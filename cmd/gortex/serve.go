@@ -47,7 +47,7 @@ func init() {
 
 func runServe(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -96,7 +96,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		if err := watcher.Start(watchPaths); err != nil {
 			return fmt.Errorf("watcher start failed: %w", err)
 		}
-		defer watcher.Stop()
+		defer func() { _ = watcher.Stop() }()
 
 		fmt.Fprintf(os.Stderr, "[gortex] watch mode active\n")
 	}
@@ -133,7 +133,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		webSrv.Shutdown(ctx)
+		_ = webSrv.Shutdown(ctx)
 	}()
 
 	// Handle graceful shutdown.

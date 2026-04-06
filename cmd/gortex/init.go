@@ -109,7 +109,7 @@ func appendGortexBlock(path, block string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	prefix := ""
 	if len(existing) > 0 {
@@ -124,7 +124,7 @@ func appendGortexBlock(path, block string) error {
 
 func generateOverview(root string) (string, error) {
 	logger := newLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.Load("")
 	if err != nil {

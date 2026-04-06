@@ -11,14 +11,8 @@ import (
 )
 
 const (
-	kotlinQClass = `(class_declaration
-		(type_identifier) @class.name) @class.def`
-
 	kotlinQObject = `(object_declaration
 		(type_identifier) @obj.name) @obj.def`
-
-	kotlinQInterface = `(class_declaration
-		(type_identifier) @iface.name) @iface.def`
 
 	kotlinQFunction = `(function_declaration
 		(simple_identifier) @func.name) @func.def`

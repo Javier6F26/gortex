@@ -39,7 +39,7 @@ func init() {
 
 func runIndex(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	path := "."
 	if len(args) > 0 {
@@ -74,17 +74,17 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(result)
 	default:
-		fmt.Fprintf(cmd.OutOrStdout(), "Indexed %d files in %dms\n", result.FileCount, result.DurationMs)
-		fmt.Fprintf(cmd.OutOrStdout(), "  Nodes: %d\n", result.NodeCount)
-		fmt.Fprintf(cmd.OutOrStdout(), "  Edges: %d\n", result.EdgeCount)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Indexed %d files in %dms\n", result.FileCount, result.DurationMs)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Nodes: %d\n", result.NodeCount)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Edges: %d\n", result.EdgeCount)
 		if len(result.Errors) > 0 {
-			fmt.Fprintf(cmd.OutOrStdout(), "  Errors: %d\n", len(result.Errors))
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  Errors: %d\n", len(result.Errors))
 			for _, e := range result.Errors {
-				fmt.Fprintf(cmd.OutOrStdout(), "    %s: %s\n", e.FilePath, e.Error)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "    %s: %s\n", e.FilePath, e.Error)
 			}
 		}
 		if indexWatch {
-			fmt.Fprintln(cmd.ErrOrStderr(), "[gortex] watch mode not yet implemented")
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "[gortex] watch mode not yet implemented")
 		}
 	}
 	return nil

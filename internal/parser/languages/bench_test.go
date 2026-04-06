@@ -224,55 +224,55 @@ end
 func BenchmarkGoExtractor_Small(b *testing.B) {
 	e := NewGoExtractor()
 	for b.Loop() {
-		e.Extract("main.go", goSmall)
+		_, _ = e.Extract("main.go", goSmall)
 	}
 }
 
 func BenchmarkGoExtractor_Medium(b *testing.B) {
 	e := NewGoExtractor()
 	for b.Loop() {
-		e.Extract("server.go", goMedium)
+		_, _ = e.Extract("server.go", goMedium)
 	}
 }
 
 func BenchmarkTypeScriptExtractor(b *testing.B) {
 	e := NewTypeScriptExtractor()
 	for b.Loop() {
-		e.Extract("controller.ts", tsSource)
+		_, _ = e.Extract("controller.ts", tsSource)
 	}
 }
 
 func BenchmarkPythonExtractor(b *testing.B) {
 	e := NewPythonExtractor()
 	for b.Loop() {
-		e.Extract("processor.py", pySource)
+		_, _ = e.Extract("processor.py", pySource)
 	}
 }
 
 func BenchmarkRustExtractor(b *testing.B) {
 	e := NewRustExtractor()
 	for b.Loop() {
-		e.Extract("cache.rs", rsSource)
+		_, _ = e.Extract("cache.rs", rsSource)
 	}
 }
 
 func BenchmarkJavaExtractor(b *testing.B) {
 	e := NewJavaExtractor()
 	for b.Loop() {
-		e.Extract("UserRepository.java", javaSource)
+		_, _ = e.Extract("UserRepository.java", javaSource)
 	}
 }
 
 func BenchmarkRubyExtractor(b *testing.B) {
 	e := NewRubyExtractor()
 	for b.Loop() {
-		e.Extract("service.rb", rbSource)
+		_, _ = e.Extract("service.rb", rbSource)
 	}
 }
 
 func BenchmarkElixirExtractor(b *testing.B) {
 	e := NewElixirExtractor()
 	for b.Loop() {
-		e.Extract("user_service.ex", exSource)
+		_, _ = e.Extract("user_service.ex", exSource)
 	}
 }

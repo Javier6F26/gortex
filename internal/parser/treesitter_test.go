@@ -66,5 +66,5 @@ func TestParseFile_InvalidSource(t *testing.T) {
 	defer tree.Close()
 
 	root := tree.RootNode()
-	assert.True(t, root.HasChanges() || root.ChildCount() >= 0) // just verify it doesn't crash
+	assert.NotNil(t, root) // just verify it doesn't crash
 }

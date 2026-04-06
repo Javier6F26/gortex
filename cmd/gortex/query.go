@@ -71,7 +71,7 @@ func printResult(cmd *cobra.Command, v any) error {
 	}
 	if queryFormat == "dot" {
 		if sg, ok := v.(*query.SubGraph); ok {
-			fmt.Fprint(cmd.OutOrStdout(), sg.ToDot())
+			_, _ = fmt.Fprint(cmd.OutOrStdout(), sg.ToDot())
 			return nil
 		}
 		return fmt.Errorf("--format dot is only supported for graph traversal queries (deps, dependents, callers, calls, usages, cluster)")
@@ -80,27 +80,27 @@ func printResult(cmd *cobra.Command, v any) error {
 	switch val := v.(type) {
 	case *query.SubGraph:
 		for _, n := range val.Nodes {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-40s %s:%d\n", n.Kind, n.ID, n.FilePath, n.StartLine)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-40s %s:%d\n", n.Kind, n.ID, n.FilePath, n.StartLine)
 		}
 		if val.Truncated {
-			fmt.Fprintf(cmd.OutOrStdout(), "... truncated (%d total)\n", val.TotalNodes)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "... truncated (%d total)\n", val.TotalNodes)
 		}
 	case []*graph.Node:
 		for _, n := range val {
-			fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-40s %s:%d\n", n.Kind, n.ID, n.FilePath, n.StartLine)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "%-12s %-40s %s:%d\n", n.Kind, n.ID, n.FilePath, n.StartLine)
 		}
 	case *graph.GraphStats:
-		fmt.Fprintf(cmd.OutOrStdout(), "Nodes: %d  Edges: %d\n", val.TotalNodes, val.TotalEdges)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Nodes: %d  Edges: %d\n", val.TotalNodes, val.TotalEdges)
 		if len(val.ByKind) > 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "By kind:")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "By kind:")
 			for k, v := range val.ByKind {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %d\n", k, v)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %d\n", k, v)
 			}
 		}
 		if len(val.ByLanguage) > 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "By language:")
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "By language:")
 			for k, v := range val.ByLanguage {
-				fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %d\n", k, v)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "  %-12s %d\n", k, v)
 			}
 		}
 	}

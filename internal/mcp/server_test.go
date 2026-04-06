@@ -24,7 +24,7 @@ import (
 func setupTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+	_ = os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
 
 import "fmt"
 
@@ -123,7 +123,7 @@ func TestGetSymbol(t *testing.T) {
 	result := callTool(t, srv, "search_symbols", map[string]any{"query": "main"})
 	text := result.Content[0].(mcplib.TextContent).Text
 	var resp map[string]any
-	json.Unmarshal([]byte(text), &resp)
+	_ = json.Unmarshal([]byte(text), &resp)
 
 	// Symbol not found returns error.
 	result = callTool(t, srv, "get_symbol", map[string]any{"id": "nonexistent"})

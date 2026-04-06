@@ -22,9 +22,6 @@ const (
 	rsQTrait = `(trait_item
 		name: (type_identifier) @trait.name) @trait.def`
 
-	rsQImpl = `(impl_item
-		type: (type_identifier) @impl.type) @impl.def`
-
 	rsQImplMethod = `(impl_item
 		type: (type_identifier) @impl.type
 		body: (declaration_list

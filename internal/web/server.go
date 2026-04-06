@@ -75,7 +75,7 @@ func (s *Server) handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		_, _ = w.Write(data)
 	})
 
 	// API endpoints
@@ -184,7 +184,7 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		fmt.Fprintf(w, ": watch mode not active\n\n")
+		_, _ = fmt.Fprintf(w, ": watch mode not active\n\n")
 		flusher.Flush()
 		return
 	}
@@ -208,12 +208,12 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			data, _ := json.Marshal(ev)
-			fmt.Fprintf(w, "event: graph_change\nid: %d\ndata: %s\n\n",
+			_, _ = fmt.Fprintf(w, "event: graph_change\nid: %d\ndata: %s\n\n",
 				ev.Timestamp.UnixMilli(), string(data))
 			flusher.Flush()
 
 		case <-keepalive.C:
-			fmt.Fprintf(w, ": keepalive\n\n")
+			_, _ = fmt.Fprintf(w, ": keepalive\n\n")
 			flusher.Flush()
 
 		case <-ctx.Done():

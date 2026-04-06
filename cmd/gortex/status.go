@@ -28,7 +28,7 @@ func init() {
 
 func runStatus(_ *cobra.Command, _ []string) error {
 	logger := newLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -47,24 +47,24 @@ func runStatus(_ *cobra.Command, _ []string) error {
 
 	stats := g.Stats()
 
-	fmt.Fprintf(os.Stdout, "Repository:  %s\n", statusIndex)
-	fmt.Fprintf(os.Stdout, "Files:       %d\n", result.FileCount)
-	fmt.Fprintf(os.Stdout, "Nodes:       %d\n", stats.TotalNodes)
-	fmt.Fprintf(os.Stdout, "Edges:       %d\n", stats.TotalEdges)
-	fmt.Fprintf(os.Stdout, "Duration:    %dms\n\n", result.DurationMs)
+	_, _ = fmt.Fprintf(os.Stdout, "Repository:  %s\n", statusIndex)
+	_, _ = fmt.Fprintf(os.Stdout, "Files:       %d\n", result.FileCount)
+	_, _ = fmt.Fprintf(os.Stdout, "Nodes:       %d\n", stats.TotalNodes)
+	_, _ = fmt.Fprintf(os.Stdout, "Edges:       %d\n", stats.TotalEdges)
+	_, _ = fmt.Fprintf(os.Stdout, "Duration:    %dms\n\n", result.DurationMs)
 
 	if len(stats.ByLanguage) > 0 {
-		fmt.Fprintln(os.Stdout, "Languages:")
+		_, _ = fmt.Fprintln(os.Stdout, "Languages:")
 		for lang, count := range stats.ByLanguage {
-			fmt.Fprintf(os.Stdout, "  %-14s %d nodes\n", lang, count)
+			_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d nodes\n", lang, count)
 		}
-		fmt.Fprintln(os.Stdout)
+		_, _ = fmt.Fprintln(os.Stdout)
 	}
 
 	if len(stats.ByKind) > 0 {
-		fmt.Fprintln(os.Stdout, "By kind:")
+		_, _ = fmt.Fprintln(os.Stdout, "By kind:")
 		for kind, count := range stats.ByKind {
-			fmt.Fprintf(os.Stdout, "  %-14s %d\n", kind, count)
+			_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d\n", kind, count)
 		}
 	}
 

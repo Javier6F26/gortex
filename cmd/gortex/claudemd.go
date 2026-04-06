@@ -38,7 +38,7 @@ func init() {
 
 func runClaudeMd(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
@@ -62,7 +62,7 @@ func runClaudeMd(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		_, err = f.WriteString("\n" + content)
 		if err != nil {
 			return err

@@ -129,7 +129,7 @@ func TestHandleSSE(t *testing.T) {
 
 	resp, err := http.Get(ts.URL + "/api/events")
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	assert.Contains(t, resp.Header.Get("Content-Type"), "text/event-stream")
 

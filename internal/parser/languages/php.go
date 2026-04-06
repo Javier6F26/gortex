@@ -361,12 +361,11 @@ func (e *PHPExtractor) extractCallSites(
 	filePath string, callerID string,
 	result *parser.ExtractionResult,
 ) {
-	nodeType := node.Type()
-	if nodeType == "function_call_expression" {
+	switch node.Type() {
+	case "function_call_expression":
 		funcNode := node.ChildByFieldName("function")
 		if funcNode != nil {
 			name := funcNode.Content(src)
-			// Strip namespace prefix, keep just the function name.
 			if idx := strings.LastIndex(name, "\\"); idx >= 0 {
 				name = name[idx+1:]
 			}
@@ -376,7 +375,7 @@ func (e *PHPExtractor) extractCallSites(
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 			})
 		}
-	} else if nodeType == "member_call_expression" || nodeType == "scoped_call_expression" {
+	case "member_call_expression", "scoped_call_expression":
 		nameNode := node.ChildByFieldName("name")
 		if nameNode != nil {
 			name := nameNode.Content(src)

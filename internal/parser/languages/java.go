@@ -41,10 +41,6 @@ const (
 	javaQCall = `(method_invocation
 		name: (identifier) @call.name) @call.expr`
 
-	javaQField = `(field_declaration
-		declarator: (variable_declarator
-			name: (identifier) @field.name)) @field.def`
-
 	javaQClassField = `(class_declaration
 		name: (identifier) @class.name
 		body: (class_body

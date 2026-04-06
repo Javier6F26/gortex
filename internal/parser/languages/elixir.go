@@ -13,17 +13,11 @@ import (
 // Elixir's grammar represents everything as `call` nodes. We capture all calls
 // with an identifier target and filter by keyword in Go code.
 const (
-	// Captures calls like: defmodule, def, defp, import, alias, use, require, @attr
-	qExCall = `(call target: (identifier) @call.target (arguments) @call.args) @call.def`
-
 	// Plain function calls: func_name(args)
 	qExFuncCall = `(call target: (identifier) @call.name) @call.expr`
 
 	// Dot/qualified calls: Module.function(args)
 	qExDotCall = `(call target: (dot left: (_) @call.receiver right: (identifier) @call.method)) @call.expr`
-
-	// Module attributes: @attr value
-	qExAttr = `(unary_operator operator: "@" operand: (call target: (identifier) @attr.name (arguments) @attr.value)) @attr.def`
 )
 
 // elixirKeywords are call targets that represent language constructs, not user calls.
