@@ -6,6 +6,7 @@ import "github.com/zzet/gortex/internal/parser"
 func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewGoExtractor())
 	reg.Register(NewTypeScriptExtractor())
+	reg.Register(NewJavaScriptExtractor())
 	reg.Register(NewPythonExtractor())
 	reg.Register(NewRustExtractor())
 	reg.Register(NewJavaExtractor())
@@ -13,4 +14,6 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewElixirExtractor())
 	reg.Register(NewCExtractor())
 	reg.Register(NewCppExtractor())
+	reg.Register(NewHTMLExtractor())
+	reg.Register(NewCSSExtractor())
 }

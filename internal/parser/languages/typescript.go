@@ -60,7 +60,7 @@ func NewTypeScriptExtractor() *TypeScriptExtractor {
 }
 
 func (e *TypeScriptExtractor) Language() string     { return "typescript" }
-func (e *TypeScriptExtractor) Extensions() []string { return []string{".ts", ".tsx", ".js", ".jsx", ".mjs"} }
+func (e *TypeScriptExtractor) Extensions() []string { return []string{".ts", ".tsx"} }
 
 func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
