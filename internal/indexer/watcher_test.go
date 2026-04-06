@@ -96,7 +96,8 @@ func NewFunc() {}
 `)
 
 	ev := waitForEvent(t, w, 2*time.Second)
-	assert.Equal(t, ChangeCreated, ev.Kind)
+	// fsnotify may emit CREATE or WRITE depending on the OS.
+	assert.Contains(t, []ChangeKind{ChangeCreated, ChangeModified}, ev.Kind)
 	assert.Greater(t, idx.graph.NodeCount(), nodesBefore)
 	assert.NotEmpty(t, idx.graph.FindNodesByName("NewFunc"))
 }
