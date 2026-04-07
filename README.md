@@ -5,16 +5,19 @@
 
 Code intelligence engine that indexes repositories into an in-memory knowledge graph and exposes it via CLI, MCP Server, and web UI.
 
-Built for AI coding agents (Claude Code, Cursor, Codex) — one `get_editing_context` call replaces 5-10 file reads, cutting token usage by ~94%.
+Built for AI coding agents (Claude Code, Cursor, Codex) — one `smart_context` call replaces 5-10 file reads, cutting token usage by ~94%.
 
 ## Features
 
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
-- **7 languages** — Go, TypeScript, Python, Rust, Java, Ruby, Elixir (via tree-sitter)
-- **22 MCP tools** — symbol lookup, call chains, blast radius, community detection, process discovery
+- **25 languages** — Go, TypeScript, JavaScript, Python, Rust, Java, C#, Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Bash, SQL, Protobuf, Markdown, HTML, CSS, YAML, TOML, HCL, Dockerfile
+- **28 MCP tools** — symbol lookup, call chains, blast radius, community detection, process discovery, and 6 agent-optimized tools
+- **6 MCP resources** — lightweight graph context without tool calls
 - **Watch mode** — surgical graph updates on file change, live sync with agents
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
-- **IMPLEMENTS inference** — structural interface satisfaction detection for Go, TypeScript, Java, Rust
+- **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
+- **PreToolUse hooks** — automatic graph context injection on Read and Grep
+- **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Zero dependencies** — everything runs in-process, in memory, no external services
 
 ## Quick Start
@@ -23,30 +26,32 @@ Built for AI coding agents (Claude Code, Cursor, Codex) — one `get_editing_con
 # Build (requires CGO for tree-sitter C bindings)
 go build -o gortex ./cmd/gortex/
 
+# Set up Gortex for a project (creates .mcp.json, .claude/commands/, CLAUDE.md, hooks, global skills)
+gortex init /path/to/repo
+
+# Or with codebase analysis for a richer CLAUDE.md
+gortex init --analyze /path/to/repo
+
 # Index a repo and print stats
 gortex status --index /path/to/repo
 
 # Start MCP server with watch mode
 gortex serve --index /path/to/repo --watch
-
-# Set up Gortex for a project (creates .mcp.json, .claude/commands/, CLAUDE.md)
-gortex init /path/to/repo
 ```
 
 ## Usage with Claude Code
 
-After running `gortex init` in your project, Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
+After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
 
-- `/gortex-guide` — tools reference and graph schema
-- `/gortex-explore` — architecture exploration workflow
-- `/gortex-debug` — debugging workflow
-- `/gortex-impact` — blast radius analysis
-- `/gortex-refactor` — safe refactoring workflow
+- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor`
+- **Global skills:** installed to `~/.claude/skills/` — available across all repos
+- **PreToolUse hook:** automatic graph context on Read/Grep calls
+- **CLAUDE.md instructions:** mandatory tool usage table and session workflow
 
 ## CLI Commands
 
 ```
-gortex init [path]           Set up Gortex for a project
+gortex init [path]           Set up Gortex for a project + install global skills
 gortex serve [flags]         Start the MCP server
 gortex index [path]          Index a repository and print stats
 gortex status [flags]        Show index status
@@ -71,7 +76,7 @@ gortex query stats                      Show graph statistics
 
 All query commands support `--format text|json|dot` (DOT output for Graphviz visualization).
 
-## MCP Tools
+## MCP Tools (28)
 
 ### Core Navigation
 | Tool | Description |
@@ -97,9 +102,19 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | Tool | Description |
 |------|-------------|
 | `get_symbol_signature` | Just the signature, no body |
+| `get_symbol_source` | Source code of a single symbol (80% fewer tokens than Read) |
+| `batch_symbols` | Multiple symbols with source/callers/callees in one call |
 | `find_import_path` | Correct import path for a symbol |
 | `explain_change_impact` | Risk-tiered blast radius with affected processes |
 | `get_recent_changes` | Files/symbols changed since timestamp |
+
+### Agent-Optimized (token efficiency)
+| Tool | Description |
+|------|-------------|
+| `smart_context` | Task-aware minimal context — replaces 5-10 exploration calls |
+| `get_edit_plan` | Dependency-ordered edit sequence for multi-file refactors |
+| `get_test_targets` | Maps changed symbols to test files and run commands |
+| `suggest_pattern` | Extracts code pattern from an example — source, registration, tests |
 
 ### Analysis
 | Tool | Description |
@@ -109,6 +124,18 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 | `get_processes` | Discovered execution flows |
 | `get_process` | Step-by-step trace of an execution flow |
 | `detect_changes` | Git diff mapped to affected symbols |
+| `index_repository` | Index or re-index a repository path |
+
+## MCP Resources (6)
+
+| Resource | Description |
+|----------|-------------|
+| `gortex://stats` | Graph statistics (node/edge counts) |
+| `gortex://schema` | Graph schema reference |
+| `gortex://communities` | Community list with cohesion scores |
+| `gortex://community/{id}` | Single community detail |
+| `gortex://processes` | Execution flow list |
+| `gortex://process/{id}` | Single process trace |
 
 ## Web UI
 
@@ -144,7 +171,7 @@ gortex binary
 
 **Edge kinds:** `calls`, `imports`, `defines`, `implements`, `extends`, `references`, `member_of`, `instantiates`
 
-## Language Support (23 languages)
+## Language Support (25 languages)
 
 ### Code Languages
 | Language | Functions | Methods + MemberOf | Types | Interfaces | Imports | Calls | Variables |
@@ -155,6 +182,7 @@ gortex binary
 | Python | Full | Full | Full | - | Full | Full | Partial |
 | Rust | Full | Full (impl blocks) | Full | Full + Meta["methods"] | Full | Full | Full |
 | Java | Full | Full | Full | Full + Meta["methods"] | Full | Full | Fields |
+| C# | Full | Full | Full | Full + Meta["methods"] | Full | Full | Fields |
 | Kotlin | Full | Full | Full | Full | Full | Full | Properties |
 | Scala | Full | Full | Full | Full + Meta["methods"] | Full | Full | - |
 | Swift | Full | Full | Full | Full + Meta["methods"] | Full | Full | - |
@@ -170,6 +198,7 @@ gortex binary
 |----------|-----------------|
 | SQL | Tables (with columns), views, functions, indexes, triggers |
 | Protobuf | Messages (with fields), services + RPCs, enums, imports |
+| Markdown | Headings, local file links, code block languages |
 | HTML | Script/link references, element IDs |
 | CSS | Class selectors, ID selectors, custom properties, @import |
 | YAML | Top-level keys |
@@ -180,14 +209,12 @@ gortex binary
 ## Building
 
 ```bash
-# Build
-go build -o gortex ./cmd/gortex/
-
-# Test
-go test -race ./...
-
-# Build with version
-go build -ldflags "-X main.version=v0.3.0" -o gortex ./cmd/gortex/
+make build          # Build with version from git tags
+make test           # go test -race ./...
+make bench          # Run all benchmarks
+make lint           # golangci-lint
+make fmt            # gofmt -s
+make install        # go install with version ldflags
 ```
 
 Requires Go 1.21+ and CGO enabled (for tree-sitter C bindings).
