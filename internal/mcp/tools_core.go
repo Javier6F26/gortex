@@ -2,10 +2,49 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 )
+
+// isCompact checks if the compact flag is set in the request.
+func isCompact(req mcp.CallToolRequest) bool {
+	if v, ok := req.GetArguments()["compact"].(bool); ok {
+		return v
+	}
+	return false
+}
+
+// compactNodes formats nodes as one-line-per-symbol text.
+// Format: "kind name file_path:start_line"
+func compactNodes(nodes []*graph.Node) string {
+	var b strings.Builder
+	for _, n := range nodes {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		fmt.Fprintf(&b, "%s %s %s:%d\n", n.Kind, n.Name, n.FilePath, n.StartLine)
+	}
+	return b.String()
+}
+
+// compactSubGraph formats a SubGraph as compact text.
+func compactSubGraph(sg *query.SubGraph) string {
+	var b strings.Builder
+	for _, n := range sg.Nodes {
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		fmt.Fprintf(&b, "%s %s %s:%d\n", n.Kind, n.Name, n.FilePath, n.StartLine)
+	}
+	if sg.Truncated {
+		fmt.Fprintf(&b, "... truncated (%d total)\n", sg.TotalNodes)
+	}
+	return b.String()
+}
 
 func (s *Server) registerCoreTools() {
 	s.mcpServer.AddTool(
@@ -30,6 +69,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — can be symbol name, concept, or multiple keywords")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
+			mcp.WithBoolean("compact", mcp.Description("Return one-line-per-result text instead of JSON objects (saves 50-70% tokens)")),
 		),
 		s.handleSearchSymbols,
 	)
@@ -38,6 +78,7 @@ func (s *Server) registerCoreTools() {
 		mcp.NewTool("get_file_summary",
 			mcp.WithDescription("Use instead of Read to understand a file's role: returns all its symbols and imports without reading source lines."),
 			mcp.WithString("file_path", mcp.Required(), mcp.Description("Relative file path")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetFileSummary,
 	)
@@ -48,6 +89,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetDependencies,
 	)
@@ -58,6 +100,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 3)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetDependents,
 	)
@@ -68,6 +111,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("function_id", mcp.Required(), mcp.Description("Function node ID")),
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 4)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetCallChain,
 	)
@@ -78,6 +122,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("function_id", mcp.Required(), mcp.Description("Function node ID")),
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetCallers,
 	)
@@ -95,6 +140,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithDescription("Use instead of Grep to find every reference to a symbol across the codebase. Returns precise locations with zero false positives."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleFindUsages,
 	)
@@ -105,6 +151,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("radius", mcp.Description("Bidirectional hops (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
 		),
 		s.handleGetCluster,
 	)
@@ -162,8 +209,14 @@ func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest)
 	}
 	limit := req.GetInt("limit", 20)
 
-	// Use fuzzy/substring search with relevance ranking
-	nodes := s.engine.SearchSymbols(q, limit+10) // fetch extra for total count
+	nodes := s.engine.SearchSymbols(q, limit+10)
+
+	if isCompact(req) {
+		if len(nodes) > limit {
+			nodes = nodes[:limit]
+		}
+		return mcp.NewToolResultText(compactNodes(nodes)), nil
+	}
 
 	var results []map[string]any
 	total := len(nodes)
@@ -189,6 +242,9 @@ func (s *Server) handleGetFileSummary(_ context.Context, req mcp.CallToolRequest
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
 	return mcp.NewToolResultJSON(sg)
 }
 
@@ -202,7 +258,11 @@ func (s *Server) handleGetDependencies(_ context.Context, req mcp.CallToolReques
 		Limit:  req.GetInt("limit", 50),
 		Detail: "brief",
 	}
-	return mcp.NewToolResultJSON(s.engine.GetDependencies(id, opts))
+	sg := s.engine.GetDependencies(id, opts)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	return mcp.NewToolResultJSON(sg)
 }
 
 func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -215,7 +275,11 @@ func (s *Server) handleGetDependents(_ context.Context, req mcp.CallToolRequest)
 		Limit:  req.GetInt("limit", 50),
 		Detail: "brief",
 	}
-	return mcp.NewToolResultJSON(s.engine.GetDependents(id, opts))
+	sg := s.engine.GetDependents(id, opts)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	return mcp.NewToolResultJSON(sg)
 }
 
 func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -228,7 +292,11 @@ func (s *Server) handleGetCallChain(_ context.Context, req mcp.CallToolRequest) 
 		Limit:  req.GetInt("limit", 50),
 		Detail: "brief",
 	}
-	return mcp.NewToolResultJSON(s.engine.GetCallChain(id, opts))
+	sg := s.engine.GetCallChain(id, opts)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	return mcp.NewToolResultJSON(sg)
 }
 
 func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -241,7 +309,11 @@ func (s *Server) handleGetCallers(_ context.Context, req mcp.CallToolRequest) (*
 		Limit:  req.GetInt("limit", 50),
 		Detail: "brief",
 	}
-	return mcp.NewToolResultJSON(s.engine.GetCallers(id, opts))
+	sg := s.engine.GetCallers(id, opts)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	return mcp.NewToolResultJSON(sg)
 }
 
 func (s *Server) handleFindImplementations(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -266,6 +338,9 @@ func (s *Server) handleFindUsages(_ context.Context, req mcp.CallToolRequest) (*
 		return mcp.NewToolResultError("id is required"), nil
 	}
 	sg := s.engine.FindUsages(id)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
 	return mcp.NewToolResultJSON(sg)
 }
 
@@ -279,7 +354,11 @@ func (s *Server) handleGetCluster(_ context.Context, req mcp.CallToolRequest) (*
 		Limit:  req.GetInt("limit", 50),
 		Detail: "brief",
 	}
-	return mcp.NewToolResultJSON(s.engine.GetCluster(id, opts))
+	sg := s.engine.GetCluster(id, opts)
+	if isCompact(req) {
+		return mcp.NewToolResultText(compactSubGraph(sg)), nil
+	}
+	return mcp.NewToolResultJSON(sg)
 }
 
 func (s *Server) handleGraphStats(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
