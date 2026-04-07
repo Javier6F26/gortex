@@ -75,7 +75,12 @@ func runInit(_ *cobra.Command, args []string) error {
 		return err
 	}
 
-	// 4. Install PreToolUse hook in .claude/settings.local.json
+	// 4. Install global skills in ~/.claude/skills/gortex-*/
+	if err := installGlobalSkills(); err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install global skills: %v\n", err)
+	}
+
+	// 5. Install PreToolUse hook in .claude/settings.local.json
 	if err := installHook(filepath.Join(root, ".claude", "settings.local.json")); err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex init] warning: could not install hook: %v\n", err)
 	}
@@ -85,6 +90,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "  .claude/commands/gortex-*.md   (slash commands)\n")
 	fmt.Fprintf(os.Stderr, "  CLAUDE.md                      (Gortex instructions block)\n")
 	fmt.Fprintf(os.Stderr, "  .claude/settings.local.json    (PreToolUse hook)\n")
+	fmt.Fprintf(os.Stderr, "  ~/.claude/skills/gortex-*      (global skills)\n")
 	fmt.Fprintf(os.Stderr, "\nCommit these files so your team gets Gortex automatically.\n")
 	fmt.Fprintf(os.Stderr, "Run `gortex serve --index . --watch` or let Claude Code start it via .mcp.json.\n")
 	return nil
@@ -166,6 +172,64 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func installGlobalSkills() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	skillsDir := filepath.Join(home, ".claude", "skills")
+
+	for name, content := range globalSkills {
+		dir := filepath.Join(skillsDir, name)
+		path := filepath.Join(dir, "SKILL.md")
+		if _, err := os.Stat(path); err == nil {
+			fmt.Fprintf(os.Stderr, "[gortex init] skip ~/.claude/skills/%s (already exists)\n", name)
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[gortex init] created ~/.claude/skills/%s\n", name)
+	}
+	return nil
+}
+
+var globalSkills = map[string]string{
+	"gortex-guide": `---
+name: gortex-guide
+description: "Use when the user asks about Gortex — available tools, graph schema, or workflow reference. Examples: \"What Gortex tools are available?\", \"How do I use Gortex?\""
+---
+` + commandGuide,
+
+	"gortex-explore": `---
+name: gortex-explore
+description: "Use when the user asks how code works, wants to understand architecture, trace execution flows, or explore unfamiliar parts of the codebase. Examples: \"How does X work?\", \"What calls this function?\", \"Show me the auth flow\""
+---
+` + commandExplore,
+
+	"gortex-debug": `---
+name: gortex-debug
+description: "Use when the user is debugging a bug, tracing an error, or asking why something fails. Examples: \"Why is X failing?\", \"Where does this error come from?\", \"Trace this bug\""
+---
+` + commandDebug,
+
+	"gortex-impact": `---
+name: gortex-impact
+description: "Use when the user wants to know what will break if they change something, or needs safety analysis before editing code. Examples: \"Is it safe to change X?\", \"What depends on this?\", \"What will break?\""
+---
+` + commandImpact,
+
+	"gortex-refactor": `---
+name: gortex-refactor
+description: "Use when the user wants to rename, extract, split, move, or restructure code safely. Examples: \"Rename this function\", \"Extract this into a module\", \"Refactor this class\""
+---
+` + commandRefactor,
 }
 
 func installHook(settingsPath string) error {
@@ -262,11 +326,11 @@ const claudeMdBlock = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep
 
 Gortex is running as an MCP server. You MUST use graph queries instead of file reads whenever possible. This saves thousands of tokens per task.
 
-**Before editing any file:** call ` + "`get_editing_context(\"<file>\")`" + ` first. This replaces 5-10 Read calls with a single ~250 token response.
-
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
+| ` + "`Read`" + ` a whole file for one function  | ` + "`get_symbol_source`" + ` (80% fewer tokens)   |
 | ` + "`Read`" + ` to find a function             | ` + "`get_symbol`" + ` or ` + "`get_editing_context`" + `    |
+| Multiple ` + "`get_symbol`" + ` calls           | ` + "`batch_symbols`" + ` (one call for N symbols) |
 | ` + "`Grep`" + ` for references                 | ` + "`find_usages`" + ` (zero false positives)     |
 | ` + "`Grep`" + ` to find a symbol by name       | ` + "`search_symbols`" + `                         |
 | ` + "`Read`" + ` to understand a file           | ` + "`get_file_summary`" + ` or ` + "`get_editing_context`" + ` |
@@ -274,14 +338,21 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | Guessing an import path               | ` + "`find_import_path`" + `                       |
 | Reading files to assess change scope  | ` + "`explain_change_impact`" + `                  |
 | ` + "`Read`" + ` to check a function signature  | ` + "`get_symbol_signature`" + `                   |
+| Guessing which tests to run           | ` + "`get_test_targets`" + `                       |
+| Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
+| Reading files to learn a pattern      | ` + "`suggest_pattern`" + `                        |
+| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
 
 ## Session start (Gortex)
 
 1. Call ` + "`graph_stats`" + ` to confirm Gortex is running and get repo orientation.
 2. If ` + "`total_nodes`" + ` is 0, call ` + "`index_repository`" + ` with path ` + "`\".\"`" + `.
-3. For every file you are about to edit, call ` + "`get_editing_context`" + ` first.
-4. Before any refactor affecting a shared type or function, call ` + "`explain_change_impact`" + `.
-5. Before committing, call ` + "`detect_changes`" + ` to verify scope.
+3. For a new task, call ` + "`smart_context`" + ` with the task description.
+4. For every file you are about to edit, call ` + "`get_editing_context`" + ` first.
+5. To see just one function's code, call ` + "`get_symbol_source`" + ` instead of Read.
+6. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list.
+7. Before committing, call ` + "`detect_changes`" + ` to verify scope.
+8. After editing, call ` + "`get_test_targets`" + ` to know which tests to run.
 
 ## Gortex slash commands
 
@@ -344,9 +415,19 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | Tool | What it gives you |
 |------|-------------------|
 | get_symbol_signature | Just the signature, no body — API boundary check |
+| get_symbol_source | Source code of a single symbol — use instead of Read |
+| batch_symbols | Multiple symbols with source/callers/callees in one call |
 | find_import_path | Correct import path for a symbol in a target file |
 | explain_change_impact | Risk-tiered blast radius with affected processes/communities |
 | get_recent_changes | Files/symbols changed since timestamp (watch mode) |
+
+### Agent-Optimized (token efficiency)
+| Tool | What it gives you |
+|------|-------------------|
+| smart_context | Task-aware minimal context bundle — replaces 5-10 exploration calls |
+| get_edit_plan | Dependency-ordered edit sequence for multi-file refactors |
+| get_test_targets | Maps changed symbols to test files and run commands |
+| suggest_pattern | Extracts code pattern from an example — source, registration, tests |
 
 ### Analysis
 | Tool | What it gives you |
