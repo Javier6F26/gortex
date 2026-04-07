@@ -95,6 +95,16 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("smart_context",
+			mcp.WithDescription("Assembles the minimal context needed for a task in one call. Searches for relevant symbols, gets their source and relationships, finds patterns to follow, and builds an edit plan. Replaces an entire exploration phase of 5-10 tool calls."),
+			mcp.WithString("task", mcp.Required(), mcp.Description("Natural language description of what you want to do (e.g. 'add a new MCP tool called list_files')")),
+			mcp.WithString("entry_point", mcp.Description("Optional symbol ID or file path to start from")),
+			mcp.WithNumber("max_symbols", mcp.Description("Max symbols to include source for (default: 5)")),
+		),
+		s.handleSmartContext,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("get_recent_changes",
 			mcp.WithDescription("Returns files and symbols that changed since the last call (watch mode only). Use to re-orient after the user edits files outside of Claude Code's view, without re-reading anything."),
 			mcp.WithString("since", mcp.Description("ISO 8601 timestamp (omit for all changes since index)")),
@@ -923,6 +933,220 @@ func (s *Server) handleGetEditPlan(_ context.Context, req mcp.CallToolRequest) (
 		"total_files": len(steps),
 		"summary":     fmt.Sprintf("%d files to edit, %d test files to verify", len(editSteps), len(testSteps)),
 	})
+}
+
+// extractPrefix returns the common prefix of a camelCase/PascalCase name.
+// e.g. "handleGetSymbol" -> "handle", "TestNewServer" -> "Test"
+func (s *Server) handleSmartContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	task, err := req.RequireString("task")
+	if err != nil {
+		return mcp.NewToolResultError("task is required"), nil
+	}
+
+	entryPoint := req.GetString("entry_point", "")
+	maxSymbols := req.GetInt("max_symbols", 5)
+
+	result := map[string]any{
+		"task": task,
+	}
+
+	// 1. Extract keywords from task description.
+	keywords := extractKeywords(task)
+	result["keywords"] = keywords
+
+	// 2. Search for relevant symbols using each keyword.
+	seen := make(map[string]bool)
+	var relevantSymbols []*graph.Node
+	for _, kw := range keywords {
+		if len(kw) < 3 {
+			continue
+		}
+		matches := s.engine.SearchSymbols(kw, 10)
+		for _, m := range matches {
+			if m.Kind == graph.KindFile || m.Kind == graph.KindImport {
+				continue
+			}
+			if !seen[m.ID] {
+				seen[m.ID] = true
+				relevantSymbols = append(relevantSymbols, m)
+			}
+		}
+	}
+
+	// 3. If entry point given, resolve it and prioritize.
+	var entryNode *graph.Node
+	if entryPoint != "" {
+		// Try as symbol ID first.
+		entryNode = s.engine.GetSymbol(entryPoint)
+		if entryNode == nil {
+			// Try as file path — get the most important symbol in the file.
+			fileSym := s.engine.GetFileSymbols(entryPoint)
+			if len(fileSym.Nodes) > 0 {
+				for _, n := range fileSym.Nodes {
+					if n.Kind != graph.KindFile {
+						entryNode = n
+						break
+					}
+				}
+			}
+		}
+		if entryNode != nil && !seen[entryNode.ID] {
+			relevantSymbols = append([]*graph.Node{entryNode}, relevantSymbols...)
+			seen[entryNode.ID] = true
+		}
+	}
+
+	// 4. Limit to top N most relevant symbols.
+	if len(relevantSymbols) > maxSymbols {
+		relevantSymbols = relevantSymbols[:maxSymbols]
+	}
+
+	// 5. Get source and signatures for relevant symbols.
+	var symbolContexts []map[string]any
+	for _, sym := range relevantSymbols {
+		entry := map[string]any{
+			"id":         sym.ID,
+			"kind":       sym.Kind,
+			"name":       sym.Name,
+			"file_path":  sym.FilePath,
+			"start_line": sym.StartLine,
+		}
+		if sig, ok := sym.Meta["signature"]; ok {
+			entry["signature"] = sig
+		}
+		// Get source for functions/methods (not types — those can be large).
+		if (sym.Kind == graph.KindFunction || sym.Kind == graph.KindMethod) &&
+			sym.StartLine > 0 && sym.EndLine > 0 {
+			absPath := sym.FilePath
+			if s.indexer != nil {
+				if root := s.indexer.RootPath(); root != "" {
+					absPath = filepath.Join(root, sym.FilePath)
+				}
+			}
+			if source, _, err := readLines(absPath, sym.StartLine, sym.EndLine, 0); err == nil {
+				entry["source"] = source
+			}
+		}
+		symbolContexts = append(symbolContexts, entry)
+	}
+	result["relevant_symbols"] = symbolContexts
+
+	// 6. If we have an entry point, get its pattern (registration, siblings, tests).
+	if entryNode != nil {
+		// File context: imports and structure.
+		fileCtx := s.engine.GetFileSymbols(entryNode.FilePath)
+		var fileSymbols []string
+		for _, n := range fileCtx.Nodes {
+			if n.Kind != graph.KindFile {
+				fileSymbols = append(fileSymbols, fmt.Sprintf("%s %s (line %d)", n.Kind, n.Name, n.StartLine))
+			}
+		}
+		result["entry_file_symbols"] = fileSymbols
+
+		// Callers and callees.
+		callers := s.engine.GetCallers(entryNode.ID, query.QueryOptions{Depth: 1, Limit: 5, Detail: "brief"})
+		var callerIDs []string
+		for _, cn := range callers.Nodes {
+			if cn.ID != entryNode.ID {
+				callerIDs = append(callerIDs, cn.ID)
+			}
+		}
+		if len(callerIDs) > 0 {
+			result["callers"] = callerIDs
+		}
+
+		callees := s.engine.GetCallChain(entryNode.ID, query.QueryOptions{Depth: 1, Limit: 5, Detail: "brief"})
+		var calleeIDs []string
+		for _, cn := range callees.Nodes {
+			if cn.ID != entryNode.ID {
+				calleeIDs = append(calleeIDs, cn.ID)
+			}
+		}
+		if len(calleeIDs) > 0 {
+			result["callees"] = calleeIDs
+		}
+	}
+
+	// 7. Find test files related to the keywords.
+	var testFiles []string
+	testSeen := make(map[string]bool)
+	for _, sym := range relevantSymbols {
+		callers := s.engine.GetCallers(sym.ID, query.QueryOptions{Depth: 2, Limit: 20, Detail: "brief"})
+		for _, cn := range callers.Nodes {
+			if isTestFile(cn.FilePath) && !testSeen[cn.FilePath] {
+				testSeen[cn.FilePath] = true
+				testFiles = append(testFiles, cn.FilePath)
+			}
+		}
+	}
+	if len(testFiles) > 5 {
+		testFiles = testFiles[:5]
+	}
+	result["related_test_files"] = testFiles
+
+	// 8. Files likely to edit.
+	fileSet := make(map[string]bool)
+	for _, sym := range relevantSymbols {
+		fileSet[sym.FilePath] = true
+	}
+	var filesToEdit []string
+	for f := range fileSet {
+		filesToEdit = append(filesToEdit, f)
+	}
+	for _, tf := range testFiles {
+		if !fileSet[tf] {
+			filesToEdit = append(filesToEdit, tf)
+		}
+	}
+	result["files_to_edit"] = filesToEdit
+
+	return mcp.NewToolResultJSON(result)
+}
+
+// extractKeywords splits a task description into searchable keywords.
+// Filters out common stop words and short words.
+func extractKeywords(task string) []string {
+	stopWords := map[string]bool{
+		"a": true, "an": true, "the": true, "is": true, "are": true,
+		"was": true, "were": true, "be": true, "been": true, "being": true,
+		"have": true, "has": true, "had": true, "do": true, "does": true,
+		"did": true, "will": true, "would": true, "could": true, "should": true,
+		"may": true, "might": true, "shall": true, "can": true,
+		"for": true, "and": true, "but": true, "or": true, "nor": true,
+		"not": true, "so": true, "yet": true, "both": true,
+		"to": true, "of": true, "in": true, "on": true, "at": true,
+		"by": true, "with": true, "from": true, "into": true, "that": true,
+		"this": true, "it": true, "its": true, "as": true, "if": true,
+		"add": true, "new": true, "create": true, "make": true, "called": true,
+		"like": true, "use": true, "using": true, "how": true, "what": true,
+		"want": true, "need": true, "all": true, "each": true, "which": true,
+	}
+
+	// Split on whitespace and punctuation.
+	words := strings.FieldsFunc(task, func(r rune) bool {
+		if r >= 'a' && r <= 'z' {
+			return false
+		}
+		if r >= 'A' && r <= 'Z' {
+			return false
+		}
+		if r >= '0' && r <= '9' {
+			return false
+		}
+		return r != '_'
+	})
+
+	seen := make(map[string]bool)
+	var keywords []string
+	for _, w := range words {
+		lower := strings.ToLower(w)
+		if len(lower) < 3 || stopWords[lower] || seen[lower] {
+			continue
+		}
+		seen[lower] = true
+		keywords = append(keywords, w) // keep original case for search
+	}
+	return keywords
 }
 
 // extractPrefix returns the common prefix of a camelCase/PascalCase name.
