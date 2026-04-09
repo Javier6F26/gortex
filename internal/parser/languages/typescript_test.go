@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,4 +113,103 @@ import axios from 'axios';
 
 	imports := edgesOfKind(result.Edges, graph.EdgeImports)
 	require.Len(t, imports, 2)
+}
+
+func TestTSExtractor_TypeEnv_ExplicitType(t *testing.T) {
+	src := []byte(`
+class UserService {
+  save() {}
+}
+
+function main() {
+  const svc: UserService = new UserService();
+  svc.save();
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("app.ts", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var saveCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "save") {
+			saveCall = c
+			break
+		}
+	}
+	require.NotNil(t, saveCall, "expected a call edge to save")
+	require.NotNil(t, saveCall.Meta, "expected Meta on save call edge")
+	assert.Equal(t, "UserService", saveCall.Meta["receiver_type"])
+}
+
+func TestTSExtractor_TypeEnv_NewExpression(t *testing.T) {
+	src := []byte(`
+class Client {
+  connect() {}
+}
+
+function main() {
+  const client = new Client();
+  client.connect();
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("app.ts", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var connectCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "connect") {
+			connectCall = c
+			break
+		}
+	}
+	require.NotNil(t, connectCall)
+	require.NotNil(t, connectCall.Meta)
+	assert.Equal(t, "Client", connectCall.Meta["receiver_type"])
+}
+
+func TestTSExtractor_TypeEnv_Unknown(t *testing.T) {
+	src := []byte(`
+function getService() { return null; }
+
+function main() {
+  const svc = getService();
+  svc.process();
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("app.ts", src)
+	require.NoError(t, err)
+
+	calls := edgesOfKind(result.Edges, graph.EdgeCalls)
+	var processCall *graph.Edge
+	for _, c := range calls {
+		if strings.HasSuffix(c.To, "process") {
+			processCall = c
+			break
+		}
+	}
+	require.NotNil(t, processCall)
+	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
+}
+
+func TestTSExtractor_MethodReceiver(t *testing.T) {
+	src := []byte(`
+class Server {
+  start() {}
+  stop() {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("server.ts", src)
+	require.NoError(t, err)
+
+	methods := nodesOfKind(result.Nodes, graph.KindMethod)
+	require.Len(t, methods, 2)
+	for _, m := range methods {
+		assert.Equal(t, "Server", m.Meta["receiver"], "method %s should have receiver Server", m.Name)
+	}
 }

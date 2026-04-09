@@ -39,11 +39,17 @@ const (
 
 	tsQCallMember = `(call_expression
 		function: (member_expression
+			object: (_) @call.receiver
 			property: (property_identifier) @call.method)) @call.expr`
 
 	tsQVar = `(lexical_declaration
 		(variable_declarator
 			name: (identifier) @var.name)) @var.def`
+
+	tsQVarTyped = `(lexical_declaration
+		(variable_declarator
+			name: (identifier) @tvar.name
+			type: (type_annotation (_) @tvar.type))) @tvar.def`
 
 	tsQExport = `(export_statement
 		(function_declaration
@@ -99,8 +105,11 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// Imports.
 	e.extractImports(root, src, filePath, fileNode.ID, result)
 
-	// Call sites.
-	e.extractCalls(root, src, filePath, result)
+	// Build type environment for receiver type inference.
+	tenv := e.buildTypeEnv(root, src)
+
+	// Call sites (with type env).
+	e.extractCalls(root, src, filePath, result, tenv)
 
 	// Variables.
 	e.extractVariables(root, src, filePath, fileNode.ID, result)
@@ -163,15 +172,17 @@ func (e *TypeScriptExtractor) extractClasses(root *sitter.Node, src []byte, file
 }
 
 func (e *TypeScriptExtractor) extractMethods(classNode *sitter.Node, src []byte, filePath, classID string, result *parser.ExtractionResult) {
+	className := classID[strings.LastIndex(classID, "::")+2:]
 	matches, _ := parser.RunQuery(tsQMethod, e.lang, classNode, src)
 	for _, m := range matches {
 		name := m.Captures["method.name"].Text
 		def := m.Captures["method.def"]
-		id := filePath + "::" + classID[strings.LastIndex(classID, "::")+2:] + "." + name
+		id := filePath + "::" + className + "." + name
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 			Language: "typescript",
+			Meta:     map[string]any{"receiver": className},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: classID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
@@ -310,7 +321,7 @@ func extractTSInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
 	return methods
 }
 
-func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, tenv typeEnv) {
 	funcRanges := buildFuncRanges(result)
 
 	matches, _ := parser.RunQuery(tsQCall, e.lang, root, src)
@@ -330,14 +341,108 @@ func (e *TypeScriptExtractor) extractCalls(root *sitter.Node, src []byte, filePa
 	matches, _ = parser.RunQuery(tsQCallMember, e.lang, root, src)
 	for _, m := range matches {
 		method := m.Captures["call.method"].Text
+		receiverText := m.Captures["call.receiver"].Text
 		expr := m.Captures["call.expr"]
 		callerID := findEnclosingFunc(funcRanges, expr.StartLine+1)
 		if callerID == "" {
 			continue
 		}
-		result.Edges = append(result.Edges, &graph.Edge{
+
+		edge := &graph.Edge{
 			From: callerID, To: "unresolved::*." + method,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: expr.StartLine + 1,
+		}
+		if recvType, ok := tenv[receiverText]; ok {
+			edge.Meta = map[string]any{"receiver_type": recvType}
+		}
+		result.Edges = append(result.Edges, edge)
+	}
+}
+
+// buildTypeEnv scans TypeScript variable declarations for type annotations (Tier 0)
+// and new expressions (Tier 1) to build a variable→type map.
+func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
+	tenv := make(typeEnv)
+
+	// Tier 0: explicit type annotations — const x: Type = ...
+	matches, _ := parser.RunQuery(tsQVarTyped, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["tvar.name"].Text
+		typeName := normalizeTypeName(m.Captures["tvar.type"].Text)
+		if typeName != "" {
+			tenv[name] = typeName
+		}
+	}
+
+	// Tier 1: new expressions — const x = new Type(...)
+	// Walk all variable declarators and check if RHS is a new_expression.
+	matches, _ = parser.RunQuery(tsQVar, e.lang, root, src)
+	for _, m := range matches {
+		name := m.Captures["var.name"].Text
+		if _, exists := tenv[name]; exists {
+			continue // already have explicit type
+		}
+		// Find the variable_declarator node to check its value child.
+		defNode := m.Captures["var.def"].Node
+		if defNode == nil {
+			continue
+		}
+		walkNodes(defNode, func(n *sitter.Node) {
+			if n.Type() == "variable_declarator" {
+				for i := 0; i < int(n.NamedChildCount()); i++ {
+					child := n.NamedChild(i)
+					if child.Type() == "new_expression" {
+						typeName := inferTypeFromNewExpr(child, src)
+						if typeName != "" {
+							tenv[name] = typeName
+						}
+						return
+					}
+				}
+			}
 		})
 	}
+
+	return tenv
+}
+
+// normalizeTypeName strips generics, arrays, and nullable markers from a type name.
+// "User" → "User", "User[]" → "User", "User<T>" → "User", "User | null" → "User"
+func normalizeTypeName(t string) string {
+	// Strip leading/trailing whitespace.
+	t = strings.TrimSpace(t)
+	// Remove array suffix.
+	t = strings.TrimSuffix(t, "[]")
+	// Remove generics.
+	if idx := strings.Index(t, "<"); idx > 0 {
+		t = t[:idx]
+	}
+	// Remove nullable union.
+	if idx := strings.Index(t, " |"); idx > 0 {
+		t = t[:idx]
+	}
+	// Skip primitives.
+	switch t {
+	case "string", "number", "boolean", "void", "any", "unknown", "never", "null", "undefined":
+		return ""
+	}
+	if t == "" || (t[0] >= 'a' && t[0] <= 'z') {
+		return "" // skip lowercase type names (primitives, type aliases like 'object')
+	}
+	return t
+}
+
+// inferTypeFromNewExpr extracts the class name from a new_expression node.
+// new User(...) → "User"
+func inferTypeFromNewExpr(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child.Type() == "identifier" || child.Type() == "type_identifier" {
+			name := child.Content(src)
+			if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
+				return name
+			}
+		}
+	}
+	return ""
 }
