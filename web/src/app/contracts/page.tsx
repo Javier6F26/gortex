@@ -62,11 +62,46 @@ export default function ContractsPage() {
           api.callTool('check_contracts', {}),
         ])
 
+        // The API returns {contracts: {type: Contract[], ...}, total: N}
+        // where contracts is grouped by type. Flatten into a single array.
         try {
           const parsed = JSON.parse(contractsText)
-          setContracts(Array.isArray(parsed) ? parsed : parsed.contracts || [])
+          if (parsed.contracts && typeof parsed.contracts === 'object' && !Array.isArray(parsed.contracts)) {
+            // Grouped by type: {env: [...], http: [...], ...}
+            const flat: Contract[] = []
+            for (const items of Object.values(parsed.contracts)) {
+              if (Array.isArray(items)) {
+                flat.push(...(items as Contract[]))
+              }
+            }
+            setContracts(flat)
+          } else if (Array.isArray(parsed)) {
+            setContracts(parsed as Contract[])
+          } else if (Array.isArray(parsed.contracts)) {
+            setContracts(parsed.contracts as Contract[])
+          } else {
+            setContracts([])
+          }
         } catch {
-          setContracts([])
+          // Parse compact text format
+          const lines = contractsText.split('\n').filter((l: string) => l.trim() && !l.startsWith('total:'))
+          const parsed: Contract[] = lines.map((line: string) => {
+            const parts = line.trim().split(/\s+/)
+            if (parts.length < 4) return null
+            const [type, role, id, ...rest] = parts
+            const filePart = rest.join(' ')
+            const [file_path, lineStr] = filePart.split(':')
+            return {
+              id,
+              type,
+              role,
+              symbol_id: '',
+              file_path: file_path || '',
+              line: parseInt(lineStr) || 0,
+              confidence: 0.9,
+            } as Contract
+          }).filter((c): c is Contract => c !== null)
+          setContracts(parsed)
         }
 
         try {
@@ -172,20 +207,29 @@ export default function ContractsPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-1">
-                    {items.slice(0, 20).map((c, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm py-1 border-b border-zinc-800 last:border-0">
-                        <Badge variant="outline" className={c.role === 'provider' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}>
-                          {c.role}
-                        </Badge>
-                        <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
-                        {c.symbol_id && (
-                          <Link href={`/symbol/${encodeURIComponent(c.symbol_id)}`} className="text-xs text-zinc-500 hover:text-zinc-300 truncate max-w-48">
-                            {c.symbol_id.split('::').pop()}
-                          </Link>
-                        )}
-                        <span className="text-xs text-zinc-600">{c.file_path}</span>
-                      </div>
-                    ))}
+                    {items.slice(0, 20).map((c, i) => {
+                      const linkTarget = c.symbol_id
+                        ? `/symbol/${encodeURIComponent(c.symbol_id)}`
+                        : `/search?q=${encodeURIComponent(c.meta?.var || c.meta?.event || c.meta?.topic || c.id.split('::').pop() || c.id)}`
+                      return (
+                        <Link
+                          key={i}
+                          href={linkTarget}
+                          className="flex items-center gap-2 text-sm py-1.5 px-1 -mx-1 rounded border-b border-zinc-800 last:border-0 hover:bg-zinc-800/50 transition-colors"
+                        >
+                          <Badge variant="outline" className={c.role === 'provider' ? 'bg-green-500/20 text-green-400' : 'bg-blue-500/20 text-blue-400'}>
+                            {c.role}
+                          </Badge>
+                          <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
+                          {c.symbol_id && (
+                            <span className="text-xs text-blue-400 truncate max-w-48">
+                              {c.symbol_id.split('::').pop()}
+                            </span>
+                          )}
+                          <span className="text-xs text-zinc-600 shrink-0">{c.file_path}{c.line ? `:${c.line}` : ''}</span>
+                        </Link>
+                      )
+                    })}
                     {items.length > 20 && (
                       <div className="text-xs text-zinc-500 pt-1">...and {items.length - 20} more</div>
                     )}
@@ -236,13 +280,18 @@ export default function ContractsPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-1">
-                    {matchResult.orphan_providers.map((c, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm py-1 border-b border-zinc-800 last:border-0">
-                        <Badge variant="outline" className={TYPE_COLORS[c.type]}>{c.type}</Badge>
-                        <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
-                        <span className="text-xs text-zinc-600">{c.file_path}:{c.line}</span>
-                      </div>
-                    ))}
+                    {matchResult.orphan_providers.map((c, i) => {
+                      const linkTarget = c.symbol_id
+                        ? `/symbol/${encodeURIComponent(c.symbol_id)}`
+                        : `/search?q=${encodeURIComponent(c.meta?.var || c.meta?.event || c.meta?.topic || c.id.split('::').pop() || c.id)}`
+                      return (
+                        <Link key={i} href={linkTarget} className="flex items-center gap-2 text-sm py-1.5 px-1 -mx-1 rounded border-b border-zinc-800 last:border-0 hover:bg-zinc-800/50 transition-colors">
+                          <Badge variant="outline" className={TYPE_COLORS[c.type]}>{c.type}</Badge>
+                          <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
+                          <span className="text-xs text-zinc-600">{c.file_path}:{c.line}</span>
+                        </Link>
+                      )
+                    })}
                   </div>
                 </CardContent>
               </Card>
@@ -259,13 +308,18 @@ export default function ContractsPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-1">
-                    {matchResult.orphan_consumers.map((c, i) => (
-                      <div key={i} className="flex items-center gap-2 text-sm py-1 border-b border-zinc-800 last:border-0">
-                        <Badge variant="outline" className={TYPE_COLORS[c.type]}>{c.type}</Badge>
-                        <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
-                        <span className="text-xs text-zinc-600">{c.file_path}:{c.line}</span>
-                      </div>
-                    ))}
+                    {matchResult.orphan_consumers.map((c, i) => {
+                      const linkTarget = c.symbol_id
+                        ? `/symbol/${encodeURIComponent(c.symbol_id)}`
+                        : `/search?q=${encodeURIComponent(c.meta?.var || c.meta?.event || c.meta?.topic || c.id.split('::').pop() || c.id)}`
+                      return (
+                        <Link key={i} href={linkTarget} className="flex items-center gap-2 text-sm py-1.5 px-1 -mx-1 rounded border-b border-zinc-800 last:border-0 hover:bg-zinc-800/50 transition-colors">
+                          <Badge variant="outline" className={TYPE_COLORS[c.type]}>{c.type}</Badge>
+                          <code className="text-zinc-300 font-mono text-xs flex-1 truncate">{c.id}</code>
+                          <span className="text-xs text-zinc-600">{c.file_path}:{c.line}</span>
+                        </Link>
+                      )
+                    })}
                   </div>
                 </CardContent>
               </Card>

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, use } from 'react'
 import Link from 'next/link'
-import { ArrowLeft, FileCode, MapPin } from 'lucide-react'
+import { ArrowLeft, FileCode, MapPin, Globe, Key, MessageSquare, Zap, Server, Database, FileJson } from 'lucide-react'
 import { api } from '@/lib/api'
 import { NODE_COLORS, LANGUAGE_COLORS } from '@/lib/colors'
 import { Badge } from '@/components/ui/badge'
@@ -98,6 +98,10 @@ export default function SymbolDetailPage({
 
   const isUnresolved = id.startsWith('unresolved::')
 
+  // Detect contract IDs: they contain "env::", "http::", "grpc::", "graphql::", "topic::", "ws::", "openapi::"
+  const CONTRACT_PREFIXES = ['env::', 'http::', 'grpc::', 'graphql::', 'topic::', 'ws::', 'openapi::']
+  const isContract = CONTRACT_PREFIXES.some(p => id.includes(p))
+
   // Fetch symbol info and source
   useEffect(() => {
     let mounted = true
@@ -106,6 +110,11 @@ export default function SymbolDetailPage({
 
     if (isUnresolved) {
       setError(`"${id.replace('unresolved::', '')}" is an external dependency — it is not indexed in the graph.`)
+      setLoading(false)
+      return
+    }
+
+    if (isContract) {
       setLoading(false)
       return
     }
@@ -193,6 +202,87 @@ export default function SymbolDetailPage({
       <div className="flex items-center gap-2 py-12 text-zinc-500">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-700 border-t-zinc-400" />
         Loading symbol...
+      </div>
+    )
+  }
+
+  // Contract detail view
+  if (isContract) {
+    // Parse: "filepath::type::name" or just "type::name"
+    const parts = id.split('::')
+    // Find the contract type prefix
+    let contractType = ''
+    let contractName = ''
+    let filePath = ''
+    for (let i = 0; i < parts.length; i++) {
+      if (CONTRACT_PREFIXES.some(p => p.startsWith(parts[i] + '::'))) {
+        contractType = parts[i]
+        contractName = parts.slice(i + 1).join('::')
+        filePath = parts.slice(0, i).join('::')
+        break
+      }
+    }
+
+    const CONTRACT_ICONS: Record<string, React.ReactNode> = {
+      env: <Key className="h-5 w-5 text-orange-400" />,
+      http: <Globe className="h-5 w-5 text-blue-400" />,
+      grpc: <Server className="h-5 w-5 text-purple-400" />,
+      graphql: <Database className="h-5 w-5 text-pink-400" />,
+      topic: <MessageSquare className="h-5 w-5 text-green-400" />,
+      ws: <Zap className="h-5 w-5 text-yellow-400" />,
+      openapi: <FileJson className="h-5 w-5 text-cyan-400" />,
+    }
+
+    const CONTRACT_COLORS: Record<string, string> = {
+      env: 'text-orange-400',
+      http: 'text-blue-400',
+      grpc: 'text-purple-400',
+      graphql: 'text-pink-400',
+      topic: 'text-green-400',
+      ws: 'text-yellow-400',
+      openapi: 'text-cyan-400',
+    }
+
+    return (
+      <div className="space-y-6">
+        <Link
+          href="/contracts"
+          className="inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-300"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back to contracts
+        </Link>
+
+        <div className="space-y-3">
+          <div className="flex items-center gap-3">
+            {CONTRACT_ICONS[contractType] || <FileCode className="h-5 w-5 text-zinc-400" />}
+            <h1 className={`font-mono text-xl font-semibold ${CONTRACT_COLORS[contractType] || 'text-zinc-100'}`}>
+              {contractName || id}
+            </h1>
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge variant="secondary" className="bg-zinc-800 text-zinc-300 capitalize">
+              {contractType} contract
+            </Badge>
+            {filePath && (
+              <span className="flex items-center gap-1 text-sm text-zinc-500">
+                <FileCode className="h-3.5 w-3.5" />
+                {filePath}
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 text-sm text-zinc-400">
+          <p>
+            This is a <span className="text-zinc-200 capitalize">{contractType}</span> contract identifier detected in the codebase.
+            Contract nodes represent API boundaries (HTTP routes, env vars, message topics, etc.) rather than code symbols.
+          </p>
+          <p className="mt-2">
+            View all contracts of this type on the{' '}
+            <Link href="/contracts" className="text-blue-400 hover:underline">Contracts page</Link>.
+          </p>
+        </div>
       </div>
     )
   }
