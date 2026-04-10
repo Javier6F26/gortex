@@ -274,6 +274,8 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 
 When running `gortex serve`, a web visualization is available at `http://localhost:8765`:
 
+![Gortex Web UI — force-directed knowledge graph visualization](assets/graph.png)
+
 - Sigma.js force-directed graph with ForceAtlas2 layout
 - Node size proportional to degree (connection count = importance)
 - Color-coded by kind (function, type, interface, method, variable, file)
