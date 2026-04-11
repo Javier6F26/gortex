@@ -27,7 +27,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Watch mode** — surgical graph updates on file change across all tracked repos, live sync with agents
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
-- **PreToolUse hooks** — automatic graph context injection on Read and Grep
+- **PreToolUse hooks** — automatic graph context injection and tool redirection on Read, Grep, and Glob. Suggests specific Gortex MCP tools as alternatives
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Per-community skills** — `gortex skills` auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
@@ -44,6 +44,9 @@ gortex init /path/to/repo
 
 # Or with codebase analysis for a richer CLAUDE.md
 gortex init --analyze /path/to/repo
+
+# Install/update only the PreToolUse hooks (Read/Grep/Glob interception)
+gortex init --hooks /path/to/repo
 
 # Index a repo and print stats
 gortex status --index /path/to/repo

@@ -19,6 +19,7 @@ import (
 )
 
 var initAnalyze bool
+var initHooksOnly bool
 
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
@@ -29,6 +30,7 @@ var initCmd = &cobra.Command{
 
 func init() {
 	initCmd.Flags().BoolVar(&initAnalyze, "analyze", false, "index the repo first to generate a richer CLAUDE.md with codebase overview")
+	initCmd.Flags().BoolVar(&initHooksOnly, "hooks", false, "only install/update PreToolUse hooks in .claude/settings.local.json")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -41,6 +43,19 @@ func runInit(_ *cobra.Command, args []string) error {
 	root, err := filepath.Abs(root)
 	if err != nil {
 		return err
+	}
+
+	// --hooks: only install/update hooks and exit.
+	if initHooksOnly {
+		settingsPath := filepath.Join(root, ".claude", "settings.local.json")
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			return err
+		}
+		if err := installHook(settingsPath); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[gortex init --hooks] done — installed PreToolUse hook in %s\n", settingsPath)
+		return nil
 	}
 
 	// 1. Create .mcp.json
@@ -350,7 +365,7 @@ func installHook(settingsPath string) error {
 		settings = make(map[string]any)
 	}
 
-	// Check if Gortex hook already exists.
+	// Check if Gortex hook already exists. If found with old matcher, upgrade it.
 	if hooks, ok := settings["hooks"].(map[string]any); ok {
 		if pre, ok := hooks["PreToolUse"].([]any); ok {
 			for _, h := range pre {
@@ -359,6 +374,19 @@ func installHook(settingsPath string) error {
 						for _, entry := range hs {
 							if em, ok := entry.(map[string]any); ok {
 								if cmd, ok := em["command"].(string); ok && contains(cmd, "gortex hook") {
+									// Upgrade matcher if it's the old Read|Grep pattern.
+									if matcher, ok := hm["matcher"].(string); ok && matcher == "Read|Grep" {
+										hm["matcher"] = "Read|Grep|Glob"
+										data, err := json.MarshalIndent(settings, "", "  ")
+										if err != nil {
+											return err
+										}
+										if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
+											return err
+										}
+										fmt.Fprintf(os.Stderr, "[gortex init] upgraded hook matcher to Read|Grep|Glob in %s\n", settingsPath)
+										return nil
+									}
 									fmt.Fprintf(os.Stderr, "[gortex init] skip %s (Gortex hook already present)\n", settingsPath)
 									return nil
 								}
@@ -379,7 +407,7 @@ func installHook(settingsPath string) error {
 
 	// Build the hook entry.
 	hookEntry := map[string]any{
-		"matcher": "Read|Grep",
+		"matcher": "Read|Grep|Glob",
 		"hooks": []any{
 			map[string]any{
 				"type":          "command",

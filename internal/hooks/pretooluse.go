@@ -74,12 +74,14 @@ func enrich(input HookInput, port int) string {
 		return enrichRead(input.ToolInput, port)
 	case "Grep":
 		return enrichGrep(input.ToolInput, port)
+	case "Glob":
+		return enrichGlob(input.ToolInput)
 	default:
 		return ""
 	}
 }
 
-// enrichRead calls get_file_summary for the file being read.
+// enrichRead calls get_file_summary for the file being read, and suggests graph alternatives.
 func enrichRead(toolInput map[string]any, port int) string {
 	filePath, ok := toolInput["file_path"].(string)
 	if !ok || filePath == "" {
@@ -91,9 +93,16 @@ func enrichRead(toolInput map[string]any, port int) string {
 		return ""
 	}
 
+	var guidance strings.Builder
+	guidance.WriteString("[Gortex] PREFER graph tools over Read for source files:\n")
+	guidance.WriteString("  - To read one symbol: use `get_symbol_source` (80% fewer tokens)\n")
+	guidance.WriteString("  - To understand a file before editing: use `get_editing_context`\n")
+	guidance.WriteString("  - To get a file overview: use `get_file_summary`\n")
+	guidance.WriteString("  - For task-level context: use `smart_context`\n")
+
 	resp, err := queryGortex(port, "/api/graph/file?path="+url.QueryEscape(filePath))
 	if err != nil || resp == "" {
-		return ""
+		return guidance.String()
 	}
 
 	// Parse to check if there are any symbols.
@@ -101,30 +110,71 @@ func enrichRead(toolInput map[string]any, port int) string {
 		Nodes []any `json:"nodes"`
 	}
 	if err := json.Unmarshal([]byte(resp), &result); err != nil || len(result.Nodes) <= 1 {
-		return "" // 1 = just the file node, no symbols
+		return guidance.String()
 	}
 
-	return fmt.Sprintf("[Gortex] File context for %s:\n%s", filePath, resp)
+	fmt.Fprintf(&guidance, "\nFile context for %s:\n%s", filePath, resp)
+	return guidance.String()
 }
 
-// enrichGrep provides symbol search results for the grep pattern.
+// enrichGrep provides symbol search results for the grep pattern and suggests graph alternatives.
 func enrichGrep(toolInput map[string]any, port int) string {
 	pattern, ok := toolInput["pattern"].(string)
 	if !ok || len(pattern) < 3 {
 		return ""
 	}
 
+	var guidance strings.Builder
+	guidance.WriteString("[Gortex] PREFER graph tools over Grep:\n")
+	guidance.WriteString("  - To find a symbol by name: use `search_symbols` (BM25 + camelCase-aware)\n")
+	guidance.WriteString("  - To find all references: use `find_usages` (zero false positives)\n")
+	guidance.WriteString("  - To find callers: use `get_callers`\n")
+	guidance.WriteString("  - To find implementations: use `find_implementations`\n")
+
 	resp, err := queryGortex(port, "/api/graph/search?q="+url.QueryEscape(pattern))
 	if err != nil || resp == "" || resp == "[]" || resp == "[]\n" || resp == "null\n" {
-		return ""
+		return guidance.String()
 	}
 
 	var nodes []any
 	if err := json.Unmarshal([]byte(resp), &nodes); err != nil || len(nodes) == 0 {
+		return guidance.String()
+	}
+
+	fmt.Fprintf(&guidance, "\n%d symbols match \"%s\" in the knowledge graph.", len(nodes), pattern)
+	return guidance.String()
+}
+
+// enrichGlob suggests graph alternatives for file discovery.
+func enrichGlob(toolInput map[string]any) string {
+	pattern, ok := toolInput["pattern"].(string)
+	if !ok || pattern == "" {
 		return ""
 	}
 
-	return fmt.Sprintf("[Gortex] %d symbols match \"%s\" in the knowledge graph. Consider using `search_symbols` or `find_usages` instead of Grep for precise results.", len(nodes), pattern)
+	// Only intervene for source file patterns.
+	sourceExts := []string{
+		".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".rs", ".java",
+		".kt", ".scala", ".swift", ".php", ".rb", ".ex", ".c", ".cpp",
+		".cs", ".dart", ".lua", ".zig", ".ml", ".hs",
+	}
+	isSourceGlob := false
+	lower := strings.ToLower(pattern)
+	for _, ext := range sourceExts {
+		if strings.HasSuffix(lower, ext) {
+			isSourceGlob = true
+			break
+		}
+	}
+	if !isSourceGlob {
+		return ""
+	}
+
+	return "[Gortex] PREFER graph tools over Glob for source files:\n" +
+		"  - To find a symbol by name: use `search_symbols`\n" +
+		"  - To find files containing a symbol: use `search_symbols` (returns file paths)\n" +
+		"  - To understand file structure: use `get_file_summary`\n" +
+		"  - For task-level file discovery: use `smart_context`"
 }
 
 func queryGortex(port int, path string) (string, error) {
