@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import dynamic from 'next/dynamic'
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/store'
@@ -19,12 +20,16 @@ const GraphCanvas = dynamic(() => import('@/components/graph/GraphCanvas'), {
 })
 
 export default function GraphExplorerPage() {
+  const searchParams = useSearchParams()
+  const repoFromUrl = searchParams.get('repo')
+
   const [fullGraphData, setFullGraphData] = useState<GraphData | null>(null)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [repos, setRepos] = useState<string[]>([])
-  const [selectedRepo, setSelectedRepo] = useState<string>('all')
+  const [selectedRepo, setSelectedRepo] = useState<string>(repoFromUrl || 'all')
+  const [urlApplied, setUrlApplied] = useState(false)
 
   const { selectedNodeId } = useStore()
 
@@ -50,9 +55,13 @@ export default function GraphExplorerPage() {
         setRepos(repoList)
         setFullGraphData(data)
 
-        // Auto-select first repo if multi-repo and too many nodes.
-        if (repoList.length > 1 && data.nodes.length > 5000) {
+        // Use URL param if valid, otherwise auto-select first repo for large graphs.
+        if (!urlApplied && repoFromUrl && repoList.includes(repoFromUrl)) {
+          setSelectedRepo(repoFromUrl)
+          setUrlApplied(true)
+        } else if (!urlApplied && repoList.length > 1 && data.nodes.length > 5000) {
           setSelectedRepo(repoList[0])
+          setUrlApplied(true)
         }
 
         setError(null)

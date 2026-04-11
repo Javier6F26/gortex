@@ -11,6 +11,7 @@ import {
   FlaskConical,
   MessageSquare,
   FileCheck,
+  Waypoints,
 } from 'lucide-react'
 import { useStore } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -23,6 +24,7 @@ const navItems = [
   { href: '/communities', label: 'Communities', icon: Users },
   { href: '/processes', label: 'Processes', icon: Workflow },
   { href: '/contracts', label: 'Contracts', icon: FileCheck },
+  { href: '/services', label: 'Services', icon: Waypoints },
   { href: '/analysis', label: 'Analysis', icon: FlaskConical },
   { href: '/chat', label: 'Chat', icon: MessageSquare },
 ]

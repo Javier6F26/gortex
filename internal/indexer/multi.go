@@ -116,6 +116,21 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 	return map[string]*IndexResult{prefix: result}, nil
 }
 
+// readGoModModule reads the module path from a go.mod file.
+func readGoModModule(repoPath string) string {
+	data, err := os.ReadFile(filepath.Join(repoPath, "go.mod"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		}
+	}
+	return ""
+}
+
 // indexMultiRepo indexes multiple repos concurrently with repo prefixes.
 func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*IndexResult, error) {
 	type repoResult struct {
@@ -124,6 +139,18 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		idx    *Indexer
 		meta   *RepoMetadata
 		err    error
+	}
+
+	// Pre-scan: build tracked repo module map from go.mod files.
+	// This enables cross-repo dependency detection via GoModExtractor.
+	trackedModules := make(map[string]string)
+	for _, entry := range repos {
+		prefix := config.ResolvePrefix(entry)
+		absPath, _ := filepath.Abs(entry.Path)
+		if mod := readGoModModule(absPath); mod != "" {
+			trackedModules[prefix] = mod
+			mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
+		}
 	}
 
 	resultCh := make(chan repoResult, len(repos))
@@ -145,6 +172,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 			idx := New(mi.graph, mi.registry, cfg.Index, mi.logger)
 			idx.search = mi.search
 			idx.SetRepoPrefix(prefix)
+			idx.SetTrackedRepoModules(trackedModules)
 
 			result, err := idx.Index(absPath)
 			if err != nil {

@@ -53,6 +53,10 @@ type Indexer struct {
 	// contractRegistry holds detected API contracts (HTTP routes, gRPC, etc.).
 	contractRegistry *contracts.Registry
 
+	// trackedRepoModules maps repo names to Go module paths for cross-repo dependency detection.
+	// Populated by MultiIndexer from go.mod files of tracked repos.
+	trackedRepoModules map[string]string
+
 	// embedder is the optional embedding provider for semantic search.
 	embedder embedding.Provider
 
@@ -85,6 +89,10 @@ func (idx *Indexer) Search() search.Backend { return idx.search }
 
 // ContractRegistry returns the contract registry populated during indexing.
 func (idx *Indexer) ContractRegistry() *contracts.Registry { return idx.contractRegistry }
+
+// SetTrackedRepoModules sets the map of tracked repo names to Go module paths.
+// This enables the GoModExtractor to detect cross-repo dependencies.
+func (idx *Indexer) SetTrackedRepoModules(m map[string]string) { idx.trackedRepoModules = m }
 
 // RootPath returns the root path used for relative path computation.
 func (idx *Indexer) RootPath() string { return idx.rootPath }
@@ -692,6 +700,7 @@ func (idx *Indexer) extractContracts() {
 		&contracts.TopicExtractor{},
 		&contracts.WebSocketExtractor{},
 		&contracts.EnvVarExtractor{},
+		&contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules},
 	}
 
 	for _, fileNode := range idx.graph.AllNodes() {
@@ -723,6 +732,18 @@ func (idx *Indexer) extractContracts() {
 			found := ext.Extract(fileNode.FilePath, src, fileNodes, fileEdges)
 			reg.AddAll(found, idx.repoPrefix)
 		}
+	}
+
+	// Process go.mod directly (not in the graph as a file node).
+	goModPath := filepath.Join(idx.rootPath, "go.mod")
+	if goModSrc, err := os.ReadFile(goModPath); err == nil {
+		goModExtractor := &contracts.GoModExtractor{TrackedRepos: idx.trackedRepoModules}
+		goModFilePath := "go.mod"
+		if idx.repoPrefix != "" {
+			goModFilePath = idx.repoPrefix + "/go.mod"
+		}
+		found := goModExtractor.Extract(goModFilePath, goModSrc, nil, nil)
+		reg.AddAll(found, idx.repoPrefix)
 	}
 
 	// Add contract nodes and edges to graph.

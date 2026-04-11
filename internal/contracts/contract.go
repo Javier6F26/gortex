@@ -16,7 +16,8 @@ const (
 	ContractTopic   ContractType = "topic"
 	ContractWS      ContractType = "ws"
 	ContractEnv     ContractType = "env"
-	ContractOpenAPI ContractType = "openapi"
+	ContractOpenAPI    ContractType = "openapi"
+	ContractDependency ContractType = "dependency"
 )
 
 // Role indicates whether a symbol provides or consumes a contract.
