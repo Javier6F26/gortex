@@ -18,7 +18,7 @@ func NewHCLExtractor() *HCLExtractor {
 }
 
 func (e *HCLExtractor) Language() string     { return "hcl" }
-func (e *HCLExtractor) Extensions() []string { return []string{".tf", ".hcl"} }
+func (e *HCLExtractor) Extensions() []string { return []string{".tf", ".tfvars", ".hcl"} }
 
 func (e *HCLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)

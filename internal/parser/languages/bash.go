@@ -30,7 +30,7 @@ func NewBashExtractor() *BashExtractor {
 }
 
 func (e *BashExtractor) Language() string     { return "bash" }
-func (e *BashExtractor) Extensions() []string { return []string{".sh", ".bash"} }
+func (e *BashExtractor) Extensions() []string { return []string{".sh", ".bash", ".zsh"} }
 
 func (e *BashExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)

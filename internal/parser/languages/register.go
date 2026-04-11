@@ -32,4 +32,9 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewDartExtractor())
 	reg.Register(NewOCamlExtractor())
 	reg.Register(NewLuaExtractor())
+	reg.Register(NewZigExtractor())
+	reg.Register(NewHaskellExtractor())
+	reg.Register(NewClojureExtractor())
+	reg.Register(NewErlangExtractor())
+	reg.Register(NewRExtractor())
 }
