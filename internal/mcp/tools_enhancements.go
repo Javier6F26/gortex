@@ -1410,8 +1410,22 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 
 	if isCompact(req) {
 		var b strings.Builder
+		// Group by repo for readability in multi-repo mode.
+		byRepo := make(map[string][]contracts.Contract)
 		for _, c := range filtered {
-			fmt.Fprintf(&b, "%s %s %s %s:%d\n", c.Type, c.Role, c.ID, c.FilePath, c.Line)
+			repo := c.RepoPrefix
+			if repo == "" {
+				repo = "(default)"
+			}
+			byRepo[repo] = append(byRepo[repo], c)
+		}
+		for repoName, items := range byRepo {
+			if len(byRepo) > 1 {
+				fmt.Fprintf(&b, "\n[%s] (%d contracts)\n", repoName, len(items))
+			}
+			for _, c := range items {
+				fmt.Fprintf(&b, "%s %s %s %s:%d\n", c.Type, c.Role, c.ID, c.FilePath, c.Line)
+			}
 		}
 		if len(filtered) == 0 {
 			b.WriteString("no contracts found\n")
@@ -1420,15 +1434,27 @@ func (s *Server) handleGetContracts(_ context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	// Group by type for structured output.
-	grouped := make(map[string][]contracts.Contract)
+	// Group by repo, then by type for structured output.
+	type repoGroup struct {
+		Contracts map[string][]contracts.Contract `json:"contracts"`
+		Total     int                             `json:"total"`
+	}
+	byRepo := make(map[string]*repoGroup)
 	for _, c := range filtered {
-		grouped[string(c.Type)] = append(grouped[string(c.Type)], c)
+		repo := c.RepoPrefix
+		if repo == "" {
+			repo = "(default)"
+		}
+		if byRepo[repo] == nil {
+			byRepo[repo] = &repoGroup{Contracts: make(map[string][]contracts.Contract)}
+		}
+		byRepo[repo].Contracts[string(c.Type)] = append(byRepo[repo].Contracts[string(c.Type)], c)
+		byRepo[repo].Total++
 	}
 
 	return mcp.NewToolResultJSON(map[string]any{
-		"contracts": grouped,
-		"total":     len(filtered),
+		"by_repo": byRepo,
+		"total":   len(filtered),
 	})
 }
 
@@ -1462,19 +1488,35 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 			if m.CrossRepo {
 				cross = " [cross-repo]"
 			}
-			fmt.Fprintf(&b, "  %s: %s:%d -> %s:%d%s\n",
+			provRepo := m.Provider.RepoPrefix
+			consRepo := m.Consumer.RepoPrefix
+			if provRepo == "" {
+				provRepo = "(default)"
+			}
+			if consRepo == "" {
+				consRepo = "(default)"
+			}
+			fmt.Fprintf(&b, "  %s: [%s] %s:%d -> [%s] %s:%d%s\n",
 				m.ContractID,
-				m.Provider.FilePath, m.Provider.Line,
-				m.Consumer.FilePath, m.Consumer.Line,
+				provRepo, m.Provider.FilePath, m.Provider.Line,
+				consRepo, m.Consumer.FilePath, m.Consumer.Line,
 				cross)
 		}
 		fmt.Fprintf(&b, "orphan providers: %d\n", len(result.OrphanProviders))
 		for _, o := range result.OrphanProviders {
-			fmt.Fprintf(&b, "  %s %s:%d\n", o.ID, o.FilePath, o.Line)
+			repoLabel := o.RepoPrefix
+			if repoLabel == "" {
+				repoLabel = "(default)"
+			}
+			fmt.Fprintf(&b, "  [%s] %s %s:%d\n", repoLabel, o.ID, o.FilePath, o.Line)
 		}
 		fmt.Fprintf(&b, "orphan consumers: %d\n", len(result.OrphanConsumers))
 		for _, o := range result.OrphanConsumers {
-			fmt.Fprintf(&b, "  %s %s:%d\n", o.ID, o.FilePath, o.Line)
+			repoLabel := o.RepoPrefix
+			if repoLabel == "" {
+				repoLabel = "(default)"
+			}
+			fmt.Fprintf(&b, "  [%s] %s %s:%d\n", repoLabel, o.ID, o.FilePath, o.Line)
 		}
 		return mcp.NewToolResultText(b.String()), nil
 	}

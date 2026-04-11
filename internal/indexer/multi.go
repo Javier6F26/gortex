@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/search"
@@ -401,6 +402,24 @@ func (mi *MultiIndexer) GetIndexer(repoPrefix string) *Indexer {
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
 	return mi.indexers[repoPrefix]
+}
+
+// MergedContractRegistry combines contract registries from all per-repo
+// indexers into a single registry. In multi-repo mode each repo's indexer
+// runs extractContracts independently; this merges the results.
+func (mi *MultiIndexer) MergedContractRegistry() *contracts.Registry {
+	mi.mu.RLock()
+	defer mi.mu.RUnlock()
+
+	merged := contracts.NewRegistry()
+	for repoPrefix, idx := range mi.indexers {
+		cr := idx.ContractRegistry()
+		if cr == nil {
+			continue
+		}
+		merged.AddAll(cr.All(), repoPrefix)
+	}
+	return merged
 }
 
 // Graph returns the underlying shared graph.

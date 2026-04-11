@@ -501,6 +501,23 @@ func (idx *Indexer) buildSearchIndex() {
 		zap.Int("dimensions", dims))
 }
 
+// defaultExcludes are always excluded regardless of config.
+var defaultExcludes = []string{
+	".git",
+	".claude",
+	".kiro",
+	"node_modules",
+	".next",
+	"__pycache__",
+	".venv",
+	"venv",
+	".tox",
+	"target",         // Rust/Java build
+	"build",          // generic build
+	"dist",           // generic dist
+	".gortex-cache",
+}
+
 func (idx *Indexer) shouldExclude(path, root string) bool {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -508,6 +525,13 @@ func (idx *Indexer) shouldExclude(path, root string) bool {
 	}
 	// Normalize to forward slashes for pattern matching.
 	rel = filepath.ToSlash(rel)
+
+	// Always exclude common non-source directories — at any depth.
+	for _, dir := range defaultExcludes {
+		if strings.HasPrefix(rel, dir+"/") || rel == dir || strings.Contains(rel, "/"+dir+"/") {
+			return true
+		}
+	}
 
 	for _, pattern := range idx.config.Exclude {
 		// Simple directory-based exclusion.
@@ -632,8 +656,10 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	// Rebuild search index to ensure consistency.
 	idx.buildSearchIndex()
 
-	// Re-extract contracts after incremental reindex.
-	idx.extractContracts()
+	// Re-extract contracts only if stale files were re-indexed.
+	if len(staleFiles) > 0 || len(deletedFiles) > 0 {
+		idx.extractContracts()
+	}
 
 	return &IndexResult{
 		NodeCount:  idx.graph.Stats().TotalNodes,
@@ -673,7 +699,18 @@ func (idx *Indexer) extractContracts() {
 			continue
 		}
 
-		absPath := filepath.Join(idx.rootPath, fileNode.FilePath)
+		// In multi-repo mode, only process files belonging to this repo.
+		// File paths are prefixed with repo name (e.g. "labrador/api/...").
+		relPath := fileNode.FilePath
+		if idx.repoPrefix != "" {
+			if !strings.HasPrefix(relPath, idx.repoPrefix+"/") {
+				continue // skip files from other repos
+			}
+			// Strip repo prefix to get the actual file path relative to rootPath
+			relPath = strings.TrimPrefix(relPath, idx.repoPrefix+"/")
+		}
+
+		absPath := filepath.Join(idx.rootPath, relPath)
 		src, err := os.ReadFile(absPath)
 		if err != nil {
 			continue
@@ -716,7 +753,13 @@ func (idx *Indexer) extractContracts() {
 	}
 
 	idx.contractRegistry = reg
-	idx.logger.Info("contracts extracted", zap.Int("count", len(reg.All())))
+	repo := idx.rootPath
+	if idx.repoPrefix != "" {
+		repo = idx.repoPrefix
+	}
+	idx.logger.Info("contracts extracted",
+		zap.String("repo", repo),
+		zap.Int("count", len(reg.All())))
 }
 
 // IsStale returns true if the file at relPath has been modified on disk since

@@ -14,6 +14,7 @@ interface AppState {
 
   // Filters
   visibleKinds: Set<string>
+  visibleRepos: Set<string> | null // null = all repos visible (auto-populated)
   hideTestFiles: boolean
   hideImports: boolean
   searchQuery: string
@@ -28,6 +29,8 @@ interface AppState {
   selectNode: (id: string | null, node?: GortexNode | null) => void
   setHoveredNode: (id: string | null) => void
   toggleKind: (kind: string) => void
+  toggleRepo: (repo: string) => void
+  setVisibleRepos: (repos: Set<string>) => void
   setHideTestFiles: (v: boolean) => void
   setHideImports: (v: boolean) => void
   setSearchQuery: (q: string) => void
@@ -46,6 +49,7 @@ export const useStore = create<AppState>((set) => ({
   selectedNode: null,
   hoveredNodeId: null,
   visibleKinds: new Set(ALL_KINDS),
+  visibleRepos: null,
   hideTestFiles: false,
   hideImports: false,
   searchQuery: '',
@@ -62,6 +66,13 @@ export const useStore = create<AppState>((set) => ({
     else next.add(kind)
     return { visibleKinds: next }
   }),
+  toggleRepo: (repo) => set((state) => {
+    const next = new Set(state.visibleRepos || [])
+    if (next.has(repo)) next.delete(repo)
+    else next.add(repo)
+    return { visibleRepos: next }
+  }),
+  setVisibleRepos: (visibleRepos) => set({ visibleRepos }),
   setHideTestFiles: (hideTestFiles) => set({ hideTestFiles }),
   setHideImports: (hideImports) => set({ hideImports }),
   setSearchQuery: (searchQuery) => set({ searchQuery }),

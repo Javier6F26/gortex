@@ -62,26 +62,30 @@ export default function ContractsPage() {
           api.callTool('check_contracts', {}),
         ])
 
-        // The API returns {contracts: {type: Contract[], ...}, total: N}
-        // where contracts is grouped by type. Flatten into a single array.
+        // The API returns {by_repo: {repoName: {contracts: {type: [...]}, total: N}}, total: N}
         try {
           const parsed = JSON.parse(contractsText)
-          if (parsed.contracts && typeof parsed.contracts === 'object' && !Array.isArray(parsed.contracts)) {
-            // Grouped by type: {env: [...], http: [...], ...}
-            const flat: Contract[] = []
-            for (const items of Object.values(parsed.contracts)) {
-              if (Array.isArray(items)) {
-                flat.push(...(items as Contract[]))
+          const flat: Contract[] = []
+          if (parsed.by_repo) {
+            // New format: grouped by repo then by type
+            for (const [, repoGroup] of Object.entries(parsed.by_repo)) {
+              const group = repoGroup as { contracts?: Record<string, Contract[]> }
+              if (group.contracts) {
+                for (const items of Object.values(group.contracts)) {
+                  if (Array.isArray(items)) flat.push(...items)
+                }
               }
             }
-            setContracts(flat)
+          } else if (parsed.contracts && typeof parsed.contracts === 'object' && !Array.isArray(parsed.contracts)) {
+            for (const items of Object.values(parsed.contracts)) {
+              if (Array.isArray(items)) flat.push(...(items as Contract[]))
+            }
           } else if (Array.isArray(parsed)) {
-            setContracts(parsed as Contract[])
+            flat.push(...parsed)
           } else if (Array.isArray(parsed.contracts)) {
-            setContracts(parsed.contracts as Contract[])
-          } else {
-            setContracts([])
+            flat.push(...parsed.contracts)
           }
+          setContracts(flat)
         } catch {
           // Parse compact text format
           const lines = contractsText.split('\n').filter((l: string) => l.trim() && !l.startsWith('total:'))

@@ -288,6 +288,11 @@ export default function SymbolDetailPage({
   }
 
   if (error || !symbol) {
+    // Extract a useful search term from the ID: "repo/path::Type.Method" → "Type.Method" or "Type Method"
+    const symbolPart = id.includes('::') ? id.split('::').pop() || id : id.split('/').pop() || id
+    const searchQuery = symbolPart.replace(/\./g, ' ')
+    const filePart = id.includes('::') ? id.split('::')[0] : ''
+
     return (
       <div className="space-y-4">
         <Link
@@ -297,8 +302,23 @@ export default function SymbolDetailPage({
           <ArrowLeft className="h-4 w-4" />
           Back to search
         </Link>
-        <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-400">
-          {error || 'Symbol not found'}
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5 space-y-3">
+          <p className="text-sm text-zinc-400">
+            Symbol <code className="font-mono text-zinc-300">{symbolPart}</code> was not found in the graph.
+          </p>
+          {filePart && (
+            <p className="text-xs text-zinc-600">
+              Expected in: <code className="font-mono">{filePart}</code>
+            </p>
+          )}
+          <div className="flex items-center gap-2 pt-1">
+            <Link
+              href={`/search?q=${encodeURIComponent(searchQuery)}`}
+              className="rounded-md border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-700"
+            >
+              Search for &ldquo;{searchQuery}&rdquo;
+            </Link>
+          </div>
         </div>
       </div>
     )

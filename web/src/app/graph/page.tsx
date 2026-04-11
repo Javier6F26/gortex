@@ -19,45 +19,42 @@ const GraphCanvas = dynamic(() => import('@/components/graph/GraphCanvas'), {
 })
 
 export default function GraphExplorerPage() {
+  const [fullGraphData, setFullGraphData] = useState<GraphData | null>(null)
   const [graphData, setGraphData] = useState<GraphData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [repos, setRepos] = useState<string[]>([])
+  const [selectedRepo, setSelectedRepo] = useState<string>('all')
 
   const { selectedNodeId } = useStore()
 
   const fitCameraRef = useRef<(() => void) | null>(null)
   const relayoutRef = useRef<(() => void) | null>(null)
 
+  // Fetch full graph once.
   useEffect(() => {
     let mounted = true
 
     async function fetchGraph() {
       try {
         setLoading(true)
-        // Check graph size first — don't load 50k+ nodes into the browser
-        const stats = await api.stats()
-        if (stats.total_nodes > 10000) {
-          // For large graphs, load only non-file, non-import, non-variable nodes
-          // by fetching graph and filtering client-side
-          const data = await api.getGraph()
-          if (!mounted) return
-          const filteredNodes = data.nodes.filter(n =>
-            n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'variable'
-          )
-          const nodeIds = new Set(filteredNodes.map(n => n.id))
-          const filteredEdges = data.edges.filter(e =>
-            nodeIds.has(e.from) && nodeIds.has(e.to)
-          )
-          setGraphData({
-            nodes: filteredNodes,
-            edges: filteredEdges,
-            stats: data.stats,
-          })
-        } else {
-          const data = await api.getGraph()
-          if (!mounted) return
-          setGraphData(data)
+        const data = await api.getGraph()
+        if (!mounted) return
+
+        // Detect repos from node repo_prefix fields.
+        const repoSet = new Set<string>()
+        for (const n of data.nodes) {
+          if (n.repo_prefix) repoSet.add(n.repo_prefix)
         }
+        const repoList = Array.from(repoSet).sort()
+        setRepos(repoList)
+        setFullGraphData(data)
+
+        // Auto-select first repo if multi-repo and too many nodes.
+        if (repoList.length > 1 && data.nodes.length > 5000) {
+          setSelectedRepo(repoList[0])
+        }
+
         setError(null)
       } catch (err) {
         if (!mounted) return
@@ -71,6 +68,39 @@ export default function GraphExplorerPage() {
     return () => { mounted = false }
   }, [])
 
+  // Filter graph by selected repo.
+  useEffect(() => {
+    if (!fullGraphData) return
+
+    if (selectedRepo === 'all') {
+      // For "all", filter heavy node types if too large.
+      if (fullGraphData.nodes.length > 10000) {
+        const filtered = fullGraphData.nodes.filter(n =>
+          n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'variable'
+        )
+        const ids = new Set(filtered.map(n => n.id))
+        setGraphData({
+          nodes: filtered,
+          edges: fullGraphData.edges.filter(e => ids.has(e.from) && ids.has(e.to)),
+          stats: fullGraphData.stats,
+        })
+      } else {
+        setGraphData(fullGraphData)
+      }
+    } else {
+      // Filter to selected repo only.
+      const repoNodes = fullGraphData.nodes.filter(n =>
+        n.repo_prefix === selectedRepo || n.file_path.startsWith(selectedRepo + '/')
+      )
+      const ids = new Set(repoNodes.map(n => n.id))
+      setGraphData({
+        nodes: repoNodes,
+        edges: fullGraphData.edges.filter(e => ids.has(e.from) && ids.has(e.to)),
+        stats: fullGraphData.stats,
+      })
+    }
+  }, [fullGraphData, selectedRepo])
+
   function handleFitCamera() {
     fitCameraRef.current?.()
   }
@@ -79,8 +109,60 @@ export default function GraphExplorerPage() {
     relayoutRef.current?.()
   }
 
-  function handleFocusCluster(_cluster: SubGraph) {
-    // Future: replace graph data with cluster subgraph for focused view
+  const [clusterActive, setClusterActive] = useState(false)
+
+  function handleFocusCluster(cluster: SubGraph) {
+    if (!cluster.nodes || cluster.nodes.length === 0) return
+    const clusterNodeIds = new Set(cluster.nodes.map(n => n.id))
+    const clusterEdges = (fullGraphData?.edges || []).filter(
+      e => clusterNodeIds.has(e.from) && clusterNodeIds.has(e.to)
+    )
+    setGraphData({
+      nodes: cluster.nodes,
+      edges: clusterEdges,
+      stats: graphData?.stats || { total_nodes: 0, total_edges: 0, by_kind: {}, by_language: {} },
+    })
+    setClusterActive(true)
+    // Re-layout with the smaller cluster graph
+    setTimeout(() => relayoutRef.current?.(), 200)
+  }
+
+  function handleExitCluster() {
+    setClusterActive(false)
+    // Re-trigger the repo filter effect
+    setSelectedRepo(prev => prev) // force re-render
+    // Re-apply full graph
+    if (fullGraphData) {
+      if (selectedRepo === 'all') {
+        if (fullGraphData.nodes.length > 10000) {
+          const filtered = fullGraphData.nodes.filter(n =>
+            n.kind !== 'file' && n.kind !== 'import' && n.kind !== 'variable'
+          )
+          const ids = new Set(filtered.map(n => n.id))
+          setGraphData({
+            nodes: filtered,
+            edges: fullGraphData.edges.filter(e => ids.has(e.from) && ids.has(e.to)),
+            stats: fullGraphData.stats,
+          })
+        } else {
+          setGraphData(fullGraphData)
+        }
+      } else {
+        const repoNodes = fullGraphData.nodes.filter(n =>
+          n.repo_prefix === selectedRepo || n.file_path.startsWith(selectedRepo + '/')
+        )
+        const ids = new Set(repoNodes.map(n => n.id))
+        setGraphData({
+          nodes: repoNodes,
+          edges: fullGraphData.edges.filter(e => ids.has(e.from) && ids.has(e.to)),
+          stats: fullGraphData.stats,
+        })
+      }
+    }
+    setTimeout(() => {
+      relayoutRef.current?.()
+      setTimeout(() => fitCameraRef.current?.(), 500)
+    }, 200)
   }
 
   if (loading) {
@@ -115,14 +197,47 @@ export default function GraphExplorerPage() {
 
   return (
     <div className="-m-6 flex h-[calc(100vh-theme(spacing.24))] overflow-hidden">
-      <GraphFilters
-        nodeCount={graphData.nodes.length}
-        edgeCount={graphData.edges.length}
-        onFitCamera={handleFitCamera}
-        onRelayout={handleRelayout}
-      />
+      <div className="flex w-60 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900 overflow-y-auto">
+        {/* Repo selector */}
+        {repos.length > 1 && (
+          <div className="p-3 border-b border-zinc-800">
+            <label className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Repository</label>
+            <select
+              value={selectedRepo}
+              onChange={(e) => setSelectedRepo(e.target.value)}
+              className="mt-1 w-full rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-200 px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="all">All Repos ({fullGraphData?.nodes.length || 0} nodes)</option>
+              {repos.map(r => {
+                const count = fullGraphData?.nodes.filter(n => n.repo_prefix === r).length || 0
+                return <option key={r} value={r}>{r} ({count} nodes)</option>
+              })}
+            </select>
+          </div>
+        )}
+        <GraphFilters
+          nodeCount={graphData.nodes.length}
+          edgeCount={graphData.edges.length}
+          repos={repos}
+          onFitCamera={handleFitCamera}
+          onRelayout={handleRelayout}
+        />
+      </div>
 
       <div className="relative flex-1 overflow-hidden bg-zinc-950">
+        {clusterActive && (
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-3 rounded-lg border border-zinc-700 bg-zinc-900/95 px-4 py-2 backdrop-blur shadow-lg">
+            <span className="text-xs text-zinc-400">
+              Cluster view — {graphData.nodes.length} nodes
+            </span>
+            <button
+              onClick={handleExitCluster}
+              className="rounded border border-zinc-600 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700 transition-colors"
+            >
+              Back to full graph
+            </button>
+          </div>
+        )}
         <GraphCanvas
           nodes={graphData.nodes}
           edges={graphData.edges}

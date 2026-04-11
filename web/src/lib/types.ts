@@ -27,11 +27,15 @@ export interface GortexEdge {
   meta?: Record<string, unknown>
 }
 
-export interface GraphStats {
+export interface RepoStats {
   total_nodes: number
   total_edges: number
   by_kind: Record<string, number>
   by_language: Record<string, number>
+}
+
+export interface GraphStats extends RepoStats {
+  per_repo?: Record<string, RepoStats>
 }
 
 export interface HealthResponse {

@@ -24,7 +24,7 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
   const layoutRef = useRef<FA2LayoutSupervisor | null>(null)
   const hoveredNodeRef = useRef<string | null>(null)
 
-  const { visibleKinds, hideTestFiles, hideImports, selectNode, setHoveredNode } = useStore()
+  const { visibleKinds, visibleRepos, hideTestFiles, hideImports, selectNode, setHoveredNode } = useStore()
 
   // Build graph from data
   const buildGraph = useCallback(() => {
@@ -44,6 +44,7 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
         color: NODE_COLORS[node.kind as NodeKind] || '#6b7280',
         nodeKind: node.kind,
         filePath: node.file_path,
+        repoPrefix: node.repo_prefix || '',
         hidden: false,
       })
     }
@@ -171,8 +172,14 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
     sigma.setSetting('nodeReducer', (nodeId, data) => {
       const kind = data.nodeKind as string
       const filePath = data.filePath as string
+      const repoPrefix = data.repoPrefix as string
 
       let hidden = false
+
+      // Repo filter (multi-repo mode)
+      if (visibleRepos !== null && repoPrefix && !visibleRepos.has(repoPrefix)) {
+        hidden = true
+      }
 
       // Kind filter
       if (!visibleKinds.has(kind)) {
@@ -230,7 +237,7 @@ export default function GraphCanvas({ nodes, edges, fitCameraRef, relayoutRef }:
     })
 
     sigma.refresh()
-  }, [visibleKinds, hideTestFiles, hideImports])
+  }, [visibleKinds, visibleRepos, hideTestFiles, hideImports])
 
   // Main setup effect
   useEffect(() => {

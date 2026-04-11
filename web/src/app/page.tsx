@@ -16,7 +16,7 @@ import {
 import { api } from '@/lib/api'
 import { useStore } from '@/lib/store'
 import { NODE_COLORS, LANGUAGE_COLORS } from '@/lib/colors'
-import type { HealthResponse, GraphStats, NodeKind } from '@/lib/types'
+import type { HealthResponse, GraphStats, RepoStats, NodeKind } from '@/lib/types'
 import {
   Card,
   CardHeader,
@@ -45,7 +45,9 @@ export default function DashboardPage() {
 
     async function fetchData() {
       try {
-        const [h, s] = await Promise.all([api.health(), api.stats()])
+        // Use graphStats (MCP tool) instead of /stats endpoint
+        // because it includes per_repo breakdown in multi-repo mode
+        const [h, s] = await Promise.all([api.health(), api.graphStats()])
         if (!mounted) return
         setLocalHealth(h)
         setLocalStats(s)
@@ -312,6 +314,104 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Per-repo breakdown (multi-repo mode) */}
+      {stats?.per_repo && Object.keys(stats.per_repo).length > 1 && (
+        <div className="space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold text-zinc-100">Repositories</h2>
+            <p className="text-sm text-zinc-500">
+              {Object.keys(stats.per_repo).length} repositories indexed
+            </p>
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+            {Object.entries(stats.per_repo)
+              .sort(([, a], [, b]) => b.total_nodes - a.total_nodes)
+              .map(([name, repo]) => {
+                const r = repo as RepoStats
+                // Top 3 languages for this repo
+                const topLangs = Object.entries(r.by_language || {})
+                  .sort(([, a], [, b]) => b - a)
+                  .slice(0, 4)
+                // Meaningful kinds (skip file, import)
+                const codeKinds = Object.entries(r.by_kind || {})
+                  .filter(([k]) => k !== 'file' && k !== 'import' && k !== 'package')
+                  .sort(([, a], [, b]) => b - a)
+
+                return (
+                  <Card key={name} className="border-zinc-800 bg-zinc-900">
+                    <CardHeader className="pb-2">
+                      <CardTitle className="flex items-center justify-between text-zinc-100">
+                        <span className="font-mono text-sm">{name}</span>
+                        <Badge variant="secondary" className="bg-zinc-800 text-zinc-400 text-[10px]">
+                          {r.total_nodes.toLocaleString()} nodes
+                        </Badge>
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {/* Node/edge summary */}
+                      <div className="flex gap-4 text-xs text-zinc-500">
+                        <span>{r.total_edges.toLocaleString()} edges</span>
+                        <span>{(r.total_edges / Math.max(r.total_nodes, 1)).toFixed(1)} avg/node</span>
+                      </div>
+
+                      {/* Symbol breakdown */}
+                      <div className="flex flex-wrap gap-1.5">
+                        {codeKinds.map(([kind, count]) => (
+                          <span
+                            key={kind}
+                            className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]"
+                            style={{
+                              backgroundColor: `${NODE_COLORS[kind as NodeKind] || '#6b7280'}15`,
+                              color: NODE_COLORS[kind as NodeKind] || '#6b7280',
+                            }}
+                          >
+                            <span
+                              className="h-1.5 w-1.5 rounded-full"
+                              style={{ backgroundColor: NODE_COLORS[kind as NodeKind] || '#6b7280' }}
+                            />
+                            {count} {kind}{count !== 1 ? 's' : ''}
+                          </span>
+                        ))}
+                      </div>
+
+                      {/* Top languages bar */}
+                      {topLangs.length > 0 && (
+                        <div className="space-y-1">
+                          <div className="flex h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                            {topLangs.map(([lang, count]) => (
+                              <div
+                                key={lang}
+                                className="h-full"
+                                style={{
+                                  width: `${(count / r.total_nodes) * 100}%`,
+                                  backgroundColor: LANGUAGE_COLORS[lang] || '#6b7280',
+                                }}
+                                title={`${lang}: ${count}`}
+                              />
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[10px] text-zinc-500">
+                            {topLangs.map(([lang, count]) => (
+                              <span key={lang} className="flex items-center gap-1">
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full"
+                                  style={{ backgroundColor: LANGUAGE_COLORS[lang] || '#6b7280' }}
+                                />
+                                {lang} {count}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )
+              })}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

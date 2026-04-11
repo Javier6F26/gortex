@@ -152,68 +152,7 @@ func runBridge(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Index repository (with cache support).
-	if bridgeIndex != "" {
-		commitHash := gitCommitHash(bridgeIndex)
-		cached := false
-
-		if commitHash != "" && store.Check(bridgeIndex, commitHash) && store.Validate(bridgeIndex, commitHash) {
-			snap, err := store.Load(bridgeIndex, commitHash)
-			if err == nil {
-				for _, n := range snap.Nodes {
-					g.AddNode(n)
-				}
-				for _, e := range snap.Edges {
-					g.AddEdge(e)
-				}
-				idx.SetFileMtimes(snap.FileMtimes)
-				idx.SetRootPath(bridgeIndex)
-
-				if len(snap.VectorIndex) > 0 && snap.VectorDims > 0 {
-					if err := idx.ImportVectorIndex(snap.VectorIndex, snap.VectorDims, snap.VectorCount); err != nil {
-						fmt.Fprintf(os.Stderr, "[gortex] bridge: vector index restore failed: %v\n", err)
-					}
-				}
-
-				result, err := idx.IncrementalReindex(bridgeIndex)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[gortex] bridge: incremental reindex failed: %v\n", err)
-				} else {
-					fmt.Fprintf(os.Stderr, "[gortex] bridge: restored graph (%d nodes, %d edges), re-indexed %d stale files in %dms\n",
-						result.NodeCount, result.EdgeCount, result.FileCount, result.DurationMs)
-				}
-				cached = true
-			} else {
-				fmt.Fprintf(os.Stderr, "[gortex] bridge: cache load failed, will re-index: %v\n", err)
-			}
-		}
-
-		if !cached {
-			fmt.Fprintf(os.Stderr, "[gortex] bridge: indexing %s...\n", bridgeIndex)
-			result, err := idx.Index(bridgeIndex)
-			if err != nil {
-				return fmt.Errorf("indexing %s: %w", bridgeIndex, err)
-			}
-			fmt.Fprintf(os.Stderr, "[gortex] bridge: indexed %d files (%d nodes, %d edges) in %dms\n",
-				result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
-		}
-	}
-
-	// Pass contract registry to MCP server.
-	if cr := idx.ContractRegistry(); cr != nil {
-		srv.SetContractRegistry(cr)
-	}
-
-	// Multi-repo indexing.
-	if mi != nil {
-		if _, err := mi.IndexAll(); err != nil {
-			fmt.Fprintf(os.Stderr, "[gortex] bridge: multi-repo indexing error: %v\n", err)
-		}
-	}
-
-	srv.RunAnalysis()
-
-	// Build the HTTP handler.
+	// Build the HTTP handler — start serving immediately, index in background.
 	bridgeHandler := bridge.NewHandler(srv.MCPServer(), g, version, logger)
 
 	var handler http.Handler
@@ -308,6 +247,72 @@ func runBridge(_ *cobra.Command, _ []string) error {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
+	}()
+
+	// Background: index, multi-repo, analyze — graph populates while HTTP is live.
+	go func() {
+		// When MultiIndexer is available (global config has repos), use it exclusively.
+		// Single --index flag is only used when no multi-repo config exists.
+		if mi != nil {
+			fmt.Fprintf(os.Stderr, "[gortex] bridge: multi-repo indexing...\n")
+			if _, err := mi.IndexAll(); err != nil {
+				fmt.Fprintf(os.Stderr, "[gortex] bridge: multi-repo indexing error: %v\n", err)
+			}
+		} else if bridgeIndex != "" {
+			commitHash := gitCommitHash(bridgeIndex)
+			cached := false
+
+			if commitHash != "" && store.Check(bridgeIndex, commitHash) && store.Validate(bridgeIndex, commitHash) {
+				snap, err := store.Load(bridgeIndex, commitHash)
+				if err == nil {
+					for _, n := range snap.Nodes {
+						g.AddNode(n)
+					}
+					for _, e := range snap.Edges {
+						g.AddEdge(e)
+					}
+					idx.SetFileMtimes(snap.FileMtimes)
+					idx.SetRootPath(bridgeIndex)
+
+					if len(snap.VectorIndex) > 0 && snap.VectorDims > 0 {
+						if err := idx.ImportVectorIndex(snap.VectorIndex, snap.VectorDims, snap.VectorCount); err != nil {
+							fmt.Fprintf(os.Stderr, "[gortex] bridge: vector index restore failed: %v\n", err)
+						}
+					}
+
+					result, err := idx.IncrementalReindex(bridgeIndex)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "[gortex] bridge: incremental reindex failed: %v\n", err)
+					} else {
+						fmt.Fprintf(os.Stderr, "[gortex] bridge: restored graph (%d nodes, %d edges), re-indexed %d stale files in %dms\n",
+							result.NodeCount, result.EdgeCount, result.FileCount, result.DurationMs)
+					}
+					cached = true
+				} else {
+					fmt.Fprintf(os.Stderr, "[gortex] bridge: cache load failed, will re-index: %v\n", err)
+				}
+			}
+
+			if !cached {
+				fmt.Fprintf(os.Stderr, "[gortex] bridge: indexing %s...\n", bridgeIndex)
+				result, err := idx.Index(bridgeIndex)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[gortex] bridge: indexing failed: %v\n", err)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "[gortex] bridge: indexed %d files (%d nodes, %d edges) in %dms\n",
+					result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
+			}
+		}
+
+		// Set contract registry: in multi-repo mode, merge all per-repo registries.
+		if mi != nil {
+			srv.SetContractRegistry(mi.MergedContractRegistry())
+		} else if cr := idx.ContractRegistry(); cr != nil {
+			srv.SetContractRegistry(cr)
+		}
+
+		srv.RunAnalysis()
 	}()
 
 	sigCh := make(chan os.Signal, 1)

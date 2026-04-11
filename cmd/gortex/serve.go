@@ -238,7 +238,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 
 		// Pass contract registry to MCP server.
-		if cr := idx.ContractRegistry(); cr != nil {
+		// In multi-repo mode, merge all per-repo registries.
+		if mi != nil {
+			srv.SetContractRegistry(mi.MergedContractRegistry())
+		} else if cr := idx.ContractRegistry(); cr != nil {
 			srv.SetContractRegistry(cr)
 		}
 

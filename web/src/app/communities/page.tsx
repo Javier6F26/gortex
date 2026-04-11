@@ -32,7 +32,20 @@ function CohesionBar({ value }: { value: number }) {
   )
 }
 
-function CommunityCard({ community, duplicateIndex }: { community: Community; duplicateIndex?: number }) {
+// Derive repos from file paths (files start with "repoName/...")
+function getReposFromFiles(files?: string[]): string[] {
+  if (!files || files.length === 0) return []
+  const repos = new Set<string>()
+  for (const f of files) {
+    const slash = f.indexOf('/')
+    if (slash > 0) repos.add(f.slice(0, slash))
+  }
+  return Array.from(repos).sort()
+}
+
+const REPO_BADGE_COLORS = ['#f7768e', '#e0af68', '#7dcfff', '#bb9af7', '#73daca', '#ff9e64']
+
+function CommunityCard({ community, duplicateIndex, allRepos }: { community: Community; duplicateIndex?: number; allRepos: string[] }) {
   const [expanded, setExpanded] = useState(false)
   const [detail, setDetail] = useState<Community | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -107,7 +120,20 @@ function CommunityCard({ community, duplicateIndex }: { community: Community; du
               )}
             </CardTitle>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {allRepos.length > 1 && getReposFromFiles(community.files).map(repo => {
+              const color = REPO_BADGE_COLORS[allRepos.indexOf(repo) % REPO_BADGE_COLORS.length]
+              return (
+                <Badge
+                  key={repo}
+                  variant="outline"
+                  className="text-[10px] px-1.5 py-0"
+                  style={{ borderColor: color + '60', color }}
+                >
+                  {repo}
+                </Badge>
+              )
+            })}
             <Badge variant="secondary" className="bg-zinc-800 text-zinc-300">
               <Users className="mr-1 h-3 w-3" />
               {community.size} symbols
@@ -213,13 +239,32 @@ export default function CommunitiesPage() {
   }, [])
 
   const [showSmall, setShowSmall] = useState(false)
+  const [repoFilter, setRepoFilter] = useState<string>('all')
   const MIN_SIZE = 5
+
+  // Detect all repos across all communities
+  const allRepos = (() => {
+    if (!data?.communities) return []
+    const repos = new Set<string>()
+    for (const c of data.communities) {
+      for (const r of getReposFromFiles(c.files)) repos.add(r)
+    }
+    return Array.from(repos).sort()
+  })()
+  const isMultiRepo = allRepos.length > 1
 
   const all = data?.communities
     ? [...data.communities].sort((a, b) => b.size - a.size)
     : []
-  const sorted = showSmall ? all : all.filter(c => c.size >= MIN_SIZE)
-  const hiddenCount = all.length - sorted.length
+
+  // Apply repo filter
+  const repoFiltered = repoFilter === 'all'
+    ? all
+    : repoFilter === 'cross-repo'
+    ? all.filter(c => getReposFromFiles(c.files).length > 1)
+    : all.filter(c => getReposFromFiles(c.files).includes(repoFilter))
+  const sorted = showSmall ? repoFiltered : repoFiltered.filter(c => c.size >= MIN_SIZE)
+  const hiddenCount = repoFiltered.length - sorted.length
 
   if (loading) {
     return (
@@ -265,8 +310,60 @@ export default function CommunitiesPage() {
             <div className="text-sm text-zinc-400">
               {sorted.length} communities detected
             </div>
+            {isMultiRepo && (
+              <div className="ml-auto text-sm text-zinc-500">
+                {all.filter(c => getReposFromFiles(c.files).length > 1).length} cross-repo
+              </div>
+            )}
           </CardContent>
         </Card>
+      )}
+
+      {/* Repo filter (multi-repo) */}
+      {isMultiRepo && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-500">Repository:</span>
+          <button
+            onClick={() => setRepoFilter('all')}
+            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+              repoFilter === 'all'
+                ? 'border-zinc-600 bg-zinc-800 text-zinc-200'
+                : 'border-zinc-800 bg-transparent text-zinc-600'
+            }`}
+          >
+            All ({all.filter(c => c.size >= (showSmall ? 0 : MIN_SIZE)).length})
+          </button>
+          {allRepos.map((repo, i) => {
+            const color = REPO_BADGE_COLORS[i % REPO_BADGE_COLORS.length]
+            const count = all.filter(c =>
+              getReposFromFiles(c.files).includes(repo) && c.size >= (showSmall ? 0 : MIN_SIZE)
+            ).length
+            return (
+              <button
+                key={repo}
+                onClick={() => setRepoFilter(repo)}
+                className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+                  repoFilter === repo
+                    ? 'border-zinc-600 bg-zinc-800'
+                    : 'border-zinc-800 bg-transparent'
+                }`}
+                style={{ color: repoFilter === repo ? color : `${color}99` }}
+              >
+                {repo} ({count})
+              </button>
+            )
+          })}
+          <button
+            onClick={() => setRepoFilter('cross-repo')}
+            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${
+              repoFilter === 'cross-repo'
+                ? 'border-zinc-600 bg-zinc-800 text-zinc-200'
+                : 'border-zinc-800 bg-transparent text-zinc-600'
+            }`}
+          >
+            Cross-repo ({all.filter(c => getReposFromFiles(c.files).length > 1 && c.size >= (showSmall ? 0 : MIN_SIZE)).length})
+          </button>
+        </div>
       )}
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -281,6 +378,7 @@ export default function CommunitiesPage() {
               key={c.id}
               community={c}
               duplicateIndex={dupeIdx}
+              allRepos={allRepos}
             />
           )
         })}

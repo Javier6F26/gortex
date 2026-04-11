@@ -105,16 +105,17 @@ func (s *Server) handleGetGraph(w http.ResponseWriter, r *http.Request) {
 	edges := s.graph.AllEdges()
 	stats := s.graph.Stats()
 
-	// Strip heavy fields for web transport
+	// Strip heavy fields for web transport, but keep RepoPrefix for multi-repo
 	briefNodes := make([]*graph.Node, len(nodes))
 	for i, n := range nodes {
 		briefNodes[i] = &graph.Node{
-			ID:        n.ID,
-			Kind:      n.Kind,
-			Name:      n.Name,
-			FilePath:  n.FilePath,
-			StartLine: n.StartLine,
-			Language:  n.Language,
+			ID:         n.ID,
+			Kind:       n.Kind,
+			Name:       n.Name,
+			FilePath:   n.FilePath,
+			StartLine:  n.StartLine,
+			Language:   n.Language,
+			RepoPrefix: n.RepoPrefix,
 		}
 	}
 

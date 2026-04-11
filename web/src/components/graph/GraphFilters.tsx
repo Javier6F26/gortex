@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect } from 'react'
 import { NODE_COLORS } from '@/lib/colors'
 import { useStore } from '@/lib/store'
 import type { NodeKind } from '@/lib/types'
@@ -9,17 +10,34 @@ import { RotateCcw, Maximize2 } from 'lucide-react'
 interface GraphFiltersProps {
   nodeCount: number
   edgeCount: number
+  repos: string[]
   onFitCamera: () => void
   onRelayout: () => void
 }
 
-export default function GraphFilters({ nodeCount, edgeCount, onFitCamera, onRelayout }: GraphFiltersProps) {
-  const { visibleKinds, toggleKind, hideTestFiles, setHideTestFiles, hideImports, setHideImports } = useStore()
+// Stable colors for repos — visually distinct from node kind colors
+const REPO_COLORS = ['#f7768e', '#e0af68', '#7dcfff', '#bb9af7', '#73daca', '#ff9e64', '#9ece6a', '#7aa2f7']
+
+export function repoColor(repo: string, repos: string[]): string {
+  const idx = repos.indexOf(repo)
+  return REPO_COLORS[idx >= 0 ? idx % REPO_COLORS.length : 0]
+}
+
+export default function GraphFilters({ nodeCount, edgeCount, repos, onFitCamera, onRelayout }: GraphFiltersProps) {
+  const { visibleKinds, toggleKind, visibleRepos, toggleRepo, setVisibleRepos, hideTestFiles, setHideTestFiles, hideImports, setHideImports } = useStore()
+
+  // Auto-populate visibleRepos when repos are first detected
+  useEffect(() => {
+    if (repos.length > 1 && visibleRepos === null) {
+      setVisibleRepos(new Set(repos))
+    }
+  }, [repos, visibleRepos, setVisibleRepos])
 
   const kinds = Object.entries(NODE_COLORS) as [NodeKind, string][]
+  const isMultiRepo = repos.length > 1
 
   return (
-    <div className="flex h-full w-[240px] shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/50 p-4">
+    <div className="flex flex-1 flex-col p-4 overflow-y-auto">
       <h2 className="mb-4 text-sm font-semibold text-zinc-300">Filters</h2>
 
       {/* Stats */}
@@ -27,6 +45,57 @@ export default function GraphFilters({ nodeCount, edgeCount, onFitCamera, onRela
         <span>{nodeCount.toLocaleString()} nodes</span>
         <span>{edgeCount.toLocaleString()} edges</span>
       </div>
+
+      {/* Repo filter (multi-repo only) */}
+      {isMultiRepo && (
+        <div className="mb-4 space-y-1.5">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-zinc-500">Repositories</p>
+          {repos.map((repo) => {
+            const color = repoColor(repo, repos)
+            const isVisible = visibleRepos === null || visibleRepos.has(repo)
+            return (
+              <label
+                key={repo}
+                className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-sm hover:bg-zinc-800/50"
+              >
+                <input
+                  type="checkbox"
+                  checked={isVisible}
+                  onChange={() => {
+                    if (visibleRepos === null) {
+                      // First toggle: create set with all except this one
+                      const next = new Set(repos)
+                      next.delete(repo)
+                      setVisibleRepos(next)
+                    } else {
+                      toggleRepo(repo)
+                    }
+                  }}
+                  className="sr-only"
+                />
+                <span
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-zinc-700"
+                  style={{
+                    backgroundColor: isVisible ? color + '33' : 'transparent',
+                    borderColor: isVisible ? color : undefined,
+                  }}
+                >
+                  {isVisible && (
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke={color} strokeWidth={3}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                    </svg>
+                  )}
+                </span>
+                <span
+                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  style={{ backgroundColor: color }}
+                />
+                <span className="text-zinc-300 truncate">{repo}</span>
+              </label>
+            )
+          })}
+        </div>
+      )}
 
       {/* Node kind checkboxes */}
       <div className="mb-4 space-y-1.5">
