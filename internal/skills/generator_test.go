@@ -167,7 +167,7 @@ func TestGenerateAll_HowToExplore(t *testing.T) {
 	skills := gen.GenerateAll()
 	for _, s := range skills {
 		assert.True(t, strings.Contains(s.Content, "## How to Explore"), "skill %s should have How to Explore section", s.Label)
-		assert.True(t, strings.Contains(s.Content, "get_community"), "skill %s should reference get_community tool", s.Label)
+		assert.True(t, strings.Contains(s.Content, "get_communities"), "skill %s should reference get_communities tool", s.Label)
 		assert.True(t, strings.Contains(s.Content, "smart_context"), "skill %s should reference smart_context tool", s.Label)
 	}
 }

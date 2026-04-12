@@ -84,7 +84,6 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"find_usages":           srv.handleFindUsages,
 		"get_cluster":           srv.handleGetCluster,
 		"get_editing_context":   srv.handleGetEditingContext,
-		"get_symbol_signature":  srv.handleGetSymbolSignature,
 		"find_import_path":      srv.handleFindImportPath,
 		"explain_change_impact": srv.handleEnhancedChangeImpact,
 		"get_recent_changes":    srv.handleGetRecentChanges,

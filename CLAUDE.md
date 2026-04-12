@@ -32,7 +32,7 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | `Read` to understand a file           | `get_file_summary` or `get_editing_context` |
 | `Read` multiple files to trace calls  | `get_call_chain` / `get_callers`         |
 | Guessing an import path               | `find_import_path`                       |
-| `Read` to check a function signature  | `get_symbol_signature`                   |
+| `Read` to check a function signature  | `get_symbol` (signature is in `meta.signature`) |
 | 5-10 calls to explore for a task      | `smart_context` (one call)               |
 
 ### Impact Analysis and Safety
@@ -44,15 +44,15 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | Manual dependency ordering            | `get_edit_plan`                          |
 | Hoping signature changes are safe     | `verify_change` — checks callers and interface implementors |
 | Manually checking team conventions    | `check_guards` — evaluates guard rules from .gortex.yaml |
-| Wondering if a new dep creates a cycle| `would_create_cycle` — checks before you add it |
+| Wondering if a new dep creates a cycle| `analyze` with `kind: "would_create_cycle"` — checks before you add it |
 
 ### Code Quality and Analysis
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually hunting unused code          | `find_dead_code` — zero incoming edges (excludes entry points, tests, exports) |
-| Guessing which symbols are over-coupled| `find_hotspots` — ranks by fan-in, fan-out, community crossings |
-| Manually scanning for circular deps   | `find_cycles` — Tarjan's SCC with severity classification |
+| Manually hunting unused code          | `analyze` with `kind: "dead_code"` — zero incoming edges (excludes entry points, tests, exports) |
+| Guessing which symbols are over-coupled| `analyze` with `kind: "hotspots"` — ranks by fan-in, fan-out, community crossings |
+| Manually scanning for circular deps   | `analyze` with `kind: "cycles"` — Tarjan's SCC with severity classification |
 | Checking if the index is stale        | `index_health` — health score, parse failures, stale files |
 | Wondering what changed this session   | `get_symbol_history` — modification counts, flags churning (3+ edits) |
 
@@ -73,16 +73,16 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Accepting all context suggestions     | `record_feedback` — report useful/not_needed/missing symbols after a task |
-| Wondering which symbols matter most   | `query_feedback` — aggregated stats: most useful, most missed, accuracy |
+| Accepting all context suggestions     | `feedback` with `action: "record"` — report useful/not_needed/missing symbols after a task |
+| Wondering which symbols matter most   | `feedback` with `action: "query"` — aggregated stats: most useful, most missed, accuracy |
 | Re-fetching unchanged symbol source   | Pass `if_none_match` with previous `etag` to get `not_modified` (saves tokens) |
 
 ### API Contracts
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually tracking API routes/services | `get_contracts` — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
-| Guessing if APIs match across repos   | `check_contracts` — detects orphan providers/consumers and mismatches |
+| Manually tracking API routes/services | `contracts` (default `action: "list"`) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
+| Guessing if APIs match across repos   | `contracts` with `action: "check"` — detects orphan providers/consumers and mismatches |
 
 ### Multi-Repo Management
 
@@ -107,4 +107,4 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 7. Before any refactor, call `get_edit_plan` for dependency-ordered file list. Use `batch_edit` to apply atomically.
 8. After editing, call `check_guards` to verify team conventions, then `get_test_targets` for tests to run (includes cross-repo test files).
 9. Before committing, call `detect_changes` to verify scope. Use `diff_context` for graph-enriched review.
-10. After completing a task, call `record_feedback` to report which symbols from `smart_context` were useful, not needed, or missing. This improves future context quality.
+10. After completing a task, call `feedback` with `action: "record"` to report which symbols from `smart_context` were useful, not needed, or missing. This improves future context quality.

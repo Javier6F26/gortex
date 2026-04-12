@@ -195,7 +195,7 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 	// How to explore.
 	sb.WriteString("## How to Explore\n\n")
 	sb.WriteString("```\n")
-	fmt.Fprintf(&sb,"get_community with id: \"%s\"\n", c.ID)
+	fmt.Fprintf(&sb,"get_communities with id: \"%s\"\n", c.ID)
 	fmt.Fprintf(&sb,"smart_context with task: \"understand %s\"\n", label)
 	if len(entryPoints) > 0 {
 		fmt.Fprintf(&sb,"find_usages with id: \"%s\"\n", entryPoints[0])

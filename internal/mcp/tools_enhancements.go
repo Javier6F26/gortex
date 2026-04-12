@@ -99,24 +99,19 @@ func (s *Server) registerEnhancementTools() {
 		s.handlePrefetchContext,
 	)
 
-	// find_dead_code
+	// analyze — unified graph analysis tool (dead_code, hotspots, cycles, would_create_cycle)
 	s.mcpServer.AddTool(
-		mcp.NewTool("find_dead_code",
-			mcp.WithDescription("Returns all symbols with zero incoming call or reference edges, excluding entry points, tests, and exported symbols. Variables are excluded by default because the graph lacks intra-function data-flow edges, making them false positives."),
-			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
-			mcp.WithBoolean("include_variables", mcp.Description("Include variable nodes (excluded by default — they are usually false positives since the graph does not track intra-function data flow)")),
+		mcp.NewTool("analyze",
+			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id)."),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle")),
+			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
+			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
+			mcp.WithNumber("threshold", mcp.Description("(hotspots) Complexity score threshold (default: mean + 2σ)")),
+			mcp.WithString("scope", mcp.Description("(cycles) File path or package prefix to limit scope")),
+			mcp.WithString("from_id", mcp.Description("(would_create_cycle) Source symbol ID")),
+			mcp.WithString("to_id", mcp.Description("(would_create_cycle) Target symbol ID")),
 		),
-		s.handleFindDeadCode,
-	)
-
-	// find_hotspots
-	s.mcpServer.AddTool(
-		mcp.NewTool("find_hotspots",
-			mcp.WithDescription("Returns symbols with disproportionately high complexity based on fan-in, fan-out, and community boundary crossings."),
-			mcp.WithNumber("threshold", mcp.Description("Complexity score threshold (default: mean + 2σ)")),
-			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
-		),
-		s.handleFindHotspots,
+		s.handleAnalyze,
 	)
 
 	// scaffold
@@ -129,27 +124,6 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithBoolean("compact", mcp.Description("Compact text output")),
 		),
 		s.handleScaffold,
-	)
-
-	// find_cycles
-	s.mcpServer.AddTool(
-		mcp.NewTool("find_cycles",
-			mcp.WithDescription("Detects circular dependency chains in the import and call graphs. Classifies by severity: import-cycle, cross-community-cycle, call-cycle."),
-			mcp.WithString("scope", mcp.Description("File path or package prefix to limit scope")),
-			mcp.WithBoolean("compact", mcp.Description("One-line-per-cycle text output")),
-		),
-		s.handleFindCycles,
-	)
-
-	// would_create_cycle
-	s.mcpServer.AddTool(
-		mcp.NewTool("would_create_cycle",
-			mcp.WithDescription("Checks whether adding a dependency edge between two symbols would create a new cycle."),
-			mcp.WithString("from_id", mcp.Required(), mcp.Description("Source symbol ID")),
-			mcp.WithString("to_id", mcp.Required(), mcp.Description("Target symbol ID")),
-			mcp.WithBoolean("compact", mcp.Description("Compact text output")),
-		),
-		s.handleWouldCreateCycle,
 	)
 
 	// diff_context
@@ -193,50 +167,33 @@ func (s *Server) registerEnhancementTools() {
 		s.handleBatchEdit,
 	)
 
-	// get_contracts
+	// contracts — unified contracts tool (list + check)
 	s.mcpServer.AddTool(
-		mcp.NewTool("get_contracts",
-			mcp.WithDescription("Lists detected API contracts (HTTP routes, gRPC services, GraphQL, topics, WebSocket, env vars, OpenAPI). Contracts are extracted during indexing."),
+		mcp.NewTool("contracts",
+			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects mismatches — orphan providers/consumers across repos."),
+			mcp.WithString("action", mcp.Description("list (default) or check")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
-			mcp.WithString("type", mcp.Description("Filter by contract type: http, grpc, graphql, topic, ws, env, openapi")),
-			mcp.WithString("role", mcp.Description("Filter by role: provider or consumer")),
+			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi")),
+			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-contract text output")),
 		),
-		s.handleGetContracts,
+		s.handleContracts,
 	)
 
-	// check_contracts
+	// feedback — unified feedback tool (record + query)
 	s.mcpServer.AddTool(
-		mcp.NewTool("check_contracts",
-			mcp.WithDescription("Detects contract mismatches: pairs providers with consumers by contract ID and reports orphan providers (no consumer) and orphan consumers (no provider)."),
-			mcp.WithString("repo", mcp.Description("Filter by repository prefix before matching")),
-			mcp.WithBoolean("compact", mcp.Description("Compact text summary")),
+		mcp.NewTool("feedback",
+			mcp.WithDescription("Agent learning feedback. action=record: report which symbols from smart_context/prefetch_context were useful, not_needed, or missing (improves future context). action=query: aggregated stats — most useful, most missed, accuracy."),
+			mcp.WithString("action", mcp.Required(), mcp.Description("record or query")),
+			mcp.WithString("task", mcp.Description("(record) The task description used in the original context call")),
+			mcp.WithString("useful", mcp.Description("(record) Comma-separated symbol IDs that were useful")),
+			mcp.WithString("not_needed", mcp.Description("(record) Comma-separated symbol IDs that were returned but not needed")),
+			mcp.WithString("missing", mcp.Description("(record) Comma-separated symbol IDs that should have been included")),
+			mcp.WithString("tool_source", mcp.Description("Which tool produced the context: smart_context or prefetch_context (default: smart_context). For query: filter by source or 'all'")),
+			mcp.WithNumber("top_n", mcp.Description("(query) Number of top symbols to return per category (default: 10)")),
+			mcp.WithBoolean("compact", mcp.Description("(query) One-line-per-symbol text output")),
 		),
-		s.handleCheckContracts,
-	)
-
-	// record_feedback
-	s.mcpServer.AddTool(
-		mcp.NewTool("record_feedback",
-			mcp.WithDescription("Report which symbols from a smart_context or prefetch_context call were useful, not needed, or missing. Improves future context quality for this repository."),
-			mcp.WithString("task", mcp.Required(), mcp.Description("The task description used in the original context call")),
-			mcp.WithString("useful", mcp.Description("Comma-separated symbol IDs that were useful for the task")),
-			mcp.WithString("not_needed", mcp.Description("Comma-separated symbol IDs that were returned but not needed")),
-			mcp.WithString("missing", mcp.Description("Comma-separated symbol IDs that should have been included but were not")),
-			mcp.WithString("tool_source", mcp.Description("Which tool produced the context: smart_context or prefetch_context (default: smart_context)")),
-		),
-		s.handleRecordFeedback,
-	)
-
-	// query_feedback
-	s.mcpServer.AddTool(
-		mcp.NewTool("query_feedback",
-			mcp.WithDescription("Returns aggregated feedback statistics: most useful symbols, most missed symbols, and accuracy metrics for context tools."),
-			mcp.WithNumber("top_n", mcp.Description("Number of top symbols to return per category (default: 10)")),
-			mcp.WithString("tool_source", mcp.Description("Filter by tool_source: smart_context, prefetch_context, or all (default: all)")),
-			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output")),
-		),
-		s.handleQueryFeedback,
+		s.handleFeedback,
 	)
 
 	// export_context
@@ -577,6 +534,29 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 		"total":      totalCount,
 		"truncated":  truncated,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// handleAnalyze — unified dispatcher for graph analysis (replaces 4 tools)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	kind, err := req.RequireString("kind")
+	if err != nil {
+		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle)"), nil
+	}
+	switch kind {
+	case "dead_code":
+		return s.handleFindDeadCode(ctx, req)
+	case "hotspots":
+		return s.handleFindHotspots(ctx, req)
+	case "cycles":
+		return s.handleFindCycles(ctx, req)
+	case "would_create_cycle":
+		return s.handleWouldCreateCycle(ctx, req)
+	default:
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle)"), nil
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,6 +1446,22 @@ func (s *Server) handleBatchEdit(_ context.Context, req mcp.CallToolRequest) (*m
 }
 
 // ---------------------------------------------------------------------------
+// handleContracts — unified dispatcher for contracts (replaces 2 tools)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleContracts(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action := req.GetString("action", "list")
+	switch action {
+	case "list", "":
+		return s.handleGetContracts(ctx, req)
+	case "check":
+		return s.handleCheckContracts(ctx, req)
+	default:
+		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list or check)"), nil
+	}
+}
+
+// ---------------------------------------------------------------------------
 // handleGetContracts
 // ---------------------------------------------------------------------------
 
@@ -1620,6 +1616,25 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 			"orphan_consumers": len(result.OrphanConsumers),
 		},
 	})
+}
+
+// ---------------------------------------------------------------------------
+// handleFeedback — unified dispatcher for feedback (replaces 2 tools)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleFeedback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	action, err := req.RequireString("action")
+	if err != nil {
+		return mcp.NewToolResultError("action is required (one of: record, query)"), nil
+	}
+	switch action {
+	case "record":
+		return s.handleRecordFeedback(ctx, req)
+	case "query":
+		return s.handleQueryFeedback(ctx, req)
+	default:
+		return mcp.NewToolResultError("unknown feedback action: " + action + " (expected: record or query)"), nil
+	}
 }
 
 // ---------------------------------------------------------------------------

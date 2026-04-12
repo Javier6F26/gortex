@@ -12,32 +12,18 @@ import (
 func (s *Server) registerAnalysisTools() {
 	s.mcpServer.AddTool(
 		mcp.NewTool("get_communities",
-			mcp.WithDescription("Returns functional clusters discovered by community detection. Each cluster groups symbols that work together. Use to understand the architecture at a module level without reading files."),
+			mcp.WithDescription("Returns functional clusters discovered by community detection. Without id: list all communities with summaries. With id: full details of a specific community (members, files, cohesion)."),
+			mcp.WithString("id", mcp.Description("Optional community ID (e.g. community-0). When set, returns full details of that community instead of the list.")),
 		),
 		s.handleGetCommunities,
 	)
 
 	s.mcpServer.AddTool(
-		mcp.NewTool("get_community",
-			mcp.WithDescription("Returns details of a specific community: all member symbols, files, and cohesion score."),
-			mcp.WithString("id", mcp.Required(), mcp.Description("Community ID (e.g. community-0)")),
-		),
-		s.handleGetCommunity,
-	)
-
-	s.mcpServer.AddTool(
 		mcp.NewTool("get_processes",
-			mcp.WithDescription("Returns discovered execution flows — named chains of function calls starting from entry points (main, handlers, controllers). Use to understand what the code does, not just what calls what."),
+			mcp.WithDescription("Returns discovered execution flows — named chains of function calls starting from entry points. Without id: list all processes. With id: full step-by-step call chain for that process."),
+			mcp.WithString("id", mcp.Description("Optional process ID (e.g. process-0). When set, returns the full step-by-step call chain for that process instead of the list.")),
 		),
 		s.handleGetProcesses,
-	)
-
-	s.mcpServer.AddTool(
-		mcp.NewTool("get_process",
-			mcp.WithDescription("Returns the full step-by-step call chain for a specific execution flow."),
-			mcp.WithString("id", mcp.Required(), mcp.Description("Process ID (e.g. process-0)")),
-		),
-		s.handleGetProcess,
 	)
 
 	s.mcpServer.AddTool(
@@ -50,8 +36,23 @@ func (s *Server) registerAnalysisTools() {
 	)
 }
 
-func (s *Server) handleGetCommunities(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetCommunities(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	comms := s.getCommunities()
+
+	// If id is provided, return the single community in detail.
+	if id := req.GetString("id", ""); id != "" {
+		if comms == nil {
+			return mcp.NewToolResultError("no communities detected yet"), nil
+		}
+		for _, c := range comms.Communities {
+			if c.ID == id {
+				return mcp.NewToolResultJSON(c)
+			}
+		}
+		return mcp.NewToolResultError("community not found: " + id), nil
+	}
+
+	// Otherwise return the list of summaries.
 	if comms == nil || len(comms.Communities) == 0 {
 		return mcp.NewToolResultJSON(map[string]any{
 			"communities": []any{},
@@ -59,7 +60,6 @@ func (s *Server) handleGetCommunities(_ context.Context, _ mcp.CallToolRequest) 
 		})
 	}
 
-	// Return summaries (not full member lists)
 	type summary struct {
 		ID       string   `json:"id"`
 		Label    string   `json:"label"`
@@ -84,27 +84,23 @@ func (s *Server) handleGetCommunities(_ context.Context, _ mcp.CallToolRequest) 
 	})
 }
 
-func (s *Server) handleGetCommunity(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
-	if err != nil {
-		return mcp.NewToolResultError("id is required"), nil
-	}
-
-	comms := s.getCommunities()
-	if comms == nil {
-		return mcp.NewToolResultError("no communities detected yet"), nil
-	}
-
-	for _, c := range comms.Communities {
-		if c.ID == id {
-			return mcp.NewToolResultJSON(c)
-		}
-	}
-	return mcp.NewToolResultError("community not found: " + id), nil
-}
-
-func (s *Server) handleGetProcesses(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetProcesses(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	procs := s.getProcesses()
+
+	// If id is provided, return the single process in detail.
+	if id := req.GetString("id", ""); id != "" {
+		if procs == nil {
+			return mcp.NewToolResultError("no processes discovered yet"), nil
+		}
+		for _, p := range procs.Processes {
+			if p.ID == id {
+				return mcp.NewToolResultJSON(p)
+			}
+		}
+		return mcp.NewToolResultError("process not found: " + id), nil
+	}
+
+	// Otherwise return the list of summaries.
 	if procs == nil || len(procs.Processes) == 0 {
 		return mcp.NewToolResultJSON(map[string]any{
 			"processes": []any{},
@@ -112,7 +108,6 @@ func (s *Server) handleGetProcesses(_ context.Context, _ mcp.CallToolRequest) (*
 		})
 	}
 
-	// Return summaries
 	type summary struct {
 		ID         string  `json:"id"`
 		Name       string  `json:"name"`
@@ -136,25 +131,6 @@ func (s *Server) handleGetProcesses(_ context.Context, _ mcp.CallToolRequest) (*
 		"processes": summaries,
 		"total":     len(summaries),
 	})
-}
-
-func (s *Server) handleGetProcess(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
-	if err != nil {
-		return mcp.NewToolResultError("id is required"), nil
-	}
-
-	procs := s.getProcesses()
-	if procs == nil {
-		return mcp.NewToolResultError("no processes discovered yet"), nil
-	}
-
-	for _, p := range procs.Processes {
-		if p.ID == id {
-			return mcp.NewToolResultJSON(p)
-		}
-	}
-	return mcp.NewToolResultError("process not found: " + id), nil
 }
 
 func (s *Server) handleDetectChanges(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

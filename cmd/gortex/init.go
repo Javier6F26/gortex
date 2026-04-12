@@ -474,7 +474,7 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | ` + "`Read`" + ` to understand a file           | ` + "`get_file_summary`" + ` or ` + "`get_editing_context`" + ` |
 | ` + "`Read`" + ` multiple files to trace calls  | ` + "`get_call_chain`" + ` / ` + "`get_callers`" + `         |
 | Guessing an import path               | ` + "`find_import_path`" + `                       |
-| ` + "`Read`" + ` to check a function signature  | ` + "`get_symbol_signature`" + `                   |
+| ` + "`Read`" + ` to check a function signature  | ` + "`get_symbol`" + ` (signature is in ` + "`meta.signature`" + `) |
 | 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
 
 ### Impact Analysis and Safety
@@ -486,15 +486,15 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 | Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
 | Hoping signature changes are safe     | ` + "`verify_change`" + ` — checks callers and interface implementors |
 | Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
-| Wondering if a new dep creates a cycle| ` + "`would_create_cycle`" + ` — checks before you add it |
+| Wondering if a new dep creates a cycle| ` + "`analyze`" + ` with ` + "`kind: \"would_create_cycle\"`" + ` — checks before you add it |
 
 ### Code Quality and Analysis
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually hunting unused code          | ` + "`find_dead_code`" + ` — zero incoming edges (excludes entry points, tests, exports) |
-| Guessing which symbols are over-coupled| ` + "`find_hotspots`" + ` — ranks by fan-in, fan-out, community crossings |
-| Manually scanning for circular deps   | ` + "`find_cycles`" + ` — Tarjan's SCC with severity classification |
+| Manually hunting unused code          | ` + "`analyze`" + ` with ` + "`kind: \"dead_code\"`" + ` — zero incoming edges (excludes entry points, tests, exports) |
+| Guessing which symbols are over-coupled| ` + "`analyze`" + ` with ` + "`kind: \"hotspots\"`" + ` — ranks by fan-in, fan-out, community crossings |
+| Manually scanning for circular deps   | ` + "`analyze`" + ` with ` + "`kind: \"cycles\"`" + ` — Tarjan's SCC with severity classification |
 | Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
 | Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
 
@@ -514,8 +514,8 @@ Gortex is running as an MCP server. You MUST use graph queries instead of file r
 
 | Instead of...                         | You MUST use...                          |
 |---------------------------------------|------------------------------------------|
-| Manually tracking API routes/services | ` + "`get_contracts`" + ` — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
-| Guessing if APIs match across repos   | ` + "`check_contracts`" + ` — detects orphan providers/consumers and mismatches |
+| Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI |
+| Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches |
 
 ### Multi-Repo Management
 
@@ -601,7 +601,6 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### Coding Workflow
 | Tool | What it gives you |
 |------|-------------------|
-| get_symbol_signature | Just the signature, no body — API boundary check |
 | get_symbol_source | Source code of a single symbol — use instead of Read |
 | batch_symbols | Multiple symbols with source/callers/callees in one call |
 | find_import_path | Correct import path for a symbol in a target file |
@@ -621,10 +620,8 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### Analysis
 | Tool | What it gives you |
 |------|-------------------|
-| get_communities | Functional clusters via Louvain community detection |
-| get_community | Members, files, cohesion for one community |
-| get_processes | Discovered execution flows (entry points -> call chains) |
-| get_process | Full step-by-step trace of one execution flow |
+| get_communities | Functional clusters via Louvain community detection (with id: returns single community details) |
+| get_processes | Discovered execution flows (with id: returns single process step-by-step trace) |
 | detect_changes | Git diff -> affected symbols -> blast radius |
 
 ### Proactive Safety
@@ -632,14 +629,11 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 |------|-------------------|
 | verify_change | Checks proposed signature changes against all callers and interface implementors |
 | check_guards | Evaluates project guard rules (.gortex.yaml) against changed symbols |
-| would_create_cycle | Checks if adding a dependency would create a circular dependency |
 
 ### Code Quality
 | Tool | What it gives you |
 |------|-------------------|
-| find_dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
-| find_hotspots | Symbols ranked by fan-in, fan-out, and community boundary crossings |
-| find_cycles | Circular dependency detection via Tarjan's SCC, classified by severity |
+| analyze | Unified graph analysis. kind=dead_code, hotspots, cycles, or would_create_cycle |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
 
@@ -654,8 +648,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### API Contracts
 | Tool | What it gives you |
 |------|-------------------|
-| get_contracts | Lists detected API contracts: HTTP routes, gRPC, GraphQL, topics, WebSocket, env vars, OpenAPI |
-| check_contracts | Matches providers to consumers, reports orphans and mismatches across repos |
+| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos |
 
 ### Multi-Repo
 | Tool | What it gives you |
@@ -681,7 +674,7 @@ const commandExplore = `# Exploring Codebases with Gortex
 2. get_communities                              -> See functional clusters (architecture overview)
 3. search_symbols({query: "<concept>"})         -> Find symbols related to a concept
 4. get_processes                                -> Discover execution flows
-5. get_process({id: "<process-id>"})            -> Trace a specific flow step by step
+5. get_processes({id: "<process-id>"})          -> Trace a specific flow step by step
 6. get_editing_context({file_path: "<file>"})   -> Deep dive on a specific file
 ` + "```" + `
 
@@ -691,7 +684,7 @@ const commandExplore = `# Exploring Codebases with Gortex
 - Call get_communities for architecture overview
 - Call search_symbols for the concept you want to understand
 - Call get_processes to discover execution flows
-- Call get_process on relevant flows for step-by-step traces
+- Call get_processes with id on relevant flows for step-by-step traces
 - Call get_editing_context on key files for full symbol context
 - Read source files only for implementation details you actually need to edit
 `
@@ -705,7 +698,7 @@ const commandDebug = `# Debugging with Gortex
 2. get_callers({function_id: "<suspect>"})                -> Who calls it?
 3. get_call_chain({function_id: "<suspect>"})             -> What does it call?
 4. get_editing_context({file_path: "<file>"})             -> Full file context
-5. get_process({id: "<process>"})                         -> Trace execution flow
+5. get_processes({id: "<process>"})                       -> Trace execution flow
 ` + "```" + `
 
 ## Debugging Patterns
@@ -910,15 +903,16 @@ func writeMergeKiroMCP(path string) error {
 			"graph_stats", "search_symbols", "get_symbol", "get_file_summary",
 			"get_editing_context", "get_dependencies", "get_dependents",
 			"get_call_chain", "get_callers", "find_implementations", "find_usages",
-			"get_cluster", "get_symbol_signature", "get_symbol_source", "batch_symbols",
+			"get_cluster", "get_symbol_source", "batch_symbols",
 			"find_import_path", "explain_change_impact", "get_recent_changes",
 			"smart_context", "get_edit_plan", "get_test_targets", "suggest_pattern",
-			"get_communities", "get_community", "get_processes", "get_process",
+			"get_communities", "get_processes",
 			"detect_changes", "index_repository",
 			"verify_change", "check_guards", "prefetch_context",
-			"find_dead_code", "find_hotspots", "find_cycles", "would_create_cycle",
+			"analyze",
 			"diff_context", "index_health", "get_symbol_history",
 			"scaffold", "batch_edit",
+			"contracts", "feedback",
 		},
 	}
 	config["mcpServers"] = servers
@@ -976,15 +970,15 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 | Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
 | Hoping signature changes are safe     | ` + "`verify_change`" + ` — checks callers and interface implementors |
 | Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
-| Wondering if a new dep creates a cycle| ` + "`would_create_cycle`" + ` — checks before you add it |
+| Wondering if a new dep creates a cycle| ` + "`analyze`" + ` with ` + "`kind: \"would_create_cycle\"`" + ` — checks before you add it |
 
 ### Code Quality and Analysis
 
 | Instead of...                         | Use...                                   |
 |---------------------------------------|------------------------------------------|
-| Manually hunting unused code          | ` + "`find_dead_code`" + ` — zero incoming edges (excludes entry points, tests, exports) |
-| Guessing which symbols are over-coupled| ` + "`find_hotspots`" + ` — ranks by fan-in, fan-out, community crossings |
-| Manually scanning for circular deps   | ` + "`find_cycles`" + ` — Tarjan's SCC with severity classification |
+| Manually hunting unused code          | ` + "`analyze`" + ` with ` + "`kind: \"dead_code\"`" + ` — zero incoming edges (excludes entry points, tests, exports) |
+| Guessing which symbols are over-coupled| ` + "`analyze`" + ` with ` + "`kind: \"hotspots\"`" + ` — ranks by fan-in, fan-out, community crossings |
+| Manually scanning for circular deps   | ` + "`analyze`" + ` with ` + "`kind: \"cycles\"`" + ` — Tarjan's SCC with severity classification |
 | Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
 | Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
 

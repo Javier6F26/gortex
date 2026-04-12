@@ -27,14 +27,6 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
-		mcp.NewTool("get_symbol_signature",
-			mcp.WithDescription("Returns only the signature of a function, method, or type — not the body. Use to understand an API boundary without spending tokens on implementation details."),
-			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol node ID")),
-		),
-		s.handleGetSymbolSignature,
-	)
-
-	s.mcpServer.AddTool(
 		mcp.NewTool("find_import_path",
 			mcp.WithDescription("Given a symbol name you want to use in a file, returns the correct import path. Use instead of reading files or guessing package paths."),
 			mcp.WithString("symbol_name", mcp.Required(), mcp.Description("Name of the symbol to import")),
@@ -63,7 +55,7 @@ func (s *Server) registerCodingTools() {
 
 	s.mcpServer.AddTool(
 		mcp.NewTool("batch_symbols",
-			mcp.WithDescription("Returns signatures, source code, callers, and callees for multiple symbols in one call. Use instead of calling get_symbol_source or get_symbol_signature multiple times — saves 60% round-trip overhead."),
+			mcp.WithDescription("Returns signatures, source code, callers, and callees for multiple symbols in one call. Use instead of calling get_symbol_source or get_symbol multiple times — saves 60% round-trip overhead."),
 			mcp.WithString("ids", mcp.Required(), mcp.Description("Comma-separated list of symbol IDs")),
 			mcp.WithBoolean("include_source", mcp.Description("Include source code for each symbol (default: false)")),
 			mcp.WithNumber("context_lines", mcp.Description("Extra lines above/below source (default: 3, only if include_source)")),
@@ -251,34 +243,6 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 		"called_by": ctx.CalledBy,
 		"calls":     ctx.Calls,
 		"etag":      etag,
-	}
-	return mcp.NewToolResultJSON(result)
-}
-
-func (s *Server) handleGetSymbolSignature(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
-	if err != nil {
-		return mcp.NewToolResultError("id is required"), nil
-	}
-
-	// Auto re-index stale file before querying.
-	if parts := strings.SplitN(id, "::", 2); len(parts) == 2 {
-		s.ensureFresh([]string{parts[0]})
-	}
-
-	node := s.engine.GetSymbol(id)
-	if node == nil {
-		return mcp.NewToolResultError("symbol not found: " + id), nil
-	}
-	result := map[string]any{
-		"id":         node.ID,
-		"kind":       node.Kind,
-		"name":       node.Name,
-		"file_path":  node.FilePath,
-		"start_line": node.StartLine,
-	}
-	if sig, ok := node.Meta["signature"]; ok {
-		result["signature"] = sig
 	}
 	return mcp.NewToolResultJSON(result)
 }
