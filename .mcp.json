@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "gortex": {
-      "command": "./gortex",
+      "command": "gortex",
       "args": [
         "serve",
         "--index", ".",
