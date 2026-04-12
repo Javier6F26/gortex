@@ -84,13 +84,49 @@ type Server struct {
 	communities  *analysis.CommunityResult
 	processes    *analysis.ProcessResult
 	analysisMu   sync.RWMutex
+
+	// session / symHistory / tokenStats are the shared-default per-client
+	// state for the embedded stdio path (one implicit client per process).
+	// Tool handlers reach per-session activity via sessionFor(ctx); that
+	// helper returns this default when ctx carries no session ID.
 	session      *sessionState
 	symHistory   *symbolHistory
 	tokenStats   *tokenStats
+
+	// sessions multiplexes per-client sessionLocal for the daemon
+	// transport. When ctx carries a session ID (WithSessionID), handlers
+	// resolve through this map; otherwise the shared fields above are
+	// used.
+	sessions *sessionMap
+
 	guardRules       []config.GuardRule
 	contractRegistry *contracts.Registry
 	semanticMgr      *semantic.Manager
 	feedback         *feedbackManager
+}
+
+// sessionFor returns the session-scoped state for the current request.
+// If ctx was wrapped with WithSessionID, the per-session entry is used
+// (created on first access). Otherwise the shared default is returned,
+// preserving embedded-mode behavior exactly.
+//
+// Never returns nil — callers can chain `.recordFile(...)` etc.
+// unconditionally.
+func (s *Server) sessionFor(ctx context.Context) *sessionState {
+	id := SessionIDFromContext(ctx)
+	if id == "" || s.sessions == nil {
+		return s.session
+	}
+	return s.sessions.get(id).session
+}
+
+// ReleaseSession drops per-session state for id. Called by the daemon
+// when a proxy disconnects, so idle entries don't accumulate for the
+// lifetime of the daemon process.
+func (s *Server) ReleaseSession(id string) {
+	if s.sessions != nil && id != "" {
+		s.sessions.release(id)
+	}
 }
 
 // sessionState tracks recent agent activity for context recovery after compaction.
@@ -236,6 +272,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		symHistory: &symbolHistory{
 			entries: make(map[string][]SymbolModification),
 		},
+		sessions:   newSessionMap(),
 		guardRules: guardRules,
 	}
 

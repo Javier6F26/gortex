@@ -135,3 +135,54 @@ func TestDaemon_MCPNoDispatcher(t *testing.T) {
 
 // assertNoPanic keeps imports tidy for the fmt package when tests grow.
 var _ = fmt.Sprintf
+
+// hookDispatcher satisfies both MCPDispatcher and SessionEndedHook so we
+// can prove the daemon fires the disconnect callback when a proxy closes.
+type hookDispatcher struct {
+	ended chan string // receives the session ID that ended
+}
+
+func (h *hookDispatcher) Dispatch(_ context.Context, _ *Session, _ []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (h *hookDispatcher) SessionEnded(sess *Session) {
+	h.ended <- sess.ID
+}
+
+// TestDaemon_SessionEndedHook_FiresOnDisconnect pins the contract that
+// dispatchers implementing SessionEndedHook get notified when a proxy
+// closes its connection. Without this, per-session state allocated in
+// the dispatcher would leak for the daemon's lifetime.
+func TestDaemon_SessionEndedHook_FiresOnDisconnect(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "gx")
+	require.NoError(t, err)
+	defer func() { _ = os.RemoveAll(dir) }()
+	socket := filepath.Join(dir, "s")
+	t.Setenv("GORTEX_DAEMON_SOCKET", socket)
+	t.Setenv("GORTEX_DAEMON_PIDFILE", filepath.Join(dir, "p"))
+
+	hook := &hookDispatcher{ended: make(chan string, 2)}
+	srv := New(socket, "test", zap.NewNop())
+	srv.MCPDispatcher = hook
+	srv.Controller = &fakeController{}
+	require.NoError(t, srv.Listen())
+	go func() { _ = srv.Serve() }()
+	defer func() { _ = srv.Shutdown() }()
+
+	require.Eventually(t, func() bool { return IsRunningAt(socket) },
+		2*time.Second, 10*time.Millisecond)
+
+	client, err := DialTo(socket, Handshake{Mode: ModeMCP, CWD: "/tmp/x"})
+	require.NoError(t, err)
+	sessionID := client.Ack.SessionID
+	require.NoError(t, client.Close())
+
+	select {
+	case got := <-hook.ended:
+		assert.Equal(t, sessionID, got,
+			"SessionEnded must receive the ID of the disconnected session")
+	case <-time.After(2 * time.Second):
+		t.Fatal("SessionEnded hook never fired after client close")
+	}
+}

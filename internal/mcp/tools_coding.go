@@ -158,7 +158,7 @@ type editingContext struct {
 	Calls    []map[string]any `json:"calls"`
 }
 
-func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	fp, err := req.RequireString("path")
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
@@ -167,18 +167,18 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 	// Auto re-index stale file before querying.
 	s.ensureFresh([]string{fp})
 
-	s.session.recordFile(fp)
+	s.sessionFor(ctx).recordFile(fp)
 	sg := s.engine.GetFileSymbols(fp)
 	if len(sg.Nodes) == 0 {
 		return mcp.NewToolResultError("no symbols found for file: " + fp), nil
 	}
 
-	ctx := editingContext{}
+	out := editingContext{}
 
 	// File info.
 	for _, n := range sg.Nodes {
 		if n.Kind == graph.KindFile {
-			ctx.File = map[string]any{"id": n.ID, "language": n.Language}
+			out.File = map[string]any{"id": n.ID, "language": n.Language}
 			break
 		}
 	}
@@ -197,7 +197,7 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 		if sig, ok := n.Meta["signature"]; ok {
 			entry["signature"] = sig
 		}
-		ctx.Defines = append(ctx.Defines, entry)
+		out.Defines = append(out.Defines, entry)
 	}
 
 	// Imports: outgoing import edges from the file node.
@@ -207,7 +207,7 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 				"id":       e.To,
 				"external": strings.HasPrefix(e.To, "external::"),
 			}
-			ctx.Imports = append(ctx.Imports, importInfo)
+			out.Imports = append(out.Imports, importInfo)
 		}
 	}
 
@@ -219,7 +219,7 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 			for _, cn := range callers.Nodes {
 				if cn.FilePath != fp && !callerSeen[cn.ID] {
 					callerSeen[cn.ID] = true
-					ctx.CalledBy = append(ctx.CalledBy, map[string]any{
+					out.CalledBy = append(out.CalledBy, map[string]any{
 						"id":         cn.ID,
 						"name":       cn.Name,
 						"file_path":  cn.FilePath,
@@ -238,7 +238,7 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 			for _, cn := range chain.Nodes {
 				if cn.FilePath != fp && !callSeen[cn.ID] {
 					callSeen[cn.ID] = true
-					ctx.Calls = append(ctx.Calls, map[string]any{
+					out.Calls = append(out.Calls, map[string]any{
 						"id":         cn.ID,
 						"name":       cn.Name,
 						"file_path":  cn.FilePath,
@@ -250,18 +250,18 @@ func (s *Server) handleGetEditingContext(_ context.Context, req mcp.CallToolRequ
 	}
 
 	// ETag conditional fetch.
-	etag := computeETag(ctx)
+	etag := computeETag(out)
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
 	}
 
 	// Add etag to response by marshaling to map.
 	result := map[string]any{
-		"file":      ctx.File,
-		"defines":   ctx.Defines,
-		"imports":   ctx.Imports,
-		"called_by": ctx.CalledBy,
-		"calls":     ctx.Calls,
+		"file":      out.File,
+		"defines":   out.Defines,
+		"imports":   out.Imports,
+		"called_by": out.CalledBy,
+		"calls":     out.Calls,
 		"etag":      etag,
 	}
 	return mcp.NewToolResultJSON(result)
@@ -360,7 +360,7 @@ func (s *Server) handleGetRecentChanges(_ context.Context, req mcp.CallToolReque
 	})
 }
 
-func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -375,8 +375,9 @@ func (s *Server) handleGetSymbolSource(_ context.Context, req mcp.CallToolReques
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + id), nil
 	}
-	s.session.recordSymbol(id)
-	s.session.recordFile(node.FilePath)
+	sess := s.sessionFor(ctx)
+	sess.recordSymbol(id)
+	sess.recordFile(node.FilePath)
 
 	if node.StartLine == 0 || node.EndLine == 0 {
 		return mcp.NewToolResultError("symbol has no line range: " + id), nil
@@ -1488,7 +1489,7 @@ func (s *Server) handleRenameSymbol(_ context.Context, req mcp.CallToolRequest) 
 	})
 }
 
-func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -1613,8 +1614,9 @@ func (s *Server) handleEditSymbol(_ context.Context, req mcp.CallToolRequest) (*
 	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("could not write file: %v", err)), nil
 	}
-	s.session.recordModified(node.FilePath)
-	s.session.recordSymbol(id)
+	sess := s.sessionFor(ctx)
+	sess.recordModified(node.FilePath)
+	sess.recordSymbol(id)
 
 	// Count lines changed.
 	oldLines := strings.Count(oldSource, "\n") + 1

@@ -100,8 +100,8 @@ func (s *Server) handleResourceStats(_ context.Context, req mcp.ReadResourceRequ
 	}, nil
 }
 
-func (s *Server) handleResourceSession(_ context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-	snap := s.session.snapshot()
+func (s *Server) handleResourceSession(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	snap := s.sessionFor(ctx).snapshot()
 
 	var b strings.Builder
 	b.WriteString("# Gortex Session State\n\n")

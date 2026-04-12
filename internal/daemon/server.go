@@ -57,6 +57,19 @@ type MCPDispatcher interface {
 	Dispatch(ctx context.Context, sess *Session, frame []byte) ([]byte, error)
 }
 
+// SessionEndedHook is an optional extension that MCPDispatcher
+// implementations can satisfy to get a disconnect callback. The daemon
+// invokes it in the per-connection goroutine's defer, giving
+// implementations a chance to release per-session state (e.g., the
+// `*mcp.Server.sessions` map entry) so idle memory doesn't grow with
+// total session-count-ever.
+//
+// Implementations must be fast and non-blocking — this fires during
+// connection teardown.
+type SessionEndedHook interface {
+	SessionEnded(sess *Session)
+}
+
 // Controller implements the daemon's control surface. Separated from
 // MCPDispatcher so the two can evolve independently and so control-only
 // tests don't need a full MCP stack.
@@ -159,6 +172,11 @@ func (s *Server) handle(conn net.Conn) {
 		_ = conn.Close()
 		s.untrackConn(conn)
 		if sess := s.sessions.Remove(conn); sess != nil {
+			// Fire the optional disconnect hook so implementations can
+			// release per-session resources keyed by this ID.
+			if hook, ok := s.MCPDispatcher.(SessionEndedHook); ok && hook != nil {
+				hook.SessionEnded(sess)
+			}
 			s.Logger.Debug("daemon: session closed",
 				zap.String("session_id", sess.ID),
 				zap.String("client", sess.ClientName))

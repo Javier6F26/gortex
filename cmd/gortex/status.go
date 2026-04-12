@@ -1,14 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
@@ -28,7 +31,61 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 }
 
-func runStatus(_ *cobra.Command, _ []string) error {
+// runStatusViaDaemon prints status from the daemon. Returns nil on
+// success, error to signal the caller to fall back to standalone
+// indexing.
+func runStatusViaDaemon(cmd *cobra.Command) error {
+	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	resp, err := c.Control(daemon.ControlStatus, nil)
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("status rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
+	}
+	var st daemon.StatusResponse
+	if err := json.Unmarshal(resp.Result, &st); err != nil {
+		return fmt.Errorf("parse status: %w", err)
+	}
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "daemon      %s (pid %d, uptime %s)\n",
+		st.Version, st.PID, time.Duration(st.UptimeSeconds)*time.Second)
+	fmt.Fprintf(w, "sessions    %d\n", st.Sessions)
+	if st.MemoryBytes > 0 {
+		fmt.Fprintf(w, "memory      %.1f MB\n", float64(st.MemoryBytes)/(1024*1024))
+	}
+	if len(st.TrackedRepos) == 0 {
+		fmt.Fprintln(w, "tracked repos: (none — run `gortex track <path>` to add one)")
+		return nil
+	}
+	fmt.Fprintln(w, "tracked repos:")
+	// Sort by prefix for stable output across runs.
+	sort.Slice(st.TrackedRepos, func(i, j int) bool {
+		return st.TrackedRepos[i].Prefix < st.TrackedRepos[j].Prefix
+	})
+	for _, r := range st.TrackedRepos {
+		fmt.Fprintf(w, "  %-24s %s  (%d files, %d nodes, %d edges)\n",
+			r.Prefix, r.Path, r.Files, r.Nodes, r.Edges)
+	}
+	return nil
+}
+
+func runStatus(cmd *cobra.Command, _ []string) error {
+	// Daemon-first: if a daemon is running, query it for aggregate
+	// status across all tracked repos. Falls back to the one-shot
+	// local index for the standalone case.
+	if daemon.IsRunning() {
+		if err := runStatusViaDaemon(cmd); err == nil {
+			return nil
+		}
+		// Any daemon error we didn't explicitly handle falls through to
+		// local status — better to give the user something than nothing.
+	}
+
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 

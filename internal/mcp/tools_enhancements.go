@@ -317,7 +317,7 @@ type prefetchCandidate struct {
 	Source          string      `json:"source,omitempty"`
 }
 
-func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	task := req.GetString("task", "")
 	recentStr := req.GetString("recent_symbols", "")
 	includeSource := false
@@ -333,9 +333,10 @@ func (s *Server) handlePrefetchContext(_ context.Context, req mcp.CallToolReques
 		}
 	}
 	if len(recentIDs) == 0 {
-		s.session.mu.Lock()
-		recentIDs = append(recentIDs, s.session.viewedSymbols...)
-		s.session.mu.Unlock()
+		sess := s.sessionFor(ctx)
+		sess.mu.Lock()
+		recentIDs = append(recentIDs, sess.viewedSymbols...)
+		sess.mu.Unlock()
 	}
 
 	if task == "" && len(recentIDs) == 0 {

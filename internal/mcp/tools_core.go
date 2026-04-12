@@ -472,7 +472,7 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 	return mcp.NewToolResultJSON(result)
 }
 
-func (s *Server) handleGetSymbol(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := req.RequireString("id")
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
@@ -497,7 +497,7 @@ func (s *Server) handleGetSymbol(_ context.Context, req mcp.CallToolRequest) (*m
 		return mcp.NewToolResultError("symbol not found in specified scope: " + id), nil
 	}
 
-	s.session.recordSymbol(id)
+	s.sessionFor(ctx).recordSymbol(id)
 
 	detail := req.GetString("detail", "brief")
 	if detail == "brief" {
@@ -514,14 +514,14 @@ func (s *Server) handleGetSymbol(_ context.Context, req mcp.CallToolRequest) (*m
 	})
 }
 
-func (s *Server) handleSearchSymbols(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	q, err := req.RequireString("query")
 	if err != nil {
 		return mcp.NewToolResultError("query is required"), nil
 	}
 	limit := req.GetInt("limit", 20)
 
-	s.session.recordSearch(q)
+	s.sessionFor(ctx).recordSearch(q)
 	nodes := s.engine.SearchSymbols(q, limit+10)
 
 	// Apply repo/project/ref filter.

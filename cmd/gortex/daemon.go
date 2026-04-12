@@ -125,7 +125,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			return nil
 		},
 	}
-	srv.MCPDispatcher = newMCPDispatcher(state.mcpServer, logger)
+	srv.MCPDispatcher = newMCPDispatcher(state.mcpServer, state.multiIndexer, logger)
 
 	// Periodic snapshots — 10 minute interval. On a crash we lose at
 	// most one interval's worth of work, which is acceptable given
