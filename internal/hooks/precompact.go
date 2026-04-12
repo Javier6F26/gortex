@@ -1,0 +1,223 @@
+package hooks
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+)
+
+// PreCompactInput is the JSON structure Claude Code sends to PreCompact hooks.
+// Fields that aren't used here are still included so future logic can branch
+// on the trigger ("auto" vs "manual") or respect custom_instructions.
+type PreCompactInput struct {
+	HookEventName      string `json:"hook_event_name"`
+	SessionID          string `json:"session_id"`
+	TranscriptPath     string `json:"transcript_path"`
+	CWD                string `json:"cwd"`
+	Trigger            string `json:"trigger"`
+	CustomInstructions string `json:"custom_instructions"`
+}
+
+// runPreCompact handles a PreCompact hook invocation given the raw stdin bytes
+// already read by the dispatcher. It queries the Gortex bridge at the given
+// port for an orientation snapshot and emits additionalContext so the agent
+// survives compaction without having to re-explore.
+//
+// Graceful degradation: if the bridge is unreachable (port wrong, server down),
+// the hook returns silently with no output. It never blocks compaction.
+func runPreCompact(data []byte, port int) {
+	var input PreCompactInput
+	if err := json.Unmarshal(data, &input); err != nil {
+		return
+	}
+	if input.HookEventName != "PreCompact" {
+		return
+	}
+
+	briefing := buildPreCompactBriefing(port)
+	if briefing == "" {
+		return
+	}
+
+	output := HookOutput{
+		HookSpecificOutput: &HookSpecificOutput{
+			HookEventName:     "PreCompact",
+			AdditionalContext: briefing,
+		},
+	}
+	out, err := json.Marshal(output)
+	if err != nil {
+		return
+	}
+	fmt.Print(string(out))
+}
+
+// buildPreCompactBriefing queries the bridge and renders a markdown briefing.
+// Returns empty string when the bridge is unreachable or returns no data.
+func buildPreCompactBriefing(port int) string {
+	stats := callBridgeTool(port, "graph_stats", nil)
+	if stats == "" {
+		// No bridge => nothing useful to say; let compaction proceed silently.
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString("## Gortex PreCompact Snapshot\n\n")
+	sb.WriteString("Use this orientation to avoid re-exploring after compaction. Prefer graph tools (`smart_context`, `get_symbol_source`, `get_editing_context`) over re-reading files.\n\n")
+
+	if summary := renderStatsSummary(stats); summary != "" {
+		sb.WriteString("**Index:** ")
+		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
+
+	if churn := renderSymbolHistory(port); churn != "" {
+		sb.WriteString("### Recently Modified Symbols (this session)\n\n")
+		sb.WriteString(churn)
+		sb.WriteString("\n")
+	}
+
+	if hot := renderHotspots(port); hot != "" {
+		sb.WriteString("### Top Hotspots (highest fan-in/out — likely load-bearing)\n\n")
+		sb.WriteString(hot)
+		sb.WriteString("\n")
+	}
+
+	if fb := renderFeedback(port); fb != "" {
+		sb.WriteString("### Feedback-Ranked Symbols (most useful in past tasks)\n\n")
+		sb.WriteString(fb)
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("_End of Gortex snapshot._\n")
+	return sb.String()
+}
+
+// renderStatsSummary produces one-line "nodes=X edges=Y languages=a,b,c".
+func renderStatsSummary(raw string) string {
+	var stats struct {
+		TotalNodes int            `json:"total_nodes"`
+		TotalEdges int            `json:"total_edges"`
+		ByLanguage map[string]int `json:"by_language"`
+	}
+	if err := json.Unmarshal([]byte(raw), &stats); err != nil {
+		return ""
+	}
+
+	// Pick the 3 most-represented languages.
+	type langCount struct {
+		name string
+		n    int
+	}
+	var langs []langCount
+	for k, v := range stats.ByLanguage {
+		langs = append(langs, langCount{k, v})
+	}
+	sort.Slice(langs, func(i, j int) bool { return langs[i].n > langs[j].n })
+	if len(langs) > 3 {
+		langs = langs[:3]
+	}
+	var names []string
+	for _, l := range langs {
+		names = append(names, l.name)
+	}
+
+	return fmt.Sprintf("%d nodes, %d edges, languages: %s",
+		stats.TotalNodes, stats.TotalEdges, strings.Join(names, ", "))
+}
+
+// renderSymbolHistory lists the top modified symbols (compact text).
+func renderSymbolHistory(port int) string {
+	raw := callBridgeTool(port, "get_symbol_history", map[string]any{"compact": true})
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return cappedLines(raw, 10)
+}
+
+// renderHotspots returns the top hotspots from the analyze tool.
+func renderHotspots(port int) string {
+	raw := callBridgeTool(port, "analyze", map[string]any{
+		"kind":    "hotspots",
+		"compact": true,
+	})
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return cappedLines(raw, 8)
+}
+
+// renderFeedback returns the most-useful symbols from past sessions.
+func renderFeedback(port int) string {
+	raw := callBridgeTool(port, "feedback", map[string]any{
+		"action":  "query",
+		"top_n":   5,
+		"compact": true,
+	})
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	return cappedLines(raw, 8)
+}
+
+// cappedLines returns the first `max` lines of s, joined with newlines.
+func cappedLines(s string, max int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > max {
+		lines = lines[:max]
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// callBridgeTool issues a POST /tool/{name} against the bridge and returns the
+// text content from the first response block. Returns empty string on any
+// error (bridge unreachable, non-200, missing content) so callers can degrade
+// silently.
+func callBridgeTool(port int, name string, args map[string]any) string {
+	if args == nil {
+		args = map[string]any{}
+	}
+	body, err := json.Marshal(map[string]any{"arguments": args})
+	if err != nil {
+		return ""
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	url := fmt.Sprintf("http://localhost:%d/tool/%s", port, name)
+	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+
+	var parsed struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return ""
+	}
+	if parsed.IsError || len(parsed.Content) == 0 {
+		return ""
+	}
+	return parsed.Content[0].Text
+}

@@ -40,15 +40,20 @@ type enrichResult struct {
 	reason  string
 }
 
-// RunPreToolUse handles a PreToolUse hook invocation.
-// It reads from stdin, checks if the tool call can be enriched or blocked,
-// queries the Gortex web server, and writes the decision to stdout.
+// RunPreToolUse reads a PreToolUse hook payload from stdin and handles it.
+// Kept as a public entry point for backward compatibility; new callers should
+// use Run which dispatches based on hook_event_name.
 func RunPreToolUse(gortexPort int) {
 	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return
 	}
+	runPreToolUse(data, gortexPort)
+}
 
+// runPreToolUse is the bytes-accepting helper used by both RunPreToolUse and
+// the generic Run dispatcher.
+func runPreToolUse(data []byte, gortexPort int) {
 	var input HookInput
 	if err := json.Unmarshal(data, &input); err != nil {
 		return

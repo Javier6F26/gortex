@@ -405,8 +405,8 @@ func installHook(settingsPath string) error {
 		hookCommand = exe + " hook"
 	}
 
-	// Build the hook entry.
-	hookEntry := map[string]any{
+	// Build the PreToolUse entry (Read/Grep/Glob enrichment).
+	preToolUseEntry := map[string]any{
 		"matcher": "Read|Grep|Glob",
 		"hooks": []any{
 			map[string]any{
@@ -414,6 +414,19 @@ func installHook(settingsPath string) error {
 				"command":       hookCommand,
 				"timeout":       3000,
 				"statusMessage": "Enriching with Gortex graph context...",
+			},
+		},
+	}
+
+	// Build the PreCompact entry (orientation snapshot before compaction).
+	// No matcher needed — PreCompact fires once per compaction.
+	preCompactEntry := map[string]any{
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       hookCommand,
+				"timeout":       3000,
+				"statusMessage": "Injecting Gortex orientation snapshot...",
 			},
 		},
 	}
@@ -427,7 +440,32 @@ func installHook(settingsPath string) error {
 		hooks["PreToolUse"] = []any{}
 	}
 	pre := hooks["PreToolUse"].([]any)
-	hooks["PreToolUse"] = append(pre, hookEntry)
+	hooks["PreToolUse"] = append(pre, preToolUseEntry)
+
+	// Register PreCompact only if not already present — avoid duplicates on rerun.
+	preCompactAlreadyInstalled := false
+	if existing, ok := hooks["PreCompact"].([]any); ok {
+		for _, h := range existing {
+			if hm, ok := h.(map[string]any); ok {
+				if hs, ok := hm["hooks"].([]any); ok {
+					for _, entry := range hs {
+						if em, ok := entry.(map[string]any); ok {
+							if cmd, ok := em["command"].(string); ok && contains(cmd, "gortex hook") {
+								preCompactAlreadyInstalled = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if !preCompactAlreadyInstalled {
+		if _, ok := hooks["PreCompact"]; !ok {
+			hooks["PreCompact"] = []any{}
+		}
+		compact := hooks["PreCompact"].([]any)
+		hooks["PreCompact"] = append(compact, preCompactEntry)
+	}
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
@@ -436,7 +474,11 @@ func installHook(settingsPath string) error {
 	if err := os.WriteFile(settingsPath, data, 0o644); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse hook in %s\n", settingsPath)
+	if preCompactAlreadyInstalled {
+		fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse hook in %s (PreCompact already present)\n", settingsPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "[gortex init] installed PreToolUse + PreCompact hooks in %s\n", settingsPath)
+	}
 	return nil
 }
 

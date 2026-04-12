@@ -14,7 +14,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **Multi-repo workspaces** — index multiple repositories into a single graph with cross-repo symbol resolution, project grouping, reference tags, and per-repo scoping
 - **33 languages** — Go, TypeScript, JavaScript, Python, Rust, Java, C#, Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Dart, OCaml, Lua, Zig, Haskell, Clojure, Erlang, R, Bash/Zsh, SQL, Protobuf, Markdown, HTML, CSS, YAML, TOML, HCL/Terraform, Dockerfile
-- **43 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, and 18 agent-optimized tools
+- **44 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, graph-validated config hygiene (`audit_agent_config`), and 18 agent-optimized tools
 - **Semantic search** — hybrid BM25 + vector search with RRF fusion. Built-in GloVe word vectors for offline use, or connect to Ollama/OpenAI for transformer-quality embeddings. Build tags for ONNX, GoMLX, and Hugot offline transformer backends
 - **Type-aware resolution** — infers receiver types from variable declarations, composite literals, and Go constructor conventions to disambiguate same-named methods across types
 - **On-disk persistence** — snapshots the graph on shutdown, restores on startup with incremental re-indexing of only changed files (~200ms vs 3-5s full re-index)
@@ -31,7 +31,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 - **Watch mode** — surgical graph updates on file change across all tracked repos, live sync with agents
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
-- **PreToolUse hooks** — automatic graph context injection and tool redirection on Read, Grep, and Glob. Suggests specific Gortex MCP tools as alternatives
+- **PreToolUse + PreCompact hooks** — PreToolUse enriches Read/Grep/Glob with graph context and redirects to Gortex MCP tools. PreCompact injects a condensed orientation snapshot (index stats, recently-modified symbols, top hotspots, feedback-ranked symbols) before Claude Code compacts the conversation, so the agent survives compaction without re-exploring. Silent fallback when bridge is unreachable
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
 - **Per-community skills** — `gortex skills` auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
@@ -49,7 +49,7 @@ gortex init /path/to/repo
 # Or with codebase analysis for a richer CLAUDE.md
 gortex init --analyze /path/to/repo
 
-# Install/update only the PreToolUse hooks (Read/Grep/Glob interception)
+# Install/update only the hooks — PreToolUse (Read/Grep/Glob interception) + PreCompact (orientation snapshot)
 gortex init --hooks /path/to/repo
 
 # Index a repo and print stats
@@ -141,7 +141,8 @@ After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.j
 
 - **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor`
 - **Global skills:** installed to `~/.claude/skills/` — available across all repos
-- **PreToolUse hook:** automatic graph context on Read/Grep calls
+- **PreToolUse hook:** automatic graph context + graph-tool suggestions on Read/Grep/Glob
+- **PreCompact hook:** condensed orientation snapshot injected before context compaction so the agent resumes without re-exploring
 - **CLAUDE.md instructions:** mandatory tool usage table and session workflow
 
 ## Usage with Kiro
@@ -233,7 +234,7 @@ gortex query stats                      Show graph statistics
 
 All query commands support `--format text|json|dot` (DOT output for Graphviz visualization).
 
-## MCP Tools (51)
+## MCP Tools (44)
 
 ### Core Navigation
 | Tool | Description |
@@ -290,6 +291,7 @@ All query commands support `--format text|json|dot` (DOT output for Graphviz vis
 |------|-------------|
 | `verify_change` | Check proposed signature changes against all callers and interface implementors |
 | `check_guards` | Evaluate project guard rules (`.gortex.yaml`) against changed symbols |
+| `audit_agent_config` | Scan CLAUDE.md / AGENTS.md / `.cursor/rules` / `.github/copilot-instructions.md` / `.windsurf/rules` / `.antigravity/rules` for stale symbol references, dead file paths, and bloat — validated against the Gortex graph (no other competitor does this) |
 
 ### Code Quality
 | Tool | Description |

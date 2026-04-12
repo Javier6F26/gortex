@@ -10,10 +10,10 @@ var hookPort int
 
 var hookCmd = &cobra.Command{
 	Use:    "hook",
-	Short:  "Claude Code hook handler (called by PreToolUse hooks)",
+	Short:  "Claude Code hook handler (dispatches PreToolUse and PreCompact)",
 	Hidden: true, // Not for direct user invocation.
 	Run: func(_ *cobra.Command, _ []string) {
-		hooks.RunPreToolUse(hookPort)
+		hooks.Run(hookPort)
 	},
 }
 
