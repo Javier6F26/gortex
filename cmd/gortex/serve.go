@@ -22,6 +22,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/semantic/goanalysis"
 	"github.com/zzet/gortex/internal/semantic/lsp"
@@ -223,6 +224,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Initialize feedback persistence for cross-session context learning.
 	srv.InitFeedback(serveCacheDir, serveIndex)
+
+	// Initialize cumulative token-savings persistence. Path defaults to
+	// ~/.cache/gortex/savings.json; the store operates in-memory when the
+	// cache dir is unavailable.
+	savingsPath := savings.DefaultPath()
+	if serveCacheDir != "" {
+		savingsPath = filepath.Join(serveCacheDir, "savings.json")
+	}
+	if savingsStore, err := savings.Open(savingsPath); err == nil {
+		srv.InitSavings(savingsStore, serveIndex)
+		defer func() { _ = srv.FlushSavings() }()
+	} else {
+		fmt.Fprintf(os.Stderr, "[gortex] savings persistence disabled: %v\n", err)
+	}
 
 	fmt.Fprintf(os.Stderr, "[gortex] MCP server ready (transport: %s)\n", serveTransport)
 

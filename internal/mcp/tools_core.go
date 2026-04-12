@@ -728,6 +728,11 @@ func (s *Server) handleGraphStats(_ context.Context, _ mcp.CallToolRequest) (*mc
 	// Include session-level token savings.
 	result["token_savings"] = s.tokenStats.snapshot()
 
+	// Include cumulative cross-session savings when a persistent store is wired.
+	if cs := s.cumulativeSavingsSnapshot(); cs != nil {
+		result["cumulative_savings"] = cs
+	}
+
 	// Include semantic enrichment stats.
 	if s.semanticMgr != nil && s.semanticMgr.Enabled() {
 		result["semantic"] = map[string]any{

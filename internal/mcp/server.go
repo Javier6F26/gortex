@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/web/hub"
 )
@@ -101,19 +102,23 @@ type sessionState struct {
 	recentSearches []string // recent search queries
 }
 
-// tokenStats tracks estimated token savings for the current session.
+// tokenStats tracks estimated token savings for the current session. When a
+// savings.Store is attached, each record() call also increments the persistent
+// cumulative totals so "Gortex saved $X this month"-style narratives survive
+// server restarts.
 type tokenStats struct {
 	mu             sync.Mutex
 	tokensSaved    int64 // cumulative tokens saved vs reading full files
 	tokensReturned int64 // cumulative tokens actually returned
 	callCount      int64 // number of source-reading tool invocations
+	persistent     *savings.Store
+	repoPath       string // forwarded to savings for per-repo aggregation
 }
 
 // record adds a single savings observation.
 // returned and fullFile are token counts (cl100k_base via internal/tokens).
 func (ts *tokenStats) record(returned, fullFile int64) {
 	ts.mu.Lock()
-	defer ts.mu.Unlock()
 	saved := fullFile - returned
 	if saved < 0 {
 		saved = 0
@@ -121,6 +126,16 @@ func (ts *tokenStats) record(returned, fullFile int64) {
 	ts.tokensSaved += saved
 	ts.tokensReturned += returned
 	ts.callCount++
+	store := ts.persistent
+	repo := ts.repoPath
+	ts.mu.Unlock()
+
+	// Forward to the persistent store outside our lock — its own mutex guards
+	// concurrent writers, and flushing to disk shouldn't block new record()
+	// calls on the hot path.
+	if store != nil {
+		store.AddObservation(repo, returned, saved)
+	}
 }
 
 // snapshot returns a copy of the current counters for inclusion in responses.
@@ -251,6 +266,60 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 // Call after NewServer with the cache directory and primary repo path.
 func (s *Server) InitFeedback(cacheDir, repoPath string) {
 	s.feedback = newFeedbackManager(cacheDir, repoPath)
+}
+
+// InitSavings wires the persistent token-savings store into tokenStats so
+// every source-reading tool call accumulates cumulative totals. Call once
+// after NewServer; safe to skip when persistence isn't desired.
+func (s *Server) InitSavings(store *savings.Store, repoPath string) {
+	if store == nil || s.tokenStats == nil {
+		return
+	}
+	s.tokenStats.mu.Lock()
+	s.tokenStats.persistent = store
+	s.tokenStats.repoPath = repoPath
+	s.tokenStats.mu.Unlock()
+}
+
+// FlushSavings forces any buffered savings observations to disk. Called on
+// server shutdown to minimize data loss on unclean exits.
+func (s *Server) FlushSavings() error {
+	if s.tokenStats == nil {
+		return nil
+	}
+	s.tokenStats.mu.Lock()
+	store := s.tokenStats.persistent
+	s.tokenStats.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+	return store.Flush()
+}
+
+// cumulativeSavingsSnapshot exposes the persistent savings state for
+// inclusion in graph_stats. Returns nil when persistence isn't wired so
+// single-shot CLI calls don't emit confusing empty totals.
+func (s *Server) cumulativeSavingsSnapshot() map[string]any {
+	if s.tokenStats == nil {
+		return nil
+	}
+	s.tokenStats.mu.Lock()
+	store := s.tokenStats.persistent
+	s.tokenStats.mu.Unlock()
+	if store == nil {
+		return nil
+	}
+
+	snap := store.Snapshot()
+	costs := savings.CostAvoidedAll(snap.Totals.TokensSaved)
+	return map[string]any{
+		"first_seen":      snap.FirstSeen.Format(time.RFC3339),
+		"last_updated":    snap.LastUpdated.Format(time.RFC3339),
+		"tokens_saved":    snap.Totals.TokensSaved,
+		"tokens_returned": snap.Totals.TokensReturned,
+		"calls_counted":   snap.Totals.CallsCounted,
+		"cost_avoided_usd": costs,
+	}
 }
 
 // ExportContext generates a portable context briefing for the given task.

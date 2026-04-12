@@ -210,6 +210,7 @@ gortex bridge [flags]        Start standalone HTTP bridge API
 gortex eval-server [flags]   Start eval HTTP server for benchmarking
 gortex skills [path]         Generate per-community SKILL.md files
 gortex context [flags]       Generate portable context briefing for a task
+gortex savings [flags]       Show cumulative token savings + cost avoided across sessions
 gortex index [path...]       Index one or more repositories and print stats
 gortex status [flags]        Show index status (per-repo and per-project in multi-repo mode)
 gortex track <path>          Add a repository to the tracked workspace
@@ -467,14 +468,28 @@ go build -tags embeddings_hugot ./cmd/gortex/  # auto-downloads XLA plugin
 
 ## Token Savings
 
-Gortex tracks how many tokens it saves compared to naive file reads, both per-call and per-session:
+Gortex tracks how many tokens it saves compared to naive file reads — per-call, per-session, and cumulative across restarts:
 
-- **Per-call:** `get_symbol_source` and other source-reading tools include a `tokens_saved` field in the response, showing the estimated difference between reading the full file vs the targeted symbol.
-- **Session-level:** `graph_stats` returns a `token_savings` object with cumulative metrics:
-  - `calls_counted` — number of source-reading tool invocations
-  - `tokens_returned` — total tokens actually sent to the agent
-  - `tokens_saved` — total tokens avoided vs full file reads
-  - `efficiency_ratio` — multiplier (e.g., 23x means 23x fewer tokens than reading whole files)
+- **Per-call:** `get_symbol_source` and other source-reading tools include a `tokens_saved` field in the response, showing the difference between reading the full file vs the targeted symbol.
+- **Session-level:** `graph_stats` returns a `token_savings` object with `calls_counted`, `tokens_returned`, `tokens_saved`, `efficiency_ratio`.
+- **Cumulative (cross-session):** `graph_stats` also returns `cumulative_savings` when persistence is wired — includes `first_seen`, `last_updated`, and `cost_avoided_usd` per model (Claude Opus/Sonnet/Haiku, GPT-4o, GPT-4o-mini). Backed by `~/.cache/gortex/savings.json`.
+
+```bash
+# Show totals + cost across all default models
+gortex savings
+
+# Highlight a single model (fuzzy match: "opus" → claude-opus-4)
+gortex savings --model opus
+
+# Machine-readable output
+gortex savings --json
+
+# Wipe cumulative totals
+gortex savings --reset
+
+# Override pricing (JSON array of {model, usd_per_m_input})
+GORTEX_MODEL_PRICING_JSON='[{"model":"mycorp","usd_per_m_input":5}]' gortex savings
+```
 
 Token counts use **tiktoken (`cl100k_base`)** — the tokenizer Claude and GPT-4 actually use — via `github.com/pkoukk/tiktoken-go` with an embedded offline BPE loader, so no runtime downloads. The BPE is lazy-loaded on first call. If init fails for any reason, the package falls back to the legacy `chars/4` heuristic so metrics stay usable.
 
