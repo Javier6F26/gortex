@@ -90,10 +90,10 @@ nfpms:
     description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
     license: "Custom"
 
-brews:
+homebrew_casks:
   - name: gortex
     # GITHUB_TOKEN can only push to the source repo. Pushing the updated
-    # formula to zzet/homebrew-tap needs a PAT with `repo` scope stored as
+    # cask to zzet/homebrew-tap needs a PAT with `repo` scope stored as
     # HOMEBREW_TAP_TOKEN in repo secrets. Workflow wires it into the env.
     repository:
       owner: zzet
@@ -101,13 +101,25 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/zzet/gortex"
     description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
-    license: "Custom (PolyForm Small Business base)"
-    # Install the binary plus shell completions. generate_completions_from_executable
-    # runs `gortex completion bash|zsh|fish` at install time and drops each script
-    # into the standard Homebrew completions directory, so `brew install gortex`
-    # gives users tab-complete out of the box (no manual `compinit` wiring).
-    install: |
-      bin.install "gortex"
-      generate_completions_from_executable(bin/"gortex", "completion")
-    test: |
-      system "#{bin}/gortex", "version"
+    binaries:
+      - gortex
+    # Generate shell completions at install time by invoking
+    # `gortex completion <shell>`. Cobra emits the right script for
+    # each shell; goreleaser drops them in the standard Homebrew
+    # completions directory so tab-complete works out of the box.
+    # No need to ship pre-generated scripts in the archive.
+    generate_completions_from_executable:
+      executable: bin/gortex
+      args:
+        - completion
+      shell_parameter_format: cobra
+    # Strip the macOS quarantine xattr so users don't hit Gatekeeper's
+    # "cannot be opened because Apple cannot check it for malicious
+    # software" prompt on first run. The binary isn't notarized today;
+    # if/when it is, this hook can be removed.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/gortex"]
+          end
