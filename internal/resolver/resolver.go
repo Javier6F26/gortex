@@ -17,8 +17,17 @@ type ResolveStats struct {
 }
 
 // Resolver resolves unresolved edge targets to actual graph node IDs.
+//
+// dirIndex / lastDirIndex are scratch maps populated for the duration
+// of a single ResolveAll/ResolveFile pass so resolveImport can look up
+// candidate file nodes in O(1) instead of scanning the whole graph per
+// import edge. On large repos (vscode ≈ 150k nodes / 5k imports) the
+// old full scan made ResolveAll the dominant cost of a cold index
+// (8m of a 9m wall-clock). Maps are cleared between passes.
 type Resolver struct {
-	graph *graph.Graph
+	graph        *graph.Graph
+	dirIndex     map[string][]*graph.Node
+	lastDirIndex map[string][]*graph.Node
 }
 
 // New creates a Resolver for the given graph.
@@ -28,6 +37,9 @@ func New(g *graph.Graph) *Resolver {
 
 // ResolveAll resolves all unresolved edges in the graph.
 func (r *Resolver) ResolveAll() *ResolveStats {
+	r.buildDirIndexes()
+	defer r.clearDirIndexes()
+
 	stats := &ResolveStats{}
 
 	edges := r.graph.AllEdges()
@@ -40,8 +52,40 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	return stats
 }
 
+// buildDirIndexes builds two lookup maps for resolveImport. Populated
+// once per ResolveAll / ResolveFile pass and torn down after.
+//
+//   - dirIndex     keys on filepath.Dir(file.FilePath) for exact
+//     importPath == dir matches.
+//   - lastDirIndex keys on the last path component of that directory
+//     so an import of "logger" matches any file under .../logger/.
+func (r *Resolver) buildDirIndexes() {
+	nodes := r.graph.AllNodes()
+	r.dirIndex = make(map[string][]*graph.Node, len(nodes)/4)
+	r.lastDirIndex = make(map[string][]*graph.Node, len(nodes)/4)
+	for _, n := range nodes {
+		if n.Kind != graph.KindFile {
+			continue
+		}
+		dir := filepath.Dir(n.FilePath)
+		r.dirIndex[dir] = append(r.dirIndex[dir], n)
+		last := lastPathComponent(dir)
+		if last != "" && last != dir {
+			r.lastDirIndex[last] = append(r.lastDirIndex[last], n)
+		}
+	}
+}
+
+func (r *Resolver) clearDirIndexes() {
+	r.dirIndex = nil
+	r.lastDirIndex = nil
+}
+
 // ResolveFile resolves unresolved edges originating from a specific file.
 func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
+	r.buildDirIndexes()
+	defer r.clearDirIndexes()
+
 	stats := &ResolveStats{}
 
 	// Get all nodes in the file, then check their outgoing edges.
@@ -98,23 +142,53 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 		return
 	}
 
-	// Look for file nodes whose directory matches the import path suffix.
-	// This handles in-repo packages. Prefer same-repo, then cross-repo.
-	candidates := r.graph.AllNodes()
-	var sameRepo *graph.Node
-	var crossRepoNode *graph.Node
-	for _, n := range candidates {
+	// Inverted-index lookup instead of a per-edge AllNodes() scan —
+	// the old scan was O(N) per import and the dominant cost of
+	// ResolveAll on large repos (e.g. vscode: 5k imports × 150k nodes
+	// = 750M comparisons per cold index). Falls back to a scan only
+	// when the indexes aren't populated (ResolveEdge invoked outside
+	// of ResolveAll/ResolveFile).
+	var sameRepo, crossRepoNode *graph.Node
+	consider := func(n *graph.Node) {
 		if n.Kind != graph.KindFile {
-			continue
+			return
 		}
-		dir := filepath.Dir(n.FilePath)
-		if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
-			if callerRepo == "" || n.RepoPrefix == callerRepo {
+		if callerRepo == "" || n.RepoPrefix == callerRepo {
+			if sameRepo == nil {
 				sameRepo = n
+			}
+			return
+		}
+		if crossRepoNode == nil {
+			crossRepoNode = n
+		}
+	}
+	if r.dirIndex != nil {
+		for _, n := range r.dirIndex[importPath] {
+			consider(n)
+			if sameRepo != nil {
 				break
 			}
-			if crossRepoNode == nil {
-				crossRepoNode = n
+		}
+		if sameRepo == nil {
+			for _, n := range r.lastDirIndex[lastPathComponent(importPath)] {
+				consider(n)
+				if sameRepo != nil {
+					break
+				}
+			}
+		}
+	} else {
+		for _, n := range r.graph.AllNodes() {
+			if n.Kind != graph.KindFile {
+				continue
+			}
+			dir := filepath.Dir(n.FilePath)
+			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
+				consider(n)
+				if sameRepo != nil {
+					break
+				}
 			}
 		}
 	}

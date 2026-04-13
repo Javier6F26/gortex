@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/progress"
 )
 
 var (
@@ -19,6 +23,7 @@ var (
 	indexWorkers   int
 	indexOutput    string
 	indexWatch     bool
+	indexProfile   bool
 )
 
 var indexCmd = &cobra.Command{
@@ -34,6 +39,7 @@ func init() {
 	indexCmd.Flags().IntVar(&indexWorkers, "workers", 0, "parallel parsing workers (default: NumCPU)")
 	indexCmd.Flags().StringVar(&indexOutput, "output", "text", "output format: text|json")
 	indexCmd.Flags().BoolVar(&indexWatch, "watch", false, "stay running and reindex on file changes")
+	indexCmd.Flags().BoolVar(&indexProfile, "profile", false, "print per-stage timings + peak RSS for battle-testing")
 	rootCmd.AddCommand(indexCmd)
 }
 
@@ -66,7 +72,22 @@ func runIndex(cmd *cobra.Command, args []string) error {
 		languages.RegisterAll(reg)
 
 		idx := indexer.New(g, reg, cfg.Index, logger)
-		result, err := idx.Index(path)
+
+		// --profile attaches a timing reporter via the progress API.
+		// The indexer emits stage markers for walking files, parsing,
+		// resolving, semantic enrichment, search build, and contract
+		// extraction — we turn those into a breakdown at the end.
+		ctx := context.Background()
+		var timer *progress.TimingReporter
+		var memBefore runtime.MemStats
+		if indexProfile {
+			timer = progress.NewTimingReporter()
+			ctx = progress.WithReporter(ctx, timer)
+			runtime.GC()
+			runtime.ReadMemStats(&memBefore)
+		}
+
+		result, err := idx.IndexCtx(ctx, path)
 		if err != nil {
 			return fmt.Errorf("indexing %s: %w", path, err)
 		}
@@ -89,6 +110,10 @@ func runIndex(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
+
+		if indexProfile {
+			writeProfileReport(cmd.OutOrStdout(), path, timer, result, memBefore)
+		}
 	}
 
 	if indexWatch {
@@ -96,4 +121,58 @@ func runIndex(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// writeProfileReport emits the per-stage breakdown, throughput summary,
+// and memory delta that a profile run cares about. Called once per
+// indexed path so multi-path runs get side-by-side breakdowns.
+func writeProfileReport(w interface {
+	Write([]byte) (int, error)
+}, path string, timer *progress.TimingReporter, result *indexer.IndexResult, memBefore runtime.MemStats) {
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
+
+	_, _ = fmt.Fprintf(w, "\nprofile: %s\n", path)
+	timer.WriteReport(w, time.Time{})
+
+	elapsed := time.Duration(result.DurationMs) * time.Millisecond
+	filesPerSec := 0.0
+	if elapsed > 0 {
+		filesPerSec = float64(result.FileCount) / elapsed.Seconds()
+	}
+	_, _ = fmt.Fprintf(w, "\nthroughput: %d files in %s  (%.0f files/s)\n",
+		result.FileCount, elapsed.Round(time.Millisecond), filesPerSec)
+	_, _ = fmt.Fprintf(w, "nodes:      %d\n", result.NodeCount)
+	_, _ = fmt.Fprintf(w, "edges:      %d\n", result.EdgeCount)
+
+	// Heap delta captures what indexing retained. Peak RSS requires OS
+	// hooks that aren't portable — callers who want RSS should wrap the
+	// binary in `/usr/bin/time -l` (macOS) or `/usr/bin/time -v` (Linux).
+	_, _ = fmt.Fprintf(w, "heap:       +%s (%s → %s)\n",
+		humanBytes(memAfter.HeapAlloc-memBefore.HeapAlloc),
+		humanBytes(memBefore.HeapAlloc),
+		humanBytes(memAfter.HeapAlloc))
+	_, _ = fmt.Fprintf(w, "gc:         %d cycles during index\n",
+		memAfter.NumGC-memBefore.NumGC)
+}
+
+// humanBytes renders a byte count with an SI-ish unit so the profile
+// output is readable. Not meant for strict accuracy — binary MiB/GiB
+// is fine here since the reader just wants a ballpark.
+func humanBytes(n uint64) string {
+	const (
+		KB = 1 << 10
+		MB = 1 << 20
+		GB = 1 << 30
+	)
+	switch {
+	case n >= GB:
+		return fmt.Sprintf("%.2f GB", float64(n)/GB)
+	case n >= MB:
+		return fmt.Sprintf("%.2f MB", float64(n)/MB)
+	case n >= KB:
+		return fmt.Sprintf("%.2f KB", float64(n)/KB)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
 }

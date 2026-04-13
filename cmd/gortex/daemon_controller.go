@@ -201,13 +201,30 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 
 	var tracked []daemon.TrackedRepoStatus
 	if c.multiIndexer != nil {
+		// meta.NodeCount / meta.EdgeCount were frozen at TrackRepo time
+		// from graph.NodeCount() — which is the *whole* multi-repo graph,
+		// not this repo's slice. Recompute from graph.RepoStats() at
+		// status time so the numbers actually reflect this repo's
+		// contribution. Falls back to the stored counts when the graph
+		// has no entry for the prefix (shouldn't happen in practice,
+		// but keeps the output complete rather than zeroed).
+		var repoStats map[string]graph.GraphStats
+		if c.graph != nil {
+			repoStats = c.graph.RepoStats()
+		}
 		for prefix, meta := range c.multiIndexer.AllMetadata() {
+			nodes := meta.NodeCount
+			edges := meta.EdgeCount
+			if s, ok := repoStats[prefix]; ok {
+				nodes = s.TotalNodes
+				edges = s.TotalEdges
+			}
 			tracked = append(tracked, daemon.TrackedRepoStatus{
 				Prefix:    prefix,
 				Path:      meta.RootPath,
 				Files:     meta.FileCount,
-				Nodes:     meta.NodeCount,
-				Edges:     meta.EdgeCount,
+				Nodes:     nodes,
+				Edges:     edges,
 				LastIndex: meta.LastIndexTime.Unix(),
 			})
 		}
