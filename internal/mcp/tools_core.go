@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -471,12 +470,9 @@ func (s *Server) handleIndexRepository(ctx context.Context, req mcp.CallToolRequ
 	// indexer here produces unprefixed nodes that corrupt per-repo stats.
 	if s.multiIndexer != nil {
 		// Accept either a tracked prefix directly or a filesystem path.
-		prefix := s.resolveRepoPrefix(path)
-		if prefix == "" {
-			if abs, absErr := filepath.Abs(path); absErr == nil {
-				prefix = s.resolveRepoPrefix(abs)
-			}
-		}
+		// Falls back to reconciling from persisted config so users don't
+		// have to re-track repos the daemon dropped across warmup (T0.3).
+		prefix := s.resolveRepoPrefixOrReconcile(ctx, path)
 		if prefix == "" {
 			return mcp.NewToolResultError(fmt.Sprintf(
 				"path %q is not a tracked repository; use track_repository to add it",

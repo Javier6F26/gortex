@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -221,9 +222,10 @@ func (s *Server) handleGetActiveProject(_ context.Context, _ mcp.CallToolRequest
 	return mcp.NewToolResultJSON(result)
 }
 
-// resolveRepoPrefix resolves a path-or-prefix string to a repo prefix.
-// It first checks if the input matches a known repo prefix directly,
-// then tries to match it as a file path against tracked repo root paths.
+// resolveRepoPrefix resolves a path-or-prefix string to a repo prefix by
+// consulting only the in-memory MultiIndexer state. Use
+// resolveRepoPrefixOrReconcile when drift between persisted config and
+// in-memory state could produce a false miss.
 func (s *Server) resolveRepoPrefix(pathOrPrefix string) string {
 	if s.multiIndexer == nil {
 		return ""
@@ -234,13 +236,48 @@ func (s *Server) resolveRepoPrefix(pathOrPrefix string) string {
 		return pathOrPrefix
 	}
 
-	// Try to match as a path — check all tracked repos.
+	// Try to match as a path — check all tracked repos. Also try the
+	// absolute form since users may pass either.
+	absInput, _ := filepath.Abs(pathOrPrefix)
 	for prefix, meta := range s.multiIndexer.AllMetadata() {
-		if meta.RootPath == pathOrPrefix {
+		if meta.RootPath == pathOrPrefix || (absInput != "" && meta.RootPath == absInput) {
 			return prefix
 		}
 	}
 
+	return ""
+}
+
+// resolveRepoPrefixOrReconcile resolves a path-or-prefix to a repo prefix
+// and reconciles persisted-config state into the in-memory MultiIndexer on
+// miss. Warmup can silently drop a repo (transient index failure, daemon
+// restart with a stale snapshot, crash mid-warmup) and leave it listed
+// under get_active_project but absent from mi.repos; the user's next
+// operation then errors with "not a tracked repository" for something
+// they can plainly see in the project list. Here, if the input matches a
+// persisted config entry, we auto-track it before returning the prefix.
+func (s *Server) resolveRepoPrefixOrReconcile(ctx context.Context, pathOrPrefix string) string {
+	if prefix := s.resolveRepoPrefix(pathOrPrefix); prefix != "" {
+		return prefix
+	}
+	if s.multiIndexer == nil || s.configManager == nil {
+		return ""
+	}
+
+	absInput, _ := filepath.Abs(pathOrPrefix)
+	for _, entry := range s.configManager.Global().Repos {
+		entryAbs, _ := filepath.Abs(entry.Path)
+		if entry.Path != pathOrPrefix && entryAbs != absInput &&
+			config.ResolvePrefix(entry) != pathOrPrefix {
+			continue
+		}
+		if _, err := s.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+			s.logger.Warn("auto-track from config failed",
+				zap.String("path", entry.Path), zap.Error(err))
+			return ""
+		}
+		return s.resolveRepoPrefix(pathOrPrefix)
+	}
 	return ""
 }
 
