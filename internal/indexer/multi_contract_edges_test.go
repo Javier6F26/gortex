@@ -315,6 +315,179 @@ func TestReconcileContractEdges_DartConsumer(t *testing.T) {
 		matchEdge.From, providerSym, nodeIDs(chain.Nodes))
 }
 
+// setupTSWrapperRepo mirrors tuck's web/lib/api.ts shape: a private
+// doFetch that calls fetch(`${API_URL}${path}`), a private request
+// wrapper that forwards its path parameter to doFetch, and several
+// exported per-endpoint functions that each call request with a
+// literal path (some plain, some template-literal with params, some
+// carrying a method: in the options). The wrapper chain has depth 2 —
+// doFetch is the initial wrapper, request is discovered in the
+// second BFS pass, and the exported functions are where inline
+// contracts finally land.
+func setupTSWrapperRepo(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "lib"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "package.json"),
+		[]byte(`{"name":"`+name+`","version":"0.0.0"}`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lib", "api.ts"), []byte(
+		"const API_URL = \"https://api.example.com\";\n"+
+			"\n"+
+			"async function doFetch(path: string, token: string, options: any = {}) {\n"+
+			"  return fetch(`${API_URL}${path}`, { ...options, headers: { Authorization: `Bearer ${token}` } });\n"+
+			"}\n"+
+			"\n"+
+			"async function request<T>(path: string, getToken: () => Promise<string>, options: any = {}): Promise<T> {\n"+
+			"  const token = await getToken();\n"+
+			"  const res = await doFetch(path, token, options);\n"+
+			"  return res.json();\n"+
+			"}\n"+
+			"\n"+
+			"export async function fetchUsers(getToken: () => Promise<string>) {\n"+
+			"  return request<any>('/api/users', getToken);\n"+
+			"}\n"+
+			"\n"+
+			"export async function fetchUser(getToken: () => Promise<string>, id: string) {\n"+
+			"  return request<any>(`/api/users/${id}`, getToken);\n"+
+			"}\n"+
+			"\n"+
+			"export async function createUser(getToken: () => Promise<string>, data: any) {\n"+
+			"  return request<any>('/api/users', getToken, { method: 'POST', body: JSON.stringify(data) });\n"+
+			"}\n"+
+			"\n"+
+			"export async function deleteUser(getToken: () => Promise<string>, id: string) {\n"+
+			"  return request<void>(`/api/users/${id}`, getToken, { method: 'DELETE' });\n"+
+			"}\n",
+	), 0o644))
+	return dir
+}
+
+// setupGoProviderRepo writes a handler for every endpoint the TS
+// wrapper repo calls. listUsers, getUser, createUser, deleteUser.
+// Gin-style route declarations so T1.3 handler resolution can pick
+// the method-level handler as the match target.
+func setupGoProviderRepo(t *testing.T, name string) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), name)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
+		[]byte("module example.com/"+name+"\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(`package main
+
+import "github.com/gin-gonic/gin"
+
+func setupRoutes(r *gin.Engine) {
+	r.GET("/api/users", listUsers)
+	r.GET("/api/users/:id", getUser)
+	r.POST("/api/users", createUser)
+	r.DELETE("/api/users/:id", deleteUser)
+}
+
+func listUsers()   {}
+func getUser()     {}
+func createUser()  {}
+func deleteUser()  {}
+`), 0o644))
+	return dir
+}
+
+// TestInlineWrappers_TuckShape is the T2.4 north-star test. A TS
+// wrapper chain (doFetch → request → exported fetch/create/delete
+// functions) plus a Go provider with matching routes must produce
+// one EdgeMatches per endpoint, not one meta-match behind an
+// unresolvable wrapper contract.
+//
+// The test asserts three things that together define the feature
+// working end-to-end:
+//
+//  1. A match edge exists from each exported TS function (fetchUsers,
+//     fetchUser, createUser, deleteUser) to the corresponding Go
+//     handler — proving wrapper inlining emits per-caller contracts
+//     and that method inference distinguishes GET from POST/DELETE.
+//  2. The edges have CrossRepo set, since consumer and provider live
+//     in different repos.
+//  3. get_call_chain from any exported function reaches its matched
+//     handler across the bridge.
+func TestInlineWrappers_TuckShape(t *testing.T) {
+	providerRoot := setupGoProviderRepo(t, "provider-svc")
+	consumerRoot := setupTSWrapperRepo(t, "web-ui")
+
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{
+		Repos: []config.RepoEntry{
+			{Path: providerRoot, Name: "provider-svc"},
+			{Path: consumerRoot, Name: "web-ui"},
+		},
+	}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	g := graph.New()
+	mi := NewMultiIndexer(g, newMultiLangRegistry(), search.NewBM25(), cm, zap.NewNop())
+	for _, entry := range cm.Global().Repos {
+		_, err := mi.TrackRepoCtx(context.Background(), entry)
+		require.NoError(t, err, "track %s", entry.Name)
+	}
+
+	type bridge struct{ consumer, provider string }
+	wantBridges := []bridge{
+		{"web-ui/lib/api.ts::fetchUsers", "provider-svc/main.go::listUsers"},
+		{"web-ui/lib/api.ts::fetchUser", "provider-svc/main.go::getUser"},
+		{"web-ui/lib/api.ts::createUser", "provider-svc/main.go::createUser"},
+		{"web-ui/lib/api.ts::deleteUser", "provider-svc/main.go::deleteUser"},
+	}
+
+	have := make(map[string]*graph.Edge)
+	for _, e := range g.AllEdges() {
+		if e.Kind != graph.EdgeMatches {
+			continue
+		}
+		have[e.From+"|"+e.To] = e
+	}
+
+	for _, b := range wantBridges {
+		e, ok := have[b.consumer+"|"+b.provider]
+		if !ok {
+			t.Errorf("missing bridge %s → %s; have: %v", b.consumer, b.provider, matchEdgeSummaries(g))
+			continue
+		}
+		assert.True(t, e.CrossRepo,
+			"bridge %s → %s: CrossRepo must be set for TS→Go chain", b.consumer, b.provider)
+	}
+
+	// get_call_chain spot-check — pick the POST case, since method
+	// inference is what distinguishes createUser → createUser (POST)
+	// from fetchUsers → listUsers (GET).
+	eng := query.NewEngine(g)
+	chain := eng.GetCallChain("web-ui/lib/api.ts::createUser",
+		query.QueryOptions{Depth: 4, Limit: 50, Detail: "brief"})
+	reached := false
+	for _, n := range chain.Nodes {
+		if n.ID == "provider-svc/main.go::createUser" {
+			reached = true
+			break
+		}
+	}
+	assert.True(t, reached,
+		"get_call_chain(createUser[TS]) must reach createUser[Go] handler across the wrapper bridge; chain: %v",
+		nodeIDs(chain.Nodes))
+}
+
+// matchEdgeSummaries dumps all EdgeMatches as "from → to" strings for
+// failure-message context when the expected bridges aren't present.
+func matchEdgeSummaries(g *graph.Graph) []string {
+	var out []string
+	for _, e := range g.AllEdges() {
+		if e.Kind == graph.EdgeMatches {
+			out = append(out, e.From+" → "+e.To)
+		}
+	}
+	return out
+}
+
 // TestReconcileContractEdges_PurgesStaleOnUntrack asserts that removing
 // the consumer repo deletes its match edges — otherwise the graph would
 // accumulate dangling edges pointing at symbols that no longer exist.

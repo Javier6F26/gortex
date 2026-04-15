@@ -497,6 +497,59 @@ func (mi *MultiIndexer) MergedContractRegistry() *contracts.Registry {
 	return merged
 }
 
+// wrapperSourceReader returns a SourceReader closure that maps a graph
+// node back to its on-disk bytes by joining the node's repo-relative
+// FilePath with the repo's RootPath from MultiIndexer metadata. In
+// single-repo mode (no RepoPrefix on nodes) the indexer's sole root is
+// used. Read results are memoized inside the closure so multi-caller
+// wrappers don't trigger N disk reads per file.
+func (mi *MultiIndexer) wrapperSourceReader() contracts.SourceReader {
+	cache := make(map[string][]byte)
+	miss := make(map[string]struct{})
+
+	readFile := func(absPath string) ([]byte, bool) {
+		if b, ok := cache[absPath]; ok {
+			return b, true
+		}
+		if _, skipped := miss[absPath]; skipped {
+			return nil, false
+		}
+		b, err := os.ReadFile(absPath)
+		if err != nil {
+			miss[absPath] = struct{}{}
+			return nil, false
+		}
+		cache[absPath] = b
+		return b, true
+	}
+
+	return func(n *graph.Node) ([]byte, bool) {
+		if n == nil || n.FilePath == "" {
+			return nil, false
+		}
+		// Multi-repo case: strip "<repo-prefix>/" from the FilePath and
+		// join with the repo's recorded root.
+		if n.RepoPrefix != "" {
+			meta := mi.GetMetadata(n.RepoPrefix)
+			if meta == nil || meta.RootPath == "" {
+				return nil, false
+			}
+			rel := strings.TrimPrefix(n.FilePath, n.RepoPrefix+"/")
+			return readFile(filepath.Join(meta.RootPath, rel))
+		}
+		// Single-repo fallback: a node without a RepoPrefix carries its
+		// path relative to the sole indexer root. Try each known repo
+		// root since the single-repo path wraps through indexSingleRepo.
+		for _, meta := range mi.AllMetadata() {
+			if b, ok := readFile(filepath.Join(meta.RootPath, n.FilePath)); ok {
+				return b, true
+			}
+		}
+		// Last resort: treat FilePath as already absolute (tests).
+		return readFile(n.FilePath)
+	}
+}
+
 // ReconcileContractEdges walks the merged contract registry, runs the
 // consumer↔provider matcher, and writes the results into the graph as
 // EdgeMatches edges pointing from consumer-contract nodes to their matched
@@ -533,6 +586,16 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 	if merged == nil {
 		return 0
 	}
+
+	// Inline HTTP wrapper callers (T2.4). Codebases that route every
+	// endpoint through a helper like `request(path, ...)` produce one
+	// parametric consumer contract per wrapper at extraction time —
+	// useless for matching. InlineWrappers walks incoming call edges
+	// of each wrapper, re-reads the caller's source, and emits a
+	// specific consumer contract per literal path. Runs before Match
+	// so the inlined contracts participate in pairing.
+	contracts.InlineWrappers(merged, g, mi.wrapperSourceReader())
+
 	result := contracts.Match(merged)
 	added := 0
 	for _, m := range result.Matched {
