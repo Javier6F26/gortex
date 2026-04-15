@@ -56,6 +56,14 @@ jobs:
           # GITHUB_TOKEN can only push to the source repo, not the tap.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
+      # goreleaser-cross runs as root inside the container, so everything
+      # in dist/ is owned by root:root on the host. The subsequent cosign
+      # and SLSA steps run as the non-root `runner` user and need to write
+      # .sig / .pem files next to the artifacts — reclaim ownership now
+      # before any permission-denied errors surface.
+      - name: Reclaim ownership of dist/ from Docker
+        run: sudo chown -R "$(id -u):$(id -g)" dist
+
       # Keyless cosign signing: each artifact gets a `.sig` (signature) and
       # `.pem` (certificate chain binding the signature to this workflow's
       # GitHub OIDC identity). Consumers verify with:
