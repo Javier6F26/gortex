@@ -91,11 +91,12 @@ func TestReconcileContractEdges_BridgesConsumerToProvider(t *testing.T) {
 		require.NoError(t, err, "track %s", entry.Name)
 	}
 
-	// EdgeMatches should exist from consumer-svc/client.go::fetchUsers to
-	// provider-svc/main.go::setupRoutes. Expected IDs reflect the
-	// repo-prefixed form produced by multi-repo indexing.
+	// EdgeMatches must land on the handler function (listUsers), not on
+	// the registration helper (setupRoutes). The HTTP provider extractor
+	// captures the handler identifier from `r.GET("/path", handler)`
+	// patterns — T1.3 — so "trace a request" lands on business logic.
 	consumerSym := "consumer-svc/client.go::fetchUsers"
-	providerSym := "provider-svc/main.go::setupRoutes"
+	providerSym := "provider-svc/main.go::listUsers"
 
 	var matchEdge *graph.Edge
 	for _, e := range g.AllEdges() {

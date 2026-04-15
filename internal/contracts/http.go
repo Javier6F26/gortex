@@ -23,11 +23,18 @@ func (h *HTTPExtractor) SupportedLanguages() []string {
 // httpPattern describes a single regex pattern that matches an HTTP route
 // declaration or call.
 type httpPattern struct {
-	re         *regexp.Regexp
-	role       Role
-	method     string // HTTP method (empty = extract from match)
-	methodGrp  int    // capture group index for method when not fixed
-	pathGrp    int    // capture group index for path
+	re        *regexp.Regexp
+	role      Role
+	method    string // HTTP method (empty = extract from match)
+	methodGrp int    // capture group index for method when not fixed
+	pathGrp   int    // capture group index for path
+	// handlerGrp is the capture group for the handler identifier on the
+	// provider side (e.g. `listUsers` in `r.GET("/users", listUsers)`).
+	// 0 = not captured. When set and the capture resolves to a function
+	// node in the same file, the Contract's SymbolID is the handler, not
+	// the enclosing registration function — so "trace a request" queries
+	// land on the business logic instead of setupRoutes().
+	handlerGrp int
 	framework  string
 	confidence float64
 	languages  []string // empty = all
@@ -38,29 +45,32 @@ type httpPattern struct {
 var httpPatterns = []httpPattern{
 	// ---- Go providers (high confidence, framework-specific) ----
 	{
-		re:         regexp.MustCompile(`(?:Handle|HandleFunc)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]`),
+		re:         regexp.MustCompile(`(?:Handle|HandleFunc)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		method:     "ANY",
 		pathGrp:    1,
+		handlerGrp: 2,
 		framework:  "net/http",
 		confidence: 0.9,
 		languages:  []string{"go"},
 	},
 	{
 		// Match router/group method calls but not http.Get/http.Post (stdlib consumers).
-		re:         regexp.MustCompile(`(?:^|[^/])\b(?:r|g|e|router|group|api|v1|mux|app)\.(Get|Post|Put|Delete|Patch|Head|Options)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]`),
+		re:         regexp.MustCompile(`(?:^|[^/])\b(?:r|g|e|router|group|api|v1|mux|app)\.(Get|Post|Put|Delete|Patch|Head|Options)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		methodGrp:  1,
 		pathGrp:    2,
+		handlerGrp: 3,
 		framework:  "gin/echo/chi",
 		confidence: 0.9,
 		languages:  []string{"go"},
 	},
 	{
-		re:         regexp.MustCompile(`\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]`),
+		re:         regexp.MustCompile(`\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		methodGrp:  1,
 		pathGrp:    2,
+		handlerGrp: 3,
 		framework:  "fiber",
 		confidence: 0.9,
 		languages:  []string{"go"},
@@ -68,10 +78,11 @@ var httpPatterns = []httpPattern{
 
 	// ---- TS/JS providers ----
 	{
-		re:         regexp.MustCompile(`(?:app|router)\.(get|post|put|delete|patch|head|options|all)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
+		re:         regexp.MustCompile(`(?:app|router)\.(get|post|put|delete|patch|head|options|all)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		methodGrp:  1,
 		pathGrp:    2,
+		handlerGrp: 3,
 		framework:  "express",
 		confidence: 0.9,
 		languages:  []string{"typescript", "javascript"},
@@ -241,6 +252,24 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 
 			symbolID := findEnclosingSymbol(fileNodes, lineNum)
 
+			// Provider patterns that also capture the handler identifier
+			// (e.g. `listUsers` in `r.GET("/users", listUsers)`) re-point
+			// SymbolID at the handler when it resolves to a function/method
+			// in the same file. This is T1.3: traversals that cross service
+			// boundaries (via EdgeMatches) land on the business logic, not
+			// on the registration helper whose line happens to enclose the
+			// route declaration.
+			if pat.handlerGrp > 0 && pat.role == RoleProvider {
+				gStart := m[pat.handlerGrp*2]
+				gEnd := m[pat.handlerGrp*2+1]
+				if gStart >= 0 && gEnd > gStart {
+					handlerName := text[gStart:gEnd]
+					if hID := findFunctionByName(fileNodes, handlerName); hID != "" {
+						symbolID = hID
+					}
+				}
+			}
+
 			c := Contract{
 				ID:       contractID,
 				Type:     ContractHTTP,
@@ -332,4 +361,20 @@ func findEnclosingSymbol(sortedNodes []*graph.Node, line int) string {
 		}
 	}
 	return best
+}
+
+// findFunctionByName returns the ID of a function or method declared in the
+// same file with the given short name (e.g. "listUsers"). Used by the HTTP
+// provider extractor to re-point a contract's SymbolID at its handler
+// function when the pattern captures it.
+func findFunctionByName(fileNodes []*graph.Node, name string) string {
+	for _, n := range fileNodes {
+		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+			continue
+		}
+		if n.Name == name {
+			return n.ID
+		}
+	}
+	return ""
 }

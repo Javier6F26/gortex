@@ -21,6 +21,57 @@ func makeNodes(filePath string, fns []struct{ name string; start, end int }) []*
 	return nodes
 }
 
+// TestHTTPExtractor_Go_Gin_HandlerResolution exercises the T1.3 path: when
+// the pattern captures the handler identifier (e.g. "listUsers" in
+// r.GET("/users", listUsers)) AND that identifier resolves to a function
+// node in the same file, the Contract's SymbolID is the handler — not the
+// enclosing setupRoutes function. Cross-service traversals landing on the
+// provider side then reach business logic, not the router glue.
+//
+// When the handler doesn't resolve (e.g. lambda, method expr, different
+// file) the code falls back to enclosing-symbol behavior — covered by
+// TestHTTPExtractor_Go_Gin above, which deliberately omits handler nodes.
+func TestHTTPExtractor_Go_Gin_HandlerResolution(t *testing.T) {
+	src := []byte(`package main
+
+import "github.com/gin-gonic/gin"
+
+func setupRoutes(r *gin.Engine) {
+	r.GET("/api/users", listUsers)
+	r.POST("/api/users", createUser)
+}
+
+func listUsers()  {}
+func createUser() {}
+`)
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"setupRoutes", 5, 8},
+		{"listUsers", 10, 10},
+		{"createUser", 11, 11},
+	})
+
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("main.go", src, nodes, nil)
+
+	byPath := map[string]Contract{}
+	for _, c := range contracts {
+		byPath[c.ID] = c
+	}
+
+	get := byPath["http::GET::/api/users"]
+	if get.SymbolID != "main.go::listUsers" {
+		t.Errorf("GET handler: expected SymbolID=main.go::listUsers (handler), got %q", get.SymbolID)
+	}
+
+	post := byPath["http::POST::/api/users"]
+	if post.SymbolID != "main.go::createUser" {
+		t.Errorf("POST handler: expected SymbolID=main.go::createUser (handler), got %q", post.SymbolID)
+	}
+}
+
 func TestHTTPExtractor_Go_Gin(t *testing.T) {
 	src := []byte(`package main
 
