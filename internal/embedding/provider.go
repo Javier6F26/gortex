@@ -33,18 +33,18 @@ type Provider interface {
 // Preference order: ONNX (fastest, requires libonnxruntime) → GoMLX (XLA) →
 // Hugot (pure Go, always compiled in) → Static (GloVe word vectors fallback).
 func NewLocalProvider() (Provider, error) {
-	// Opt-in transformer backends (compiled in via build tags).
-	if p, err := newONNXProvider(); err == nil {
-		return p, nil
+	// Opt-in transformer backends (compiled in via build tags), then the
+	// default Hugot pure-Go ONNX runtime which auto-downloads MiniLM-L6-v2
+	// to ~/.cache/gortex/models/ on first use.
+	factories := []func() (Provider, error){
+		newONNXProvider,
+		newGoMLXProvider,
+		newHugotProvider,
 	}
-	if p, err := newGoMLXProvider(); err == nil {
-		return p, nil
-	}
-	// Default transformer backend: Hugot with the pure-Go ONNX runtime.
-	// Auto-downloads the MiniLM-L6-v2 model to ~/.cache/gortex/models/ on
-	// first use.
-	if p, err := newHugotProvider(); err == nil {
-		return p, nil
+	for _, factory := range factories {
+		if p, err := factory(); err == nil {
+			return p, nil
+		}
 	}
 	// Fallback: static word vectors (always available, no network).
 	return NewStaticProvider()
