@@ -3,6 +3,7 @@ package resolver
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -22,10 +23,16 @@ type CrossRepoStats struct {
 // file nodes by directory in O(1) instead of scanning the whole graph
 // (which is O(N) per import edge, O(N×M) total). Maps are nil between
 // passes so we don't pay the memory cost while idle.
+//
+// mu serializes the Resolve* methods. Both reset and repopulate the
+// scratch maps at the start of every call, so concurrent invocations
+// (multi-watcher firing on different repos at the same time) would
+// crash with "concurrent map writes" without a lock.
 type CrossRepoResolver struct {
 	graph        *graph.Graph
 	dirIndex     map[string][]*graph.Node
 	lastDirIndex map[string][]*graph.Node
+	mu           sync.Mutex
 }
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
@@ -37,6 +44,9 @@ func NewCrossRepo(g *graph.Graph) *CrossRepoResolver {
 // matches first, then cross-repo search. Sets Edge.CrossRepo = true for
 // cross-repo matches.
 func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+
 	cr.buildDirIndexes()
 	defer cr.clearDirIndexes()
 
@@ -55,6 +65,9 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 // ResolveForRepo resolves only unresolved edges originating from nodes
 // in the specified repository.
 func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+
 	cr.buildDirIndexes()
 	defer cr.clearDirIndexes()
 

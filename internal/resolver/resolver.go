@@ -3,6 +3,7 @@ package resolver
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -24,10 +25,18 @@ type ResolveStats struct {
 // import edge. On large repos (vscode ≈ 150k nodes / 5k imports) the
 // old full scan made ResolveAll the dominant cost of a cold index
 // (8m of a 9m wall-clock). Maps are cleared between passes.
+//
+// mu serializes ResolveAll and ResolveFile because both reset and
+// repopulate the scratch maps as part of their first step. Without
+// it, two concurrent file-watcher debounce goroutines firing on the
+// same per-repo Indexer (each calls Resolver.ResolveFile via
+// Indexer.IndexFile) crash the daemon with "concurrent map writes"
+// in buildDirIndexes.
 type Resolver struct {
 	graph        *graph.Graph
 	dirIndex     map[string][]*graph.Node
 	lastDirIndex map[string][]*graph.Node
+	mu           sync.Mutex
 }
 
 // New creates a Resolver for the given graph.
@@ -37,6 +46,9 @@ func New(g *graph.Graph) *Resolver {
 
 // ResolveAll resolves all unresolved edges in the graph.
 func (r *Resolver) ResolveAll() *ResolveStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.buildDirIndexes()
 	defer r.clearDirIndexes()
 
@@ -83,6 +95,9 @@ func (r *Resolver) clearDirIndexes() {
 
 // ResolveFile resolves unresolved edges originating from a specific file.
 func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	r.buildDirIndexes()
 	defer r.clearDirIndexes()
 

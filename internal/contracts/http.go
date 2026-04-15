@@ -58,11 +58,13 @@ var httpPatterns = []httpPattern{
 		confidence: 0.95,
 		languages:  []string{"go"},
 	},
-	// Legacy net/http HandleFunc with pattern-only path (method set
-	// elsewhere or meant to catch any method). Kept after the 1.22+
-	// form so the specific pattern wins when both match.
+	// Legacy net/http HandleFunc with pattern-only path. Requires the
+	// captured path to start with "/" (no leading verb), so the Go
+	// 1.22+ "METHOD /path" form above doesn't double-match and emit
+	// a bogus http::ANY::/VERB path contract alongside the canonical
+	// http::VERB::/path one.
 	{
-		re:         regexp.MustCompile(`(?:Handle|HandleFunc)\(\s*["` + "`" + `]([^"` + "`" + `]+)["` + "`" + `]\s*(?:,\s*(\w+))?`),
+		re:         regexp.MustCompile(`(?:Handle|HandleFunc)\(\s*["` + "`" + `](/[^"` + "`" + `]*)["` + "`" + `]\s*(?:,\s*(\w+))?`),
 		role:       RoleProvider,
 		method:     "ANY",
 		pathGrp:    1,
@@ -296,19 +298,32 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 			symbolID := findEnclosingSymbol(fileNodes, lineNum)
 
 			// Provider patterns that also capture the handler identifier
-			// (e.g. `listUsers` in `r.GET("/users", listUsers)`) re-point
-			// SymbolID at the handler when it resolves to a function/method
-			// in the same file. This is T1.3: traversals that cross service
-			// boundaries (via EdgeMatches) land on the business logic, not
-			// on the registration helper whose line happens to enclose the
-			// route declaration.
+			// re-point SymbolID at the actual handler function in the
+			// same file. Two forms handled:
+			//   1. Bare handler:  r.GET("/users", listUsers)
+			//      → handlerGrp captures "listUsers", resolve directly.
+			//   2. Middleware-wrapped: mux.HandleFunc("POST /x",
+			//      WithAuth(auth, h.CreateTuck)) — handlerGrp grabs
+			//      "WithAuth" which is a wrapper. Walk forward from
+			//      the end of the handlerGrp match, through the rest
+			//      of the call's balanced parens, and pick the LAST
+			//      identifier (or method reference like h.CreateTuck)
+			//      that resolves to a function in this file. That's
+			//      the innermost handler — what "trace a request"
+			//      actually wants to land on.
 			if pat.handlerGrp > 0 && pat.role == RoleProvider {
 				gStart := m[pat.handlerGrp*2]
 				gEnd := m[pat.handlerGrp*2+1]
 				if gStart >= 0 && gEnd > gStart {
 					handlerName := text[gStart:gEnd]
-					if hID := findFunctionByName(fileNodes, handlerName); hID != "" {
+					if hID := resolveHandlerIdent(fileNodes, handlerName); hID != "" {
 						symbolID = hID
+					} else {
+						// Scan the call-trail for a better candidate.
+						trail := callTrailSlice(text, m[1])
+						if hID := findInnermostResolvableHandler(fileNodes, trail); hID != "" {
+							symbolID = hID
+						}
 					}
 				}
 			}
@@ -447,4 +462,100 @@ func findFunctionByName(fileNodes []*graph.Node, name string) string {
 		}
 	}
 	return ""
+}
+
+// resolveHandlerIdent resolves a handler identifier captured by a
+// provider-pattern regex. Accepts bare "listUsers" (function name)
+// and method-expression "h.CreateTuck" (dot-qualified) — the latter
+// common when routes are registered on a receiver. The method-name
+// after the dot is used for the lookup, so `h.CreateTuck` resolves
+// to a method CreateTuck in the same file regardless of receiver
+// variable name.
+func resolveHandlerIdent(fileNodes []*graph.Node, ident string) string {
+	if ident == "" {
+		return ""
+	}
+	if i := strings.LastIndex(ident, "."); i >= 0 {
+		ident = ident[i+1:]
+	}
+	return findFunctionByName(fileNodes, ident)
+}
+
+// callTrailSlice returns the byte slice that starts at the HandleFunc
+// call's opening "(" (found by the regex at matchStart) and ends at
+// the matching balanced close ")". Used to scan past a middleware
+// wrapper for an inner handler identifier. Returns empty when the
+// call can't be balanced (which only happens on truncated or invalid
+// source — production files are fine).
+func callTrailSlice(src string, matchStart int) string {
+	// Seek forward from matchStart to the first '(' — that's the
+	// opening paren of the HandleFunc call. The regex's m[0] lands
+	// at the start of the "HandleFunc" token.
+	openIdx := -1
+	for i := matchStart; i < len(src); i++ {
+		if src[i] == '(' {
+			openIdx = i
+			break
+		}
+		if src[i] == '\n' {
+			return ""
+		}
+	}
+	if openIdx < 0 {
+		return ""
+	}
+	depth := 0
+	i := openIdx
+	for i < len(src) {
+		switch src[i] {
+		case '(':
+			depth++
+			i++
+		case ')':
+			depth--
+			if depth == 0 {
+				return src[openIdx+1 : i]
+			}
+			i++
+		case '"', '\'', '`':
+			q := src[i]
+			i++
+			for i < len(src) && src[i] != q {
+				if src[i] == '\\' && i+1 < len(src) {
+					i += 2
+					continue
+				}
+				i++
+			}
+			if i < len(src) {
+				i++
+			}
+		default:
+			i++
+		}
+	}
+	return ""
+}
+
+// handlerCandidateRE captures every bare identifier or `recv.Method`
+// style expression in the call-trail. Tight enough to skip keywords
+// like "context" or "nil" only by not resolving them to a file-local
+// function — the caller filters via findFunctionByName.
+var handlerCandidateRE = regexp.MustCompile(`\b([A-Za-z_]\w*(?:\.\w+)?)\b`)
+
+// findInnermostResolvableHandler walks the call trail and returns the
+// LAST identifier that resolves to a function or method declared in
+// the same file. For `WithAuth(auth, h.CreateTuck)` this is
+// `h.CreateTuck` (resolves to CreateTuck method); WithAuth and auth
+// fail to resolve (not file-local). Returns "" if no candidate
+// resolves.
+func findInnermostResolvableHandler(fileNodes []*graph.Node, trail string) string {
+	matches := handlerCandidateRE.FindAllStringSubmatch(trail, -1)
+	var best string
+	for _, m := range matches {
+		if id := resolveHandlerIdent(fileNodes, m[1]); id != "" {
+			best = id
+		}
+	}
+	return best
 }

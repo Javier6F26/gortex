@@ -363,6 +363,104 @@ func TestNormalizeHTTPPath(t *testing.T) {
 	}
 }
 
+// TestHTTPExtractor_Go_StdlibMux_NoLegacyDuplicate guards against the
+// regression where both the Go 1.22+ pattern and the legacy HandleFunc
+// pattern matched the same route, producing duplicate contracts
+// (http::POST::/v1/tucks AND http::ANY::/POST /v1/tucks for a single
+// mux.HandleFunc("POST /v1/tucks", h)). The legacy pattern's path
+// capture now requires a leading "/", which the 1.22+ form never has
+// (it starts with the verb), so only the specific extractor fires.
+func TestHTTPExtractor_Go_StdlibMux_NoLegacyDuplicate(t *testing.T) {
+	src := []byte(`package main
+
+import "net/http"
+
+func wire(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("POST /v1/tucks", h.CreateTuck)
+}
+`)
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"wire", 5, 7},
+		{"CreateTuck", 9, 9},
+	})
+
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("main.go", src, nodes, nil)
+
+	seen := map[string]int{}
+	for _, c := range contracts {
+		seen[c.ID]++
+	}
+	if seen["http::ANY::/POST /v1/tucks"] > 0 {
+		t.Errorf("legacy HandleFunc pattern double-matched the 1.22 form: %v", seen)
+	}
+	if seen["http::POST::/v1/tucks"] != 1 {
+		t.Errorf("expected exactly 1 http::POST::/v1/tucks contract, got %d (all: %v)",
+			seen["http::POST::/v1/tucks"], seen)
+	}
+}
+
+// TestHTTPExtractor_Go_HandlerThroughMiddleware guards against the
+// regression where routes registered as
+//   mux.HandleFunc("POST /v1/tucks", WithAuth(auth, h.CreateTuck))
+// landed with SymbolID = "WithAuth" (the middleware wrapper) or the
+// enclosing RegisterRoutes function, rather than the actual handler
+// h.CreateTuck. The extractor now walks the balanced-paren tail of
+// the call expression, picks the innermost identifier that resolves
+// to a function/method in the same file — correctly landing on
+// CreateTuck.
+func TestHTTPExtractor_Go_HandlerThroughMiddleware(t *testing.T) {
+	src := []byte(`package main
+
+import "net/http"
+
+func wire(mux *http.ServeMux, h *Handler) {
+	mux.HandleFunc("POST /v1/tucks", WithAuth(auth, h.CreateTuck))
+	mux.HandleFunc("GET /v1/tucks/{id}", WithAuth(auth, h.GetTuck))
+	mux.HandleFunc("DELETE /v1/tucks/{id}", WithAuth(auth, WithAudit(audit, h.DeleteTuck)))
+}
+`)
+	nodes := makeNodes("main.go", []struct {
+		name       string
+		start, end int
+	}{
+		{"wire", 5, 9},
+		{"CreateTuck", 12, 12},
+		{"GetTuck", 14, 14},
+		{"DeleteTuck", 16, 16},
+	})
+
+	ext := &HTTPExtractor{}
+	contracts := ext.Extract("main.go", src, nodes, nil)
+
+	bySymbol := map[string]string{}
+	for _, c := range contracts {
+		if c.Role != RoleProvider {
+			continue
+		}
+		bySymbol[c.ID] = c.SymbolID
+	}
+	want := map[string]string{
+		"http::POST::/v1/tucks":        "main.go::CreateTuck",
+		"http::GET::/v1/tucks/{id}":    "main.go::GetTuck",
+		"http::DELETE::/v1/tucks/{id}": "main.go::DeleteTuck",
+	}
+	for id, wantSym := range want {
+		gotSym, ok := bySymbol[id]
+		if !ok {
+			t.Errorf("missing provider contract %s", id)
+			continue
+		}
+		if gotSym != wantSym {
+			t.Errorf("%s: SymbolID want %s, got %s (dropped to enclosing or wrapper name)",
+				id, wantSym, gotSym)
+		}
+	}
+}
+
 // TestHTTPExtractor_Dart_Consumers covers T2.1: Dart HTTP client patterns
 // (dio and package:http) now produce consumer contracts. Exercised via
 // short snippets resembling the shape of tuck_app's TuckApiClient
