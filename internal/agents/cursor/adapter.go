@@ -41,10 +41,16 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{
+	p := &agents.Plan{Files: []agents.FileAction{
 		{Path: mcpConfigPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
-		{Path: rulesPath(env), Action: agents.ActionWouldCreate, Keys: []string{"gortex-rule"}},
-	}}, nil
+	}}
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: communitiesRulePath(env), Action: agents.ActionWouldCreate,
+			Keys: []string{"communities-rule"},
+		})
+	}
+	return p, nil
 }
 
 // mcpConfigPath returns the mcp.json path for the given mode.
@@ -58,11 +64,14 @@ func mcpConfigPath(env agents.Env) string {
 	return filepath.Join(env.Root, ".cursor", "mcp.json")
 }
 
-// rulesPath returns the project-scoped MDC file Cursor auto-applies on
-// every chat turn. Cursor does not support user-level MDC rules (they
-// live in the app's Settings UI), so we always write project-scoped.
-func rulesPath(env agents.Env) string {
-	return filepath.Join(env.Root, ".cursor", "rules", "gortex.mdc")
+// communitiesRulePath returns the project-scoped MDC file carrying
+// the regenerated community-routing block. Gortex owns this file
+// end-to-end; each `gortex init` overwrites it.
+//
+// Cursor does not support user-level MDC rules (those live in the
+// app's Settings UI), so this is always project-scoped.
+func communitiesRulePath(env agents.Env) string {
+	return filepath.Join(env.Root, ".cursor", "rules", "gortex-communities.mdc")
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -84,15 +93,19 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	res.Files = append(res.Files, action)
 
-	// MDC rules file — one-rule-per-file format, create only when
-	// missing so user edits to .cursor/rules/gortex.mdc survive init
-	// re-runs. Cursor applies `alwaysApply: true` rules on every chat
-	// turn, which is exactly what we want for the MANDATORY block.
-	ruleAction, err := agents.WriteIfNotExists(env.Stderr, rulesPath(env), agents.CursorMDCFrontmatter(agents.InstructionsBody), opts)
-	if err != nil {
-		return res, err
+	// Community-routing MDC file — always written fresh on init
+	// so the routing tracks the current graph. Skipped in global
+	// mode (file is per-repo) and when --no-skills / no
+	// communities qualify.
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		body := agents.CursorMDCFrontmatter(
+			agents.CommunitiesStartMarker + "\n" + env.SkillsRouting + "\n" + agents.CommunitiesEndMarker + "\n")
+		ruleAction, err := agents.WriteOwnedFile(env.Stderr, communitiesRulePath(env), body, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, ruleAction)
 	}
-	res.Files = append(res.Files, ruleAction)
 
 	res.Configured = true
 	return res, nil

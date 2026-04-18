@@ -55,6 +55,56 @@ func WriteIfNotExists(w io.Writer, path, content string, opts ApplyOpts) (FileAc
 	return FileAction{Path: path, Action: ActionCreate}, nil
 }
 
+// WriteOwnedFile writes content to path unconditionally, overwriting
+// whatever is there. Meant for files Gortex owns end-to-end (e.g.
+// generated community-routing files under .cursor/rules/,
+// .continue/rules/, .clinerules/) so each `gortex init` run
+// regenerates them from the current graph. Returns ActionCreate when
+// the file was absent and ActionMerge when it already existed, so the
+// summary line reads naturally.
+//
+// Under DryRun: no disk write. Returns ActionWould* mirroring the
+// same existed/absent split.
+func WriteOwnedFile(w io.Writer, path, content string, opts ApplyOpts) (FileAction, error) {
+	existing, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return FileAction{}, fmt.Errorf("read %s: %w", path, readErr)
+	}
+
+	// Skip when the target is already byte-identical — keeps
+	// AssertIdempotent valid and avoids mtime bumps on no-op
+	// re-runs.
+	if existed && string(existing) == content {
+		return FileAction{Path: path, Action: ActionSkip, Reason: "unchanged"}, nil
+	}
+
+	if opts.DryRun {
+		action := ActionWouldCreate
+		if existed {
+			action = ActionWouldMerge
+		}
+		return FileAction{Path: path, Action: action}, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return FileAction{}, fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	}
+	if err := AtomicWriteFile(path, []byte(content), 0o644); err != nil {
+		return FileAction{}, err
+	}
+	verb := "wrote"
+	if existed {
+		verb = "regenerated"
+	}
+	logf(w, "[gortex init] %s %s", verb, path)
+	action := ActionCreate
+	if existed {
+		action = ActionMerge
+	}
+	return FileAction{Path: path, Action: action}, nil
+}
+
 // AtomicWriteFile writes data to path via a temp file in the same
 // directory followed by a rename. Guarantees that a concurrent reader
 // either sees the old file or the fully-written new file — never a

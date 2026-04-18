@@ -58,14 +58,18 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	p := &agents.Plan{Files: []agents.FileAction{
-		{Path: filepath.Join(env.Root, ".windsurfrules"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
-	}}
+	p := &agents.Plan{}
 	if env.Home != "" {
 		p.Files = append(p.Files, agents.FileAction{
 			Path:   currentConfigPath(env.Home),
 			Action: agents.ActionWouldMerge,
 			Keys:   []string{"mcpServers"},
+		})
+	}
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: filepath.Join(env.Root, ".windsurfrules"), Action: agents.ActionWouldMerge,
+			Keys: []string{"communities-block"},
 		})
 	}
 	return p, nil
@@ -100,14 +104,18 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	res.Files = append(res.Files, action)
 
-	// .windsurfrules is Windsurf's project-scoped instructions file
-	// Cascade reads on every turn. Sentinel-guarded append.
-	rulesPath := filepath.Join(env.Root, ".windsurfrules")
-	rulesAction, err := agents.AppendInstructions(env.Stderr, rulesPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
-	if err != nil {
-		return res, err
+	// .windsurfrules gets a marker-guarded community-routing block
+	// when skills were generated. Skipped in global mode (the file
+	// is per-repo) and when --no-skills / no communities qualify.
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		rulesPath := filepath.Join(env.Root, ".windsurfrules")
+		routingAction, err := agents.UpsertMarkedBlock(env.Stderr, rulesPath, env.SkillsRouting,
+			agents.CommunitiesStartMarker, agents.CommunitiesEndMarker, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, routingAction)
 	}
-	res.Files = append(res.Files, rulesAction)
 
 	res.Configured = true
 	return res, nil

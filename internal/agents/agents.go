@@ -37,18 +37,19 @@ type Adapter interface {
 }
 
 // Mode selects between per-repo and user-level installation.
-// Today only the Claude Code adapter distinguishes the two; other
-// adapters ignore it. Adding the dimension now keeps the interface
-// stable as we audit each agent for user-level MCP support.
+// `gortex init` runs adapters in ModeProject; `gortex install` runs
+// them in ModeGlobal. Adapters branch on this to choose between
+// project-local paths (.mcp.json, .cursor/mcp.json, CLAUDE.md, …) and
+// user-level paths (~/.claude.json, ~/.gemini/settings.json, …).
 type Mode int
 
 const (
 	// ModeProject writes project-local files (.mcp.json, .cursor/mcp.json, …).
-	// This is the default for `gortex init`.
+	// Used by `gortex init`.
 	ModeProject Mode = iota
 
 	// ModeGlobal writes user-level files (~/.claude.json, ~/.gemini/settings.json, …).
-	// Set by `gortex init --global`.
+	// Used by `gortex install`.
 	ModeGlobal
 )
 
@@ -89,8 +90,33 @@ type Env struct {
 	// the agents package free of the indexer dependency.
 	AnalyzedOverview string
 
+	// SkillsRouting, if non-empty, is the pre-rendered
+	// community-routing block each adapter writes into its
+	// per-repo instructions surface between CommunitiesStartMarker
+	// and CommunitiesEndMarker. Callers set this after running the
+	// community generator; adapters treat it as an opaque markdown
+	// payload.
+	SkillsRouting string
+
+	// GeneratedSkills, if non-empty, lists per-community skill
+	// files. The Claude Code adapter materialises these under
+	// .claude/skills/generated/<DirName>/SKILL.md. Other adapters
+	// rely on SkillsRouting alone.
+	GeneratedSkills []GeneratedSkill
+
 	// Stderr receives progress messages. nil means discard.
 	Stderr io.Writer
+}
+
+// GeneratedSkill is a small, package-local mirror of the skills
+// generator's output — kept here so the agents package doesn't
+// depend on internal/skills. The caller populates this from
+// internal/skills.Generator output.
+type GeneratedSkill struct {
+	CommunityID string
+	Label       string // kebab-case, e.g. "mcp-server"
+	DirName     string // e.g. "gortex-mcp-server"
+	Content     string // full SKILL.md content
 }
 
 // ApplyOpts controls Apply's runtime behaviour. Plan doesn't take

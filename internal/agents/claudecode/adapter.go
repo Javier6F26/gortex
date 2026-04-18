@@ -39,35 +39,46 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 // Plan reports the full set of files the adapter would touch for
-// the given Env. Mode branches between project and global mode;
-// InstallHooks elides hook files without affecting anything else.
+// the given Env. Mode branches between project (`gortex init`) and
+// global (`gortex install`) surfaces; InstallHooks elides hook files
+// without affecting anything else.
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	p := &agents.Plan{}
 	if env.Mode == agents.ModeGlobal {
-		// Global mode only touches user-level files. The daemon
-		// spans every project once registered, so we don't write
-		// per-repo artifacts here.
+		// User-level artifacts — machine-wide. Slash commands and
+		// curated Gortex tool-usage skills both belong here: they're
+		// codebase-agnostic, so duplicating them into every repo is
+		// wasted disk and drift risk.
 		p.Files = append(p.Files, agents.FileAction{Path: userClaudeJSONPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}})
 		if env.InstallHooks {
 			p.Files = append(p.Files, agents.FileAction{Path: userSettingsLocalPath(env.Home), Action: agents.ActionWouldMerge, Keys: []string{"hooks"}})
 		}
+		if env.Home != "" {
+			for name := range GlobalSkills {
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"), Action: agents.ActionWouldCreate})
+			}
+			for name := range SlashCommands {
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "commands", name), Action: agents.ActionWouldCreate})
+			}
+		}
 		return p, nil
 	}
 
-	// Project mode — the canonical shape.
+	// Project mode — only genuinely repo-specific artifacts. No
+	// tool-usage duplication: that lives at ~/.claude/skills/
+	// (installed by `gortex install`). CLAUDE.md gets a
+	// marker-guarded block only when --analyze or --skills produce
+	// codebase-derived content.
 	p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, ".mcp.json"), Action: agents.ActionWouldCreate, Keys: []string{"mcpServers"}})
-	for name := range SlashCommands {
-		p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, ".claude", "commands", name), Action: agents.ActionWouldCreate})
-	}
 	p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, ".claude", "settings.json"), Action: agents.ActionWouldMerge, Keys: []string{"permissions"}})
 	if env.InstallHooks {
 		p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, ".claude", "settings.local.json"), Action: agents.ActionWouldMerge, Keys: []string{"hooks"}})
 	}
-	p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, "CLAUDE.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}})
-	if env.Home != "" {
-		for name := range GlobalSkills {
-			p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"), Action: agents.ActionWouldCreate})
-		}
+	if env.AnalyzedOverview != "" || env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, "CLAUDE.md"), Action: agents.ActionWouldMerge, Keys: []string{"communities-block"}})
+	}
+	for _, s := range env.GeneratedSkills {
+		p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Root, ".claude", "skills", "generated", s.DirName, "SKILL.md"), Action: agents.ActionWouldCreate})
 	}
 	return p, nil
 }
@@ -97,23 +108,14 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	res.Files = append(res.Files, mcpAction)
 
-	// 2. Slash commands — each file created if absent.
-	for name, content := range SlashCommands {
-		action, err := agents.WriteIfNotExists(w, filepath.Join(env.Root, ".claude", "commands", name), content, opts)
-		if err != nil {
-			return res, fmt.Errorf(".claude/commands/%s: %w", name, err)
-		}
-		res.Files = append(res.Files, action)
-	}
-
-	// 3. MCP permissions in .claude/settings.json — merge, not create.
+	// 2. MCP permissions in .claude/settings.json — merge, not create.
 	permAction, err := installPermissions(w, filepath.Join(env.Root, ".claude", "settings.json"), opts)
 	if err != nil {
 		logWarn(w, "could not install permissions: %v", err)
 	}
 	res.Files = append(res.Files, permAction)
 
-	// 4. Hooks in .claude/settings.local.json — merge with healing.
+	// 3. Hooks in .claude/settings.local.json — merge with healing.
 	if env.InstallHooks {
 		hookAction, err := InstallHook(w, filepath.Join(env.Root, ".claude", "settings.local.json"), opts)
 		if err != nil {
@@ -124,35 +126,57 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		logf(w, "[gortex init] skipping hook installation (--no-hooks)")
 	}
 
-	// 5. CLAUDE.md append — project-level instructions block.
-	claudeMdPath := filepath.Join(env.Root, "CLAUDE.md")
-	block := ClaudeMdBlock
-	if env.AnalyzeRepo && env.AnalyzedOverview != "" {
-		block = env.AnalyzedOverview + "\n" + ClaudeMdBlock
-	}
-	claudeAction, err := agents.AppendInstructions(w, claudeMdPath, block, ClaudeMdSentinel, opts)
-	if err != nil {
-		return res, fmt.Errorf("CLAUDE.md: %w", err)
-	}
-	res.Files = append(res.Files, claudeAction)
-
-	// 6. Global skills — user-level ~/.claude/skills/gortex-*.
-	if env.Home != "" {
-		skillActions, err := installGlobalSkills(w, env.Home, opts)
-		if err != nil {
-			logWarn(w, "could not install global skills: %v", err)
+	// 4. CLAUDE.md — only written when there's genuinely
+	// codebase-specific content to place there: either the
+	// --analyze overview, the --skills community routing, or both.
+	// Generic tool-usage moved to user-level ~/.claude/skills/
+	// (installed by `gortex install`).
+	if env.AnalyzedOverview != "" || env.SkillsRouting != "" {
+		claudeMdPath := filepath.Join(env.Root, "CLAUDE.md")
+		var body strings.Builder
+		if env.AnalyzedOverview != "" {
+			body.WriteString(env.AnalyzedOverview)
+			if !strings.HasSuffix(env.AnalyzedOverview, "\n") {
+				body.WriteString("\n")
+			}
 		}
-		res.Files = append(res.Files, skillActions...)
+		if env.SkillsRouting != "" {
+			if body.Len() > 0 {
+				body.WriteString("\n")
+			}
+			body.WriteString(env.SkillsRouting)
+		}
+		claudeAction, err := agents.UpsertMarkedBlock(w, claudeMdPath, body.String(),
+			agents.CommunitiesStartMarker, agents.CommunitiesEndMarker, opts)
+		if err != nil {
+			return res, fmt.Errorf("CLAUDE.md: %w", err)
+		}
+		res.Files = append(res.Files, claudeAction)
+	}
+
+	// 5. Generated community skills — per-community SKILL.md files
+	// under .claude/skills/generated/. Claude Code auto-discovers
+	// them next to the repo-local CLAUDE.md. Regenerated each init
+	// run so they track the current graph.
+	for _, s := range env.GeneratedSkills {
+		path := filepath.Join(env.Root, ".claude", "skills", "generated", s.DirName, "SKILL.md")
+		action, err := agents.WriteOwnedFile(w, path, s.Content, opts)
+		if err != nil {
+			logWarn(w, "could not write generated skill %s: %v", s.DirName, err)
+			continue
+		}
+		res.Files = append(res.Files, action)
 	}
 
 	res.Configured = true
 	return res, nil
 }
 
-// applyGlobal handles Mode=ModeGlobal writes. The daemon path means
-// we don't create per-repo artifacts at all: the user gets a single
-// user-level MCP stanza and (optionally) user-level hooks that
-// apply to every project they open.
+// applyGlobal handles Mode=ModeGlobal writes (entered via `gortex
+// install`). Everything here is codebase-agnostic user-level
+// machinery: MCP config pointing at `gortex serve`, user-level
+// hooks, curated Gortex tool-usage skills, and Gortex slash
+// commands. No per-repo artifacts.
 func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents.Result) error {
 	w := env.Stderr
 	if env.Home == "" {
@@ -175,6 +199,27 @@ func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents
 		}
 		res.Files = append(res.Files, hookAction)
 	}
+
+	// 3. ~/.claude/skills/gortex-*/SKILL.md — curated tool-usage
+	// skills (guide / explore / debug / impact / refactor). One
+	// source of truth per user rather than duplicated into every
+	// repo. Skipped when the files already exist so user edits
+	// survive.
+	skillActions, err := installGlobalSkills(w, env.Home, opts)
+	if err != nil {
+		logWarn(w, "could not install user-level skills: %v", err)
+	}
+	res.Files = append(res.Files, skillActions...)
+
+	// 4. ~/.claude/commands/gortex-*.md — slash commands, also
+	// codebase-agnostic and user-level. Claude Code discovers
+	// user-level commands alongside project-level ones.
+	cmdActions, err := installGlobalSlashCommands(w, env.Home, opts)
+	if err != nil {
+		logWarn(w, "could not install user-level slash commands: %v", err)
+	}
+	res.Files = append(res.Files, cmdActions...)
+
 	return nil
 }
 
@@ -216,6 +261,25 @@ func installGlobalSkills(w io.Writer, home string, opts agents.ApplyOpts) ([]age
 	for name, content := range GlobalSkills {
 		dir := filepath.Join(skillsDir, name)
 		path := filepath.Join(dir, "SKILL.md")
+		action, err := agents.WriteIfNotExists(w, path, content, opts)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, action)
+	}
+	return out, nil
+}
+
+// installGlobalSlashCommands writes ~/.claude/commands/gortex-*.md
+// for each entry in SlashCommands. Skips existing files so users
+// keep any local tweaks. Mirrors installGlobalSkills — both are
+// user-level, codebase-agnostic artifacts installed by
+// `gortex install`.
+func installGlobalSlashCommands(w io.Writer, home string, opts agents.ApplyOpts) ([]agents.FileAction, error) {
+	out := make([]agents.FileAction, 0, len(SlashCommands))
+	dir := filepath.Join(home, ".claude", "commands")
+	for name, content := range SlashCommands {
+		path := filepath.Join(dir, name)
 		action, err := agents.WriteIfNotExists(w, path, content, opts)
 		if err != nil {
 			return out, err

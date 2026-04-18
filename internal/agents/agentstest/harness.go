@@ -40,9 +40,30 @@ func NewEnv(t *testing.T) (agents.Env, *bytes.Buffer) {
 		HookCommand:  "/tmp/test-gortex hook",
 		Mode:         agents.ModeProject,
 		InstallHooks: true,
-		Stderr:       buf,
+		// SkillsRouting + GeneratedSkills are seeded so per-adapter
+		// tests exercise the community-routing write path — which
+		// is the only reason adapters touch per-repo instructions
+		// files now. A real `gortex init` run sets these after
+		// community generation; NewEnv fakes them with minimal
+		// stubs so every adapter's test path stays realistic.
+		SkillsRouting: StubSkillsRouting,
+		GeneratedSkills: []agents.GeneratedSkill{{
+			CommunityID: "test",
+			Label:       "stub",
+			DirName:     "gortex-stub",
+			Content:     "---\nname: gortex-stub\ndescription: test stub\n---\n# Stub community\n",
+		}},
+		Stderr: buf,
 	}, buf
 }
+
+// StubSkillsRouting is the fake routing payload NewEnv seeds. Kept
+// small but with the marker-guarded wrapper contract preserved so
+// tests that grep for the block shape stay realistic.
+const StubSkillsRouting = `## Gortex Community Skills (test stub)
+
+- stub: routes to gortex-stub/
+`
 
 // AssertCountsByAction fails the test when the result's action
 // counts differ from the expected map. Used to declare "phase 1

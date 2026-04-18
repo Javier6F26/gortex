@@ -45,9 +45,9 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 - **Web UI** — Sigma.js force-directed visualization with node size proportional to importance
 - **IMPLEMENTS inference** — structural interface satisfaction for Go, TypeScript, Java, Rust, C#, Scala, Swift, Protobuf
 - **PreToolUse + PreCompact + Stop hooks** — PreToolUse enriches Read/Grep/Glob with graph context and redirects to Gortex MCP tools; matching `Task` also briefs spawned subagents with an inline tool-swap table + task-scoped `smart_context` so subagents don't fall back to grep/Read. PreCompact injects a condensed orientation snapshot (index stats, recently-modified symbols, top hotspots, feedback-ranked symbols) before Claude Code compacts the conversation. Stop runs post-task diagnostics (`detect_changes` → `get_test_targets`, `check_guards`, `analyze dead_code`, `contracts check` on modified symbols) so the agent self-corrects before handoff. All hooks degrade silently when the bridge is unreachable
-- **Long-living daemon (optional)** — `gortex daemon start` runs a single shared process that holds the graph for every tracked repo. Each Claude Code / Cursor / Kiro window connects as a thin stdio proxy over a Unix socket, getting per-client session isolation (recent activity, token stats) + cross-repo queries by default. Live fsnotify watching on every tracked repo so file edits flow into the graph without manual reload. `gortex init --global` sets up user-level config; `gortex daemon install-service` installs a LaunchAgent (macOS) or systemd `--user` unit (Linux) so the OS supervises lifecycle and auto-starts at login — no sudo required. Binaries fall back to embedded mode if the daemon isn't running; the feature is additive
+- **Long-living daemon (optional)** — `gortex daemon start` runs a single shared process that holds the graph for every tracked repo. Each Claude Code / Cursor / Kiro window connects as a thin stdio proxy over a Unix socket, getting per-client session isolation (recent activity, token stats) + cross-repo queries by default. Live fsnotify watching on every tracked repo so file edits flow into the graph without manual reload. `gortex install` sets up user-level config; `gortex daemon install-service` installs a LaunchAgent (macOS) or systemd `--user` unit (Linux) so the OS supervises lifecycle and auto-starts at login — no sudo required. Binaries fall back to embedded mode if the daemon isn't running; the feature is additive
 - **Benchmarked** — per-language parsing, query engine, indexer benchmarks
-- **Per-community skills** — `gortex skills` auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery
+- **Per-community skills** — `gortex init --skills` (default on) auto-generates SKILL.md per detected community with key files, entry points, cross-community connections, and MCP tool invocations for Claude Code auto-discovery; the same routing table lands in every detected agent's per-repo instructions file
 - **Eval framework** — SWE-bench harness for A/B benchmarking tool effectiveness with Docker-based environments and multi-model support
 - **Zero dependencies** — everything runs in-process, in memory, no external services
 
@@ -55,7 +55,7 @@ See [docs/agents.md](docs/agents.md) for the adapter matrix, per-agent schema no
 
 Pre-built binaries are published to [GitHub Releases](https://github.com/zzet/gortex/releases) for linux/amd64, linux/arm64, darwin/amd64 (Intel Mac), and darwin/arm64 (Apple Silicon). Every release is **cosign-signed**, ships **SLSA-3 provenance**, and is **VirusTotal-scanned** — see [Verifying releases](#verifying-releases-supply-chain-security) below. Windows support is planned.
 
-**New to Gortex?** After installing, see [docs/onboarding.md](docs/onboarding.md) for the 15-minute walkthrough: `gortex init` → start the server → verify your AI assistant uses graph tools → what to do if it doesn't.
+**New to Gortex?** After installing, see [docs/onboarding.md](docs/onboarding.md) for the 15-minute walkthrough: `gortex install` (once per machine) → `gortex init` (once per repo) → verify your AI assistant uses graph tools → what to do if it doesn't.
 
 ### macOS — Homebrew
 
@@ -184,19 +184,19 @@ go install github.com/zzet/gortex/cmd/gortex@latest
 
 ## Quick Start
 
-`gortex init` in a terminal opens an interactive wizard that asks whether you want a global daemon or per-project setup, and whether to track the current repo + start the daemon immediately. For scripts or CI the flags below skip the prompt.
+Setup is split into two commands — `gortex install` runs once per machine, `gortex init` runs once per repo:
 
-### Global mode (recommended when you work across multiple repos)
+- **`gortex install`** writes user-level artifacts: `~/.claude.json` MCP config, `~/.claude/skills/gortex-*` (tool-usage skills), `~/.claude/commands/gortex-*.md` (slash commands), `~/.gemini/antigravity/` Knowledge Items, and (optionally) user-level Claude Code hooks. Codebase-agnostic content lives here so it isn't duplicated into every repo.
+- **`gortex init`** writes per-repo artifacts: `.mcp.json`, `.claude/settings.{json,local.json}`, `CLAUDE.md` with the codebase overview and community routing, `.claude/skills/generated/` per-community SKILL.md files, and a marker-guarded community routing block in every other detected agent's per-repo instructions file (`AGENTS.md`, `.windsurfrules`, `GEMINI.md`, `.cursor/rules/gortex-communities.mdc`, etc.).
+
+### One-time machine setup
 
 ```bash
-# Interactive: walks you through mode choice + follow-ups
-cd ~/projects/myapp
-gortex init
+gortex install                      # interactive-free: MCP + skills + slash commands at ~/.claude/
+gortex install --start --track      # also spawn the daemon and track the current directory
+gortex install --no-hooks           # skip user-level hook installation
 
-# Non-interactive equivalent (CI / scripts):
-gortex init --global --start --track
-
-# Daemon lifecycle:
+# Daemon lifecycle (also spawned by `gortex install --start`):
 gortex daemon start --detach        # spawn in background
 gortex daemon status                # PID, uptime, memory, tracked repos, sessions
 gortex daemon stop                  # graceful shutdown + final snapshot
@@ -217,14 +217,16 @@ gortex untrack backend
 gortex status
 ```
 
-### Per-repo mode
+### Per-repo setup
 
 ```bash
-# Pick [2] at the wizard, or pass no --global flag and the config stays local:
-gortex init /path/to/repo               # creates .mcp.json, CLAUDE.md, hooks, commands
-gortex init --analyze /path/to/repo     # indexes first for a richer CLAUDE.md
-gortex init --hooks-only /path/to/repo  # (re)install hooks only, skip everything else
-gortex init --no-hooks /path/to/repo    # full init but skip hook installation
+cd ~/projects/myapp
+gortex init                             # writes .mcp.json, .claude/settings.*, CLAUDE.md with community routing
+gortex init --analyze                   # also index first for a richer CLAUDE.md overview
+gortex init --no-skills                 # skip community-routing generation
+gortex init --skills-min-size 5 --skills-max 10   # tune the generator
+gortex init --hooks-only                # (re)install repo-local hooks only, skip everything else
+gortex init --no-hooks                  # full init but skip hook installation
 
 # Run the MCP server standalone (auto-detects daemon via stdio; --no-daemon forces embedded):
 gortex serve --index /path/to/repo --watch
@@ -234,7 +236,6 @@ gortex serve --no-daemon --watch        # explicit embedded mode
 ### Other commands
 
 ```bash
-gortex skills /path/to/repo              # generate per-community SKILL.md files for Claude Code
 gortex bridge --index . --web            # HTTP bridge API + web graph UI at :4747
 gortex savings                           # cumulative tokens saved + $ avoided across sessions
 gortex version
@@ -347,32 +348,34 @@ All query tools (`search_symbols`, `get_symbol`, `find_usages`, `get_file_summar
 
 ## Usage with Claude Code
 
-After running `gortex init`, Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
+After `gortex install` (once per machine) and `gortex init` (once per repo), Claude Code automatically starts Gortex via `.mcp.json`. The agent gets:
 
-- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor`
-- **Global skills:** installed to `~/.claude/skills/` — available across all repos
+- **Slash commands:** `/gortex-guide`, `/gortex-explore`, `/gortex-debug`, `/gortex-impact`, `/gortex-refactor` — installed to `~/.claude/commands/` by `gortex install`
+- **Tool-usage skills:** installed to `~/.claude/skills/` by `gortex install` — one copy per user, used across every repo
 - **PreToolUse hook:** automatic graph context + graph-tool suggestions on Read/Grep/Glob
 - **PreCompact hook:** condensed orientation snapshot injected before context compaction so the agent resumes without re-exploring
 - **Stop hook:** post-task diagnostics — tests to run, guard violations, dead code, and contract issues on the changed symbols — injected as context before the agent hands off
-- **CLAUDE.md instructions:** mandatory tool usage table and session workflow
+- **CLAUDE.md:** per-repo codebase overview (via `--analyze`) plus a marker-guarded community routing block written by `gortex init --skills`
 
 ## Usage with other agents
 
-`gortex init` auto-detects and configures 14 other AI coding assistants — Kiro, Cursor, VS Code / Copilot, Windsurf, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw. Each adapter writes only when its host is present on the machine, and every re-run is idempotent.
+`gortex install` (user-level) and `gortex init` (repo-level) together auto-detect and configure 14 other AI coding assistants — Kiro, Cursor, VS Code / Copilot, Windsurf, Continue.dev, Cline, OpenCode, Antigravity, Codex CLI, Gemini CLI, Zed, Aider, Kilo Code, OpenClaw. Each adapter writes only when its host is present on the machine, and every re-run is idempotent.
+
+Tool-usage guidance for agents that have a user-level surface (Claude Code, Antigravity) lives once per user; for the rest, MCP tool descriptions carry the teaching and `gortex init` adds only a per-repo community-routing block — no more duplicated instructions blocks in every repo.
 
 - **Adapter matrix + per-agent schema notes:** [`docs/agents.md`](docs/agents.md)
 - **Audit what's currently configured:** `gortex init doctor` (zero-op; `--json` for CI consumers)
-- **Constrain setup:** `gortex init --agents=claude-code,cursor` or `--agents-skip=antigravity`
-- **CI / scripted install:** `gortex init --yes --json --dry-run`
+- **Constrain setup:** `gortex init --agents=claude-code,cursor` or `--agents-skip=antigravity` (same flags accepted by `gortex install`)
+- **CI / scripted install:** `gortex install --yes --json` then `gortex init --yes --json --dry-run`
 
 ## CLI Commands
 
 ```
-gortex init [path]           Set up Gortex for a project + install global skills
+gortex install               One-time machine-wide setup (user-level MCP, skills, hooks, daemon wiring)
+gortex init [path]           Per-repo setup (.mcp.json, hooks, community routing, per-community SKILL.md)
 gortex serve [flags]         Start the MCP server (--bridge to add HTTP API)
 gortex bridge [flags]        Start standalone HTTP bridge API
 gortex eval-server [flags]   Start eval HTTP server for benchmarking
-gortex skills [path]         Generate per-community SKILL.md files
 gortex context [flags]       Generate portable context briefing for a task
 gortex savings [flags]       Show cumulative token savings + cost avoided across sessions
 gortex index [path...]       Index one or more repositories and print stats
@@ -381,7 +384,6 @@ gortex track <path>          Add a repository to the tracked workspace
 gortex untrack <path>        Remove a repository from the tracked workspace
 gortex query <subcommand>    Query the knowledge graph
 gortex clean                 Remove Gortex files from a project
-gortex claude-md [flags]     Generate CLAUDE.md block
 gortex version               Print version
 ```
 
@@ -579,14 +581,15 @@ Contracts are normalized to canonical IDs (e.g., `http::GET::/api/users/{id}`) a
 
 ## Per-Community Skills
 
-`gortex skills` analyzes your codebase, detects functional communities via Louvain clustering, and generates targeted SKILL.md files that Claude Code auto-discovers:
+`gortex init --skills` (default on) analyzes your codebase, detects functional communities via Louvain clustering, and generates targeted SKILL.md files that Claude Code auto-discovers:
 
 ```bash
-# Generate skills for the current repo
-gortex skills .
+# Runs as part of `gortex init` by default — community generation is folded in
+gortex init
 
-# Custom settings
-gortex skills . --min-size 5 --max-communities 10 --output-dir .claude/skills/generated/
+# Tune or disable:
+gortex init --skills-min-size 5 --skills-max 10
+gortex init --no-skills
 ```
 
 Each generated skill includes:
@@ -596,7 +599,7 @@ Each generated skill includes:
 - **Cross-community connections** — which other areas this community interacts with
 - **MCP tool invocations** — pre-written `get_communities`, `smart_context`, `find_usages` calls
 
-Skills are written to `.claude/skills/generated/` and a routing table is inserted into CLAUDE.md between `<!-- gortex:skills:start/end -->` markers.
+For Claude Code, skills are written to `.claude/skills/generated/<DirName>/SKILL.md`, and a routing table is inserted into `CLAUDE.md` between `<!-- gortex:communities:start/end -->` markers. Every other detected agent gets the same routing table inside its per-repo instructions surface (`AGENTS.md` for Codex/OpenCode, `.windsurfrules` for Windsurf, `GEMINI.md` for Gemini CLI, `.cursor/rules/gortex-communities.mdc` for Cursor, etc.) — so the routing is consistent across tools on the same repo.
 
 ## Semantic Search
 

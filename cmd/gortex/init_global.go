@@ -5,57 +5,18 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/spf13/cobra"
-
 	"github.com/zzet/gortex/internal/daemon"
 )
 
-// runGlobalFollowUps performs the post-setup daemon control-plane
-// operations for `gortex init --global`:
-//
-//   - --start spawns the daemon detached
-//   - --track registers the current repo with the running daemon
-//
-// These don't fit the Adapter interface because they touch the
-// daemon's RPC protocol, not on-disk config files.
-func runGlobalFollowUps(cmd *cobra.Command, absRoot string) error {
-	w := cmd.ErrOrStderr()
-
-	if initStartDaemon {
-		if daemon.IsRunning() {
-			_, _ = fmt.Fprintln(w, "[gortex init --global] daemon already running (skipped --start)")
-		} else {
-			if err := spawnDetachedDaemon(); err != nil {
-				return fmt.Errorf("start daemon: %w", err)
-			}
-			_, _ = fmt.Fprintln(w, "[gortex init --global] daemon started (detached)")
-		}
-	}
-
-	if initTrackRepo {
-		if !daemon.IsRunning() {
-			_, _ = fmt.Fprintln(w, "[gortex init --global] ⚠ skipping --track: daemon is not running (try `gortex daemon start`)")
-		} else {
-			resp, err := trackViaDaemon(absRoot)
-			if err != nil {
-				return fmt.Errorf("track %s: %w", absRoot, err)
-			}
-			_, _ = fmt.Fprintf(w, "[gortex init --global] tracked %s (%s)\n", absRoot, resp)
-		}
-	}
-
-	if !initStartDaemon {
-		_, _ = fmt.Fprintln(w, "\nNext: start the daemon → `gortex daemon start --detach`")
-	}
-	if !initTrackRepo && initStartDaemon {
-		_, _ = fmt.Fprintln(w, "Then: track this repo → `gortex track .` (or open Claude Code here and follow the suggestion)")
-	}
-	return nil
-}
+// This file hosts daemon-side helpers shared between `gortex install`
+// (which spawns / tracks at user-level setup time) and `gortex init`
+// (which uses ensureGlobalConfig to register the repo with the
+// daemon config). They don't fit the Adapter interface because they
+// touch the daemon's RPC protocol, not on-disk agent config.
 
 // ensureGlobalConfigExists creates an empty ~/.config/gortex/config.yaml
 // when none is present. The daemon needs a writable path on first
-// Track; creating it now surfaces any permission problems at init
+// Track; creating it now surfaces any permission problems at install
 // time instead of on the first use.
 func ensureGlobalConfigExists() error {
 	home, err := os.UserHomeDir()

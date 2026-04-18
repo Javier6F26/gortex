@@ -65,14 +65,25 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{
+	p := &agents.Plan{Files: []agents.FileAction{
 		{Path: filepath.Join(env.Root, ".aiderignore"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-ignore-block"}},
-		{Path: filepath.Join(env.Root, "CONVENTIONS.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
-	}}, nil
+	}}
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: filepath.Join(env.Root, "CONVENTIONS.md"), Action: agents.ActionWouldMerge,
+			Keys: []string{"communities-block"},
+		})
+	}
+	return p, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
 	res := &agents.Result{Name: Name, DocsURL: DocsURL}
+	// Aider has no user-level MCP surface today — all artifacts
+	// are per-repo, so ModeGlobal is a no-op.
+	if env.Mode == agents.ModeGlobal {
+		return res, nil
+	}
 	detected, _ := a.Detect(env)
 	res.Detected = detected
 	if !detected {
@@ -87,19 +98,22 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	res.Files = append(res.Files, action)
 
-	// CONVENTIONS.md is the file aider users canonically `/read` (or
-	// wire into .aider.conf.yml's `read:` list) to pin project-wide
-	// guidance into every session. We append the block here; touching
-	// the user's aider.conf is left to them because that file routinely
-	// carries per-user settings we don't want to disturb.
-	conventionsPath := filepath.Join(env.Root, "CONVENTIONS.md")
-	mdAction, err := agents.AppendInstructions(env.Stderr, conventionsPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
-	if err != nil {
-		return res, err
-	}
-	res.Files = append(res.Files, mdAction)
-	if mdAction.Action == agents.ActionCreate || mdAction.Action == agents.ActionMerge {
-		internalutil.Logf(env.Stderr, "[gortex init] add CONVENTIONS.md to your .aider.conf.yml `read:` list to load it on every aider session")
+	// CONVENTIONS.md is the file aider users canonically `/read`
+	// (or wire into .aider.conf.yml's `read:` list). Write a
+	// marker-guarded community-routing block there when skills
+	// were generated. Otherwise leave the file alone so we don't
+	// create an empty CONVENTIONS.md users have to delete.
+	if env.SkillsRouting != "" {
+		conventionsPath := filepath.Join(env.Root, "CONVENTIONS.md")
+		routingAction, err := agents.UpsertMarkedBlock(env.Stderr, conventionsPath, env.SkillsRouting,
+			agents.CommunitiesStartMarker, agents.CommunitiesEndMarker, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, routingAction)
+		if routingAction.Action == agents.ActionCreate {
+			internalutil.Logf(env.Stderr, "[gortex init] add CONVENTIONS.md to your .aider.conf.yml `read:` list to load it on every aider session")
+		}
 	}
 
 	res.Configured = true

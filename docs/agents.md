@@ -1,47 +1,78 @@
 # Agent Integrations
 
-`gortex init` auto-configures Gortex for every AI coding assistant it
-detects on your machine. Fifteen adapters ship today.
+`gortex install` (once per machine) and `gortex init` (once per repo)
+auto-configure Gortex for every AI coding assistant detected on your
+machine. Fifteen adapters ship today.
 
-Run `gortex init doctor` to see what's currently configured. Run
-`gortex init --agents=<csv>` to constrain setup to a specific subset,
-or `--agents-skip=<csv>` to exclude one.
+- `gortex install` writes user-level machinery: `~/.claude.json` MCP,
+  `~/.claude/skills/gortex-*`, `~/.claude/commands/gortex-*.md`,
+  `~/.gemini/antigravity/` Knowledge Items, user-level Claude Code
+  hooks.
+- `gortex init` writes per-repo machinery: `.mcp.json`, per-agent
+  MCP configs (`.cursor/mcp.json`, `.vscode/mcp.json`, …), repo-local
+  Claude Code hooks, per-agent marker-guarded community-routing
+  blocks, and `.claude/skills/generated/` per-community SKILL.md.
+
+Run `gortex init doctor` to see what's currently configured. Both
+commands accept `--agents=<csv>` to constrain setup and
+`--agents-skip=<csv>` to exclude an adapter.
 
 ## Adapter matrix
 
-| Name            | What gets written                                            | Mode       | Docs link                                                           |
-| --------------- | ------------------------------------------------------------ | ---------- | ------------------------------------------------------------------- |
-| `claude-code`   | `.mcp.json`, `.claude/*`, `CLAUDE.md`, `~/.claude/skills/*`  | both       | https://docs.claude.com/en/docs/claude-code/overview                |
-| `aider`         | `.aiderignore` block                                         | project    | https://aider.chat/docs/config/aider_conf.html                      |
-| `antigravity`   | `~/.gemini/antigravity/mcp_config.json` + Knowledge Item     | user       | https://antigravity.google/docs/mcp                                 |
-| `cline`         | `cline_mcp_settings.json` (per VS Code / Cursor globalStorage) | user     | https://docs.cline.bot/mcp/mcp-overview                             |
-| `codex`         | `~/.codex/config.toml` (`[mcp_servers.gortex]`)              | user       | https://developers.openai.com/codex/mcp                             |
-| `continue`      | `.continue/mcpServers/gortex.json`                           | project    | https://docs.continue.dev/customize/deep-dives/mcp                  |
-| `cursor`        | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`         | both       | https://docs.cursor.com/en/context/mcp                              |
-| `gemini`        | `.gemini/settings.json` or `~/.gemini/settings.json`         | both       | https://geminicli.com/docs/tools/mcp-server/                        |
-| `kilocode`      | `mcp_settings.json` + `.kilocode/mcp.json`                   | both       | https://kilo.ai/docs/features/mcp/using-mcp-in-kilo-code            |
-| `kiro`          | `.kiro/settings/mcp.json` + steering/hooks or user-level     | both       | https://kiro.dev/docs/mcp/configuration                             |
-| `opencode`      | `.opencode/config.json`                                      | project    | https://opencode.ai/docs/mcp                                        |
-| `openclaw`      | `~/.openclaw/openclaw.json` (`mcp.servers.gortex`)           | user       | https://docs.openclaw.ai/cli/mcp                                    |
-| `vscode`        | `.vscode/mcp.json` (`servers` key, 1.102+ schema)            | project    | https://code.visualstudio.com/docs/copilot/chat/mcp-servers         |
-| `windsurf`      | `~/.codeium/mcp_config.json`                                 | user       | https://docs.windsurf.com/plugins/cascade/mcp                       |
-| `zed`           | OS-specific `settings.json` (`context_servers`)              | user       | https://zed.dev/docs/ai/mcp                                         |
+| Name            | What gets written                                                                               | Mode       | Docs link                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------- |
+| `claude-code`   | `.mcp.json`, `.claude/*`, `CLAUDE.md`, `.claude/skills/generated/*`, `~/.claude/skills/gortex-*`, `~/.claude/commands/gortex-*.md`, `~/.claude.json` | both       | https://docs.claude.com/en/docs/claude-code/overview                |
+| `aider`         | `.aiderignore` block, `CONVENTIONS.md` communities block                                        | project    | https://aider.chat/docs/config/aider_conf.html                      |
+| `antigravity`   | `~/.gemini/antigravity/mcp_config.json` + Knowledge Item                                        | user       | https://antigravity.google/docs/mcp                                 |
+| `cline`         | `cline_mcp_settings.json` (per VS Code / Cursor globalStorage), `.clinerules/gortex-communities.md` | both     | https://docs.cline.bot/mcp/mcp-overview                             |
+| `codex`         | `~/.codex/config.toml` (`[mcp_servers.gortex]`), `AGENTS.md` communities block                  | both       | https://developers.openai.com/codex/mcp                             |
+| `continue`      | `.continue/mcpServers/gortex.json`, `.continue/rules/gortex-communities.md`                     | project    | https://docs.continue.dev/customize/deep-dives/mcp                  |
+| `cursor`        | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json`, `.cursor/rules/gortex-communities.mdc`    | both       | https://docs.cursor.com/en/context/mcp                              |
+| `gemini`        | `.gemini/settings.json` or `~/.gemini/settings.json`, `GEMINI.md` communities block             | both       | https://geminicli.com/docs/tools/mcp-server/                        |
+| `kilocode`      | `mcp_settings.json` + `.kilocode/mcp.json`, `.kilocoderules` communities block                  | both       | https://kilo.ai/docs/features/mcp/using-mcp-in-kilo-code            |
+| `kiro`          | `.kiro/settings/mcp.json` + steering/hooks or user-level                                        | both       | https://kiro.dev/docs/mcp/configuration                             |
+| `opencode`      | `.opencode/config.json`, `AGENTS.md` communities block                                          | project    | https://opencode.ai/docs/mcp                                        |
+| `openclaw`      | `~/.openclaw/openclaw.json` (`mcp.servers.gortex`)                                              | user       | https://docs.openclaw.ai/cli/mcp                                    |
+| `vscode`        | `.vscode/mcp.json` (`servers` key, 1.102+), `.github/copilot-instructions.md` communities block | project    | https://code.visualstudio.com/docs/copilot/chat/mcp-servers         |
+| `windsurf`      | `~/.codeium/mcp_config.json`, `.windsurfrules` communities block                                | both       | https://docs.windsurf.com/plugins/cascade/mcp                       |
+| `zed`           | OS-specific `settings.json` (`context_servers`), `.rules` communities block                     | both       | https://zed.dev/docs/ai/mcp                                         |
 
-Mode legend: **project** writes inside the repo; **user** writes
-under `$HOME`; **both** respects `--global` to choose.
+Mode legend: **project** writes inside the repo (`gortex init` only);
+**user** writes under `$HOME` (`gortex install` only); **both** means
+the adapter splits: `gortex install` writes the user-level pieces and
+`gortex init` writes the repo-level pieces.
+
+Tool-usage guidance (how to prefer graph tools over `Read`/`Grep`) no
+longer gets duplicated into every repo. For Claude Code and
+Antigravity — the two adapters whose upstream tool exposes a
+user-level instructions surface — the guidance lives once per user
+(installed by `gortex install`). For the other 13, MCP tool
+descriptions carry the teaching. Only codebase-derived community
+routing lands in per-repo instructions files.
 
 ## Common CLI flags
 
 ```
-gortex init                          # interactive, default mode
-gortex init --yes                    # skip wizard, use defaults
+# Machine-wide (run once)
+gortex install                       # user-level MCP, skills, slash commands, hooks
+gortex install --start --track       # also spawn daemon + track current dir
+gortex install --agents=claude-code  # constrain to one adapter
+gortex install --dry-run --json      # plan-only, JSON report
+
+# Per repo (run in each project)
+gortex init                          # interactive: only asks about hooks
+gortex init --yes                    # skip prompt, use defaults
+gortex init --analyze                # include a richer CLAUDE.md codebase overview
+gortex init --no-skills              # skip community-routing generation
+gortex init --skills-min-size 5 --skills-max 10
 gortex init --agents=claude-code,cursor     # allow-list
 gortex init --agents-skip=antigravity       # block-list
 gortex init --dry-run --json         # plan, emit JSON report
 gortex init --force                  # overwrite merge-preserved keys
 gortex init --hooks-only             # refresh Claude Code hooks only
-gortex init --global                 # user-wide install + daemon wiring
-gortex init doctor                   # observe-only report
+
+# Observe-only
+gortex init doctor                   # read-only state report
 gortex init doctor --json            # machine-readable report
 ```
 
@@ -73,17 +104,39 @@ Every write funnels through `agents.WriteIfNotExists`,
 
 ### claude-code
 
-The primary integration. Writes six artifacts in project mode
-(`.mcp.json`, `.claude/commands/gortex-*.md`, `.claude/settings.json`,
-`.claude/settings.local.json`, `CLAUDE.md`, `~/.claude/skills/gortex-*`).
-Hooks installed today: **PreToolUse**, **PreCompact**, **Stop**,
-**SessionStart** — the SessionStart handler fires on new or resumed
-sessions to prime the first turn with graph orientation, complementing
-PreCompact which fires on summary boundaries.
+The primary integration, split across the two commands.
 
-Global mode (`--global`) writes `~/.claude.json` (user-level MCP) and
-`~/.claude/settings.local.json` (user-level hooks) instead, so every
-project Claude Code opens uses the shared daemon.
+**`gortex install` (user-level, once per machine)** writes:
+
+- `~/.claude.json` — MCP stanza pointing at `gortex serve`
+- `~/.claude/settings.local.json` — user-level Claude Code hooks
+  (unless `--no-hooks`)
+- `~/.claude/skills/gortex-*/SKILL.md` — curated tool-usage skills
+  (`gortex-guide`, `gortex-explore`, `gortex-debug`, `gortex-impact`,
+  `gortex-refactor`), one source of truth per user instead of copied
+  into every repo
+- `~/.claude/commands/gortex-*.md` — slash commands
+  (`/gortex-guide`, etc.), also codebase-agnostic and therefore
+  user-level
+
+**`gortex init` (per repo)** writes:
+
+- `.mcp.json` — project MCP stanza
+- `.claude/settings.json` — MCP permissions merge
+  (`mcp__gortex__*` allowlist)
+- `.claude/settings.local.json` — repo-local hooks (unless
+  `--no-hooks`)
+- `CLAUDE.md` — marker-guarded block (`<!-- gortex:communities:start -->`
+  / `<!-- gortex:communities:end -->`) carrying the codebase overview
+  (via `--analyze`) and the community routing (via `--skills`,
+  default on); if neither flag produces content, no block is written
+- `.claude/skills/generated/<DirName>/SKILL.md` — one per detected
+  community, regenerated each run so the content tracks the graph
+
+Hooks installed today: **PreToolUse**, **PreCompact**, **Stop**,
+**SessionStart** — SessionStart fires on new or resumed sessions to
+prime the first turn with graph orientation; PreCompact fires on
+summary boundaries.
 
 ### aider
 
@@ -120,8 +173,12 @@ simplicity; upgrading to the YAML+metadata form is tracked.
 
 ### cursor
 
-Project-level `.cursor/mcp.json` by default; `~/.cursor/mcp.json`
-when `--global` is set. Env key is `env` (not `environment`).
+Project-level `.cursor/mcp.json` (written by `gortex init`);
+`~/.cursor/mcp.json` (written by `gortex install`). Env key is `env`
+(not `environment`). Cursor does not expose a user-level rules
+surface, so community-routing lives per-repo at
+`.cursor/rules/gortex-communities.mdc` — regenerated each `gortex
+init` run so it tracks the current graph.
 
 ### gemini
 
@@ -138,11 +195,11 @@ when a project-level directory exists.
 
 ### kiro
 
-Workspace `.kiro/settings/mcp.json` + steering/hooks in project
-mode; `~/.kiro/settings/mcp.json` only in global mode (steering
-and hooks are project-scoped in Kiro's runtime). The MCP entry
-carries `autoApprove` and explicit `disabled: false` keys Kiro's
-UI expects.
+Workspace `.kiro/settings/mcp.json` + steering/hooks via `gortex
+init`; `~/.kiro/settings/mcp.json` via `gortex install` (steering
+and hooks are project-scoped in Kiro's runtime so they stay per-repo).
+The MCP entry carries `autoApprove` and explicit `disabled: false`
+keys Kiro's UI expects.
 
 ### opencode
 

@@ -8,81 +8,80 @@ Just installed Gortex? This is the shortest path from "it's on my machine" to "i
 - A repository you want to work in. We'll call it `~/projects/myapp` in the examples — substitute your own path.
 - An AI coding assistant installed. Gortex auto-integrates with Claude Code, Cursor, Kiro, Windsurf, GitHub Copilot (VS Code), Continue.dev, Cline, OpenCode, and Antigravity.
 
-## Two Setup Modes
+## Two Commands
 
-**Global (recommended if you work across multiple repos):** one long-living daemon holds the graph for every repo you track. Every Claude Code session reads from the same shared index; cross-repo queries work by default.
+Setup is split into two commands so codebase-agnostic machinery lives once per user, not once per repo:
 
-**Per-repo (simpler, one index per project):** legacy default. Each MCP client spawns its own indexer.
+- **`gortex install`** — run **once per machine**. Writes user-level artifacts: `~/.claude.json` (MCP config), `~/.claude/skills/gortex-*` (tool-usage skills), `~/.claude/commands/gortex-*.md` (slash commands), `~/.gemini/antigravity/` Knowledge Items, and (optionally) user-level Claude Code hooks. Also sets up the daemon — pass `--start` to spawn it, `--track` to register the current directory.
+- **`gortex init`** — run **once per repo**. Writes per-repo artifacts: `.mcp.json`, `.claude/settings.{json,local.json}`, `CLAUDE.md` with the codebase overview and community routing, `.claude/skills/generated/` per-community SKILL.md files, and a marker-guarded community-routing block in every other detected agent's per-repo instructions file.
 
-Just run `gortex init` in your repo — when stdin is a terminal, it asks you which mode you want:
-
-```
-$ gortex init
-
-How should Gortex integrate with your AI tools?
-  [1] Global daemon (recommended) — one graph across all projects,
-      per-client session isolation, live file watching, user-level hooks
-  [2] Per-repo — isolated server per project; each Claude Code window
-      spawns its own indexer (current default)
-Choice [1/2] (default: 1): 1
-Track this repository with the daemon now? [Y/n]: y
-Start the daemon now (detached)? [Y/n]: y
-```
-
-For CI, scripts, or explicit control, pass the flags directly and the wizard is skipped:
+You can run them independently — `gortex init` doesn't require `gortex install` first; it just writes less if the user-level wiring isn't there.
 
 ```bash
-gortex init --global --start --track   # explicit global setup
-gortex init                            # in a non-TTY: falls back to per-repo
-cd ~/projects/myapp && gortex init     # per-repo (pick [2] at the wizard)
+# One-time: machine-wide user-level setup
+gortex install --start --track         # install, start daemon, track current dir
+
+# Per repo: drop into the repo and wire it up
+cd ~/projects/myapp
+gortex init                            # default: indexes repo, generates community routing
 ```
 
-Global is the more interesting experience once you have more than one repo. Per-repo is fine for single-project workflows. The rest of this doc covers per-repo in depth; see the [Global mode](#global-mode) section at the bottom for the daemon walkthrough.
+For CI, scripts, or explicit control, both commands accept the usual flags (`--yes`, `--json`, `--dry-run`, `--agents`, `--agents-skip`, `--force`).
 
 ## 30-Second Version
 
 ```bash
+# Once per machine
+gortex install --start --track
+
+# Once per repo
 cd ~/projects/myapp
-gortex init                   # interactive: pick global or per-repo, optionally start daemon + track repo
+gortex init
 ```
 
-If you picked global + started the daemon, you're done — Claude Code will find Gortex on its next run. If you picked per-repo, also start the MCP server:
+With `--start`, the daemon is already running and Claude Code will find Gortex on its next run. If you skipped `--start`, you can either spawn the daemon (`gortex daemon start --detach`) or run a per-repo server (`gortex serve --index . --watch`).
 
-```bash
-gortex serve --index . --watch # per-repo only; global mode auto-starts via the daemon
-```
-
-Now open your AI assistant in that repo and ask it to do something real. It'll use Gortex tools automatically. If that worked, the rest of this document is optional detail.
+Open your AI assistant in that repo and ask it to do something real. It'll use Gortex tools automatically. If that worked, the rest of this document is optional detail.
 
 ## Step-by-Step
 
-### 1. Set up integration for the repo
+### 1. One-time: user-level setup
+
+```bash
+gortex install                    # MCP config, skills, slash commands, KIs at ~/
+gortex install --start --track    # also spawn the daemon + track current dir
+gortex install --no-hooks         # skip user-level Claude Code hooks
+```
+
+This writes under `$HOME` only. It's idempotent — re-running it is safe. Think of it like `brew install`.
+
+### 2. Per repo: wire it up
 
 ```bash
 cd ~/projects/myapp
 gortex init
 ```
 
-In a terminal this opens the interactive wizard (global vs per-repo, optional daemon start + track). In CI / non-TTY stdin, it silently falls through to per-repo mode — the historical behavior. Pass `--global` or `--per-repo` (via unset) explicitly to skip the prompt.
+`gortex init` creates tool-specific config files (auto-detecting which tools you have installed) and runs community detection on the graph so each agent gets codebase-specific routing. Commit the output — your teammates get Gortex for free when they pull.
 
-The per-repo path creates tool-specific config files (auto-detecting which tools you have installed). The output lists them all. Commit them — your teammates get Gortex for free when they pull.
-
-**Key files it creates:**
+**Key files `gortex init` creates:**
 
 - `.mcp.json` — tells MCP clients (Claude Code, Cursor, VS Code) how to start the Gortex server
-- `CLAUDE.md` — instructions for Claude Code telling it to prefer Gortex tools over `Read` / `Grep`
+- `CLAUDE.md` — codebase overview (with `--analyze`) plus a marker-guarded community-routing block
 - `.claude/settings.local.json` — installs three hooks: `PreToolUse` (redirects `Read` / `Grep` / `Glob` / `Task`), `PreCompact` (injects orientation snapshot before context compaction), `Stop` (post-task diagnostics)
-- `.cursor/mcp.json`, `.kiro/settings/mcp.json`, `.vscode/mcp.json`, etc. — equivalents for other tools
+- `.claude/skills/generated/<DirName>/SKILL.md` — one per detected community (via `--skills`, default on)
+- `.cursor/mcp.json`, `.kiro/settings/mcp.json`, `.vscode/mcp.json`, etc. — per-agent MCP configs
+- Marker-guarded "Gortex Communities" routing block in each detected agent's per-repo instructions file (`AGENTS.md`, `.windsurfrules`, `GEMINI.md`, `.cursor/rules/gortex-communities.mdc`, etc.)
 
-**If your repo is unfamiliar:**
+**Tune the community generator:**
 
 ```bash
-gortex init --analyze
+gortex init --analyze                         # include a richer codebase overview in CLAUDE.md
+gortex init --no-skills                       # skip community generation entirely
+gortex init --skills-min-size 5 --skills-max 10   # raise the floor / lower the ceiling
 ```
 
-This indexes the codebase first and prepends a repo-specific overview (language breakdown, entry points, communities, top hotspots) to the `CLAUDE.md` block. The AI will start with real context instead of generic tool instructions.
-
-### 2. Start the MCP server
+### 3. Start the MCP server
 
 Two ways — pick whichever fits your workflow.
 
@@ -106,7 +105,7 @@ Open `http://localhost:4747` for the force-directed graph explorer.
 
 If you're unsure, start with Option A. You can always remove the `.mcp.json` → switch to Option B later.
 
-### 3. Verify the integration
+### 4. Verify the integration
 
 Open your AI assistant in the repo. Ask it something concrete that requires understanding the code:
 
@@ -131,7 +130,7 @@ gortex status --index .
 
 Prints node/edge counts, language breakdown, and per-repo stats. If this shows 0 nodes, the index didn't build — check for errors in `gortex serve` output.
 
-### 4. Your first calls (if you're driving Gortex directly)
+### 5. Your first calls (if you're driving Gortex directly)
 
 For debugging, writing custom agents, or working with the bridge HTTP API — the "good first calls" in order:
 
@@ -144,7 +143,7 @@ For debugging, writing custom agents, or working with the bridge HTTP API — th
 3. **`smart_context` with the task** — does what `plan_turn` recommended as step 1, but assembles the actual context (relevant symbols, entry file structure, related tests) rather than just pointing at tools.
 4. **Before editing any file — `get_editing_context` on its path.** Returns all symbols, signatures, direct dependencies, immediate callers. You don't need to read the file.
 
-### 5. What the hooks do automatically
+### 6. What the hooks do automatically
 
 Once installed, three things happen without you lifting a finger:
 
@@ -181,15 +180,15 @@ Once the basics are working:
 
 - **Multi-repo workspaces** — index several repos into one graph for cross-repo impact analysis. See [Multi-Repo Workspaces](../README.md#multi-repo-workspaces) in the README.
 - **Guard rules** — add `.gortex.yaml` to declare architectural invariants (e.g., "UI must not import DB directly"). `check_guards` enforces them on every change. See `.gortex.yaml` in this repo for an example.
-- **Per-community skills** — run `gortex skills .` to generate Claude Code skill files, one per detected subsystem. Each skill auto-activates when the agent asks about that area.
+- **Per-community skills** — already generated by `gortex init --skills` (default on). Each skill auto-activates when the agent asks about that area. Re-run `gortex init` to regenerate after the graph changes; pass `--no-skills` if you want to skip that step.
 - **Token savings + cost tracking** — `gortex savings` prints cumulative tokens saved + dollars avoided per model across all sessions. Accumulates automatically; no setup.
 - **Compact wire format (GCX1)** — every list-shaped tool accepts `format: "gcx"` for a round-trippable compact response. Median **−27.4% tokens** vs JSON on the benchmark, 100% round-trip integrity. Spec: [docs/wire-format.md](wire-format.md). TypeScript decoder on npm: [`@gortex/wire`](https://www.npmjs.com/package/@gortex/wire). Agents pick it up automatically — the PreToolUse and subagent hooks surface the opt-in. Applies to: `search_symbols`, `find_usages`, `analyze`, `contracts`, `batch_symbols`, `get_callers` / `get_call_chain` / `get_dependencies` / `get_dependents` / `find_implementations`, `get_file_summary`, `get_editing_context`, `smart_context`.
 - **Feedback loop** — after a successful task, call the `feedback` MCP tool with `action: "record"`. Future `smart_context` results rerank based on what was actually useful.
 - **Custom bridge integration** — `gortex bridge --index . --cors-origin '*'` exposes every MCP tool as HTTP. Good for editor plugins, CI hooks, custom dashboards.
 
-## Global Mode
+## Daemon Mode
 
-The global mode runs Gortex as a long-living daemon that holds the graph for every tracked repo. All MCP clients (Claude Code windows, Cursor, Kiro, etc.) connect to the same daemon via a Unix socket, so:
+The daemon is a long-living process that holds the graph for every tracked repo. All MCP clients (Claude Code windows, Cursor, Kiro, etc.) connect to it via a Unix socket, so:
 
 - Memory scales with workspace size, not open-editor count — one process instead of one per project.
 - Cross-repo queries work by default: an agent in `frontend` can find callers in `backend` without extra config.
@@ -197,14 +196,9 @@ The global mode runs Gortex as a long-living daemon that holds the graph for eve
 
 ### Setup
 
-The simplest path: just run `gortex init` and pick option 1 at the wizard, saying yes to both follow-ups.
-
-For non-interactive setup (CI, scripts, or just preference):
-
 ```bash
-# One-time: install user-level Claude Code config + hooks, start the daemon,
-# and track the current repo.
-gortex init --global --start --track
+# One-time: user-level MCP config, skills, slash commands, hooks, daemon spawn + track.
+gortex install --start --track
 
 # Track additional repos any time:
 gortex track ~/projects/backend

@@ -27,6 +27,17 @@ import (
 // like AGENTS.md) we skip to stay idempotent.
 const InstructionsSentinel = "## MANDATORY: Use Gortex MCP tools"
 
+// CommunitiesStartMarker / CommunitiesEndMarker fence the generated
+// community-routing block that `gortex init` writes into per-repo
+// instructions files. Fenced (not just start-only) because this block
+// is regenerated on every `init` re-run as the codebase evolves, so
+// we need to identify and overwrite it precisely without clobbering
+// user edits around it.
+const (
+	CommunitiesStartMarker = "<!-- gortex:communities:start -->"
+	CommunitiesEndMarker   = "<!-- gortex:communities:end -->"
+)
+
 // InstructionsBody is the shared rule block every adapter writes to
 // its agent's instructions file. Tool names in the tables (Read, Grep)
 // are Claude-Code-specific flavour; models outside Claude Code read
@@ -191,4 +202,102 @@ alwaysApply: true
 ---
 
 ` + body
+}
+
+// UpsertMarkedBlock writes `body` into `path` between `startMarker`
+// and `endMarker`. Unlike AppendInstructions, this is idempotent AND
+// regeneratable: if the markers already exist the block between them
+// is replaced; otherwise the block is appended with a blank-line gap
+// to existing content. If `body` is empty and the markers exist, the
+// block is removed (migration use case). Creates the file if missing.
+//
+// Designed for the per-repo community-routing block which regenerates
+// on every `gortex init` run as the graph evolves.
+func UpsertMarkedBlock(w io.Writer, path, body, startMarker, endMarker string, opts ApplyOpts) (FileAction, error) {
+	existing, readErr := os.ReadFile(path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return FileAction{}, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	existed := readErr == nil
+	text := ""
+	if existed {
+		text = string(existing)
+	}
+
+	hasBlock := existed && strings.Contains(text, startMarker) && strings.Contains(text, endMarker)
+	empty := strings.TrimSpace(body) == ""
+
+	// Nothing to do: empty body and no existing block.
+	if empty && !hasBlock {
+		return FileAction{Path: path, Action: ActionSkip, Reason: "no-communities"}, nil
+	}
+
+	fenced := startMarker + "\n" + body + "\n" + endMarker + "\n"
+
+	var next string
+	switch {
+	case hasBlock:
+		start := strings.Index(text, startMarker)
+		end := strings.Index(text, endMarker) + len(endMarker)
+		// Trim trailing newline after the end marker so we don't
+		// accumulate blank lines on repeated re-runs.
+		if end < len(text) && text[end] == '\n' {
+			end++
+		}
+		if empty {
+			next = text[:start] + text[end:]
+		} else {
+			next = text[:start] + fenced + text[end:]
+		}
+	case !existed:
+		next = fenced
+	default:
+		prefix := ""
+		if len(text) > 0 {
+			if !strings.HasSuffix(text, "\n") {
+				prefix = "\n\n"
+			} else if !strings.HasSuffix(text, "\n\n") {
+				prefix = "\n"
+			}
+		}
+		next = text + prefix + fenced
+	}
+
+	// Skip when the file would end up byte-identical to what's
+	// already there — important for AssertIdempotent semantics and
+	// for avoiding spurious mtime bumps on `gortex init` re-runs
+	// when the graph hasn't changed.
+	if existed && next == text {
+		return FileAction{Path: path, Action: ActionSkip, Reason: "unchanged"}, nil
+	}
+
+	if opts.DryRun {
+		switch {
+		case !existed:
+			return FileAction{Path: path, Action: ActionWouldCreate, Keys: []string{"communities-block"}}, nil
+		case hasBlock:
+			return FileAction{Path: path, Action: ActionWouldMerge, Keys: []string{"communities-block"}}, nil
+		default:
+			return FileAction{Path: path, Action: ActionWouldMerge, Keys: []string{"communities-block"}}, nil
+		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return FileAction{}, err
+	}
+	if err := os.WriteFile(path, []byte(next), 0o644); err != nil {
+		return FileAction{}, err
+	}
+	if w != nil {
+		verb := "updated"
+		if !existed {
+			verb = "wrote"
+		}
+		_, _ = fmt.Fprintf(w, "[gortex init] %s %s (communities block)\n", verb, path)
+	}
+	action := ActionMerge
+	if !existed {
+		action = ActionCreate
+	}
+	return FileAction{Path: path, Action: action, Keys: []string{"communities-block"}}, nil
 }

@@ -85,11 +85,13 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 			})
 		}
 	}
-	p.Files = append(p.Files, agents.FileAction{
-		Path:   filepath.Join(env.Root, ".clinerules", "gortex.md"),
-		Action: agents.ActionWouldCreate,
-		Keys:   []string{"gortex-rule"},
-	})
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path:   filepath.Join(env.Root, ".clinerules", "gortex-communities.md"),
+			Action: agents.ActionWouldCreate,
+			Keys:   []string{"communities-rule"},
+		})
+	}
 	return p, nil
 }
 
@@ -118,15 +120,21 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		}
 		res.Files = append(res.Files, action)
 	}
-	// Cline reads .clinerules/*.md as project-scoped instructions on
-	// every chat turn. One-rule-per-file; create-only so user edits
-	// survive init re-runs.
-	rulesPath := filepath.Join(env.Root, ".clinerules", "gortex.md")
-	ruleAction, err := agents.WriteIfNotExists(env.Stderr, rulesPath, agents.InstructionsBody, opts)
-	if err != nil {
-		internalutil.Warnf(env.Stderr, "could not write Cline rules at %s: %v", rulesPath, err)
-	} else {
-		res.Files = append(res.Files, ruleAction)
+	// Cline reads .clinerules/*.md as project-scoped instructions
+	// on every chat turn. The community-routing file is ours
+	// end-to-end — regenerated each `gortex init` run so the
+	// listing tracks the current graph. Skipped in global mode
+	// (file is per-repo) and when --no-skills / no communities
+	// qualify.
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		rulesPath := filepath.Join(env.Root, ".clinerules", "gortex-communities.md")
+		body := agents.CommunitiesStartMarker + "\n" + env.SkillsRouting + "\n" + agents.CommunitiesEndMarker + "\n"
+		ruleAction, err := agents.WriteOwnedFile(env.Stderr, rulesPath, body, opts)
+		if err != nil {
+			internalutil.Warnf(env.Stderr, "could not write Cline community rules at %s: %v", rulesPath, err)
+		} else {
+			res.Files = append(res.Files, ruleAction)
+		}
 	}
 
 	res.Configured = len(res.Files) > 0

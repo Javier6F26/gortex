@@ -14,11 +14,17 @@ import (
 // acceptance test for the most important adapter. It asserts that
 // a fresh project gets:
 //   - .mcp.json with our server stanza
-//   - .claude/commands/gortex-*.md (one per SlashCommand)
 //   - .claude/settings.json with MCP permissions
 //   - .claude/settings.local.json with the three hook events
-//   - CLAUDE.md with the instructions block
-//   - ~/.claude/skills/gortex-* (one per GlobalSkill)
+//   - CLAUDE.md with the marker-guarded communities block (since
+//     the test env seeds SkillsRouting)
+//   - .claude/skills/generated/<DirName>/SKILL.md (one per
+//     GeneratedSkill)
+//
+// Slash commands and the curated GlobalSkills are NOT written in
+// project mode anymore — they're user-level artifacts installed by
+// `gortex install`. TestClaudeCodeGlobalModeWritesUserFiles covers
+// those.
 //
 // Re-running must be a no-op (idempotent contract).
 func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
@@ -39,11 +45,8 @@ func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
 		filepath.Join(env.Root, ".claude", "settings.local.json"),
 		filepath.Join(env.Root, "CLAUDE.md"),
 	}
-	for name := range SlashCommands {
-		expected = append(expected, filepath.Join(env.Root, ".claude", "commands", name))
-	}
-	for name := range GlobalSkills {
-		expected = append(expected, filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"))
+	for _, s := range env.GeneratedSkills {
+		expected = append(expected, filepath.Join(env.Root, ".claude", "skills", "generated", s.DirName, "SKILL.md"))
 	}
 	for _, p := range expected {
 		if _, err := os.Stat(p); err != nil {
@@ -51,10 +54,27 @@ func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
 		}
 	}
 
-	// CLAUDE.md must contain the sentinel we key idempotency on.
+	// Project-mode must NOT touch the user-level slash commands or
+	// curated skills — those live in install mode now.
+	for name := range SlashCommands {
+		if _, err := os.Stat(filepath.Join(env.Home, ".claude", "commands", name)); err == nil {
+			t.Errorf("project mode unexpectedly wrote user-level slash command %s", name)
+		}
+		if _, err := os.Stat(filepath.Join(env.Root, ".claude", "commands", name)); err == nil {
+			t.Errorf("project mode unexpectedly wrote project-level slash command %s", name)
+		}
+	}
+	for name := range GlobalSkills {
+		if _, err := os.Stat(filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md")); err == nil {
+			t.Errorf("project mode unexpectedly wrote user-level skill %s", name)
+		}
+	}
+
+	// CLAUDE.md must contain the communities-block markers (since
+	// the stub SkillsRouting routes through UpsertMarkedBlock).
 	claudeMd, _ := os.ReadFile(filepath.Join(env.Root, "CLAUDE.md"))
-	if !strings.Contains(string(claudeMd), ClaudeMdSentinel) {
-		t.Fatalf("CLAUDE.md missing sentinel")
+	if !strings.Contains(string(claudeMd), agents.CommunitiesStartMarker) {
+		t.Fatalf("CLAUDE.md missing communities start marker: %s", claudeMd)
 	}
 
 	// Hooks file must reference our test hook command.
@@ -75,9 +95,10 @@ func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
 	}
 }
 
-// TestClaudeCodeGlobalModeWritesUserFiles verifies that --global
-// writes to ~/.claude.json and ~/.claude/settings.local.json and
-// leaves the per-repo tree alone.
+// TestClaudeCodeGlobalModeWritesUserFiles verifies that global mode
+// (entered via `gortex install`) writes to ~/.claude.json, user-level
+// hooks, and the user-level slash-commands + curated skills trees,
+// while leaving the per-repo tree alone.
 func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	env, _ := agentstest.NewEnv(t)
 	env.Mode = agents.ModeGlobal
@@ -92,10 +113,17 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	}
 
 	// User-level files exist.
-	for _, p := range []string{
+	expected := []string{
 		filepath.Join(env.Home, ".claude.json"),
 		filepath.Join(env.Home, ".claude", "settings.local.json"),
-	} {
+	}
+	for name := range SlashCommands {
+		expected = append(expected, filepath.Join(env.Home, ".claude", "commands", name))
+	}
+	for name := range GlobalSkills {
+		expected = append(expected, filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"))
+	}
+	for _, p := range expected {
 		if _, err := os.Stat(p); err != nil {
 			t.Errorf("missing user-level artifact %s: %v", p, err)
 		}
@@ -105,6 +133,7 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	for _, p := range []string{
 		filepath.Join(env.Root, ".mcp.json"),
 		filepath.Join(env.Root, "CLAUDE.md"),
+		filepath.Join(env.Root, ".claude", "settings.local.json"),
 	} {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("global mode unexpectedly wrote per-repo file %s", p)

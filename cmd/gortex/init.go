@@ -33,21 +33,25 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	genskills "github.com/zzet/gortex/internal/skills"
 )
 
-// Per-flag globals. Behaviour flags (--hooks, --global, etc.) stay
-// separate from UX flags (--yes, --json, --dry-run) so the wizard
-// and the orchestrator read them without cross-pollution.
+// Per-flag globals. Behaviour flags stay separate from UX flags so
+// the wizard and the orchestrator read them without cross-pollution.
 var (
+	// Core behaviour
 	initAnalyze      bool
-	initHooksOnly    bool
 	initInstallHooks = true
 	initNoHooks      bool
-	initGlobal       bool
-	initStartDaemon  bool
-	initTrackRepo    bool
+	initHooksOnly    bool
 
-	// Step 2 — non-interactive contract.
+	// Community skills generation (replaces the old `gortex skills`).
+	initSkills          = true
+	initNoSkills        bool
+	initSkillsMinSize   int
+	initSkillsMaxSkills int
+
+	// Non-interactive / reporting knobs
 	initYes        bool
 	initAgents     string
 	initAgentsSkip string
@@ -58,35 +62,40 @@ var (
 
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
-	Short: "Set up Gortex integration for every detected AI coding assistant",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runInit,
+	Short: "Wire Gortex into the current repository for every detected AI coding assistant",
+	Long: `Configure Gortex for this repository: per-repo MCP config, (optional)
+hooks, community-derived routing, and a codebase overview.
+
+For one-time machine-wide setup (user MCP config, user skills /
+Knowledge Items, user hooks), run ` + "`gortex install`" + ` once.`,
+	Args: cobra.MaximumNArgs(1),
+	RunE: runInit,
 }
 
 func init() {
-	initCmd.Flags().BoolVar(&initAnalyze, "analyze", false, "index the repo first to generate a richer CLAUDE.md with codebase overview")
+	initCmd.Flags().BoolVar(&initAnalyze, "analyze", false, "index the repo to generate a richer CLAUDE.md with codebase overview")
 	initCmd.Flags().BoolVar(&initInstallHooks, "hooks", true, "install Claude Code hooks (PreToolUse + PreCompact + Stop); use --no-hooks to skip")
 	initCmd.Flags().BoolVar(&initNoHooks, "no-hooks", false, "skip installing Claude Code hooks (inverse of --hooks)")
 	initCmd.Flags().BoolVar(&initHooksOnly, "hooks-only", false, "only install/update Claude Code hooks in .claude/settings.local.json, skip everything else")
-	initCmd.Flags().BoolVar(&initGlobal, "global", false, "install a user-wide config (~/.claude.json) that points every project at the daemon; skip per-repo file creation")
-	initCmd.Flags().BoolVar(&initStartDaemon, "start", false, "start the daemon immediately after --global setup (detached)")
-	initCmd.Flags().BoolVar(&initTrackRepo, "track", false, "track the current repo via the daemon after --global setup")
 
-	// Non-interactive / CI / scripted flags (Step 2 of the init plan).
-	initCmd.Flags().BoolVarP(&initYes, "yes", "y", false, "skip the interactive wizard and use defaults (implied when stdin is not a TTY)")
+	initCmd.Flags().BoolVar(&initSkills, "skills", true, "generate per-community routing + SKILL.md files; use --no-skills to skip")
+	initCmd.Flags().BoolVar(&initNoSkills, "no-skills", false, "skip community-skill generation (inverse of --skills)")
+	initCmd.Flags().IntVar(&initSkillsMinSize, "skills-min-size", 3, "minimum community size to generate a skill")
+	initCmd.Flags().IntVar(&initSkillsMaxSkills, "skills-max", 20, "maximum number of skills to generate")
+
+	initCmd.Flags().BoolVarP(&initYes, "yes", "y", false, "skip the interactive wizard (implied when stdin is not a TTY)")
 	initCmd.Flags().StringVar(&initAgents, "agents", "", "comma-separated list of agents to configure ('auto' means every registered adapter)")
 	initCmd.Flags().StringVar(&initAgentsSkip, "agents-skip", "", "comma-separated list of agents to skip (composable with --agents)")
-	initCmd.Flags().BoolVar(&initJSON, "json", false, "emit a structured JSON report on stdout (human-readable banner moves to stderr)")
-	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "plan writes without modifying disk (implies --json is useful)")
+	initCmd.Flags().BoolVar(&initJSON, "json", false, "emit a structured JSON report on stdout")
+	initCmd.Flags().BoolVar(&initDryRun, "dry-run", false, "plan writes without modifying disk")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite keys we would otherwise preserve during a merge")
 
 	rootCmd.AddCommand(initCmd)
 }
 
 // buildRegistry wires up every registered adapter. Registration
-// order is also the execution order — Claude Code first because it's
-// the primary integration, then the other per-IDE adapters in
-// alphabetical order to keep the --json report stable.
+// order is also execution order — Claude Code first because it's
+// the primary integration, then alphabetical for stable --json.
 func buildRegistry() *agents.Registry {
 	r := agents.NewRegistry()
 	r.Register(claudecode.New())
@@ -113,36 +122,31 @@ func runInit(cmd *cobra.Command, args []string) error {
 		root = args[0]
 	}
 
-	// --no-hooks is the explicit negation for --hooks; fold it so
-	// the orchestrator only has to check initInstallHooks.
 	if initNoHooks {
 		initInstallHooks = false
 	}
+	if initNoSkills {
+		initSkills = false
+	}
 
-	// Interactive wizard. Runs only when no mode flag is pre-set,
-	// stdin is a TTY, and --yes wasn't passed. --hooks-only, --global,
-	// and --yes all pre-answer the mode question.
-	if !initYes && !initGlobal && !initHooksOnly && !cmd.Flags().Changed("global") && isInteractive() {
+	// Interactive wizard — only asks about hooks now (global/per-repo
+	// split is owned by the separate `gortex install` command).
+	if !initYes && !initHooksOnly && isInteractive() {
 		hooksPreset := cmd.Flags().Changed("hooks") || cmd.Flags().Changed("no-hooks")
 		if choice, ran := runInteractiveInit(os.Stdin, cmd.ErrOrStderr(), hooksPreset); ran {
-			initGlobal = choice.Global
-			initTrackRepo = choice.Track
-			initStartDaemon = choice.Start
 			if !hooksPreset {
 				initInstallHooks = choice.Hooks
 			}
 		}
 	}
 
-	// Resolve root to an absolute path — every adapter expects Root
-	// to be absolute so joined paths don't pick up the wrong cwd.
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
 
-	// --hooks-only short-circuit: just install/heal Claude Code
-	// hooks and exit. Everything else is a no-op.
+	// --hooks-only short-circuit: install/heal Claude Code hooks
+	// and exit. Everything else is a no-op.
 	if initHooksOnly {
 		settingsPath := filepath.Join(absRoot, ".claude", "settings.local.json")
 		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
@@ -156,37 +160,46 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// The remaining code is the full orchestration path used by both
-	// per-repo and --global modes. Build the Env once.
 	home, _ := os.UserHomeDir()
-	mode := agents.ModeProject
-	if initGlobal {
-		mode = agents.ModeGlobal
-	}
-
 	env := agents.Env{
 		Root:         absRoot,
 		Home:         home,
 		HookCommand:  claudecode.ResolveHookCommand(cmd.ErrOrStderr()),
-		Mode:         mode,
+		Mode:         agents.ModeProject,
 		InstallHooks: initInstallHooks,
 		AnalyzeRepo:  initAnalyze,
 		Stderr:       cmd.ErrOrStderr(),
 	}
 
-	// --analyze piggybacks the indexer to generate a dynamic CLAUDE.md
-	// preamble. Only meaningful in project mode; skip in --global.
-	if initAnalyze && mode == agents.ModeProject {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] indexing %s...\n", absRoot)
-		overview, err := generateOverview(absRoot)
-		if err != nil {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] indexing failed: %v — using static block\n", err)
+	// Indexing powers both --analyze (codebase overview in
+	// CLAUDE.md) and --skills (community routing in every per-repo
+	// instructions surface). Index once, feed both.
+	needIndex := initAnalyze || initSkills
+	if needIndex {
+		g, idxErr := indexRepoForInit(absRoot, cmd.ErrOrStderr())
+		if idxErr != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] indexing failed: %v — proceeding without analysis/skills\n", idxErr)
 		} else {
-			env.AnalyzedOverview = overview
+			if initAnalyze {
+				eng := query.NewEngine(g)
+				env.AnalyzedOverview = claudemd.Generate(eng, 180)
+			}
+			if initSkills {
+				generated, routing := genskills.Build(g, genskills.BuildOpts{
+					MinSize:   initSkillsMinSize,
+					MaxSkills: initSkillsMaxSkills,
+				})
+				if len(generated) > 0 {
+					env.GeneratedSkills = toEnvSkills(generated)
+					env.SkillsRouting = routing
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] generated %d community skill(s)\n", len(generated))
+				} else {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] no communities large enough (min-size: %d) — skipping skills\n", initSkillsMinSize)
+				}
+			}
 		}
 	}
 
-	// Build the registry and pick adapters per --agents / --agents-skip.
 	registry := buildRegistry()
 	selected, err := registry.Filter(initAgents, initAgentsSkip)
 	if err != nil {
@@ -198,10 +211,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	for _, a := range selected {
 		r, err := a.Apply(env, opts)
 		if err != nil {
-			// Claude Code is load-bearing: propagate its failures
-			// up so the user sees them. Other adapters emit
-			// warnings so one broken editor install doesn't abort
-			// the whole init run.
 			if a.Name() == claudecode.Name {
 				return fmt.Errorf("%s: %w", a.Name(), err)
 			}
@@ -212,50 +221,76 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Always update Gortex's own global config (~/.config/gortex/config.yaml)
-	// so the daemon knows about this repo next time it starts.
-	if !initDryRun && mode == agents.ModeProject {
+	// Always update Gortex's own global config so the daemon picks
+	// up this repo next time it starts (harmless when no daemon).
+	if !initDryRun {
 		if err := ensureGlobalConfig(absRoot); err != nil {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] warning: could not update global config: %v\n", err)
 		}
 	}
 
-	// Global mode has two extra orchestration steps the adapters
-	// can't express (daemon control plane): --start spawns the
-	// daemon, --track registers this repo with it.
-	if mode == agents.ModeGlobal && !initDryRun {
-		if err := ensureGlobalConfigExists(); err != nil {
-			return err
-		}
-		if err := runGlobalFollowUps(cmd, absRoot); err != nil {
-			return err
-		}
-	}
-
-	// Emit the report. --json to stdout for machine consumers;
-	// human summary to stderr for people.
 	if initJSON {
 		if err := emitJSONReport(cmd.OutOrStdout(), results, opts); err != nil {
 			return err
 		}
 	}
-	emitHumanSummary(cmd.ErrOrStderr(), results, opts, mode)
+	emitHumanSummary(cmd.ErrOrStderr(), results, opts)
 	return nil
 }
 
-// emitJSONReport writes a single JSON object to w. Shape:
-//
-//	{
-//	  "dry_run": bool,
-//	  "force":   bool,
-//	  "agents":  [{name, detected, configured, docs_url, files: [...]}, ...]
-//	}
-//
-// Callers machine-read this (CI smoke matrix, gortex init doctor).
+// toEnvSkills converts the skills generator's output into the
+// agents.GeneratedSkill payload carried on Env. The two shapes are
+// identical today; the mirror keeps the agents package free of the
+// internal/skills dependency.
+func toEnvSkills(src []genskills.GeneratedSkill) []agents.GeneratedSkill {
+	out := make([]agents.GeneratedSkill, len(src))
+	for i, s := range src {
+		out[i] = agents.GeneratedSkill{
+			CommunityID: s.CommunityID,
+			Label:       s.Label,
+			DirName:     s.DirName,
+			Content:     s.Content,
+		}
+	}
+	return out
+}
+
+// indexRepoForInit runs a one-shot index of the repo. Kept inside
+// cmd/gortex (not an adapter) because the indexer pulls in many
+// gortex-internal packages we'd rather not leak into internal/agents.
+func indexRepoForInit(root string, w io.Writer) (*graph.Graph, error) {
+	logger := newLogger()
+	defer func() { _ = logger.Sync() }()
+
+	cfg, err := config.Load("")
+	if err != nil {
+		cfg = &config.Config{}
+	}
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+
+	idx := indexer.New(g, reg, cfg.Index, logger)
+	_, _ = fmt.Fprintf(w, "[gortex init] indexing %s...\n", root)
+	result, err := idx.Index(root)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = fmt.Fprintf(w, "[gortex init] indexed %d files (%d nodes, %d edges) in %dms\n",
+		result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
+	return g, nil
+}
+
+// emitJSONReport writes a single JSON object to w. Shape kept
+// compatible with earlier releases (agents array, dry_run, force)
+// plus a mode discriminator so the install/init outputs are
+// distinguishable.
 func emitJSONReport(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) error {
 	payload := map[string]any{
 		"dry_run": opts.DryRun,
 		"force":   opts.Force,
+		"mode":    "project",
 		"agents":  results,
 	}
 	enc := json.NewEncoder(w)
@@ -263,11 +298,8 @@ func emitJSONReport(w io.Writer, results []*agents.Result, opts agents.ApplyOpts
 	return enc.Encode(payload)
 }
 
-// emitHumanSummary prints the "what got configured" footer the old
-// init.go shipped. It prints one line per adapter with the count of
-// files created / merged / skipped — useful for a human reading the
-// terminal without parsing JSON.
-func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOpts, mode agents.Mode) {
+// emitHumanSummary prints the per-agent file counts to stderr.
+func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) {
 	_, _ = fmt.Fprintf(w, "\n[gortex init] done")
 	if opts.DryRun {
 		_, _ = fmt.Fprintf(w, " (dry-run — no files written)")
@@ -281,13 +313,10 @@ func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOp
 		if !r.Detected {
 			detected = "not detected"
 		}
-		_, _ = fmt.Fprintf(w, "  • %s — %s, %d file(s) ", r.Name, detected, len(r.Files))
-		_, _ = fmt.Fprintf(w, "[%s]\n", countByAction(r.Files))
+		_, _ = fmt.Fprintf(w, "  • %s — %s, %d file(s) [%s]\n", r.Name, detected, len(r.Files), countByAction(r.Files))
 	}
-	if mode == agents.ModeProject {
-		_, _ = fmt.Fprintln(w, "\nCommit .mcp.json, .claude/commands/, .claude/settings.json, CLAUDE.md, and any detected agent configs so your team gets Gortex automatically.")
-		_, _ = fmt.Fprintln(w, "Run `gortex serve --index . --watch` or let your IDE start it via MCP config.")
-	}
+	_, _ = fmt.Fprintln(w, "\nCommit .mcp.json, .claude/commands/, .claude/settings.json, CLAUDE.md, and any detected agent configs so your team gets Gortex automatically.")
+	_, _ = fmt.Fprintln(w, "If you haven't already, run `gortex install` once per machine to set up user-level integration.")
 }
 
 // countByAction renders "create=3 merge=1 skip=2" style line.
@@ -326,40 +355,8 @@ func countByAction(files []agents.FileAction) string {
 	return strings.Join(parts, " ")
 }
 
-// generateOverview runs a one-shot index to produce a dynamic
-// CLAUDE.md preamble (used by --analyze). Kept in this file rather
-// than inside the claudecode adapter because the indexer depends on
-// many gortex-internal packages we'd rather not leak across
-// internal/agents/.
-func generateOverview(root string) (string, error) {
-	logger := newLogger()
-	defer func() { _ = logger.Sync() }()
-
-	cfg, err := config.Load("")
-	if err != nil {
-		cfg = &config.Config{}
-	}
-
-	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-
-	idx := indexer.New(g, reg, cfg.Index, logger)
-	result, err := idx.Index(root)
-	if err != nil {
-		return "", err
-	}
-
-	_, _ = fmt.Fprintf(os.Stderr, "[gortex init] indexed %d files (%d nodes, %d edges) in %dms\n",
-		result.FileCount, result.NodeCount, result.EdgeCount, result.DurationMs)
-
-	eng := query.NewEngine(g)
-	return claudemd.Generate(eng, 180), nil
-}
-
 // ensureGlobalConfig adds this repo to ~/.config/gortex/config.yaml
-// so the daemon picks it up on its next restart. Skipped in
-// --dry-run and --global modes.
+// so the daemon picks it up on its next restart. Skipped in --dry-run.
 func ensureGlobalConfig(root string) error {
 	gc, err := config.LoadGlobal()
 	if err != nil {

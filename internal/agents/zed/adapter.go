@@ -78,14 +78,18 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	p := &agents.Plan{Files: []agents.FileAction{
-		{Path: filepath.Join(env.Root, ".rules"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
-	}}
+	p := &agents.Plan{}
 	if settings := userSettingsPath(env.Home); settings != "" {
 		p.Files = append(p.Files, agents.FileAction{
 			Path:   settings,
 			Action: agents.ActionWouldMerge,
 			Keys:   []string{"context_servers"},
+		})
+	}
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: filepath.Join(env.Root, ".rules"), Action: agents.ActionWouldMerge,
+			Keys: []string{"communities-block"},
 		})
 	}
 	return p, nil
@@ -128,14 +132,18 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	res.Files = append(res.Files, action)
 
 	// Zed's Agent panel reads `.rules` at the project root on every
-	// turn. Append the instructions block there so the agent prefers
-	// Gortex tools over its own file-search UI.
-	rulesPath := filepath.Join(env.Root, ".rules")
-	rulesAction, err := agents.AppendInstructions(env.Stderr, rulesPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
-	if err != nil {
-		return res, err
+	// turn. Write a marker-guarded community-routing block there
+	// when skills were generated. Skipped in global mode (the file
+	// is per-repo).
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		rulesPath := filepath.Join(env.Root, ".rules")
+		routingAction, err := agents.UpsertMarkedBlock(env.Stderr, rulesPath, env.SkillsRouting,
+			agents.CommunitiesStartMarker, agents.CommunitiesEndMarker, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, routingAction)
 	}
-	res.Files = append(res.Files, rulesAction)
 
 	res.Configured = true
 	return res, nil

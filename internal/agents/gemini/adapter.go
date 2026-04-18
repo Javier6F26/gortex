@@ -57,10 +57,16 @@ func configPath(env agents.Env) string {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{
+	p := &agents.Plan{Files: []agents.FileAction{
 		{Path: configPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
-		{Path: filepath.Join(env.Root, "GEMINI.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
-	}}, nil
+	}}
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: filepath.Join(env.Root, "GEMINI.md"), Action: agents.ActionWouldMerge,
+			Keys: []string{"communities-block"},
+		})
+	}
+	return p, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -84,15 +90,19 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	res.Files = append(res.Files, action)
 
-	// GEMINI.md is Gemini CLI's per-repo instructions file (the
-	// Gemini analogue of CLAUDE.md / AGENTS.md). Always written at
-	// env.Root regardless of project/global mode — it's repo-scoped.
-	geminiMdPath := filepath.Join(env.Root, "GEMINI.md")
-	mdAction, err := agents.AppendInstructions(env.Stderr, geminiMdPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
-	if err != nil {
-		return res, err
+	// GEMINI.md gets a marker-guarded community-routing block when
+	// skills were generated (--skills, default on in `gortex init`).
+	// Skipped in global mode (the file is per-repo) and when no
+	// communities met the min-size threshold.
+	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
+		geminiMdPath := filepath.Join(env.Root, "GEMINI.md")
+		routingAction, err := agents.UpsertMarkedBlock(env.Stderr, geminiMdPath, env.SkillsRouting,
+			agents.CommunitiesStartMarker, agents.CommunitiesEndMarker, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, routingAction)
 	}
-	res.Files = append(res.Files, mdAction)
 
 	res.Configured = true
 	return res, nil
