@@ -21,7 +21,7 @@ Built for AI coding agents (Claude Code, Kiro, Cursor, Windsurf, Copilot, Contin
 
 - **Knowledge graph** — every file, symbol, import, call chain, and type relationship in one queryable structure
 - **Multi-repo workspaces** — index multiple repositories into a single graph with cross-repo symbol resolution, project grouping, reference tags, and per-repo scoping
-- **56 languages** — Go, TypeScript, JavaScript, Python, Rust, Java, C#, Kotlin, Swift, Scala, PHP, Ruby, Elixir, C, C++, Dart, OCaml, Lua, Zig, Haskell, Clojure, Erlang, R, Bash/Zsh, SQL, Protobuf, Markdown, HTML, CSS, YAML, TOML, HCL/Terraform, Dockerfile, Verse (UEFN), AL (Dynamics 365), AutoHotkey (v1+v2), Assembly (NASM / GAS / ARM / WLA-DX / CA65 — one extractor, multiple dialects), GDScript (Godot), Nix, Fortran (77/90/95/2003/2008), Solidity, **F#, Julia, Tcl, Shaders (GLSL + HLSL), Perl, Raku, Crystal, Nim, Pascal/Delphi, COBOL, Ada, PowerShell, VimScript, Emacs Lisp, Racket**
+- **92 languages** — tree-sitter + regex extractors across core programming (Go, TypeScript, Python, Rust, Java, C#, Kotlin, Swift, C, C++, …), scripting (Bash, PowerShell, Perl, Lua, …), functional (Haskell, OCaml, Elixir, Clojure, …), template engines (Blade, EJS, Jinja, Twig, ERB, Liquid, Pug, Handlebars), blockchain (Solidity, Move, Cairo, Noir, Tact, Ballerina), scientific (Julia, R, MATLAB, Mathematica, SAS, Stata, Fortran, COBOL, Ada, Pascal, ABAP, Apex), emerging (Mojo, Odin, V, Hare, Carbon, ReScript, Gleam), build/data (Makefile, CMake, Dockerfile, SQL, Protobuf, JSON, YAML, TOML, HCL), and more. See [docs/languages.md](docs/languages.md) for the full table
 - **47 MCP tools** — symbol lookup, call chains, blast radius, community/process discovery, contract detection, unified `analyze` (dead code, hotspots, cycles), scaffolding, inline editing, symbol renaming, multi-repo management, agent feedback loop, context export, graph-validated config hygiene (`audit_agent_config`), opening-move routing (`plan_turn`), narrative repo overview (`get_repo_outline`), test-coverage gaps (`get_untested_symbols`), and 18 agent-optimized tools
 - **Semantic search** — hybrid BM25 + vector search with RRF fusion. Hugot (pure-Go ONNX runtime with MiniLM-L6-v2) is bundled by default and auto-downloads the model on first use — zero-config, no native dependencies. GloVe word vectors remain as fallback. Optional build tags switch to ONNX or GoMLX for higher throughput
 - **LSP-enriched call-graph tiers** — every edge carries an `origin` tier (`lsp_resolved` / `lsp_dispatch` / `ast_resolved` / `ast_inferred` / `text_matched`); pass `min_tier` to `get_callers`, `find_usages`, `find_implementations`, etc. to restrict results to compiler-verified edges for high-stakes refactors
@@ -739,48 +739,9 @@ gortex binary
 
 **Multi-repo fields:** Nodes carry `repo_prefix` (empty in single-repo mode). Edges carry `cross_repo` (true when connecting nodes in different repos). Node IDs use `<repo_prefix>/<path>::<Symbol>` format in multi-repo mode.
 
-## Language Support (33 languages)
+## Language Support
 
-### Code Languages
-| Language | Functions | Methods + MemberOf | Types | Interfaces | Imports | Calls | Variables |
-|----------|-----------|-------------------|-------|------------|---------|-------|-----------|
-| Go | Full | Full (receiver) | Full | Full + Meta["methods"] | Full | Full | Full |
-| TypeScript | Full | Full | Full | Full + Meta["methods"] | Full | Full | Full |
-| JavaScript | Full | Full | Full | - | Full | Full | Full |
-| Python | Full | Full | Full | - | Full | Full | Partial |
-| Rust | Full | Full (impl blocks) | Full | Full + Meta["methods"] | Full | Full | Full |
-| Java | Full | Full | Full | Full + Meta["methods"] | Full | Full | Fields |
-| C# | Full | Full | Full | Full + Meta["methods"] | Full | Full | Fields |
-| Kotlin | Full | Full | Full | Full | Full | Full | Properties |
-| Scala | Full | Full | Full | Full + Meta["methods"] | Full | Full | - |
-| Swift | Full | Full | Full | Full + Meta["methods"] | Full | Full | - |
-| PHP | Full | Full | Full | Full | Full | Full | - |
-| Ruby | Full | Full | Full | - | Full | Full | Constants |
-| Elixir | Full | Full (defmodule) | Modules | - | Full | Full | Attributes |
-| C | Full | - | Structs/Enums | - | Full | Full | Globals |
-| C++ | Full | Full | Classes/Structs | - | Full | Full | - |
-| Dart | Full | Full | Classes/Enums/Mixins/Extensions | Abstract interface | Full | Full | Full |
-| OCaml | Full | Full (class) | Types/Modules | Module types | open | Full | Full |
-| Lua | Full | Full (M.func/M:method) | - | - | require() | Full | Full |
-| Zig | Full | - | Structs/Enums/Unions | - | @import | Full | Full |
-| Haskell | Full | - | data/newtype/type | class | import | Full | - |
-| Clojure | Full (defn) | - | defrecord/deftype | defprotocol | require/use | Full | def |
-| Erlang | Full | - | -type/-record | - | -import | Full | - |
-| R | Full | - | - | - | library/require/source | Full | Full |
-| Bash/Zsh | Full | - | - | - | source/. | Full | Exports |
-
-### Data & Config Languages
-| Language | What it extracts |
-|----------|-----------------|
-| SQL | Tables (with columns), views, functions, indexes, triggers |
-| Protobuf | Messages (with fields), services + RPCs, enums, imports |
-| Markdown | Headings, local file links, code block languages |
-| HTML | Script/link references, element IDs |
-| CSS | Class selectors, ID selectors, custom properties, @import |
-| YAML | Top-level keys |
-| TOML | Tables, key-value pairs |
-| HCL/Terraform | Resource/data/module/variable/output blocks (.tf, .tfvars, .hcl) |
-| Dockerfile | FROM (base images), ENV/ARG variables |
+Gortex indexes **92 languages** — see **[docs/languages.md](docs/languages.md)** for the full table (extensions, engine, extracted symbols per language).
 
 ## Building
 
