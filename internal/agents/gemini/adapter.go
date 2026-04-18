@@ -57,11 +57,10 @@ func configPath(env agents.Env) string {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   configPath(env),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcpServers"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: configPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
+		{Path: filepath.Join(env.Root, "GEMINI.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -84,6 +83,17 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// GEMINI.md is Gemini CLI's per-repo instructions file (the
+	// Gemini analogue of CLAUDE.md / AGENTS.md). Always written at
+	// env.Root regardless of project/global mode — it's repo-scoped.
+	geminiMdPath := filepath.Join(env.Root, "GEMINI.md")
+	mdAction, err := agents.AppendInstructions(env.Stderr, geminiMdPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, mdAction)
+
 	res.Configured = true
 	return res, nil
 }

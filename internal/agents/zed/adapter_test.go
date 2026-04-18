@@ -28,7 +28,10 @@ func TestZedUsesContextServersKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: Zed's settings.json for the context_servers stanza
+	// plus the project-root .rules file the Agent panel reads on
+	// every turn.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 
 	cfg := agentstest.ReadJSON(t, p)
 	if _, ok := cfg["mcpServers"]; ok {

@@ -20,6 +20,8 @@ func TestContinueCreatesAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: the MCP server JSON plus .continue/rules/gortex.md,
+	// the per-rule file Continue reads on every chat turn.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 	agentstest.AssertIdempotent(t, a, env)
 }

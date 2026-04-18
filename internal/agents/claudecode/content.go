@@ -18,6 +18,8 @@
 // of the pre-refactor behaviour is trivially verifiable.
 package claudecode
 
+import "github.com/zzet/gortex/internal/agents"
+
 // ProjectMCPJSON is the starter content for a project's .mcp.json
 // when no file exists yet. The --web flag is intentional: it turns
 // on the HTTP status page so users can peek at the index without
@@ -45,90 +47,12 @@ const ProjectMCPJSON = `{
 // byte sequence here must match what the previous implementation
 // wrote, or the idempotency check (contains "## MANDATORY: Use
 // Gortex MCP tools") would misfire on re-runs.
-const ClaudeMdBlock = `## MANDATORY: Use Gortex MCP tools instead of Read/Grep
-
-Gortex is running as an MCP server. You MUST use graph queries instead of file reads whenever possible. This saves thousands of tokens per task.
-
-### Navigation and Reading
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| ` + "`Read`" + ` a whole file for one function  | ` + "`get_symbol_source`" + ` (80% fewer tokens)   |
-| ` + "`Read`" + ` to find a function             | ` + "`get_symbol`" + ` or ` + "`get_editing_context`" + `    |
-| Multiple ` + "`get_symbol`" + ` calls           | ` + "`batch_symbols`" + ` (one call for N symbols) |
-| ` + "`Grep`" + ` for references                 | ` + "`find_usages`" + ` (zero false positives)     |
-| ` + "`Grep`" + ` to find a symbol by name       | ` + "`search_symbols`" + ` (BM25 + camelCase-aware)|
-| Filtering ` + "`search_symbols`" + ` by hand    | ` + "`winnow_symbols`" + ` — structured constraint chain (kind, language, community, path_prefix, min_fan_in, min_churn) with per-axis score contributions |
-| ` + "`Read`" + ` to understand a file           | ` + "`get_file_summary`" + ` or ` + "`get_editing_context`" + ` |
-| ` + "`Read`" + ` multiple files to trace calls  | ` + "`get_call_chain`" + ` / ` + "`get_callers`" + `         |
-| Guessing an import path               | ` + "`find_import_path`" + `                       |
-| ` + "`Read`" + ` to check a function signature  | ` + "`get_symbol`" + ` (signature is in ` + "`meta.signature`" + `) |
-| 5-10 calls to explore for a task      | ` + "`smart_context`" + ` (one call)               |
-
-### Impact Analysis and Safety
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| Reading files to assess change scope  | ` + "`explain_change_impact`" + ` (includes cross-community warnings) |
-| Guessing which tests to run           | ` + "`get_test_targets`" + `                       |
-| Manual dependency ordering            | ` + "`get_edit_plan`" + `                          |
-| Hoping signature changes are safe     | ` + "`verify_change`" + ` — checks callers and interface implementors |
-| Manually checking team conventions    | ` + "`check_guards`" + ` — evaluates guard rules from .gortex.yaml |
-| Wondering if a new dep creates a cycle| ` + "`analyze`" + ` with ` + "`kind: \"would_create_cycle\"`" + ` — checks before you add it |
-
-### Code Quality and Analysis
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| Manually hunting unused code          | ` + "`analyze`" + ` with ` + "`kind: \"dead_code\"`" + ` — zero incoming edges (excludes entry points, tests, exports) |
-| Guessing which symbols are over-coupled| ` + "`analyze`" + ` with ` + "`kind: \"hotspots\"`" + ` — ranks by fan-in, fan-out, community crossings |
-| Manually scanning for circular deps   | ` + "`analyze`" + ` with ` + "`kind: \"cycles\"`" + ` — Tarjan's SCC with severity classification |
-| Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
-| Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
-
-### Code Generation and Editing
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| Reading files to learn a pattern      | ` + "`suggest_pattern`" + `                        |
-| Manually scaffolding from a pattern   | ` + "`scaffold`" + ` — generates code, wiring, and test stubs from an example |
-| Read→Edit roundtrip for one symbol    | ` + "`edit_symbol`" + ` — edit source by ID, no Read needed |
-| Manual find-and-replace for renames   | ` + "`rename_symbol`" + ` — coordinated rename across all references |
-| Sequencing multi-file edits yourself  | ` + "`batch_edit`" + ` — applies edits in dependency order, re-indexes between steps |
-| Reading a diff without graph context  | ` + "`diff_context`" + ` — enriches git diff with callers, callees, community, risk |
-| Guessing what context you need next   | ` + "`prefetch_context`" + ` — predicts needed symbols from task + recent activity |
-
-### API Contracts
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
-| Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches; scope with ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` |
-
-### Multi-Repo Management
-
-| Instead of...                         | You MUST use...                          |
-|---------------------------------------|------------------------------------------|
-| Manually adding a repo to config      | ` + "`track_repository`" + ` — indexes immediately, persists to config |
-| Manually removing a repo from config  | ` + "`untrack_repository`" + ` — evicts nodes/edges, persists to config |
-| Wondering which project is active     | ` + "`get_active_project`" + ` — returns project name and repo list |
-| Switching project context             | ` + "`set_active_project`" + ` — re-scopes all subsequent queries |
-| Scoping a query to one repo           | Pass ` + "`repo`" + ` param to ` + "`search_symbols`" + `, ` + "`find_usages`" + `, etc. |
-| Scoping a query to a project          | Pass ` + "`project`" + ` param to any query tool |
-| Filtering by reference tag            | Pass ` + "`ref`" + ` param to any query tool |
-
-## Session start (Gortex)
-
-1. Call ` + "`graph_stats`" + ` to confirm Gortex is running and get repo orientation.
-2. If ` + "`total_nodes`" + ` is 0, call ` + "`index_repository`" + ` with path ` + "`\".\"`" + `.
-3. In multi-repo mode, call ` + "`get_active_project`" + ` to check scope. Use ` + "`set_active_project`" + ` to switch if needed.
-4. For a new task, call ` + "`smart_context`" + ` with the task description.
-5. For every file you are about to edit, call ` + "`get_editing_context`" + ` first.
-6. Before changing a function signature, call ` + "`verify_change`" + ` to catch contract violations — checks callers across all repos.
-7. Before any refactor, call ` + "`get_edit_plan`" + ` for dependency-ordered file list. Use ` + "`batch_edit`" + ` to apply atomically.
-8. After editing, call ` + "`check_guards`" + ` to verify team conventions, then ` + "`get_test_targets`" + ` for tests to run (includes cross-repo test files).
-9. Before committing, call ` + "`detect_changes`" + ` to verify scope. Use ` + "`diff_context`" + ` for graph-enriched review.
-
+//
+// The shared body lives in `agents.InstructionsBody` so every
+// doc-aware adapter writes the same rule table. Claude Code
+// additionally advertises its slash commands — appended here so the
+// block stays self-contained for CLAUDE.md readers.
+const ClaudeMdBlock = agents.InstructionsBody + `
 ## Gortex slash commands
 
 Use these for guided workflows: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore`" + `, ` + "`/gortex-debug`" + `, ` + "`/gortex-impact`" + `, ` + "`/gortex-refactor`" + `
@@ -137,8 +61,10 @@ Use these for guided workflows: ` + "`/gortex-guide`" + `, ` + "`/gortex-explore
 // ClaudeMdSentinel is the substring used to detect whether
 // ClaudeMdBlock has already been appended to a project's
 // CLAUDE.md. Kept as a named constant so the doctor subcommand can
-// query it without pulling in the entire block.
-const ClaudeMdSentinel = "## MANDATORY: Use Gortex MCP tools"
+// query it without pulling in the entire block. Aliased to the shared
+// sentinel so idempotency works across adapters writing to the same
+// file (e.g. AGENTS.md shared by Codex + Opencode).
+const ClaudeMdSentinel = agents.InstructionsSentinel
 
 // SlashCommands maps the filename under .claude/commands/ to its
 // markdown content. Each file is a slash command Claude Code

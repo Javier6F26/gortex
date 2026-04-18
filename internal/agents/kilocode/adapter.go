@@ -88,6 +88,11 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 			Action: agents.ActionWouldMerge,
 			Keys:   []string{"mcpServers"},
 		})
+		p.Files = append(p.Files, agents.FileAction{
+			Path:   filepath.Join(env.Root, ".kilocoderules"),
+			Action: agents.ActionWouldMerge,
+			Keys:   []string{"gortex-block"},
+		})
 	}
 	if env.Home != "" {
 		for _, path := range globalStoragePaths(env.Home) {
@@ -146,6 +151,20 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 			res.Files = append(res.Files, action)
 		}
 	}
+
+	// .kilocoderules is the project-scoped instructions file Kilo
+	// Code reads on every task (inherited from the Cline lineage).
+	// Skip in global mode since the file lives per-repo.
+	if env.Mode != agents.ModeGlobal {
+		rulesPath := filepath.Join(env.Root, ".kilocoderules")
+		ruleAction, err := agents.AppendInstructions(env.Stderr, rulesPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+		if err != nil {
+			internalutil.Warnf(env.Stderr, "could not update %s: %v", rulesPath, err)
+		} else {
+			res.Files = append(res.Files, ruleAction)
+		}
+	}
+
 	res.Configured = len(res.Files) > 0
 	return res, nil
 }

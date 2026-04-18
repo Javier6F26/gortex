@@ -25,7 +25,9 @@ func TestCodexWritesMcpServersTOMLTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: ~/.codex/config.toml for MCP plus AGENTS.md, the
+	// per-repo instructions file Codex CLI reads on every task.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 
 	data, err := os.ReadFile(filepath.Join(env.Home, ".codex", "config.toml"))
 	if err != nil {

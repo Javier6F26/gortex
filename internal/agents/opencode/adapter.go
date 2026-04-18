@@ -52,11 +52,10 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   filepath.Join(env.Root, ".opencode", "config.json"),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcp"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".opencode", "config.json"), Action: agents.ActionWouldMerge, Keys: []string{"mcp"}},
+		{Path: filepath.Join(env.Root, "AGENTS.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -99,6 +98,18 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// AGENTS.md is OpenCode's per-repo instructions file (and is also
+	// read by Codex and several other agents). Sentinel-guarded
+	// append means running multiple adapters on the same repo adds
+	// the block exactly once.
+	agentsMdPath := filepath.Join(env.Root, "AGENTS.md")
+	mdAction, err := agents.AppendInstructions(env.Stderr, agentsMdPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, mdAction)
+
 	res.Configured = true
 	return res, nil
 }

@@ -24,7 +24,9 @@ func TestWindsurfUsesCurrentPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: ~/.codeium/mcp_config.json for MCP plus the
+	// project-scoped .windsurfrules file the Cascade agent reads.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 
 	if _, err := os.Stat(filepath.Join(env.Home, ".codeium", "mcp_config.json")); err != nil {
 		t.Fatalf("current config path not written: %v", err)

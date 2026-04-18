@@ -24,7 +24,10 @@ func TestVSCodeUsesServersKeyNotMcpServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: .vscode/mcp.json for MCP plus
+	// .github/copilot-instructions.md for the Copilot rules block
+	// that tells Copilot Chat to prefer Gortex over file reads.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 
 	cfg := agentstest.ReadJSON(t, filepath.Join(env.Root, ".vscode", "mcp.json"))
 	if _, ok := cfg["mcpServers"]; ok {
@@ -59,7 +62,10 @@ func TestVSCodeMergePreservesUserServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionMerge: 1})
+	// mcp.json pre-exists → merge. The copilot-instructions.md file
+	// does not exist in this fixture, so the instructions helper
+	// creates it.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionMerge: 1, agents.ActionCreate: 1})
 
 	cfg := agentstest.ReadJSON(t, path)
 	servers := cfg["servers"].(map[string]any)

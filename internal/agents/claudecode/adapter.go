@@ -1,7 +1,6 @@
 package claudecode
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -131,7 +130,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	if env.AnalyzeRepo && env.AnalyzedOverview != "" {
 		block = env.AnalyzedOverview + "\n" + ClaudeMdBlock
 	}
-	claudeAction, err := appendClaudeMdBlock(w, claudeMdPath, block, opts)
+	claudeAction, err := agents.AppendInstructions(w, claudeMdPath, block, ClaudeMdSentinel, opts)
 	if err != nil {
 		return res, fmt.Errorf("CLAUDE.md: %w", err)
 	}
@@ -206,61 +205,6 @@ func installPermissions(w io.Writer, settingsPath string, opts agents.ApplyOpts)
 		perms["allow"] = append(allow, "mcp__gortex__*")
 		return true, nil
 	}, opts)
-}
-
-// appendClaudeMdBlock appends the Gortex instructions to CLAUDE.md,
-// creating it if missing. If the block is already present (as
-// detected by the ClaudeMdSentinel substring), we skip — we do not
-// append a duplicate block. This function is not JSON so we can't
-// use MergeJSON; we have to hand-roll idempotency.
-func appendClaudeMdBlock(w io.Writer, path, block string, opts agents.ApplyOpts) (agents.FileAction, error) {
-	existing, readErr := os.ReadFile(path)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return agents.FileAction{}, fmt.Errorf("read %s: %w", path, readErr)
-	}
-	existed := readErr == nil
-	if existed && strings.Contains(string(existing), ClaudeMdSentinel) {
-		if w != nil {
-			_, _ = fmt.Fprintf(w, "[gortex init] skip %s (Gortex block already present)\n", path)
-		}
-		return agents.FileAction{Path: path, Action: agents.ActionSkip, Reason: "block-present"}, nil
-	}
-
-	if opts.DryRun {
-		action := agents.ActionWouldMerge
-		if !existed {
-			action = agents.ActionWouldCreate
-		}
-		return agents.FileAction{Path: path, Action: action, Keys: []string{"gortex-block"}}, nil
-	}
-
-	prefix := ""
-	if existed && len(existing) > 0 {
-		prefix = "\n\n"
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return agents.FileAction{}, err
-	}
-	// os.O_APPEND guarantees the write lands at the end even if
-	// another process concurrently appended — we're not atomic here
-	// because that's the historical behaviour and CLAUDE.md is
-	// plaintext a human edits anyway.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return agents.FileAction{}, err
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := f.WriteString(prefix + block); err != nil {
-		return agents.FileAction{}, err
-	}
-	if w != nil {
-		_, _ = fmt.Fprintf(w, "[gortex init] appended Gortex block to %s\n", path)
-	}
-	action := agents.ActionMerge
-	if !existed {
-		action = agents.ActionCreate
-	}
-	return agents.FileAction{Path: path, Action: action, Keys: []string{"gortex-block"}}, nil
 }
 
 // installGlobalSkills writes ~/.claude/skills/gortex-*/SKILL.md for

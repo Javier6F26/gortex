@@ -41,11 +41,10 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   mcpConfigPath(env),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcpServers"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: mcpConfigPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
+		{Path: rulesPath(env), Action: agents.ActionWouldCreate, Keys: []string{"gortex-rule"}},
+	}}, nil
 }
 
 // mcpConfigPath returns the mcp.json path for the given mode.
@@ -57,6 +56,13 @@ func mcpConfigPath(env agents.Env) string {
 		return filepath.Join(env.Home, ".cursor", "mcp.json")
 	}
 	return filepath.Join(env.Root, ".cursor", "mcp.json")
+}
+
+// rulesPath returns the project-scoped MDC file Cursor auto-applies on
+// every chat turn. Cursor does not support user-level MDC rules (they
+// live in the app's Settings UI), so we always write project-scoped.
+func rulesPath(env agents.Env) string {
+	return filepath.Join(env.Root, ".cursor", "rules", "gortex.mdc")
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -77,6 +83,17 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// MDC rules file — one-rule-per-file format, create only when
+	// missing so user edits to .cursor/rules/gortex.mdc survive init
+	// re-runs. Cursor applies `alwaysApply: true` rules on every chat
+	// turn, which is exactly what we want for the MANDATORY block.
+	ruleAction, err := agents.WriteIfNotExists(env.Stderr, rulesPath(env), agents.CursorMDCFrontmatter(agents.InstructionsBody), opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, ruleAction)
+
 	res.Configured = true
 	return res, nil
 }

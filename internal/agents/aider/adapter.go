@@ -65,11 +65,10 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   filepath.Join(env.Root, ".aiderignore"),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"gortex-ignore-block"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".aiderignore"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-ignore-block"}},
+		{Path: filepath.Join(env.Root, "CONVENTIONS.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -87,6 +86,22 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// CONVENTIONS.md is the file aider users canonically `/read` (or
+	// wire into .aider.conf.yml's `read:` list) to pin project-wide
+	// guidance into every session. We append the block here; touching
+	// the user's aider.conf is left to them because that file routinely
+	// carries per-user settings we don't want to disturb.
+	conventionsPath := filepath.Join(env.Root, "CONVENTIONS.md")
+	mdAction, err := agents.AppendInstructions(env.Stderr, conventionsPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, mdAction)
+	if mdAction.Action == agents.ActionCreate || mdAction.Action == agents.ActionMerge {
+		internalutil.Logf(env.Stderr, "[gortex init] add CONVENTIONS.md to your .aider.conf.yml `read:` list to load it on every aider session")
+	}
+
 	res.Configured = true
 	return res, nil
 }

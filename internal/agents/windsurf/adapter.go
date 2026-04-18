@@ -58,14 +58,17 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	if env.Home == "" {
-		return &agents.Plan{}, nil
+	p := &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".windsurfrules"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}
+	if env.Home != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path:   currentConfigPath(env.Home),
+			Action: agents.ActionWouldMerge,
+			Keys:   []string{"mcpServers"},
+		})
 	}
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   currentConfigPath(env.Home),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcpServers"},
-	}}}, nil
+	return p, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -96,6 +99,16 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// .windsurfrules is Windsurf's project-scoped instructions file
+	// Cascade reads on every turn. Sentinel-guarded append.
+	rulesPath := filepath.Join(env.Root, ".windsurfrules")
+	rulesAction, err := agents.AppendInstructions(env.Stderr, rulesPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, rulesAction)
+
 	res.Configured = true
 	return res, nil
 }

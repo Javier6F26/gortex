@@ -23,7 +23,9 @@ func TestOpenCodeUsesMCPSectionKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+	// Two creates: .opencode/config.json for MCP plus AGENTS.md for
+	// the instructions block OpenCode reads on every task.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
 
 	cfg := agentstest.ReadJSON(t, filepath.Join(env.Root, ".opencode", "config.json"))
 	if _, ok := cfg["mcpServers"]; ok {

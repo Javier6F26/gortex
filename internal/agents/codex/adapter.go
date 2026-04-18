@@ -46,14 +46,17 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	if env.Home == "" {
-		return &agents.Plan{}, nil
+	p := &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, "AGENTS.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}
+	if env.Home != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path:   filepath.Join(env.Home, ".codex", "config.toml"),
+			Action: agents.ActionWouldMerge,
+			Keys:   []string{"mcp_servers"},
+		})
 	}
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   filepath.Join(env.Home, ".codex", "config.toml"),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcp_servers"},
-	}}}, nil
+	return p, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -92,6 +95,19 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// AGENTS.md is the per-repo instructions file that Codex CLI
+	// reads on every task. Other agents (Opencode, Amp, some others)
+	// also read this filename, so idempotency via the shared
+	// sentinel prevents double-appending when multiple adapters
+	// target it on the same repo.
+	agentsMdPath := filepath.Join(env.Root, "AGENTS.md")
+	mdAction, err := agents.AppendInstructions(env.Stderr, agentsMdPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, mdAction)
+
 	res.Configured = true
 	return res, nil
 }

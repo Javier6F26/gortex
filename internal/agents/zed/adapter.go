@@ -78,15 +78,17 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	path := userSettingsPath(env.Home)
-	if path == "" {
-		return &agents.Plan{}, nil
+	p := &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".rules"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}
+	if settings := userSettingsPath(env.Home); settings != "" {
+		p.Files = append(p.Files, agents.FileAction{
+			Path:   settings,
+			Action: agents.ActionWouldMerge,
+			Keys:   []string{"context_servers"},
+		})
 	}
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   path,
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"context_servers"},
-	}}}, nil
+	return p, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -124,6 +126,17 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// Zed's Agent panel reads `.rules` at the project root on every
+	// turn. Append the instructions block there so the agent prefers
+	// Gortex tools over its own file-search UI.
+	rulesPath := filepath.Join(env.Root, ".rules")
+	rulesAction, err := agents.AppendInstructions(env.Stderr, rulesPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, rulesAction)
+
 	res.Configured = true
 	return res, nil
 }

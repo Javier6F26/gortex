@@ -57,11 +57,10 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   filepath.Join(env.Root, ".vscode", "mcp.json"),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"servers"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".vscode", "mcp.json"), Action: agents.ActionWouldMerge, Keys: []string{"servers"}},
+		{Path: filepath.Join(env.Root, ".github", "copilot-instructions.md"), Action: agents.ActionWouldMerge, Keys: []string{"gortex-block"}},
+	}}, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -104,6 +103,18 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// Copilot reads .github/copilot-instructions.md on every chat
+	// turn. Append the MANDATORY-prefer-Gortex block so Copilot knows
+	// to call Gortex MCP tools instead of `codebase` / `findFiles` /
+	// raw file reads. Idempotent via the shared sentinel.
+	copilotPath := filepath.Join(env.Root, ".github", "copilot-instructions.md")
+	copilotAction, err := agents.AppendInstructions(env.Stderr, copilotPath, agents.InstructionsBody, agents.InstructionsSentinel, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, copilotAction)
+
 	res.Configured = true
 	return res, nil
 }

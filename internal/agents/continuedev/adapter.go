@@ -35,11 +35,10 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 }
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
-	return &agents.Plan{Files: []agents.FileAction{{
-		Path:   filepath.Join(env.Root, ".continue", "mcpServers", "gortex.json"),
-		Action: agents.ActionWouldMerge,
-		Keys:   []string{"mcpServers"},
-	}}}, nil
+	return &agents.Plan{Files: []agents.FileAction{
+		{Path: filepath.Join(env.Root, ".continue", "mcpServers", "gortex.json"), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
+		{Path: filepath.Join(env.Root, ".continue", "rules", "gortex.md"), Action: agents.ActionWouldCreate, Keys: []string{"gortex-rule"}},
+	}}, nil
 }
 
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
@@ -65,6 +64,16 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// Continue reads .continue/rules/*.md on every chat turn.
+	// One-rule-per-file, create-only so user edits survive re-runs.
+	rulesPath := filepath.Join(env.Root, ".continue", "rules", "gortex.md")
+	ruleAction, err := agents.WriteIfNotExists(env.Stderr, rulesPath, agents.InstructionsBody, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, ruleAction)
+
 	res.Configured = true
 	return res, nil
 }
