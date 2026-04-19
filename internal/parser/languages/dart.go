@@ -178,9 +178,22 @@ func (e *DartExtractor) extractMethods(
 		seen[methodID] = true
 		seen[filePath+"::_method_L"+fmt.Sprint(startLine+1)] = true
 
+		// Dart's tree-sitter grammar splits a method into a leading
+		// method_signature node (declaration line) and a following
+		// function_body sibling that carries the `{ ... }` block.
+		// Using method_signature.EndPoint alone makes every method
+		// one line long and breaks downstream tooling that wants to
+		// read the body (source viewer, shape extractor,
+		// brace-balancing fallbacks, coverage). Stretch EndLine to
+		// cover the adjacent function_body when present.
+		endLine := int(node.EndPoint().Row)
+		if body := nextDartFunctionBody(node); body != nil {
+			endLine = int(body.EndPoint().Row)
+		}
+
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: methodID, Kind: graph.KindMethod, Name: name,
-			FilePath: filePath, StartLine: startLine + 1, EndLine: int(node.EndPoint().Row) + 1,
+			FilePath: filePath, StartLine: startLine + 1, EndLine: endLine + 1,
 			Language: "dart",
 			Meta:     map[string]any{"receiver": typeName},
 		})
@@ -194,6 +207,26 @@ func (e *DartExtractor) extractMethods(
 			})
 		}
 	})
+}
+
+// nextDartFunctionBody returns the function_body sibling that follows
+// a method_signature / function_signature node, walking through
+// immediate siblings (the Dart grammar occasionally interposes
+// whitespace / comment nodes between them). Returns nil when the
+// method is abstract or declared with `=>` without a brace block.
+func nextDartFunctionBody(sig *sitter.Node) *sitter.Node {
+	for s := sig.NextSibling(); s != nil; s = s.NextSibling() {
+		if s.Type() == "function_body" {
+			return s
+		}
+		// Stop if we've walked past the declaration grouping — the
+		// next signature wipes any chance of finding "this" one's
+		// body.
+		if s.Type() == "method_signature" || s.Type() == "function_signature" {
+			return nil
+		}
+	}
+	return nil
 }
 
 // extractTopLevelFunctions finds function_signature nodes that are direct children of program

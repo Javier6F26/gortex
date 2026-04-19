@@ -51,6 +51,67 @@ export type ContractLocation = {
   meta?: Record<string, unknown>
 }
 
+export type ContractSchema = {
+  request_type?: string
+  response_type?: string
+  request_expr?: string
+  response_expr?: string
+  request_stream?: boolean
+  response_stream?: boolean
+  path_params?: string[]
+  query_params?: string[]
+  status_codes?: number[]
+  source?: 'extracted' | 'partial' | 'none' | string
+}
+
+// TypeShapeField mirrors contracts.ShapeField on the Go side. It's the
+// field-level snapshot of a type that's referenced as a request /
+// response body. Populated on the type node's Meta["shape"] during
+// indexing.
+export type TypeShapeField = {
+  name: string
+  type: string
+  json_tag?: string
+  required: boolean
+  repeated?: boolean
+  comment?: string
+}
+
+export type TypeShape = {
+  kind: 'struct' | 'interface' | 'type' | 'class' | 'message' | string
+  fields: TypeShapeField[]
+  notes?: string[]
+}
+
+// ContractIssue mirrors contracts.ContractIssue on the Go side. It's
+// the output of `contracts validate` — one record per diff between a
+// provider's and consumer's shape for a given contract ID.
+export type ContractIssueSeverity = 'breaking' | 'warning' | 'info' | string
+
+export type ContractIssue = {
+  contract_id: string
+  kind: string
+  severity: ContractIssueSeverity
+  provider?: string
+  consumer?: string
+  field?: string
+  details?: string
+  provider_type?: string
+  consumer_type?: string
+}
+
+export type ContractValidationSummary = {
+  total: number
+  breaking: number
+  warning: number
+  info: number
+}
+
+export type ContractValidation = {
+  issues: ContractIssue[]
+  summary: ContractValidationSummary
+}
+
 export type Contract = {
   id: string
   name: string
@@ -64,6 +125,7 @@ export type Contract = {
   callers: number
   last: string
   locations: ContractLocation[]
+  schema?: ContractSchema
 }
 
 export type Community = {

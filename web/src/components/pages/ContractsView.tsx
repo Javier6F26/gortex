@@ -4,12 +4,14 @@ import { useMemo, useState } from 'react'
 import { Icon } from '@/components/primitives/Icon'
 import { CaveatBadge } from '@/components/primitives/Caveat'
 import { CodeBlock } from '@/components/primitives/CodeBlock'
-import { useContracts, useSymbolSource } from '@/lib/hooks'
+import { useContracts, useSymbolSource, useSymbol, useContractValidation } from '@/lib/hooks'
 import type {
   Contract,
+  ContractIssue,
   ContractLocation,
   ContractScope,
   ContractType,
+  TypeShape,
 } from '@/lib/schema'
 
 type ScopeFilter = ContractScope | 'all'
@@ -36,6 +38,7 @@ const SCOPE_FILTERS: { value: ScopeFilter; label: string }[] = [
 export function ContractsView() {
   const { data, loading, error, refetch } = useContracts()
   const contracts = data ?? []
+  const { data: validation, refetch: refetchValidation } = useContractValidation()
 
   const [scope, setScope] = useState<ScopeFilter>('all')
   const [typ, setTyp] = useState<TypeFilter>('all')
@@ -44,6 +47,19 @@ export function ContractsView() {
   const typeCounts = useMemo(() => countBy(contracts, (c) => c.type), [contracts])
   const scopeCounts = useMemo(() => countBy(contracts, (c) => c.scope), [contracts])
 
+  // Bucket validation issues by contract ID so every row can look up
+  // its own diffs in O(1). Also compute severity-summary for the row
+  // so the badge renders without re-scanning the full list.
+  const issuesByContract = useMemo(() => {
+    const m = new Map<string, ContractIssue[]>()
+    for (const is of validation?.issues ?? []) {
+      const bucket = m.get(is.contract_id) ?? []
+      bucket.push(is)
+      m.set(is.contract_id, bucket)
+    }
+    return m
+  }, [validation])
+
   const filtered = useMemo(
     () =>
       contracts.filter(
@@ -51,7 +67,15 @@ export function ContractsView() {
       ),
     [contracts, scope, typ],
   )
-  const breaking = filtered.filter((c) => c.breaking).length
+  // Breaking count is derived from validation (the contract-level
+  // `breaking` flag is still unused / false pending future work).
+  const breakingTotal = validation?.summary.breaking ?? 0
+  const warningTotal = validation?.summary.warning ?? 0
+
+  const refresh = () => {
+    refetch()
+    refetchValidation()
+  }
 
   return (
     <>
@@ -61,11 +85,13 @@ export function ContractsView() {
           <div className="sub">
             {loading
               ? 'Loading detected contracts…'
-              : `${filtered.length} of ${contracts.length} API/event boundaries · ${breaking} breaking`}
+              : validation
+              ? `${filtered.length} of ${contracts.length} API/event boundaries · ${breakingTotal} breaking · ${warningTotal} warning`
+              : `${filtered.length} of ${contracts.length} API/event boundaries`}
           </div>
         </div>
         <div className="actions">
-          <button type="button" className="btn" onClick={refetch}>
+          <button type="button" className="btn" onClick={refresh}>
             <Icon name="history" size={12} /> Refresh
           </button>
         </div>
@@ -158,6 +184,7 @@ export function ContractsView() {
               <ContractRow
                 key={c.id}
                 c={c}
+                issues={issuesByContract.get(c.id) ?? []}
                 expanded={openId === c.id}
                 onToggle={() => setOpenId(openId === c.id ? null : c.id)}
               />
@@ -171,17 +198,23 @@ export function ContractsView() {
 
 function ContractRow({
   c,
+  issues,
   expanded,
   onToggle,
 }: {
   c: Contract
+  issues: ContractIssue[]
   expanded: boolean
   onToggle: () => void
 }) {
   const badge = kindBadge(c.kind)
   const [selected, setSelected] = useState<ContractLocation | null>(null)
-  const [mode, setMode] = useState<'source' | 'schema'>('source')
+  const [mode, setMode] = useState<'source' | 'schema' | 'issues'>('source')
   const providerLoc = c.locations.find((l) => l.role === 'provider') ?? null
+
+  const breakingCount = issues.filter((i) => i.severity === 'breaking').length
+  const warningCount = issues.filter((i) => i.severity === 'warning').length
+  const infoCount = issues.filter((i) => i.severity === 'info').length
 
   const openTrace = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -242,6 +275,29 @@ function ContractRow({
             </span>
             {c.breaking && <CaveatBadge kind="boundary" />}
             {c.version && <span className="chip">{c.version}</span>}
+            {breakingCount > 0 && (
+              <span
+                className="chip"
+                title={`${breakingCount} breaking change${breakingCount === 1 ? '' : 's'} — click to inspect`}
+                style={{
+                  color: 'var(--danger)',
+                  borderColor: 'var(--danger)',
+                  background: 'oklch(0.6 0.22 25 / 0.1)',
+                  fontWeight: 600,
+                }}
+              >
+                ⚠ {breakingCount} breaking
+              </span>
+            )}
+            {warningCount > 0 && (
+              <span
+                className="chip"
+                title={`${warningCount} warning${warningCount === 1 ? '' : 's'}`}
+                style={{ color: 'var(--warn)', borderColor: 'var(--warn)' }}
+              >
+                {warningCount} warning
+              </span>
+            )}
           </div>
           <div className="hstack" style={{ gap: 10, marginTop: 6, fontSize: 11.5, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
             <span>
@@ -274,6 +330,7 @@ function ContractRow({
       {expanded && (
         <ContractDetail
           c={c}
+          issues={issues}
           selected={selected}
           onSelect={setSelected}
           mode={mode}
@@ -286,16 +343,18 @@ function ContractRow({
 
 function ContractDetail({
   c,
+  issues,
   selected,
   onSelect,
   mode,
   setMode,
 }: {
   c: Contract
+  issues: ContractIssue[]
   selected: ContractLocation | null
   onSelect: (l: ContractLocation) => void
-  mode: 'source' | 'schema'
-  setMode: (m: 'source' | 'schema') => void
+  mode: 'source' | 'schema' | 'issues'
+  setMode: (m: 'source' | 'schema' | 'issues') => void
 }) {
   const providers = c.locations.filter((l) => l.role === 'provider')
   const consumers = c.locations.filter((l) => l.role === 'consumer')
@@ -369,6 +428,32 @@ function ContractDetail({
           >
             Schema / Meta
           </button>
+          {issues.length > 0 && (
+            <button
+              type="button"
+              className="chip"
+              onClick={() => setMode('issues')}
+              style={{
+                cursor: 'pointer',
+                background: mode === 'issues' ? 'var(--bg-1)' : 'transparent',
+                color:
+                  mode === 'issues'
+                    ? 'var(--fg-0)'
+                    : issues.some((i) => i.severity === 'breaking')
+                    ? 'var(--danger)'
+                    : 'var(--fg-2)',
+                borderColor:
+                  mode === 'issues'
+                    ? 'var(--fg-2)'
+                    : issues.some((i) => i.severity === 'breaking')
+                    ? 'var(--danger)'
+                    : 'var(--line)',
+                fontWeight: mode === 'issues' ? 600 : 400,
+              }}
+            >
+              Issues · {issues.length}
+            </button>
+          )}
           {selected && (
             <span className="faint mono" style={{ marginLeft: 'auto', fontSize: 11 }}>
               {selected.file_path}:{selected.line}
@@ -378,8 +463,89 @@ function ContractDetail({
 
         {mode === 'source' ? (
           <SourcePane symbolId={selected?.symbol_id ?? null} filePath={selected?.file_path ?? null} />
+        ) : mode === 'schema' ? (
+          <SchemaPane contract={c} loc={selected} />
         ) : (
-          <SchemaPane loc={selected} />
+          <IssuesPane issues={issues} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function IssuesPane({ issues }: { issues: ContractIssue[] }) {
+  if (issues.length === 0) {
+    return (
+      <div className="faint" style={{ padding: 12, fontSize: 12 }}>
+        No validation issues detected for this contract. Provider and
+        consumer shapes match.
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'grid', gap: 6, overflow: 'auto' }}>
+      {issues.map((is, i) => (
+        <IssueRow key={`${is.kind}-${is.field}-${i}`} issue={is} />
+      ))}
+    </div>
+  )
+}
+
+function IssueRow({ issue }: { issue: ContractIssue }) {
+  const sevColor =
+    issue.severity === 'breaking'
+      ? 'var(--danger)'
+      : issue.severity === 'warning'
+      ? 'var(--warn)'
+      : 'var(--fg-2)'
+  const sevBg =
+    issue.severity === 'breaking'
+      ? 'oklch(0.6 0.22 25 / 0.08)'
+      : issue.severity === 'warning'
+      ? 'oklch(0.82 0.15 80 / 0.08)'
+      : 'transparent'
+  return (
+    <div
+      style={{
+        border: '1px solid var(--line)',
+        borderLeft: `3px solid ${sevColor}`,
+        background: sevBg,
+        borderRadius: 4,
+        padding: '8px 10px',
+        fontSize: 12,
+        display: 'grid',
+        gap: 4,
+      }}
+    >
+      <div className="hstack" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <span
+          className="chip"
+          style={{
+            color: sevColor,
+            borderColor: sevColor,
+            fontWeight: 600,
+            fontSize: 10,
+            textTransform: 'uppercase',
+          }}
+        >
+          {issue.severity}
+        </span>
+        <span className="mono" style={{ fontSize: 11.5 }}>{issue.kind}</span>
+        {issue.field && (
+          <span className="mono faint" style={{ fontSize: 11 }}>field={issue.field}</span>
+        )}
+      </div>
+      {issue.details && (
+        <div className="faint" style={{ fontSize: 11.5, lineHeight: 1.45 }}>{issue.details}</div>
+      )}
+      <div className="hstack" style={{ gap: 6, flexWrap: 'wrap', fontSize: 10.5, color: 'var(--fg-2)' }}>
+        {issue.provider && <span>provider={issue.provider}</span>}
+        {issue.consumer && <span>consumer={issue.consumer}</span>}
+        {issue.provider_type && (
+          <span className="mono" title="Provider type">p={issue.provider_type}</span>
+        )}
+        {issue.consumer_type && (
+          <span className="mono" title="Consumer type">c={issue.consumer_type}</span>
         )}
       </div>
     </div>
@@ -463,31 +629,237 @@ function SourcePane({ symbolId, filePath }: { symbolId: string | null; filePath:
   return <CodeBlock code={data} filePath={filePath ?? undefined} maxHeight={420} />
 }
 
-function SchemaPane({ loc }: { loc: ContractLocation | null }) {
-  if (!loc) {
-    return (
-      <div className="faint" style={{ padding: 12, fontSize: 12 }}>
-        Select a location on the left to inspect its schema / meta.
-      </div>
-    )
-  }
-  const meta = loc.meta ?? {}
-  const hasMeta = Object.keys(meta).length > 0
+function SchemaPane({ contract, loc }: { contract: Contract; loc: ContractLocation | null }) {
+  const schema = contract.schema
+  const hasSchema =
+    !!schema &&
+    (!!schema.request_type ||
+      !!schema.response_type ||
+      !!schema.request_expr ||
+      !!schema.response_expr ||
+      (schema.path_params?.length ?? 0) > 0 ||
+      (schema.query_params?.length ?? 0) > 0 ||
+      (schema.status_codes?.length ?? 0) > 0)
+
   return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      <div className="hstack" style={{ gap: 8, flexWrap: 'wrap', fontSize: 11.5 }}>
-        <span className="chip">{loc.role}</span>
-        <span className="chip">{loc.repo_prefix || '(unknown)'}</span>
-        {loc.symbol_id && <span className="mono faint">{loc.symbol_id}</span>}
-      </div>
-      {hasMeta ? (
-        <CodeBlock code={JSON.stringify(meta, null, 2)} lang="json" maxHeight={380} />
+    <div style={{ display: 'grid', gap: 10, overflow: 'auto' }}>
+      {hasSchema && schema ? (
+        <div style={{ display: 'grid', gap: 10 }}>
+          <div className="hstack" style={{ gap: 6, flexWrap: 'wrap', fontSize: 11.5 }}>
+            <span className="chip" title="Contract type">{contract.type}</span>
+            {schema.source && (
+              <span
+                className="chip"
+                title="How the schema was inferred"
+                style={{
+                  color:
+                    schema.source === 'extracted'
+                      ? 'var(--ok)'
+                      : schema.source === 'partial'
+                      ? 'var(--warn)'
+                      : 'var(--fg-2)',
+                }}
+              >
+                {schema.source}
+              </span>
+            )}
+          </div>
+
+          <SchemaField label="Request" type={schema.request_type} expr={schema.request_expr} stream={schema.request_stream} />
+          <TypeShapeInline symbolId={schemaTypeSymbolId(schema.request_type)} />
+          <SchemaField label="Response" type={schema.response_type} expr={schema.response_expr} stream={schema.response_stream} />
+          <TypeShapeInline symbolId={schemaTypeSymbolId(schema.response_type)} />
+
+          {(schema.path_params?.length ?? 0) > 0 && (
+            <ParamRow label="Path params" values={schema.path_params!} />
+          )}
+          {(schema.query_params?.length ?? 0) > 0 && (
+            <ParamRow label="Query params" values={schema.query_params!} />
+          )}
+          {(schema.status_codes?.length ?? 0) > 0 && (
+            <ParamRow label="Status codes" values={schema.status_codes!.map(String)} />
+          )}
+        </div>
       ) : (
         <div className="faint" style={{ padding: 12, fontSize: 12 }}>
-          No schema metadata attached to this location.
+          No schema shape was extracted for this contract. The extractor
+          either didn&apos;t recognise the framework binding, or the
+          handler writes an inline / anonymous type. Raw per-location
+          meta is shown below.
+        </div>
+      )}
+
+      {loc?.meta && Object.keys(loc.meta).length > 0 && (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <div className="faint" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+            Location meta {loc.symbol_id ? `· ${loc.symbol_id}` : ''}
+          </div>
+          <CodeBlock code={JSON.stringify(loc.meta, null, 2)} lang="json" maxHeight={240} />
         </div>
       )}
     </div>
+  )
+}
+
+function SchemaField({
+  label,
+  type,
+  expr,
+  stream,
+}: {
+  label: string
+  type?: string
+  expr?: string
+  stream?: boolean
+}) {
+  if (!type && !expr) return null
+  const isSymbolId = !!type && type.includes('::')
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '90px 1fr',
+        gap: 10,
+        alignItems: 'baseline',
+        fontSize: 12,
+      }}
+    >
+      <div className="faint" style={{ textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.5 }}>
+        {label}
+        {stream && <span style={{ marginLeft: 4, color: 'var(--violet)' }}>stream</span>}
+      </div>
+      <div className="hstack" style={{ gap: 6, flexWrap: 'wrap' }}>
+        {type ? (
+          <span
+            className="mono"
+            title={isSymbolId ? 'Symbol ID (resolved)' : 'Bare type name (unresolved across repos)'}
+            style={{
+              color: isSymbolId ? 'var(--fg-0)' : 'var(--fg-2)',
+              background: 'var(--bg-1)',
+              border: '1px solid var(--line)',
+              borderRadius: 4,
+              padding: '2px 6px',
+              fontSize: 11.5,
+            }}
+          >
+            {type}
+          </span>
+        ) : (
+          <span className="mono faint" style={{ fontSize: 11 }}>{expr}</span>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ParamRow({ label, values }: { label: string; values: string[] }) {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '90px 1fr',
+        gap: 10,
+        alignItems: 'baseline',
+        fontSize: 12,
+      }}
+    >
+      <div className="faint" style={{ textTransform: 'uppercase', fontSize: 10, letterSpacing: 0.5 }}>
+        {label}
+      </div>
+      <div className="hstack" style={{ gap: 4, flexWrap: 'wrap' }}>
+        {values.map((v) => (
+          <span
+            key={v}
+            className="mono"
+            style={{
+              background: 'var(--bg-1)',
+              border: '1px solid var(--line)',
+              borderRadius: 4,
+              padding: '2px 6px',
+              fontSize: 11,
+            }}
+          >
+            {v}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// schemaTypeSymbolId returns the type identifier only when it's a
+// graph symbol ID (contains `::`), otherwise null. Bare names that
+// the module-wide post-pass couldn't upgrade don't resolve to nodes,
+// so we can't fetch shapes for them.
+function schemaTypeSymbolId(t?: string): string | null {
+  if (!t) return null
+  return t.includes('::') ? t : null
+}
+
+// TypeShapeInline fetches the type node for a symbol ID and renders
+// its field-level shape (Stage 2 output). No-op when the symbolId is
+// null, when the node has no shape attached, or while the fetch is
+// in flight — the surrounding Request/Response row already conveys
+// the type name, so this is purely additive.
+function TypeShapeInline({ symbolId }: { symbolId: string | null }) {
+  const { data: node } = useSymbol(symbolId)
+  const shape = (node?.meta?.shape ?? null) as TypeShape | null
+  if (!shape || shape.fields.length === 0) return null
+
+  return (
+    <div
+      style={{
+        marginLeft: 100,
+        marginTop: -4,
+        border: '1px solid var(--line)',
+        borderRadius: 4,
+        overflow: 'hidden',
+        fontSize: 11.5,
+      }}
+    >
+      <div
+        className="faint"
+        style={{
+          padding: '4px 8px',
+          background: 'var(--bg-1)',
+          borderBottom: '1px solid var(--line)',
+          textTransform: 'uppercase',
+          fontSize: 10,
+          letterSpacing: 0.5,
+        }}
+      >
+        {shape.kind} · {shape.fields.length} field{shape.fields.length === 1 ? '' : 's'}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'max-content max-content 1fr' }}>
+        {shape.fields.map((f) => (
+          <TypeShapeRow key={f.name} f={f} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function TypeShapeRow({ f }: { f: { name: string; type: string; required: boolean; repeated?: boolean; json_tag?: string; comment?: string } }) {
+  return (
+    <>
+      <div
+        className="mono"
+        style={{
+          padding: '3px 8px',
+          color: f.required ? 'var(--fg-0)' : 'var(--fg-2)',
+        }}
+      >
+        {f.name}
+        {f.required ? '' : <span className="faint">?</span>}
+      </div>
+      <div className="mono faint" style={{ padding: '3px 8px' }}>
+        {f.repeated ? `${f.type}[]` : f.type}
+      </div>
+      <div className="faint" style={{ padding: '3px 8px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {f.json_tag && f.json_tag !== f.name && <span className="mono" style={{ marginRight: 8 }}>tag={f.json_tag}</span>}
+        {f.comment}
+      </div>
+    </>
   )
 }
 

@@ -102,20 +102,19 @@ func NormalizeHTTPPath(path string) string {
 		return "{" + name + "}"
 	})
 
-	// Normalise parameter placeholders.
+	// Normalise parameter placeholders to positional names — {p1}, {p2}, …
+	// HTTP routing identity is positional, not name-based: a provider
+	// declaring `DELETE /v1/workspaces/{wid}/tags/{id}` and a consumer
+	// calling `DELETE /v1/workspaces/{workspaceId}/tags/{id}` describe
+	// the same route, and must hash to the same Contract.ID for
+	// cross-repo matching (`contracts check` / `validate`) to work.
+	// Keeping the user-written name in the ID is a common source of
+	// false orphans across services whose provider and consumer teams
+	// chose different names for the same slot.
+	var paramCounter int
 	path = paramPatterns.ReplaceAllStringFunc(path, func(m string) string {
-		sub := paramPatterns.FindStringSubmatch(m)
-		// sub[1] = :param, sub[2] = <param> (possibly typed), sub[3] = {param}
-		for _, s := range sub[1:] {
-			if s != "" {
-				// Drop type prefix if present, e.g. "int:id" -> "id".
-				if idx := strings.LastIndex(s, ":"); idx >= 0 {
-					s = s[idx+1:]
-				}
-				return fmt.Sprintf("{%s}", s)
-			}
-		}
-		return m
+		paramCounter++
+		return fmt.Sprintf("{p%d}", paramCounter)
 	})
 
 	// Ensure leading slash.

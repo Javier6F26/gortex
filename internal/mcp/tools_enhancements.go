@@ -192,11 +192,11 @@ func (s *Server) registerEnhancementTools() {
 		s.handleBatchEdit,
 	)
 
-	// contracts — unified contracts tool (list + check)
+	// contracts — unified contracts tool (list + check + validate)
 	s.mcpServer.AddTool(
 		mcp.NewTool("contracts",
-			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects mismatches — orphan providers/consumers across repos."),
-			mcp.WithString("action", mcp.Description("list (default) or check")),
+			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues."),
+			mcp.WithString("action", mcp.Description("list (default), check, or validate")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project (resolves to the project's repo set)")),
 			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
@@ -1496,8 +1496,10 @@ func (s *Server) handleContracts(ctx context.Context, req mcp.CallToolRequest) (
 		return s.handleGetContracts(ctx, req)
 	case "check":
 		return s.handleCheckContracts(ctx, req)
+	case "validate":
+		return s.handleValidateContracts(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list or check)"), nil
+		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list, check, or validate)"), nil
 	}
 }
 
@@ -1681,6 +1683,92 @@ func (s *Server) handleCheckContracts(_ context.Context, req mcp.CallToolRequest
 			"orphan_providers": len(result.OrphanProviders),
 			"orphan_consumers": len(result.OrphanConsumers),
 		},
+	}
+	return mcp.NewToolResultJSON(payload)
+}
+
+// ---------------------------------------------------------------------------
+// handleValidateContracts
+// ---------------------------------------------------------------------------
+//
+// Pairs each contract's provider and consumer sides, diffs their
+// request/response shapes (populated by the Stage 2 snapshotting
+// pass), and returns a list of issues classified as breaking,
+// warning, or info. Accepts the same repo/project/ref scoping
+// parameters as `check` so callers can limit the diff to one project.
+
+func (s *Server) handleValidateContracts(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	registry := s.effectiveContractRegistry()
+	if registry == nil {
+		return mcp.NewToolResultError("no contract registry available — index a repository first"), nil
+	}
+
+	allowed, err := s.resolveRepoFilter(req)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	reg := registry
+	if allowed != nil {
+		reg = contracts.NewRegistry()
+		for _, c := range registry.All() {
+			if c.RepoPrefix != "" && !allowed[c.RepoPrefix] {
+				continue
+			}
+			reg.Add(c)
+		}
+	}
+
+	// Shape lookup pulls Shape out of the type node's meta — the
+	// indexer attaches it during commitContracts (see
+	// snapshotContractShapes in internal/indexer/indexer.go).
+	lookup := contracts.ShapeLookup(func(symbolID string) *contracts.Shape {
+		n := s.graph.GetNode(symbolID)
+		if n == nil || n.Meta == nil {
+			return nil
+		}
+		switch v := n.Meta["shape"].(type) {
+		case *contracts.Shape:
+			return v
+		case contracts.Shape:
+			return &v
+		}
+		return nil
+	})
+
+	issues := contracts.Validate(reg, lookup)
+
+	// Severity rollup for easy at-a-glance counts.
+	summary := map[string]int{"breaking": 0, "warning": 0, "info": 0, "total": len(issues)}
+	for _, is := range issues {
+		switch is.Severity {
+		case contracts.SeverityBreaking:
+			summary["breaking"]++
+		case contracts.SeverityWarning:
+			summary["warning"]++
+		case contracts.SeverityInfo:
+			summary["info"]++
+		}
+	}
+
+	if isCompact(req) {
+		var b strings.Builder
+		fmt.Fprintf(&b, "issues: %d (breaking=%d warning=%d info=%d)\n",
+			summary["total"], summary["breaking"], summary["warning"], summary["info"])
+		for _, is := range issues {
+			field := is.Field
+			if field == "" {
+				field = "-"
+			}
+			fmt.Fprintf(&b, "  [%s] %s %s field=%s prov=%s cons=%s %s\n",
+				is.Severity, is.ContractID, is.Kind, field, is.Provider, is.Consumer, is.Details)
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+
+	payload := map[string]any{
+		"issues":  issues,
+		"summary": summary,
 	}
 	return mcp.NewToolResultJSON(payload)
 }

@@ -1,6 +1,9 @@
 package contracts
 
-import "sync"
+import (
+	"strings"
+	"sync"
+)
 
 // Registry collects contracts from all repos and provides indexed lookups.
 type Registry struct {
@@ -39,6 +42,66 @@ func (r *Registry) AddAll(contracts []Contract, repoPrefix string) {
 		contracts[i].RepoPrefix = repoPrefix
 		r.Add(contracts[i])
 	}
+}
+
+// TypeLookup resolves a bare type name to the symbol ID of its
+// definition. The optional repoHint lets callers prefer definitions
+// from the same repo as the contract itself when multiple repos
+// define a type with the same name. An empty return slice means no
+// match; a single entry is an unambiguous upgrade; more than one
+// entry signals ambiguity and the upgrade pass leaves the bare name
+// in place.
+type TypeLookup func(name, repoHint string) []string
+
+// UpgradeBareTypeRefs walks every contract in the registry and
+// rewrites Meta["request_type"] / Meta["response_type"] from a bare
+// type name to a symbol ID when the lookup yields exactly one match.
+// Meta entries that already look like symbol IDs (they contain "::")
+// are left alone. This pass is the counterpart to the in-file type
+// resolution done during extraction — it upgrades the cases where
+// the type is defined in a sibling file and therefore couldn't be
+// resolved from the file-scoped node list.
+func (r *Registry) UpgradeBareTypeRefs(lookup TypeLookup) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	upgrade := func(meta map[string]any, key, repoHint string) {
+		v, ok := meta[key].(string)
+		if !ok || v == "" || strings.Contains(v, "::") {
+			return
+		}
+		candidates := lookup(v, repoHint)
+		if len(candidates) == 1 {
+			meta[key] = candidates[0]
+		}
+	}
+	for id, list := range r.byID {
+		for i := range list {
+			if list[i].Meta == nil {
+				continue
+			}
+			upgrade(list[i].Meta, "request_type", list[i].RepoPrefix)
+			upgrade(list[i].Meta, "response_type", list[i].RepoPrefix)
+		}
+		r.byID[id] = list
+	}
+	// Mirror the upgrades into the other indexes so lookups stay
+	// consistent. The byRepo / bySymbol / byFilePath slices hold
+	// value copies of the same Contract, so we re-walk them too.
+	syncMeta := func(m map[string][]Contract) {
+		for k, list := range m {
+			for i := range list {
+				if list[i].Meta == nil {
+					continue
+				}
+				upgrade(list[i].Meta, "request_type", list[i].RepoPrefix)
+				upgrade(list[i].Meta, "response_type", list[i].RepoPrefix)
+			}
+			m[k] = list
+		}
+	}
+	syncMeta(r.byRepo)
+	syncMeta(r.bySymbol)
+	syncMeta(r.byFilePath)
 }
 
 // ByID returns all contracts matching the given contract ID.

@@ -7,6 +7,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/analysis"
+	"github.com/zzet/gortex/internal/contracts"
 )
 
 func (s *Server) registerAnalysisTools() {
@@ -292,7 +293,132 @@ func (s *Server) handleEnhancedChangeImpact(_ context.Context, req mcp.CallToolR
 		}
 	}
 
+	// Contract impact — if any of the changed symbols is referenced
+	// as a request/response body by a declared contract, surface the
+	// full list so the reviewer sees "this struct backs N routes"
+	// before the edit lands. Live validate pass runs on the affected
+	// contracts so existing breaking drift is reported alongside the
+	// pending-change blast radius.
+	if ci := s.computeContractImpact(ids); ci != nil {
+		result["contract_impact"] = ci
+		if impact.Risk == analysis.RiskLow && ci.Breaking > 0 {
+			result["risk"] = analysis.RiskHigh
+			result["contract_risk_upgrade"] = "risk raised to HIGH — type is a contract boundary with breaking drift"
+		}
+	}
+
 	return mcp.NewToolResultJSON(result)
+}
+
+// -----------------------------------------------------------------------------
+// Contract impact helper
+// -----------------------------------------------------------------------------
+
+// contractImpact enumerates the contracts that reference one of the
+// input type IDs as a request or response body, and rolls up the
+// current validation issues for that subset so change-review sees
+// breaking drift in the same payload as community / risk info.
+type contractImpact struct {
+	Affected     []contractImpactEntry     `json:"affected"`
+	Breaking     int                       `json:"breaking"`
+	Warning      int                       `json:"warning"`
+	Info         int                       `json:"info"`
+	SampleIssues []contracts.ContractIssue `json:"sample_issues,omitempty"`
+}
+
+type contractImpactEntry struct {
+	ContractID string `json:"contract_id"`
+	Position   string `json:"position"` // request | response
+	Role       string `json:"role"`     // provider | consumer
+	Repo       string `json:"repo"`
+	TypeID     string `json:"type_id"`
+}
+
+// computeContractImpact walks every contract in the effective
+// registry and returns the ones whose request_type or response_type
+// matches any of the changed symbol IDs. Returns nil when nothing
+// matches so the JSON payload stays compact.
+func (s *Server) computeContractImpact(changedIDs []string) *contractImpact {
+	reg := s.effectiveContractRegistry()
+	if reg == nil {
+		return nil
+	}
+	changed := make(map[string]struct{}, len(changedIDs))
+	for _, id := range changedIDs {
+		changed[id] = struct{}{}
+	}
+
+	var entries []contractImpactEntry
+	affectedIDs := make(map[string]struct{})
+	for _, c := range reg.All() {
+		reqType := impactMetaString(c.Meta, "request_type")
+		respType := impactMetaString(c.Meta, "response_type")
+		if _, hit := changed[reqType]; hit && reqType != "" {
+			entries = append(entries, contractImpactEntry{
+				ContractID: c.ID, Position: "request",
+				Role: string(c.Role), Repo: c.RepoPrefix, TypeID: reqType,
+			})
+			affectedIDs[c.ID] = struct{}{}
+		}
+		if _, hit := changed[respType]; hit && respType != "" {
+			entries = append(entries, contractImpactEntry{
+				ContractID: c.ID, Position: "response",
+				Role: string(c.Role), Repo: c.RepoPrefix, TypeID: respType,
+			})
+			affectedIDs[c.ID] = struct{}{}
+		}
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Validate the affected subset only — Validate on the full
+	// registry would drown the payload in unrelated drift.
+	sub := contracts.NewRegistry()
+	for _, c := range reg.All() {
+		if _, ok := affectedIDs[c.ID]; ok {
+			sub.Add(c)
+		}
+	}
+	lookup := contracts.ShapeLookup(func(id string) *contracts.Shape {
+		n := s.graph.GetNode(id)
+		if n == nil || n.Meta == nil {
+			return nil
+		}
+		switch v := n.Meta["shape"].(type) {
+		case *contracts.Shape:
+			return v
+		case contracts.Shape:
+			return &v
+		}
+		return nil
+	})
+	issues := contracts.Validate(sub, lookup)
+
+	out := &contractImpact{Affected: entries}
+	for _, is := range issues {
+		switch is.Severity {
+		case contracts.SeverityBreaking:
+			out.Breaking++
+		case contracts.SeverityWarning:
+			out.Warning++
+		case contracts.SeverityInfo:
+			out.Info++
+		}
+	}
+	// Keep the first 10 issues inline; full list is always one
+	// `contracts validate` call away.
+	if len(issues) > 10 {
+		out.SampleIssues = issues[:10]
+	} else {
+		out.SampleIssues = issues
+	}
+	return out
+}
+
+func impactMetaString(m map[string]any, key string) string {
+	v, _ := m[key].(string)
+	return v
 }
 
 // CommunityCoupling describes the coupling between two communities.

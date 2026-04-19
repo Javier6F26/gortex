@@ -299,6 +299,29 @@ type contractEntry struct {
 	Callers   int                 `json:"callers"`
 	Last      string              `json:"last"`
 	Locations []contractLocation `json:"locations"`
+
+	// Schema-shape fields promoted from the primary location's meta so
+	// the UI can render a structured schema card instead of the raw
+	// per-location JSON. Populated from the provider when present,
+	// otherwise from the first consumer.
+	Schema *contractSchema `json:"schema,omitempty"`
+}
+
+// contractSchema summarises the request/response shape of a contract
+// for UI consumption. All fields are optional and reflect whatever
+// the extractor and post-pass could pin down. `Source` is one of
+// "extracted" | "partial" | "none".
+type contractSchema struct {
+	RequestType    string   `json:"request_type,omitempty"`
+	ResponseType   string   `json:"response_type,omitempty"`
+	RequestExpr    string   `json:"request_expr,omitempty"`
+	ResponseExpr   string   `json:"response_expr,omitempty"`
+	RequestStream  bool     `json:"request_stream,omitempty"`
+	ResponseStream bool     `json:"response_stream,omitempty"`
+	PathParams     []string `json:"path_params,omitempty"`
+	QueryParams    []string `json:"query_params,omitempty"`
+	StatusCodes    []int    `json:"status_codes,omitempty"`
+	Source         string   `json:"source,omitempty"`
 }
 
 // contractLocation is a single on-disk occurrence of a contract —
@@ -398,6 +421,7 @@ func (h *Handler) handleContracts(w http.ResponseWriter, r *http.Request) {
 			}
 			return a.Line < b.Line
 		})
+		e.Schema = promoteSchemaFromLocations(e.Locations)
 		out = append(out, *e)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -407,6 +431,38 @@ func (h *Handler) handleContracts(w http.ResponseWriter, r *http.Request) {
 		return out[i].Name < out[j].Name
 	})
 	WriteJSON(w, http.StatusOK, map[string]any{"contracts": out})
+}
+
+// --- /v1/contracts/validate ---
+//
+// Passes through to the contracts MCP tool's `validate` action and
+// returns its JSON payload unchanged: `{issues: [...], summary: {...}}`.
+// The UI consumes this to badge contract rows with breaking-change
+// counts and render a per-contract diff panel.
+
+func (h *Handler) handleContractsValidate(w http.ResponseWriter, r *http.Request) {
+	raw := h.CallTool(r.Context(), "contracts", map[string]any{"action": "validate"})
+	if raw == "" {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"issues":  []any{},
+			"summary": map[string]int{"total": 0, "breaking": 0, "warning": 0, "info": 0},
+		})
+		return
+	}
+	// The tool returns JSON we can relay verbatim — re-decoding to a
+	// Go map would lose the severity enum's string form. Only thing
+	// we do is verify it parses as JSON; malformed input falls back
+	// to an empty payload rather than propagating a server error.
+	var probe any
+	if err := json.Unmarshal([]byte(raw), &probe); err != nil {
+		WriteJSON(w, http.StatusOK, map[string]any{
+			"issues":  []any{},
+			"summary": map[string]int{"total": 0, "breaking": 0, "warning": 0, "info": 0},
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(raw))
 }
 
 func uiContractKind(raw string) string {
@@ -424,6 +480,121 @@ func uiContractKind(raw string) string {
 	default:
 		return strings.ToUpper(raw)
 	}
+}
+
+// promoteSchemaFromLocations folds schema-shape meta from the primary
+// location (provider first, consumer fallback) into a flat
+// contractSchema for UI rendering. Returns nil when nothing useful
+// was pinned down so the wire shape stays compact.
+func promoteSchemaFromLocations(locs []contractLocation) *contractSchema {
+	var primary contractLocation
+	found := false
+	for _, l := range locs {
+		if l.Role == "provider" {
+			primary = l
+			found = true
+			break
+		}
+	}
+	if !found && len(locs) > 0 {
+		primary = locs[0]
+		found = true
+	}
+	if !found || primary.Meta == nil {
+		return nil
+	}
+	s := &contractSchema{
+		RequestType:  metaString(primary.Meta, "request_type"),
+		ResponseType: metaString(primary.Meta, "response_type"),
+		RequestExpr:  metaString(primary.Meta, "request_expr"),
+		ResponseExpr: metaString(primary.Meta, "response_expr"),
+		Source:       metaString(primary.Meta, "schema_source"),
+		PathParams:   metaStrings(primary.Meta, "path_params"),
+		QueryParams:  metaStrings(primary.Meta, "query_params"),
+		StatusCodes:  metaInts(primary.Meta, "status_codes"),
+	}
+	if v, _ := primary.Meta["request_stream"].(bool); v {
+		s.RequestStream = true
+	}
+	if v, _ := primary.Meta["response_stream"].(bool); v {
+		s.ResponseStream = true
+	}
+	// If a provider had nothing but a consumer also has meta, try
+	// filling gaps from it — useful for contracts where the consumer
+	// (e.g. a generated SDK) carries types the provider didn't
+	// annotate.
+	for _, l := range locs {
+		if l.Role == primary.Role || l.Meta == nil {
+			continue
+		}
+		if s.RequestType == "" {
+			s.RequestType = metaString(l.Meta, "request_type")
+		}
+		if s.ResponseType == "" {
+			s.ResponseType = metaString(l.Meta, "response_type")
+		}
+		if len(s.StatusCodes) == 0 {
+			s.StatusCodes = metaInts(l.Meta, "status_codes")
+		}
+		if len(s.QueryParams) == 0 {
+			s.QueryParams = metaStrings(l.Meta, "query_params")
+		}
+	}
+	if schemaIsEmpty(s) {
+		return nil
+	}
+	return s
+}
+
+func schemaIsEmpty(s *contractSchema) bool {
+	if s == nil {
+		return true
+	}
+	return s.RequestType == "" && s.ResponseType == "" && s.RequestExpr == "" && s.ResponseExpr == "" &&
+		len(s.PathParams) == 0 && len(s.QueryParams) == 0 && len(s.StatusCodes) == 0 &&
+		!s.RequestStream && !s.ResponseStream
+}
+
+func metaString(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func metaStrings(m map[string]any, key string) []string {
+	switch v := m[key].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, x := range v {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func metaInts(m map[string]any, key string) []int {
+	switch v := m[key].(type) {
+	case []int:
+		return v
+	case []any:
+		out := make([]int, 0, len(v))
+		for _, x := range v {
+			switch n := x.(type) {
+			case int:
+				out = append(out, n)
+			case float64:
+				out = append(out, int(n))
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // contractScope decides whether a merged contract row represents something

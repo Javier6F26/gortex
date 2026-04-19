@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { api, type ProcessDetail } from './api'
 import type {
   Repo, Process, Contract, Caveat, Activity, Guard, Community,
-  DashboardSnapshot,
+  DashboardSnapshot, ContractValidation,
 } from './schema'
 import type { GraphData } from './types'
 
@@ -85,6 +85,10 @@ export function useSymbol(id: string | null) {
 
 export function useContracts(): Async<Contract[]> {
   return useAsync(async () => (await api.contracts()).contracts)
+}
+
+export function useContractValidation(): Async<ContractValidation> {
+  return useAsync(async () => api.contractsValidate())
 }
 
 export function useCommunities(): Async<{ communities: Community[]; modularity: number }> {

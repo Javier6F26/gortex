@@ -128,6 +128,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("GET /v1/repos", h.handleRepos)
 	h.mux.HandleFunc("GET /v1/processes", h.handleProcesses)
 	h.mux.HandleFunc("GET /v1/contracts", h.handleContracts)
+	h.mux.HandleFunc("GET /v1/contracts/validate", h.handleContractsValidate)
 	h.mux.HandleFunc("GET /v1/communities", h.handleCommunities)
 	h.mux.HandleFunc("GET /v1/guards", h.handleGuards)
 }

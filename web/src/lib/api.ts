@@ -4,7 +4,7 @@ import type {
 } from './types'
 import type {
   Repo, Process, Contract, Caveat, Activity, Guard, Community,
-  DashboardSnapshot, KindCount, LanguageCount,
+  DashboardSnapshot, KindCount, LanguageCount, ContractValidation,
 } from './schema'
 
 // Single base URL for the gortex server (http://.../v1/*).
@@ -144,6 +144,11 @@ export const api = {
 
   contracts: async (): Promise<{ contracts: Contract[] }> => {
     const res = await serverFetch('/v1/contracts')
+    return res.json()
+  },
+
+  contractsValidate: async (): Promise<ContractValidation> => {
+    const res = await serverFetch('/v1/contracts/validate')
     return res.json()
   },
 

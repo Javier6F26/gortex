@@ -119,10 +119,12 @@ func setupRoutes(r *gin.Engine) {
 		t.Errorf("expected confidence 0.9, got %f", c.Confidence)
 	}
 
-	// Check path param normalisation.
+	// Check path param normalisation. Param names collapse to
+	// positional {p1}, {p2}, ... so a provider's {id} and a
+	// consumer's {userId} hash to the same contract ID.
 	c3 := contracts[2]
-	if c3.Meta["path"] != "/api/users/{id}" {
-		t.Errorf("expected normalised path /api/users/{id}, got %s", c3.Meta["path"])
+	if c3.Meta["path"] != "/api/users/{p1}" {
+		t.Errorf("expected normalised path /api/users/{p1}, got %s", c3.Meta["path"])
 	}
 }
 
@@ -332,9 +334,16 @@ func TestNormalizeHTTPPath(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"gin-style param", "/users/:id", "/users/{id}"},
-		{"typed angle param", "/users/<int:id>", "/users/{id}"},
-		{"canonical brace param", "/users/{id}", "/users/{id}"},
+		// Path parameters are rewritten to positional names ({p1},
+		// {p2}, ...) so cross-repo contract IDs match regardless of
+		// whether provider and consumer teams picked different names
+		// for the same slot — the well-known `{wid}` vs `{workspaceId}`
+		// mismatch that used to appear as two orphan contracts.
+		{"gin-style param", "/users/:id", "/users/{p1}"},
+		{"typed angle param", "/users/<int:id>", "/users/{p1}"},
+		{"canonical brace param", "/users/{id}", "/users/{p1}"},
+		{"multiple params rename positionally", "/workspaces/{wid}/tags/{id}", "/workspaces/{p1}/tags/{p2}"},
+		{"consumer name variant hashes the same", "/workspaces/{workspaceId}/tags/{id}", "/workspaces/{p1}/tags/{p2}"},
 		{"trailing slash + quotes", `"/api/v1/items/"`, "/api/v1/items"},
 		{"missing leading slash", "api/users", "/api/users"},
 		{"root", "/", "/"},
@@ -348,8 +357,8 @@ func TestNormalizeHTTPPath(t *testing.T) {
 		{"leading tpl placeholder", "${API_URL}/v1/tucks", "/v1/tucks"},
 		{"leading slash then placeholder", "/${TUCK_API_URL}/v1/tucks", "/v1/tucks"},
 		{"dotted placeholder", "${process.env.API_URL}/v1/users", "/v1/users"},
-		{"inline placeholder becomes param", "/v1/users/${id}", "/v1/users/{id}"},
-		{"base + inline param", "${BASE}/v1/users/${id}/tags", "/v1/users/{id}/tags"},
+		{"inline placeholder becomes param", "/v1/users/${id}", "/v1/users/{p1}"},
+		{"base + inline param", "${BASE}/v1/users/${id}/tags", "/v1/users/{p1}/tags"},
 		{"tpl inside host", "https://${HOST}/v1/users", "/v1/users"},
 	}
 
@@ -445,8 +454,8 @@ func wire(mux *http.ServeMux, h *Handler) {
 	}
 	want := map[string]string{
 		"http::POST::/v1/tucks":        "main.go::CreateTuck",
-		"http::GET::/v1/tucks/{id}":    "main.go::GetTuck",
-		"http::DELETE::/v1/tucks/{id}": "main.go::DeleteTuck",
+		"http::GET::/v1/tucks/{p1}":    "main.go::GetTuck",
+		"http::DELETE::/v1/tucks/{p1}": "main.go::DeleteTuck",
 	}
 	for id, wantSym := range want {
 		gotSym, ok := bySymbol[id]
@@ -465,7 +474,7 @@ func wire(mux *http.ServeMux, h *Handler) {
 // (dio and package:http) now produce consumer contracts. Exercised via
 // short snippets resembling the shape of tuck_app's TuckApiClient
 // methods, including Dart's bare-$id interpolation style that
-// NormalizeHTTPPath collapses to {id}.
+// NormalizeHTTPPath collapses to a positional {p1}.
 // TestHTTPExtractor_Go_StdlibMux_1_22 covers the Go 1.22+ stdlib mux
 // pattern where the HTTP method is embedded in the pattern string as
 // "METHOD /path". Without splitting it, the contract ID ended up as
@@ -504,8 +513,8 @@ func wire(mux *http.ServeMux, h *Handler) {
 	}{
 		{"http::GET::/v1/tucks", "GET", "/v1/tucks"},
 		{"http::POST::/v1/tucks", "POST", "/v1/tucks"},
-		{"http::DELETE::/v1/tucks/{id}", "DELETE", "/v1/tucks/{id}"},
-		{"http::PATCH::/v1/tucks/{id}/progress", "PATCH", "/v1/tucks/{id}/progress"},
+		{"http::DELETE::/v1/tucks/{p1}", "DELETE", "/v1/tucks/{p1}"},
+		{"http::PATCH::/v1/tucks/{p1}/progress", "PATCH", "/v1/tucks/{p1}/progress"},
 	}
 	for _, w := range want {
 		c, ok := byID[w.id]
@@ -567,7 +576,7 @@ func TestHTTPExtractor_Dart_Consumers(t *testing.T) {
 
 	want := map[string]string{
 		"http::POST::/v1/tucks":        "client.dart::createTuck",
-		"http::DELETE::/v1/tucks/{id}": "client.dart::deleteTuck",
+		"http::DELETE::/v1/tucks/{p1}": "client.dart::deleteTuck",
 		"http::GET::/v1/health":        "client.dart::listHealth",
 	}
 	got := map[string]string{}

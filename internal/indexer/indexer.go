@@ -1137,6 +1137,38 @@ func (idx *Indexer) runContractExtractorsForFile(
 // once per index pass after all per-file contracts have been collected
 // (inline from parse workers) plus go.mod has been processed.
 func (idx *Indexer) commitContracts(reg *contracts.Registry) {
+	// Upgrade bare type names in contract Meta (e.g. "UserResp") to
+	// full symbol IDs (e.g. "pkg/resp.go::UserResp") now that the
+	// graph is complete. During extraction the enricher only saw
+	// the handler's file-scoped node list, so types declared in a
+	// sibling file stayed as bare names.
+	reg.UpgradeBareTypeRefs(func(name, repoHint string) []string {
+		matches := idx.graph.FindNodesByName(name)
+		var same, others []string
+		for _, n := range matches {
+			if n.Kind != graph.KindType {
+				continue
+			}
+			if repoHint != "" && strings.HasPrefix(n.ID, repoHint+"/") {
+				same = append(same, n.ID)
+				continue
+			}
+			others = append(others, n.ID)
+		}
+		if len(same) > 0 {
+			return same
+		}
+		return others
+	})
+
+	// Snapshot field-level shapes for every type that's referenced as
+	// a contract's request / response body. This is Stage 2 — without
+	// per-field data Stage 3 (validation, breaking-change detection)
+	// has nothing to diff. We de-duplicate by symbol ID so heavy
+	// fan-in types (a User DTO used by 40 routes) only get parsed
+	// once per index pass.
+	idx.snapshotContractShapes(reg)
+
 	for _, c := range reg.All() {
 		contractNode := &graph.Node{
 			ID:       c.ID,
@@ -1171,6 +1203,80 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	idx.logger.Info("contracts extracted",
 		zap.String("repo", repo),
 		zap.Int("count", len(reg.All())))
+}
+
+// snapshotContractShapes walks every request_type / response_type
+// reference in the registry, loads each referenced type node's source,
+// and attaches the extracted Shape to the node's Meta["shape"].
+//
+// We:
+//   * Collect the unique set of symbol IDs — a popular DTO might be a
+//     request/response on dozens of routes and we want to parse its
+//     source once.
+//   * Read each file once (cached in the source map).
+//   * Skip nodes whose ID doesn't look like a symbol (bare names that
+//     couldn't be upgraded) — those have nothing to dereference.
+//   * Skip type nodes that already have a shape attached from a prior
+//     pass on the same session (ETag-style short-circuit).
+func (idx *Indexer) snapshotContractShapes(reg *contracts.Registry) {
+	symbols := make(map[string]struct{})
+	for _, c := range reg.All() {
+		for _, key := range []string{"request_type", "response_type"} {
+			v, _ := c.Meta[key].(string)
+			if v == "" || !strings.Contains(v, "::") {
+				continue
+			}
+			symbols[v] = struct{}{}
+		}
+	}
+	if len(symbols) == 0 {
+		return
+	}
+	srcCache := make(map[string][]byte)
+	attached := 0
+	for id := range symbols {
+		node := idx.graph.GetNode(id)
+		if node == nil || node.Kind != graph.KindType {
+			continue
+		}
+		if _, done := node.Meta["shape"]; done {
+			continue
+		}
+		src, ok := srcCache[node.FilePath]
+		if !ok {
+			// File paths in the graph are repo-prefixed; trim the
+			// prefix for disk I/O.
+			diskPath := node.FilePath
+			if idx.repoPrefix != "" && strings.HasPrefix(diskPath, idx.repoPrefix+"/") {
+				diskPath = strings.TrimPrefix(diskPath, idx.repoPrefix+"/")
+			}
+			diskPath = filepath.Join(idx.rootPath, diskPath)
+			data, err := os.ReadFile(diskPath)
+			if err != nil {
+				srcCache[node.FilePath] = nil
+				continue
+			}
+			srcCache[node.FilePath] = data
+			src = data
+		}
+		if src == nil {
+			continue
+		}
+		shape := contracts.ExtractShape(node.FilePath, src, node.StartLine, node.EndLine)
+		if shape == nil {
+			continue
+		}
+		if node.Meta == nil {
+			node.Meta = map[string]any{}
+		}
+		node.Meta["shape"] = shape
+		attached++
+	}
+	if attached > 0 {
+		idx.logger.Info("contract shapes snapshotted",
+			zap.Int("types", attached),
+			zap.Int("examined", len(symbols)))
+	}
 }
 
 // extractGoModContracts runs the go.mod-specific extractor once against

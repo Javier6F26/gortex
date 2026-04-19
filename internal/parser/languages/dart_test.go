@@ -111,6 +111,30 @@ func TestDartExtractor_ClassWithMethods(t *testing.T) {
 	for _, edge := range memberEdges {
 		assert.Equal(t, "user_service.dart::UserService", edge.To)
 	}
+
+	// Methods must span signature + body, not the declaration line
+	// alone. A one-line span (end == start) breaks source viewers
+	// and the shape extractor.
+	for _, m := range methods {
+		if m.EndLine <= m.StartLine {
+			t.Errorf("method %s has end_line (%d) <= start_line (%d) — body span missing",
+				m.Name, m.EndLine, m.StartLine)
+		}
+	}
+	// Exact expected spans given the fixture above. Changing the
+	// fixture is fine; changing these numbers without is a regression.
+	byName := map[string]*graph.Node{}
+	for _, m := range methods {
+		byName[m.Name] = m
+	}
+	if m := byName["getUser"]; m != nil {
+		assert.Equal(t, 2, m.StartLine, "getUser start")
+		assert.Equal(t, 4, m.EndLine, "getUser end (through closing brace)")
+	}
+	if m := byName["deleteUser"]; m != nil {
+		assert.Equal(t, 6, m.StartLine, "deleteUser start")
+		assert.Equal(t, 8, m.EndLine, "deleteUser end (through closing brace)")
+	}
 }
 
 func TestDartExtractor_AbstractClass(t *testing.T) {

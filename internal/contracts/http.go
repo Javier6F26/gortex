@@ -17,7 +17,7 @@ var _ Extractor = (*HTTPExtractor)(nil)
 
 // SupportedLanguages returns the languages this extractor can analyse.
 func (h *HTTPExtractor) SupportedLanguages() []string {
-	return []string{"go", "typescript", "javascript", "python", "java", "dart"}
+	return []string{"go", "typescript", "javascript", "python", "java", "kotlin", "dart"}
 }
 
 // httpPattern describes a single regex pattern that matches an HTTP route
@@ -153,7 +153,7 @@ var httpPatterns = []httpPattern{
 		pathGrp:    2,
 		framework:  "spring",
 		confidence: 0.9,
-		languages:  []string{"java"},
+		languages:  []string{"java", "kotlin"},
 	},
 	{
 		re:         regexp.MustCompile(`@RequestMapping\(\s*(?:value\s*=\s*)?["']([^"']+)["']`),
@@ -162,7 +162,7 @@ var httpPatterns = []httpPattern{
 		pathGrp:    1,
 		framework:  "spring",
 		confidence: 0.9,
-		languages:  []string{"java"},
+		languages:  []string{"java", "kotlin"},
 	},
 	{
 		re:         regexp.MustCompile(`@(GET|POST|PUT|DELETE|PATCH)\s+@Path\(\s*["']([^"']+)["']`),
@@ -171,7 +171,7 @@ var httpPatterns = []httpPattern{
 		pathGrp:    2,
 		framework:  "jaxrs",
 		confidence: 0.9,
-		languages:  []string{"java"},
+		languages:  []string{"java", "kotlin"},
 	},
 
 	// ---- Go consumers ----
@@ -195,6 +195,18 @@ var httpPatterns = []httpPattern{
 	},
 
 	// ---- TS/JS consumers ----
+	// fetch with explicit `method: '<VERB>'` in the options object —
+	// tried first so the generic GET pattern below doesn't steal the
+	// match.
+	{
+		re:         regexp.MustCompile(`fetch\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `][^)]*?method\s*:\s*["'](\w+)["']`),
+		role:       RoleConsumer,
+		methodGrp:  2,
+		pathGrp:    1,
+		framework:  "fetch",
+		confidence: 0.9,
+		languages:  []string{"typescript", "javascript"},
+	},
 	{
 		re:         regexp.MustCompile(`fetch\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
 		role:       RoleConsumer,
@@ -204,8 +216,13 @@ var httpPatterns = []httpPattern{
 		confidence: 0.7,
 		languages:  []string{"typescript", "javascript"},
 	},
+	// Axios. The optional `<...>` between the method name and the
+	// opening paren is TypeScript's generic form — axios.post<Resp, Req>(...)
+	// — which the enrichment layer uses to pin response / request
+	// types. `[^<>(),]` inside the generic keeps the matcher fast and
+	// stops greedy consumption from crossing the path argument.
 	{
-		re:         regexp.MustCompile(`axios\.(get|post|put|delete|patch|head|options)\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
+		re:         regexp.MustCompile(`axios\.(get|post|put|delete|patch|head|options)(?:<[^<>()]*>)?\(\s*["'` + "`" + `]([^"'` + "`" + `]+)["'` + "`" + `]`),
 		role:       RoleConsumer,
 		methodGrp:  1,
 		pathGrp:    2,
@@ -233,7 +250,7 @@ var httpPatterns = []httpPattern{
 		pathGrp:    1,
 		framework:  "java-http",
 		confidence: 0.7,
-		languages:  []string{"java"},
+		languages:  []string{"java", "kotlin"},
 	},
 
 	// ---- Dart consumers ----
@@ -342,6 +359,13 @@ func (h *HTTPExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 				},
 				Confidence: pat.confidence,
 			}
+
+			// Second pass: pull request/response types, query params,
+			// and status codes out of the handler body (provider) or
+			// the call-site window (consumer). The enricher mutates
+			// c.Meta in place and sets "schema_source".
+			enrichHTTPContract(&c, lines, fileNodes, lang)
+
 			out = append(out, c)
 		}
 	}
@@ -362,6 +386,8 @@ func detectLanguage(filePath string) string {
 		return "python"
 	case strings.HasSuffix(filePath, ".java"):
 		return "java"
+	case strings.HasSuffix(filePath, ".kt"), strings.HasSuffix(filePath, ".kts"):
+		return "kotlin"
 	case strings.HasSuffix(filePath, ".dart"):
 		return "dart"
 	default:

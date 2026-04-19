@@ -1,0 +1,502 @@
+package contracts
+
+import (
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+)
+
+// schemaHints collects the structured fields a single enricher extracts
+// from a handler body. Each field is optional — a detector populates
+// only what it can pin down from the text. The driver merges hints
+// from every applicable enricher before writing to Contract.Meta.
+type schemaHints struct {
+	// RequestType is the symbol ID or bare type name of the request
+	// body. A symbol ID is emitted when the type is defined in the
+	// same file as the handler (cheap to resolve via the file-scoped
+	// node list); otherwise the bare name is stored so a later
+	// module-wide pass can upgrade it.
+	RequestType string
+	// RequestExpr is the raw source expression used to receive the
+	// body when no type name could be pulled out (e.g.
+	// `c.BindJSON(map[string]any{})`). Kept so the UI can at least
+	// point at the binding call site.
+	RequestExpr string
+
+	ResponseType string
+	ResponseExpr string
+
+	QueryParams []string
+	StatusCodes []int
+}
+
+func (h *schemaHints) isEmpty() bool {
+	return h.RequestType == "" &&
+		h.RequestExpr == "" &&
+		h.ResponseType == "" &&
+		h.ResponseExpr == "" &&
+		len(h.QueryParams) == 0 &&
+		len(h.StatusCodes) == 0
+}
+
+func (h *schemaHints) merge(o schemaHints) {
+	if h.RequestType == "" {
+		h.RequestType = o.RequestType
+	}
+	if h.RequestExpr == "" {
+		h.RequestExpr = o.RequestExpr
+	}
+	if h.ResponseType == "" {
+		h.ResponseType = o.ResponseType
+	}
+	if h.ResponseExpr == "" {
+		h.ResponseExpr = o.ResponseExpr
+	}
+	h.QueryParams = append(h.QueryParams, o.QueryParams...)
+	h.StatusCodes = append(h.StatusCodes, o.StatusCodes...)
+}
+
+// schemaEnricher is a per-(language, role) body scanner. Each detector
+// looks for binding / encoding / query / status patterns specific to
+// its framework and returns the hints it found. Framework gating is
+// intentionally absent — regex specificity already keeps a gin
+// detector from firing on fiber code, and upstream httpPatterns
+// sometimes mis-label the framework tag (e.g. a `r.POST(...)`
+// declaration in a gin file gets tagged "fiber" because the uppercase
+// pattern is shared). Role gating is explicit: provider-side decoders
+// would otherwise match response-body decodes on the consumer side.
+type schemaEnricher struct {
+	name      string
+	languages []string // empty = any
+	roles     []Role   // empty = any
+	detect    func(body string, fileNodes []*graph.Node) schemaHints
+}
+
+// schemaEnrichers is the registry of body scanners. Each language
+// contributes its own detectors below; the driver iterates over them
+// and merges results. Declaration-site order is not significant:
+// hints merge additively so two enrichers can contribute different
+// fields without stepping on each other.
+var schemaEnrichers []schemaEnricher
+
+// enrichHTTPContract extracts schema-shape hints from the handler body
+// that owns `c` and folds them into c.Meta. It is a no-op when the
+// contract is a consumer (there is no handler to scan), when the
+// handler's body span can't be located, or when no enricher matched.
+//
+// Keys written to c.Meta on success:
+//   path_params   []string   — always when the path template has placeholders
+//   query_params  []string   — when any enricher found query reads
+//   status_codes  []int      — when any enricher found status writes
+//   request_type  string     — symbol ID or bare type name
+//   request_expr  string     — raw expression fallback
+//   response_type string     — symbol ID or bare type name
+//   response_expr string     — raw expression fallback
+//   schema_source string     — one of "extracted" | "partial" | "none"
+func enrichHTTPContract(c *Contract, lines []string, fileNodes []*graph.Node, lang string) {
+	if c.Meta == nil {
+		c.Meta = map[string]any{}
+	}
+
+	// Path params can be read off the normalised path regardless of
+	// whether we ever find the handler body.
+	if path, _ := c.Meta["path"].(string); path != "" {
+		if pps := pathParamsFromTemplate(path); len(pps) > 0 {
+			c.Meta["path_params"] = pps
+		}
+	}
+
+	if c.Role != RoleProvider {
+		// Consumer-side schema extraction is handled by the consumer
+		// enrichers below, which look at the call site not a handler
+		// body. Keep the call short: find the call-site line and a
+		// small window around it.
+		enrichConsumerContract(c, lines, fileNodes, lang)
+		return
+	}
+
+	start, end := handlerBodyRange(c, fileNodes, lines)
+	if start <= 0 || end < start {
+		c.Meta["schema_source"] = "none"
+		return
+	}
+	body := strings.Join(lines[start-1:end], "\n")
+
+	var merged schemaHints
+	matched := false
+	for _, e := range schemaEnrichers {
+		if !containsStr(e.languages, lang) {
+			continue
+		}
+		if !containsRole(e.roles, c.Role) {
+			continue
+		}
+		h := e.detect(body, fileNodes)
+		if h.isEmpty() {
+			continue
+		}
+		matched = true
+		merged.merge(h)
+	}
+	applyHints(c, merged, matched)
+}
+
+// enrichConsumerContract handles the consumer case — we scan a small
+// window around the call site for payload arg types, decode targets,
+// and any JSON-encode wrapper expressions.
+func enrichConsumerContract(c *Contract, lines []string, fileNodes []*graph.Node, lang string) {
+	start, end := callSiteWindow(c, lines)
+	if start <= 0 {
+		c.Meta["schema_source"] = "none"
+		return
+	}
+	body := strings.Join(lines[start-1:end], "\n")
+
+	var merged schemaHints
+	matched := false
+	for _, e := range schemaEnrichers {
+		if !containsStr(e.languages, lang) {
+			continue
+		}
+		if !containsRole(e.roles, c.Role) {
+			continue
+		}
+		h := e.detect(body, fileNodes)
+		if h.isEmpty() {
+			continue
+		}
+		matched = true
+		merged.merge(h)
+	}
+	applyHints(c, merged, matched)
+}
+
+func containsRole(xs []Role, r Role) bool {
+	if len(xs) == 0 {
+		return true
+	}
+	for _, x := range xs {
+		if x == r {
+			return true
+		}
+	}
+	return false
+}
+
+func applyHints(c *Contract, h schemaHints, matched bool) {
+	if !matched {
+		c.Meta["schema_source"] = "none"
+		return
+	}
+	if h.RequestType != "" {
+		c.Meta["request_type"] = h.RequestType
+	}
+	if h.RequestExpr != "" {
+		c.Meta["request_expr"] = h.RequestExpr
+	}
+	if h.ResponseType != "" {
+		c.Meta["response_type"] = h.ResponseType
+	}
+	if h.ResponseExpr != "" {
+		c.Meta["response_expr"] = h.ResponseExpr
+	}
+	if qs := uniqStrings(h.QueryParams); len(qs) > 0 {
+		c.Meta["query_params"] = qs
+	}
+	if ss := uniqInts(h.StatusCodes); len(ss) > 0 {
+		c.Meta["status_codes"] = ss
+	}
+	// "extracted" means we have real type references on whichever side
+	// of the wire is relevant for this role. Everything else is
+	// partial — we saw something but couldn't pin a type.
+	haveTypes := false
+	if c.Role == RoleProvider {
+		haveTypes = h.RequestType != "" || h.ResponseType != ""
+	} else {
+		haveTypes = h.RequestType != "" || h.ResponseType != ""
+	}
+	if haveTypes {
+		c.Meta["schema_source"] = "extracted"
+	} else {
+		c.Meta["schema_source"] = "partial"
+	}
+}
+
+// handlerBodyRange returns the 1-based [start, end] line range covering
+// the handler's body in the file. Returns (0, 0) when no sensible span
+// can be located. For parsers that record end_line accurately (Go,
+// Python) we trust it; otherwise we brace-balance up to a 200-line
+// safety window starting from the symbol's start_line.
+func handlerBodyRange(c *Contract, fileNodes []*graph.Node, lines []string) (int, int) {
+	// Find the handler node.
+	var node *graph.Node
+	for _, n := range fileNodes {
+		if n.ID == c.SymbolID {
+			node = n
+			break
+		}
+	}
+	if node == nil {
+		// Fall back to a window around the declaration line.
+		return braceWindow(lines, c.Line)
+	}
+	start := node.StartLine
+	end := node.EndLine
+	if start <= 0 {
+		start = c.Line
+	}
+	if end > start {
+		return start, clampLine(end, len(lines))
+	}
+	return braceWindow(lines, start)
+}
+
+// braceWindow is the fallback for parsers that only record start_line:
+// walk from `from` forward up to 200 lines, counting braces, and stop
+// when the first opening `{` on or after `from` closes. Useful for
+// Dart and (historically) TypeScript where the extractor pins only the
+// declaration line.
+func braceWindow(lines []string, from int) (int, int) {
+	if from <= 0 || from > len(lines) {
+		return 0, 0
+	}
+	depth := 0
+	opened := false
+	end := from
+	limit := from + 200
+	if limit > len(lines) {
+		limit = len(lines)
+	}
+	for i := from - 1; i < limit; i++ {
+		line := lines[i]
+		for _, ch := range line {
+			if ch == '{' {
+				depth++
+				opened = true
+			} else if ch == '}' && opened {
+				depth--
+			}
+		}
+		end = i + 1
+		if opened && depth <= 0 {
+			return from, end
+		}
+	}
+	return from, end
+}
+
+// callSiteWindow picks a small window of source around a consumer
+// call site — enough to catch `jsonEncode(payload)` or `Decode(&resp)`
+// patterns that sit in adjacent lines.
+func callSiteWindow(c *Contract, lines []string) (int, int) {
+	if c.Line <= 0 || c.Line > len(lines) {
+		return 0, 0
+	}
+	start := c.Line - 6
+	if start < 1 {
+		start = 1
+	}
+	end := c.Line + 14
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return start, end
+}
+
+func clampLine(n, max int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+// pathParamRe picks canonical {name} placeholders out of a normalised
+// path. Other placeholder syntaxes are already collapsed to this form
+// by NormalizeHTTPPath, so this is the only pattern we need here.
+var pathParamRe = regexp.MustCompile(`\{([^}]+)\}`)
+
+func pathParamsFromTemplate(path string) []string {
+	ms := pathParamRe.FindAllStringSubmatch(path, -1)
+	if len(ms) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m[1])
+	}
+	return uniqStrings(out)
+}
+
+// -----------------------------------------------------------------------------
+// Shared helpers for enricher implementations
+// -----------------------------------------------------------------------------
+
+// resolveTypeInFile upgrades a bare type name to its in-file symbol ID
+// when a matching type node is present. Returns the original name
+// unchanged when nothing matches — a later module-wide pass can
+// upgrade it using the import graph.
+func resolveTypeInFile(name string, fileNodes []*graph.Node) string {
+	name = strings.TrimSpace(strings.TrimPrefix(name, "*"))
+	if name == "" {
+		return ""
+	}
+	// Drop package qualifier for in-file lookup: "common.Foo" -> "Foo".
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		name = name[idx+1:]
+	}
+	for _, n := range fileNodes {
+		if n.Kind == graph.KindType && n.Name == name {
+			return n.ID
+		}
+	}
+	return name // bare name; upgraded later
+}
+
+// findVarType scans the handler body for the first declaration that
+// binds `varName` to a type and returns the type name. Supports the
+// common Go forms:
+//
+//	var req    LoginRequest
+//	var req   *LoginRequest
+//	req    := LoginRequest{}
+//	req    := &LoginRequest{}
+//	req    := new(LoginRequest)
+//	func(... req LoginRequest ...)        // handler parameter
+//	func(... req *LoginRequest ...)
+//
+// and a handful of the same idioms rewritten for Dart / Java / TS in
+// the framework-specific detectors.
+func findVarType(body, varName string) string {
+	if varName == "" {
+		return ""
+	}
+	v := regexp.QuoteMeta(varName)
+	// var foo Type  |  var foo *Type
+	if m := regexp.MustCompile(`\bvar\s+` + v + `\s+\*?([A-Za-z_][\w\.]*)`).FindStringSubmatch(body); len(m) > 1 {
+		return m[1]
+	}
+	// foo := Type{  |  foo := &Type{  |  foo := new(Type)
+	if m := regexp.MustCompile(v + `\s*:=\s*&?([A-Za-z_][\w\.]*)\s*\{`).FindStringSubmatch(body); len(m) > 1 {
+		return m[1]
+	}
+	if m := regexp.MustCompile(v + `\s*:=\s*new\(\s*([A-Za-z_][\w\.]*)\s*\)`).FindStringSubmatch(body); len(m) > 1 {
+		return m[1]
+	}
+	// Handler signature param: req *Type  |  req Type — allow a
+	// trailing comma / paren to terminate.
+	if m := regexp.MustCompile(`\b` + v + `\s+\*?([A-Za-z_][\w\.]*)(?:\s*[,)])`).FindStringSubmatch(body); len(m) > 1 {
+		return m[1]
+	}
+	return ""
+}
+
+func uniqStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func uniqInts(in []int) []int {
+	if len(in) == 0 {
+		return nil
+	}
+	seen := make(map[int]struct{}, len(in))
+	out := make([]int, 0, len(in))
+	for _, v := range in {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	sort.Ints(out)
+	return out
+}
+
+func containsStr(xs []string, needle string) bool {
+	if len(xs) == 0 {
+		return true // empty = match any
+	}
+	for _, x := range xs {
+		if x == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// -----------------------------------------------------------------------------
+// Status-code name → int table for Go's net/http constants. Any
+// framework that uses the same constants (most Go ones do) gets this
+// for free.
+// -----------------------------------------------------------------------------
+
+var httpStatusNames = map[string]int{
+	"StatusContinue":                      100,
+	"StatusSwitchingProtocols":            101,
+	"StatusOK":                            200,
+	"StatusCreated":                       201,
+	"StatusAccepted":                      202,
+	"StatusNoContent":                     204,
+	"StatusMovedPermanently":              301,
+	"StatusFound":                         302,
+	"StatusSeeOther":                      303,
+	"StatusNotModified":                   304,
+	"StatusTemporaryRedirect":             307,
+	"StatusPermanentRedirect":             308,
+	"StatusBadRequest":                    400,
+	"StatusUnauthorized":                  401,
+	"StatusForbidden":                     403,
+	"StatusNotFound":                      404,
+	"StatusMethodNotAllowed":              405,
+	"StatusConflict":                      409,
+	"StatusGone":                          410,
+	"StatusPreconditionFailed":            412,
+	"StatusUnprocessableEntity":           422,
+	"StatusTooManyRequests":               429,
+	"StatusInternalServerError":           500,
+	"StatusNotImplemented":                501,
+	"StatusBadGateway":                    502,
+	"StatusServiceUnavailable":            503,
+	"StatusGatewayTimeout":                504,
+}
+
+// parseStatusExpr turns a status expression like "http.StatusOK" or
+// "200" into an int, ignoring anything it doesn't recognise.
+func parseStatusExpr(expr string) (int, bool) {
+	expr = strings.TrimSpace(expr)
+	if n, err := strconv.Atoi(expr); err == nil {
+		return n, true
+	}
+	if strings.HasPrefix(expr, "http.") {
+		name := strings.TrimPrefix(expr, "http.")
+		if v, ok := httpStatusNames[name]; ok {
+			return v, true
+		}
+	}
+	// Bare constant: "StatusOK"
+	if v, ok := httpStatusNames[expr]; ok {
+		return v, true
+	}
+	return 0, false
+}
