@@ -5,8 +5,9 @@ import { Icon } from '@/components/primitives/Icon'
 import { CaveatBadge } from '@/components/primitives/Caveat'
 import {
   useContracts, useGuards, useProcesses, useProcessDetail,
-  useActivity, useSymbolSource,
+  useActivity, useSymbolSource, useSymbol,
 } from '@/lib/hooks'
+import { useInspector } from '@/lib/inspector'
 
 // Splits a node ID of the form "<repoPrefix>/<path>::<symbol>" into its
 // parts so we can render a step without extra round-trips. Symbol-only
@@ -44,6 +45,29 @@ export function InvestigationView() {
 
   const selectedStepId = steps[stepIdx] ?? null
   const { data: source, loading: sourceLoading } = useSymbolSource(selectedStepId)
+  const { data: node } = useSymbol(selectedStepId)
+
+  // Feed the global Inspector with the selected step so the right
+  // pane's callers/callees stay in sync with the flow trace here.
+  const setInspector = useInspector((s) => s.setSym)
+  useEffect(() => {
+    if (!selectedStepId) return
+    const parsed = parseStepId(selectedStepId)
+    setInspector({
+      id: selectedStepId,
+      kind: (node?.kind as string) ?? 'function',
+      name: node?.name || parsed.symbol,
+      repo: node?.repo_prefix || parsed.repo,
+      file: node?.file_path
+        ? `${node.file_path}${node.start_line ? `:${node.start_line}` : ''}`
+        : parsed.path,
+      sig: (node?.meta?.signature as string) ?? '',
+      callers: 0,
+      callees: 0,
+      community: '',
+      caveats: [],
+    })
+  }, [selectedStepId, node, setInspector])
 
   const { data: activity } = useActivity(20)
   const { data: contracts } = useContracts()

@@ -79,6 +79,10 @@ export function useSymbolSource(id: string | null): Async<string> {
   return useAsync(async () => (id ? api.getSymbolSource(id) : Promise.resolve('')), [id])
 }
 
+export function useSymbol(id: string | null) {
+  return useAsync(async () => (id ? api.getSymbol(id) : Promise.resolve(null)), [id])
+}
+
 export function useContracts(): Async<Contract[]> {
   return useAsync(async () => (await api.contracts()).contracts)
 }

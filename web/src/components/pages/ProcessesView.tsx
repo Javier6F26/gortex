@@ -1,19 +1,92 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Icon } from '@/components/primitives/Icon'
-import { useProcesses, useRepos } from '@/lib/hooks'
+import {
+  useProcesses, useRepos, useProcessDetail, useSymbolSource, useSymbol,
+} from '@/lib/hooks'
+import { useInspector } from '@/lib/inspector'
+import { scopeOf, type CodeScope } from '@/lib/utils'
+
+// Hard cap on rendered steps; sqlite flows have 800+ steps and
+// scrolling a single list past a few hundred rows is useless.
+const STEP_LIMIT = 200
+
+function parseStepId(id: string): { repo: string; path: string; symbol: string } {
+  const sepIdx = id.indexOf('::')
+  const pathPart = sepIdx >= 0 ? id.slice(0, sepIdx) : id
+  const symbol = sepIdx >= 0 ? id.slice(sepIdx + 2) : id
+  const slashIdx = pathPart.indexOf('/')
+  if (slashIdx >= 0) {
+    return { repo: pathPart.slice(0, slashIdx), path: pathPart.slice(slashIdx + 1), symbol }
+  }
+  return { repo: '', path: pathPart, symbol }
+}
 
 export function ProcessesView() {
   const { data: processes, loading, error, refetch } = useProcesses()
   const { data: repos } = useRepos()
   const [sel, setSel] = useState<string | null>(null)
+  const [stepIdx, setStepIdx] = useState(0)
+  // Scope filter by entry-point path. Default "yours" because the raw
+  // list is dominated by sqlite flows (Pods/) and *_test.dart main()s
+  // that the user likely doesn't want to debug.
+  const [scope, setScope] = useState<CodeScope>('yours')
+
+  const counts = useMemo(() => {
+    const c = { yours: 0, tests: 0, deps: 0 }
+    for (const p of processes ?? []) c[scopeOf(p.entry)]++
+    return c
+  }, [processes])
+  const scopedProcesses = useMemo(() => {
+    const list = processes ?? []
+    if (scope === 'all') return list
+    return list.filter((p) => scopeOf(p.entry) === scope)
+  }, [processes, scope])
 
   useEffect(() => {
-    if (!sel && processes && processes.length > 0) setSel(processes[0].id)
-  }, [processes, sel])
+    if (!scopedProcesses || scopedProcesses.length === 0) {
+      setSel(null)
+      return
+    }
+    if (!sel || !scopedProcesses.some((p) => p.id === sel)) {
+      setSel(scopedProcesses[0].id)
+    }
+  }, [scopedProcesses, sel])
+  useEffect(() => { setStepIdx(0) }, [sel])
+
+  const { data: detail, loading: detailLoading } = useProcessDetail(sel)
+  const steps = useMemo(() => (detail?.steps ?? []).slice(0, STEP_LIMIT), [detail])
+  const selectedStepId = steps[stepIdx] ?? null
+  const { data: source, loading: sourceLoading } = useSymbolSource(selectedStepId)
+  const { data: node } = useSymbol(selectedStepId)
+
+  // Mirror the selected step into the global Inspector right-pane so
+  // clicking a flow step lights up callers/callees alongside the
+  // source view. Runs on every selection change — immediately with
+  // the parsed ID, then enriches once useSymbol resolves.
+  const setInspector = useInspector((s) => s.setSym)
+  useEffect(() => {
+    if (!selectedStepId) return
+    const parsed = parseStepId(selectedStepId)
+    setInspector({
+      id: selectedStepId,
+      kind: (node?.kind as string) ?? 'function',
+      name: node?.name || parsed.symbol,
+      repo: node?.repo_prefix || parsed.repo,
+      file: node?.file_path
+        ? `${node.file_path}${node.start_line ? `:${node.start_line}` : ''}`
+        : parsed.path,
+      sig: (node?.meta?.signature as string) ?? '',
+      callers: 0,
+      callees: 0,
+      community: '',
+      caveats: [],
+    })
+  }, [selectedStepId, node, setInspector])
 
   const repoColor = (id: string) => repos?.find((r) => r.id === id)?.color || 'var(--fg-2)'
+  const proc = processes?.find((p) => p.id === sel) ?? processes?.[0]
 
   return (
     <>
@@ -23,12 +96,28 @@ export function ProcessesView() {
           <div className="sub">
             {loading
               ? 'Discovering execution flows…'
-              : `${processes?.length ?? 0} flows discovered across ${
-                  new Set(processes?.flatMap((p) => p.crosses) ?? []).size
+              : `${scopedProcesses.length} of ${processes?.length ?? 0} flows · ${
+                  new Set(scopedProcesses.flatMap((p) => p.crosses)).size
                 } repos`}
           </div>
         </div>
         <div className="actions">
+          <div className="seg" style={{ height: 28 }}>
+            {(['yours', 'tests', 'deps', 'all'] as const).map((s) => (
+              <button
+                key={s}
+                type="button"
+                className={scope === s ? 'active' : ''}
+                onClick={() => setScope(s)}
+                style={{ textTransform: 'capitalize', fontSize: 11 }}
+              >
+                {s}{' '}
+                <span className="mono faint" style={{ marginLeft: 4 }}>
+                  {s === 'all' ? processes?.length ?? 0 : counts[s]}
+                </span>
+              </button>
+            ))}
+          </div>
           <button type="button" className="btn" onClick={refetch}>
             <Icon name="history" size={12} /> Refresh
           </button>
@@ -48,21 +137,28 @@ export function ProcessesView() {
       )}
 
       {processes && processes.length > 0 && (
-        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', flex: 1, minHeight: 0 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.4fr', flex: 1, minHeight: 0 }}>
+          {/* Column 1 — process list */}
           <div style={{ overflow: 'auto', borderRight: '1px solid var(--line-1)' }}>
             <table className="tbl">
               <thead>
                 <tr>
                   <th />
                   <th>Flow</th>
-                  <th>Repos touched</th>
+                  <th>Repos</th>
                   <th className="num">Steps</th>
-                  <th className="num">Files</th>
                   <th className="num">Score</th>
                 </tr>
               </thead>
               <tbody>
-                {processes.map((p) => (
+                {scopedProcesses.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="faint" style={{ padding: 22, textAlign: 'center', fontSize: 12 }}>
+                      No processes in this scope. Try “all”.
+                    </td>
+                  </tr>
+                )}
+                {scopedProcesses.map((p) => (
                   <tr
                     key={p.id}
                     onClick={() => setSel(p.id)}
@@ -96,70 +192,174 @@ export function ProcessesView() {
                       </div>
                     </td>
                     <td className="num">{p.steps}</td>
-                    <td className="num">{p.files}</td>
                     <td className="num">{p.score}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <div style={{ padding: 18, overflow: 'auto', background: 'var(--bg-1)' }}>
-            {(() => {
-              const p = processes.find((x) => x.id === sel) ?? processes[0]
-              return (
-                <div>
-                  <div
-                    className="mono faint"
-                    style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.08em' }}
-                  >
-                    flow
-                  </div>
-                  <div style={{ fontSize: 18, fontWeight: 500, marginTop: 4 }}>{p.name}</div>
-                  <div className="mono faint" style={{ fontSize: 11, marginTop: 4 }}>{p.entry}</div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 8, marginTop: 14 }}>
-                    <div className="card">
-                      <div className="card-bd">
-                        <div className="mono faint" style={{ fontSize: 10.5 }}>STEPS</div>
-                        <div className="mono" style={{ fontSize: 22 }}>{p.steps}</div>
-                      </div>
-                    </div>
-                    <div className="card">
-                      <div className="card-bd">
-                        <div className="mono faint" style={{ fontSize: 10.5 }}>FILES</div>
-                        <div className="mono" style={{ fontSize: 22 }}>{p.files}</div>
-                      </div>
-                    </div>
-                    <div className="card">
-                      <div className="card-bd">
-                        <div className="mono faint" style={{ fontSize: 10.5 }}>SCORE</div>
-                        <div className="mono" style={{ fontSize: 22 }}>{p.score}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div
-                    style={{
-                      fontSize: 10.5,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.08em',
-                      color: 'var(--fg-3)',
-                      margin: '16px 0 8px',
-                    }}
-                  >
-                    Repos on this flow
-                  </div>
-                  <div className="hstack" style={{ gap: 4, flexWrap: 'wrap' }}>
-                    {p.crosses.map((r) => (
-                      <span key={r} className="chip">
-                        <span className="swatch" style={{ background: repoColor(r) }} />
-                        {r}
-                      </span>
-                    ))}
-                  </div>
+          {/* Column 2 — step list for selected process */}
+          <div style={{ overflow: 'auto', borderRight: '1px solid var(--line-1)', background: 'var(--bg-1)' }}>
+            <div
+              style={{
+                padding: '12px 14px',
+                borderBottom: '1px solid var(--line-1)',
+                position: 'sticky',
+                top: 0,
+                background: 'var(--bg-1)',
+                zIndex: 1,
+              }}
+            >
+              <div className="mono faint" style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Flow
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 500, marginTop: 2, color: 'var(--fg-0)' }}>
+                {proc?.name ?? '—'}
+              </div>
+              <div className="mono faint" style={{ fontSize: 11, marginTop: 2, wordBreak: 'break-all' }}>
+                {proc?.entry ?? ''}
+              </div>
+              <div className="hstack" style={{ gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
+                {(proc?.crosses ?? []).map((r) => (
+                  <span key={r} className="chip">
+                    <span className="swatch" style={{ background: repoColor(r) }} />
+                    {r}
+                  </span>
+                ))}
+              </div>
+              <div
+                className="hstack"
+                style={{ gap: 10, marginTop: 10, fontSize: 11, color: 'var(--fg-2)' }}
+              >
+                <span className="mono">{proc?.steps ?? 0} steps</span>
+                <span className="mono">{proc?.files ?? 0} files</span>
+                <span className="mono">score {proc?.score ?? 0}</span>
+              </div>
+            </div>
+            <div style={{ padding: '8px 10px' }}>
+              {detailLoading && (
+                <div className="faint" style={{ fontSize: 12, padding: 12 }}>Loading steps…</div>
+              )}
+              {!detailLoading && steps.length === 0 && (
+                <div className="faint" style={{ fontSize: 12, padding: 12 }}>
+                  No steps available for this flow.
                 </div>
-              )
-            })()}
+              )}
+              {steps.map((sid, i) => {
+                const cur = parseStepId(sid)
+                const prev = i > 0 ? parseStepId(steps[i - 1]) : null
+                const crosses = prev && prev.repo !== cur.repo ? (
+                  <div className="repo-hop" style={{ margin: '4px 0 2px' }}>
+                    <Icon name="arrowr" size={10} /> crosses {prev.repo || '—'} → {cur.repo || '—'}
+                  </div>
+                ) : null
+                const isSel = stepIdx === i
+                return (
+                  <div key={sid + ':' + i}>
+                    {crosses}
+                    <div
+                      className="flow-step"
+                      style={{
+                        background: isSel ? 'var(--accent-soft)' : 'transparent',
+                        borderRadius: 4,
+                        cursor: 'pointer',
+                        padding: '6px 8px',
+                      }}
+                      onClick={() => setStepIdx(i)}
+                    >
+                      <div className="idx">
+                        <span className="no">{i + 1}</span>
+                      </div>
+                      <div className="body">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {cur.repo && (
+                            <span
+                              className="repo-tag"
+                              style={{ borderLeft: `2px solid ${repoColor(cur.repo)}`, paddingLeft: 4 }}
+                            >
+                              {cur.repo}
+                            </span>
+                          )}
+                          <span className="mono" style={{ fontSize: 11.5, color: 'var(--fg-0)' }}>
+                            {cur.symbol}
+                          </span>
+                        </div>
+                        {cur.path && (
+                          <div className="mono faint" style={{ fontSize: 10.5, marginTop: 2, wordBreak: 'break-all' }}>
+                            {cur.path}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+              {detail && detail.steps.length > STEP_LIMIT && (
+                <div
+                  className="faint"
+                  style={{ fontSize: 11, padding: '10px 4px', textAlign: 'center' }}
+                >
+                  Showing first {STEP_LIMIT} of {detail.steps.length} steps.
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Column 3 — source + node details */}
+          <div style={{ overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
+            <div
+              style={{
+                padding: '12px 14px',
+                borderBottom: '1px solid var(--line-1)',
+                position: 'sticky',
+                top: 0,
+                background: 'var(--bg-0)',
+                zIndex: 1,
+              }}
+            >
+              <div className="mono faint" style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                Step {stepIdx + 1}
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 500, marginTop: 2, color: 'var(--fg-0)' }}>
+                {node?.name || (selectedStepId ? parseStepId(selectedStepId).symbol : '—')}
+              </div>
+              <div className="mono faint" style={{ fontSize: 11, marginTop: 2, wordBreak: 'break-all' }}>
+                {selectedStepId ?? ''}
+              </div>
+              <div className="hstack" style={{ gap: 10, marginTop: 8, fontSize: 11, color: 'var(--fg-2)', flexWrap: 'wrap' }}>
+                {node?.kind && <span className="tag-dim">{node.kind}</span>}
+                {node?.file_path && (
+                  <span className="mono faint" style={{ wordBreak: 'break-all' }}>
+                    {node.file_path}{node.start_line ? `:${node.start_line}` : ''}
+                  </span>
+                )}
+              </div>
+              {node?.meta?.signature ? (
+                <pre
+                  className="code"
+                  style={{ margin: '8px 0 0', fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                >
+                  {String(node.meta.signature)}
+                </pre>
+              ) : null}
+            </div>
+            <div style={{ flex: 1, padding: 14 }}>
+              {!selectedStepId && (
+                <div className="faint" style={{ fontSize: 12 }}>Select a step to view its source.</div>
+              )}
+              {selectedStepId && sourceLoading && (
+                <div className="faint" style={{ fontSize: 12 }}>Loading source…</div>
+              )}
+              {selectedStepId && !sourceLoading && !source && (
+                <div className="faint" style={{ fontSize: 12 }}>
+                  Source not available for this node.
+                </div>
+              )}
+              {selectedStepId && !sourceLoading && source && (
+                <pre className="code" style={{ margin: 0, whiteSpace: 'pre', overflow: 'auto' }}>{source}</pre>
+              )}
+            </div>
           </div>
         </div>
       )}
