@@ -393,9 +393,17 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 
 	contextLines := req.GetInt("context_lines", 3)
 
-	// Resolve the file path against the indexer's root.
+	// Resolve the file path against whichever indexer owns the repo.
+	// Multi-repo mode must be checked first — each repo has its own
+	// root, so the single-root fallback would produce the wrong path
+	// for any non-primary repo.
 	absPath := node.FilePath
-	if s.indexer != nil {
+	if s.multiIndexer != nil {
+		if resolved := s.multiIndexer.ResolveFilePath(node.FilePath); resolved != "" {
+			absPath = resolved
+		}
+	}
+	if absPath == node.FilePath && s.indexer != nil {
 		if root := s.indexer.RootPath(); root != "" {
 			absPath = filepath.Join(root, node.FilePath)
 		}
