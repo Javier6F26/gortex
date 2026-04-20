@@ -49,10 +49,11 @@ for (const section of decode(payload)) {
 
 ## Relation to the Go encoder
 
-This package is decoder-only. Gortex servers emit GCX via
-`internal/wire/` and `internal/mcp/gcx.go`; this package decodes
-what they produce. Per-tool field layouts are documented in the
-spec linked above.
+This package is decoder-only. Gortex servers emit GCX via the
+MIT-licensed [`github.com/zzet/gortex/pkg/wire`](https://github.com/zzet/gortex/tree/main/pkg/wire)
+Go module and the per-tool hand-tuned encoders in
+`internal/mcp/gcx.go`; this package decodes what they produce.
+Per-tool field layouts are documented in the spec linked above.
 
 ## Version
 

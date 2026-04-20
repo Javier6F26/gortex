@@ -201,7 +201,7 @@ func (g *Generator) renderSkill(c analysis.Community, crossComm map[string]map[s
 		fmt.Fprintf(&sb,"find_usages with id: \"%s\", format: \"gcx\"\n", entryPoints[0])
 	}
 	sb.WriteString("```\n\n")
-	sb.WriteString("_`format: \"gcx\"` returns the [GCX1 compact wire format](../../docs/wire-format.md) — round-trippable, ~27% fewer tokens than JSON. Drop it for JSON output; agents using `@gortex/wire` or the Go `internal/wire` package decode either._\n")
+	sb.WriteString("_`format: \"gcx\"` returns the [GCX1 compact wire format](../../docs/wire-format.md) — round-trippable, ~27% fewer tokens than JSON. Drop it for JSON output; agents using `@gortex/wire` or the Go `github.com/zzet/gortex/pkg/wire` package decode either._\n")
 
 	return sb.String()
 }

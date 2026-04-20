@@ -13,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/zzet/gortex/internal/wire"
+	"github.com/zzet/gortex/pkg/wire"
 )
 
 func main() {

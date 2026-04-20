@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/zzet/gortex/internal/wire"
+	"github.com/zzet/gortex/pkg/wire"
 )
 
 // encodeAsGCX selects the best GCX encoding for the given canonical
