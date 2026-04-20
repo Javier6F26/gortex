@@ -21,6 +21,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/toon-format/toon-go v0.0.0-20251202084852-7ca0e27c4e8c
 	github.com/yalue/onnxruntime_go v1.27.0
+	github.com/zzet/gortex/pkg/wire v0.1.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/tools v0.44.0
 	gopkg.in/yaml.v3 v3.0.1
