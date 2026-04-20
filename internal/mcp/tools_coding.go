@@ -105,6 +105,26 @@ func (s *Server) registerCodingTools() {
 	)
 
 	s.mcpServer.AddTool(
+		mcp.NewTool("edit_file",
+			mcp.WithDescription("Edit any file (markdown, config, spec, template, source) by exact string replacement — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Complements edit_symbol for non-code files that have no symbol ID."),
+			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
+			mcp.WithString("old_string", mcp.Required(), mcp.Description("Exact text to replace (must be unique unless replace_all=true)")),
+			mcp.WithString("new_string", mcp.Required(), mcp.Description("Replacement text")),
+			mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence instead of requiring uniqueness (default: false)")),
+		),
+		s.handleEditFile,
+	)
+
+	s.mcpServer.AddTool(
+		mcp.NewTool("write_file",
+			mcp.WithDescription("Create a new file or overwrite an existing one with the given content — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Use for new docs, configs, specs, scaffolded files; prefer edit_symbol or edit_file when a symbol/string target exists."),
+			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
+			mcp.WithString("content", mcp.Required(), mcp.Description("Full file content")),
+		),
+		s.handleWriteFile,
+	)
+
+	s.mcpServer.AddTool(
 		mcp.NewTool("rename_symbol",
 			mcp.WithDescription("Generates coordinated multi-file edit instructions for renaming a symbol. Returns {file, line, old_text, new_text, confidence} for every reference. Use dry_run to preview, then apply edits with the Edit tool."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol ID to rename (e.g. auth/token.go::validateToken)")),
