@@ -142,6 +142,12 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) {
 	case strings.HasPrefix(target, "*."):
 		// Method call or method-value reference (e.g. h.handleHealth)
 		r.resolveMethodCall(e, strings.TrimPrefix(target, "*."), stats)
+	case e.Kind == graph.EdgeProvides || e.Kind == graph.EdgeConsumes:
+		// DI-token reference — the target is a named value (injection
+		// token), usually an `export const`, that the resolver's
+		// function/method passes would miss because they only accept
+		// method/function candidates.
+		r.resolveTokenRef(e, target, stats)
 	default:
 		// For instantiates/references edges, try to resolve as a type first;
 		// for calls edges, resolve as a function (original behavior).
@@ -565,6 +571,34 @@ func (r *Resolver) applyBuiltinIfKnown(e *graph.Edge, methodName string, stats *
 	e.To = "builtin::" + lang + "::" + category + "::" + methodName
 	stats.External++
 	return true
+}
+
+// resolveTokenRef resolves the target of an EdgeProvides / EdgeConsumes
+// edge that refers to a DI injection token. Tokens are typically
+// declared as `export const MY_TOKEN = '...'` (KindVariable) — the
+// method/function passes skip them. We name-lookup and accept any kind,
+// preferring same-directory matches so token names that happen to
+// collide across unrelated files don't pull spurious edges.
+func (r *Resolver) resolveTokenRef(e *graph.Edge, name string, stats *ResolveStats) {
+	candidates := r.graph.FindNodesByName(name)
+	if len(candidates) == 0 {
+		stats.Unresolved++
+		return
+	}
+	callerDir := filepath.Dir(e.FilePath)
+	for _, c := range candidates {
+		if filepath.Dir(c.FilePath) == callerDir {
+			e.To = c.ID
+			e.Confidence = 0.9
+			stats.Resolved++
+			return
+		}
+	}
+	// No same-dir hit: take the first candidate so find_usages can still
+	// surface the relationship. Confidence drops to reflect uncertainty.
+	e.To = candidates[0].ID
+	e.Confidence = 0.7
+	stats.Resolved++
 }
 
 // boundImplsFor returns the set of concrete class names bound to the

@@ -155,8 +155,14 @@ func (e *Engine) FindUsages(nodeID string) *SubGraph {
 	nodeMap := make(map[string]*graph.Node)
 	var filtered []*graph.Edge
 	for _, edge := range edges {
+		// EdgeProvides + EdgeConsumes carry DI token relationships —
+		// `@Inject(TOKEN)` and `{ provide: TOKEN, useValue: ... }`
+		// both resolve into one of these, so find_usages on a token
+		// returns its providers and consumers alongside the usual
+		// call/reference/instantiate edges.
 		if edge.Kind == graph.EdgeCalls || edge.Kind == graph.EdgeReferences ||
-			edge.Kind == graph.EdgeInstantiates {
+			edge.Kind == graph.EdgeInstantiates ||
+			edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes {
 			filtered = append(filtered, edge)
 			if n := e.g.GetNode(edge.From); n != nil {
 				nodeMap[n.ID] = n

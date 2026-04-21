@@ -198,9 +198,16 @@ func (e *TypeScriptExtractor) extractClasses(root *sitter.Node, src []byte, file
 		// useClass: Y }] })` declares that when a consumer asks for X it
 		// receives Y. Emit an EdgeProvides from the module to Y tagged
 		// with provides_for=X so the resolver can pick the bound
-		// implementation when receiver_type is abstract.
+		// implementation when receiver_type is abstract. useValue /
+		// useFactory / useExisting variants emit a different-shaped edge
+		// (module → token) that the DI-token feature consumes below.
 		if def.Node != nil {
 			emitModuleBindings(def.Node, src, id, filePath, result)
+			// @Inject(TOKEN) on constructor params: the declaring class
+			// consumes the token. Emit an EdgeConsumes from the class
+			// (not the constructor method) to the token so find_usages
+			// on the token surfaces the consumer directly.
+			emitInjectConsumers(def.Node, src, id, filePath, result)
 		}
 	}
 }
@@ -667,22 +674,48 @@ func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath st
 			if entry == nil || entry.Type() != "object" {
 				continue
 			}
-			abstract := objectFieldIdentifier(entry, src, "provide")
-			concrete := objectFieldIdentifier(entry, src, "useClass")
-			if abstract == "" || concrete == "" {
+			abstract := objectFieldToken(entry, src, "provide")
+			if abstract == "" {
 				continue
 			}
-			result.Edges = append(result.Edges, &graph.Edge{
-				From:     classID,
-				To:       "unresolved::" + concrete,
-				Kind:     graph.EdgeProvides,
-				FilePath: filePath,
-				Line:     int(entry.StartPoint().Row) + 1,
-				Meta: map[string]any{
-					"provides_for": abstract,
-					"binding":      "useClass",
-				},
-			})
+			// useClass: abstract type bound to a concrete implementation.
+			// Target is the concrete class so the resolver can rewrite
+			// abstract-typed call sites to the bound concrete.
+			if concrete := objectFieldIdentifier(entry, src, "useClass"); concrete != "" {
+				result.Edges = append(result.Edges, &graph.Edge{
+					From:     classID,
+					To:       "unresolved::" + concrete,
+					Kind:     graph.EdgeProvides,
+					FilePath: filePath,
+					Line:     int(entry.StartPoint().Row) + 1,
+					Meta: map[string]any{
+						"provides_for": abstract,
+						"binding":      "useClass",
+					},
+				})
+				continue
+			}
+			// useValue / useFactory / useExisting: the token IS the
+			// public face of the binding — there's no concrete class to
+			// rewrite calls to, just a (module → token) link so
+			// find_usages on the token surfaces the module as a provider.
+			for _, variant := range []string{"useValue", "useFactory", "useExisting"} {
+				if objectFieldValue(entry, src, variant) == nil {
+					continue
+				}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From:     classID,
+					To:       "unresolved::" + abstract,
+					Kind:     graph.EdgeProvides,
+					FilePath: filePath,
+					Line:     int(entry.StartPoint().Row) + 1,
+					Meta: map[string]any{
+						"di_token": abstract,
+						"binding":  variant,
+					},
+				})
+				break
+			}
 		}
 	}
 }
@@ -736,13 +769,124 @@ func objectFieldValue(objNode *sitter.Node, src []byte, name string) *sitter.Nod
 
 // objectFieldIdentifier is a thin wrapper on objectFieldValue that only
 // returns a value when it's a plain identifier (the shape we care about
-// for `provide: X` / `useClass: Y` entries). Returns "" otherwise.
+// for `useClass: Y` entries). Returns "" otherwise.
 func objectFieldIdentifier(objNode *sitter.Node, src []byte, name string) string {
 	v := objectFieldValue(objNode, src, name)
 	if v == nil || v.Type() != "identifier" {
 		return ""
 	}
 	return v.Content(src)
+}
+
+// objectFieldToken accepts either an identifier or a string literal —
+// what shows up as the `provide:` key. NestJS permits both shapes:
+// `{ provide: MyToken, ... }` (identifier) and `{ provide: 'MY_TOKEN',
+// ... }` (literal). The returned string is the token name with any
+// surrounding quotes stripped.
+func objectFieldToken(objNode *sitter.Node, src []byte, name string) string {
+	v := objectFieldValue(objNode, src, name)
+	if v == nil {
+		return ""
+	}
+	switch v.Type() {
+	case "identifier":
+		return v.Content(src)
+	case "string":
+		// String literal: strip the two surrounding quotes. Escape
+		// handling isn't needed — injection tokens are simple ASCII.
+		s := v.Content(src)
+		if len(s) >= 2 {
+			return s[1 : len(s)-1]
+		}
+	}
+	return ""
+}
+
+// emitInjectConsumers scans a class_declaration for a constructor whose
+// parameters carry `@Inject(TOKEN)` decorators. For each, emits an
+// EdgeConsumes from the class (not the constructor method) to the
+// token — the class is what consumes the token across its lifetime,
+// and that's the grain callers want when they ask `find_usages(TOKEN)`.
+func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult) {
+	seen := make(map[string]struct{})
+	walkNodes(classNode, func(n *sitter.Node) {
+		if n.Type() != "method_definition" {
+			return
+		}
+		nameNode := n.ChildByFieldName("name")
+		if nameNode == nil || nameNode.Content(src) != "constructor" {
+			return
+		}
+		params := n.ChildByFieldName("parameters")
+		if params == nil {
+			return
+		}
+		for i := 0; i < int(params.NamedChildCount()); i++ {
+			p := params.NamedChild(i)
+			if p == nil {
+				continue
+			}
+			for j := 0; j < int(p.ChildCount()); j++ {
+				c := p.Child(j)
+				if c == nil || c.Type() != "decorator" {
+					continue
+				}
+				tok := injectDecoratorArg(c, src)
+				if tok == "" {
+					continue
+				}
+				if _, dup := seen[tok]; dup {
+					continue
+				}
+				seen[tok] = struct{}{}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From:     classID,
+					To:       "unresolved::" + tok,
+					Kind:     graph.EdgeConsumes,
+					FilePath: filePath,
+					Line:     int(c.StartPoint().Row) + 1,
+					Meta: map[string]any{
+						"di_token": tok,
+						"via":      "@Inject",
+					},
+				})
+			}
+		}
+	})
+}
+
+// injectDecoratorArg returns the first identifier or string-literal
+// argument of an `@Inject(...)` decorator, or "" when the decorator
+// isn't @Inject or its argument isn't a simple token.
+func injectDecoratorArg(dec *sitter.Node, src []byte) string {
+	call := nestDecoratorCall(dec)
+	if call == nil {
+		return ""
+	}
+	fn := call.ChildByFieldName("function")
+	if fn == nil || fn.Type() != "identifier" || fn.Content(src) != "Inject" {
+		return ""
+	}
+	args := call.ChildByFieldName("arguments")
+	if args == nil {
+		return ""
+	}
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		arg := args.NamedChild(i)
+		if arg == nil {
+			continue
+		}
+		switch arg.Type() {
+		case "identifier":
+			return arg.Content(src)
+		case "string":
+			s := arg.Content(src)
+			if len(s) >= 2 {
+				return s[1 : len(s)-1]
+			}
+		}
+	}
+	return ""
 }
 
 // nestDispatchDecorators maps a NestJS-style dispatch decorator name to

@@ -510,3 +510,102 @@ export class M {}
 		}
 	}
 }
+
+func TestTSExtractor_NestJsInjectConsumer(t *testing.T) {
+	// @Inject(TOKEN) in a constructor param emits an EdgeConsumes from
+	// the declaring class to the token, tagged via:"@Inject". Edge is
+	// unresolved::<tok> — the resolver walks the graph to find the
+	// matching `export const` node.
+	src := []byte(`
+import { Inject, Injectable } from '@nestjs/common';
+import { DB_URL } from './tokens';
+
+@Injectable()
+export class ConfigService {
+  constructor(@Inject(DB_URL) private readonly dbUrl: string) {}
+}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("config.service.ts", src)
+	require.NoError(t, err)
+
+	var consume *graph.Edge
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeConsumes) {
+		if ed.Meta == nil {
+			continue
+		}
+		if v, _ := ed.Meta["via"].(string); v == "@Inject" {
+			consume = ed
+			break
+		}
+	}
+	require.NotNil(t, consume, "expected EdgeConsumes from @Inject")
+	assert.Equal(t, "config.service.ts::ConfigService", consume.From)
+	assert.Equal(t, "unresolved::DB_URL", consume.To)
+	assert.Equal(t, "DB_URL", consume.Meta["di_token"])
+}
+
+func TestTSExtractor_NestJsUseValueProvider(t *testing.T) {
+	// Non-useClass providers (useValue, useFactory, useExisting) emit
+	// an EdgeProvides from the module to the token itself, so
+	// find_usages on the token surfaces the module as a provider.
+	src := []byte(`
+import { Module } from '@nestjs/common';
+import { DB_URL } from './tokens';
+
+@Module({
+  providers: [
+    { provide: DB_URL, useValue: 'postgres://localhost' },
+  ],
+})
+export class ConfigModule {}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("config.module.ts", src)
+	require.NoError(t, err)
+
+	var provide *graph.Edge
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeProvides) {
+		if ed.Meta == nil {
+			continue
+		}
+		if b, _ := ed.Meta["binding"].(string); b == "useValue" {
+			provide = ed
+			break
+		}
+	}
+	require.NotNil(t, provide, "expected a useValue EdgeProvides")
+	assert.Equal(t, "config.module.ts::ConfigModule", provide.From)
+	assert.Equal(t, "unresolved::DB_URL", provide.To)
+	assert.Equal(t, "DB_URL", provide.Meta["di_token"])
+}
+
+func TestTSExtractor_NestJsStringLiteralToken(t *testing.T) {
+	// `{ provide: 'X', useValue: ... }` — string-literal token form
+	// should be treated identically to the identifier form.
+	src := []byte(`
+import { Module } from '@nestjs/common';
+
+@Module({
+  providers: [
+    { provide: 'CACHE_TTL', useValue: 300 },
+  ],
+})
+export class M {}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("m.ts", src)
+	require.NoError(t, err)
+
+	var seen bool
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeProvides) {
+		if ed.Meta == nil {
+			continue
+		}
+		if tok, _ := ed.Meta["di_token"].(string); tok == "CACHE_TTL" {
+			seen = true
+			break
+		}
+	}
+	assert.True(t, seen, "string-literal token should produce a binding edge")
+}
