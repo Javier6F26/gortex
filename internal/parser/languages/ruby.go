@@ -1,6 +1,8 @@
 package languages
 
 import (
+	"strings"
+
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/ruby"
 	"github.com/zzet/gortex/internal/graph"
@@ -25,6 +27,16 @@ const (
 		name: (constant) @class.name
 		body: (body_statement
 			(method
+				name: (identifier) @method.name) @method.def))`
+
+	// `def self.foo` appears in the grammar as singleton_method (not
+	// method). Ruby class methods live in this branch exclusively; a
+	// Rails User.authenticate / Rails.logger style factory is one of
+	// these, so the extractor would miss them without a second query.
+	qRbSingletonMethod = `(class
+		name: (constant) @class.name
+		body: (body_statement
+			(singleton_method
 				name: (identifier) @method.name) @method.def))`
 
 	qRbAssignment = `(assignment
@@ -89,34 +101,40 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	}
 
 	// --- Class methods (before top-level methods so we can skip them) ---
-	matches, _ = parser.RunQuery(qRbClassMethod, e.lang, root, src)
-	for _, m := range matches {
-		className := m.Captures["class.name"].Text
-		methodName := m.Captures["method.name"].Text
-		def := m.Captures["method.def"]
+	// Instance methods first, then singleton methods (def self.x) under
+	// the same path — both belong to the class but have different AST
+	// shapes. Without this second pass, Rails-style `User.authenticate`
+	// (a self.method) is invisible to search and to any graph query.
+	for _, q := range []string{qRbClassMethod, qRbSingletonMethod} {
+		matches, _ = parser.RunQuery(q, e.lang, root, src)
+		for _, m := range matches {
+			className := m.Captures["class.name"].Text
+			methodName := m.Captures["method.name"].Text
+			def := m.Captures["method.def"]
 
-		id := filePath + "::" + className + "." + methodName
-		if seen[id] {
-			continue
+			id := filePath + "::" + className + "." + methodName
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			methodLines[def.StartLine] = true
+
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID: id, Kind: graph.KindMethod, Name: methodName,
+				FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+				Language: "ruby", Meta: map[string]any{
+					"receiver":  className,
+					"signature": "def " + methodName,
+				},
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
+			})
+			typeID := filePath + "::" + className
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
+			})
 		}
-		seen[id] = true
-		methodLines[def.StartLine] = true
-
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindMethod, Name: methodName,
-			FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
-			Language: "ruby", Meta: map[string]any{
-				"receiver":  className,
-				"signature": "def " + methodName,
-			},
-		})
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
-		})
-		typeID := filePath + "::" + className
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
-		})
 	}
 
 	// --- Classes ---
@@ -236,7 +254,263 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 	}
 
+	// Rails-style callback dispatch: before_action / after_action /
+	// around_action / skip_before_action / before_filter (legacy) /
+	// after_filter. These declarations bind callback methods to
+	// controller actions — runtime dispatch with no explicit call
+	// site. For each match we emit one EdgeCalls per (action, callback)
+	// pair so both `callers:callback` and `call_chain:action` answer
+	// the way a Rails developer would expect.
+	emitRailsCallbacks(root, src, filePath, result)
+
 	return result, nil
+}
+
+// railsCallbackMethods enumerates the Rails controller macros that
+// bind callbacks to actions. `skip_*` is intentionally excluded —
+// it removes an inherited binding, and correctly honouring it would
+// require parent-class tracking that's out of scope for the first
+// pass. The negative-space impact is small; the positive binding
+// from the parent class still surfaces as an edge.
+var railsCallbackMethods = map[string]struct{}{
+	"before_action":  {},
+	"after_action":   {},
+	"around_action":  {},
+	"before_filter":  {},
+	"after_filter":   {},
+	"around_filter":  {},
+}
+
+func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {
+	// Walk every class body looking for top-level call expressions
+	// whose method identifier matches a callback macro.
+	var walk func(*sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type() == "class" {
+			nameNode := n.ChildByFieldName("name")
+			if nameNode == nil {
+				return
+			}
+			className := nameNode.Content(src)
+			classID := filePath + "::" + className
+
+			// Actions = instance methods of this class. Build a quick
+			// map from method name to node ID so callbacks can be
+			// resolved locally; avoids the resolver pass entirely for
+			// this synthetic edge.
+			methodIDs := make(map[string]string)
+			var bodyStatements *sitter.Node
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if c != nil && c.Type() == "body_statement" {
+					bodyStatements = c
+					break
+				}
+			}
+			if bodyStatements == nil {
+				return
+			}
+			// Collect methods first so callback macros can resolve
+			// symbol names to concrete IDs.
+			for i := 0; i < int(bodyStatements.NamedChildCount()); i++ {
+				c := bodyStatements.NamedChild(i)
+				if c == nil {
+					continue
+				}
+				if c.Type() == "method" || c.Type() == "singleton_method" {
+					nn := c.ChildByFieldName("name")
+					if nn == nil {
+						continue
+					}
+					name := nn.Content(src)
+					methodIDs[name] = filePath + "::" + className + "." + name
+				}
+			}
+			// First pass: collect every callback method named anywhere
+			// in the class's before/after/around macros. These must be
+			// excluded from the action set of EVERY macro — otherwise
+			// `before_action :a; before_action :b` ends up binding a
+			// to guard b and vice versa.
+			allCallbacks := make(map[string]struct{})
+			for i := 0; i < int(bodyStatements.NamedChildCount()); i++ {
+				c := bodyStatements.NamedChild(i)
+				if c == nil || c.Type() != "call" {
+					continue
+				}
+				methodNode := c.ChildByFieldName("method")
+				if methodNode == nil {
+					continue
+				}
+				if _, ok := railsCallbackMethods[methodNode.Content(src)]; !ok {
+					continue
+				}
+				args := c.ChildByFieldName("arguments")
+				if args == nil {
+					continue
+				}
+				for i := 0; i < int(args.NamedChildCount()); i++ {
+					arg := args.NamedChild(i)
+					if arg != nil && arg.Type() == "simple_symbol" {
+						allCallbacks[strings.TrimPrefix(arg.Content(src), ":")] = struct{}{}
+					}
+				}
+			}
+			// Second pass: emit edges.
+			for i := 0; i < int(bodyStatements.NamedChildCount()); i++ {
+				c := bodyStatements.NamedChild(i)
+				if c == nil || c.Type() != "call" {
+					continue
+				}
+				methodNode := c.ChildByFieldName("method")
+				if methodNode == nil {
+					continue
+				}
+				macro := methodNode.Content(src)
+				if _, ok := railsCallbackMethods[macro]; !ok {
+					continue
+				}
+				args := c.ChildByFieldName("arguments")
+				if args == nil {
+					continue
+				}
+				emitRailsCallbackEdges(args, src, filePath, int(c.StartPoint().Row)+1, classID, className, methodIDs, allCallbacks, macro, result)
+			}
+			return
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			walk(n.NamedChild(i))
+		}
+	}
+	walk(root)
+}
+
+// emitRailsCallbackEdges pulls symbol args out of a callback macro call,
+// applies only:/except: filters against the class's action methods,
+// and emits one EdgeCalls per (action, callback) pair. Class-level
+// callbacks without only:/except: fan out to every action.
+func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line int, classID, className string, methodIDs map[string]string, allCallbacks map[string]struct{}, macro string, result *parser.ExtractionResult) {
+	var callbackSyms []string
+	onlyFilter := map[string]struct{}{}
+	exceptFilter := map[string]struct{}{}
+	hasOnly := false
+	hasExcept := false
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		arg := args.NamedChild(i)
+		if arg == nil {
+			continue
+		}
+		switch arg.Type() {
+		case "simple_symbol":
+			// `:name` — the most common form.
+			sym := strings.TrimPrefix(arg.Content(src), ":")
+			callbackSyms = append(callbackSyms, sym)
+		case "pair":
+			// `only: :show` or `except: [:a, :b]`.
+			keyNode := arg.ChildByFieldName("key")
+			valNode := arg.ChildByFieldName("value")
+			if keyNode == nil || valNode == nil {
+				continue
+			}
+			key := strings.TrimSuffix(strings.TrimPrefix(keyNode.Content(src), ":"), ":")
+			target := &onlyFilter
+			set := &hasOnly
+			switch key {
+			case "only":
+				// use default onlyFilter
+			case "except":
+				target = &exceptFilter
+				set = &hasExcept
+			default:
+				continue
+			}
+			for _, sym := range collectRubySymbols(valNode, src) {
+				(*target)[sym] = struct{}{}
+			}
+			if len(*target) > 0 {
+				*set = true
+			}
+		case "hash":
+			// Older Ruby fat-comma syntax (`only => :show`). Rare in
+			// modern Rails; skip for simplicity.
+		}
+	}
+	if len(callbackSyms) == 0 {
+		return
+	}
+
+	// Resolve the actions this macro applies to.
+	var applyTo []string
+	for name := range methodIDs {
+		if hasOnly {
+			if _, ok := onlyFilter[name]; !ok {
+				continue
+			}
+		}
+		if hasExcept {
+			if _, ok := exceptFilter[name]; ok {
+				continue
+			}
+		}
+		// Exclude ALL callback methods — a before_action can never
+		// guard another before_action's method (Rails fires them all
+		// sequentially, each bound to *actions*, not to each other).
+		if _, isCallback := allCallbacks[name]; isCallback {
+			continue
+		}
+		applyTo = append(applyTo, name)
+	}
+	if len(applyTo) == 0 {
+		return
+	}
+	for _, cb := range callbackSyms {
+		target := methodIDs[cb]
+		if target == "" {
+			// Inherited callback (defined on a parent class). Emit
+			// an unresolved:: target and let the resolver find it by
+			// name — works when the parent is in the same repo.
+			target = "unresolved::" + cb
+		}
+		for _, action := range applyTo {
+			actionID := methodIDs[action]
+			if actionID == "" {
+				continue
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     actionID,
+				To:       target,
+				Kind:     graph.EdgeCalls,
+				FilePath: filePath,
+				Line:     line,
+				Meta: map[string]any{
+					"dispatch_macro": macro,
+					"rails_callback": cb,
+				},
+			})
+		}
+	}
+	_ = classID
+	_ = className
+}
+
+// collectRubySymbols gathers bare symbol tokens from an expression that
+// may be a single symbol (`:foo`) or an array of them (`[:a, :b]`).
+func collectRubySymbols(n *sitter.Node, src []byte) []string {
+	var out []string
+	switch n.Type() {
+	case "simple_symbol":
+		out = append(out, strings.TrimPrefix(n.Content(src), ":"))
+	case "array":
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Type() == "simple_symbol" {
+				out = append(out, strings.TrimPrefix(c.Content(src), ":"))
+			}
+		}
+	}
+	return out
 }
 
 func isUpperASCII(b byte) bool {

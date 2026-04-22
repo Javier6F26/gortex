@@ -1,0 +1,90 @@
+# Rails DI-recall fixture
+#
+# Rails "DI" is mostly callback dispatch — before_action / after_action
+# / skip_before_action in controllers attach methods to run before or
+# after actions, without any explicit call site. This is the same shape
+# as NestJS @UseGuards or Phoenix plug. Routes (`get '/users', to: ...`)
+# are already handled by Gortex's HTTPExtractor so they're not the
+# focus here.
+#
+# Tiering:
+#   exact    — named symbols
+#   concept  — paraphrases
+#   di       — plain method call resolution (no callback extraction
+#              needed)
+#   di_gap   — callback dispatch that's invisible without
+#              before_action-aware extraction
+name: gortex-rails-di
+cases:
+
+  # exact
+  - id: exact-UsersController
+    tier: exact
+    query: UsersController
+    expected: [app/controllers/users_controller.rb::UsersController]
+  - id: exact-ApplicationController
+    tier: exact
+    query: ApplicationController
+    expected: [app/controllers/application_controller.rb::ApplicationController]
+  - id: exact-require_login
+    tier: exact
+    query: require_login
+    expected: [app/controllers/application_controller.rb::ApplicationController.require_login]
+  - id: exact-authenticate
+    tier: exact
+    query: authenticate
+    expected: [app/models/user.rb::User.authenticate]
+
+  # concept
+  - id: concept-destroy-session
+    tier: concept
+    query: log a user out
+    expected: [app/controllers/sessions_controller.rb::SessionsController.destroy]
+
+  # di — real method body calls (User.find, session[:user_id], etc.)
+  - id: di-call_chain-create
+    tier: di
+    query: "call_chain:app/controllers/sessions_controller.rb::SessionsController.create"
+    expected: [app/models/user.rb::User.authenticate]
+
+  # di_gap — callback dispatch
+  # NOTE: inherited callbacks (ApplicationController.before_action
+  # :require_login → UsersController actions) aren't tracked. Would
+  # require cross-file class-hierarchy walking. See the Rails feature
+  # notes for future work.
+
+  # before_action :set_user, only: [:show, :update, :destroy] — the
+  # filter list matters: only those three actions should call set_user.
+  - id: di_gap-callers-set_user
+    tier: di_gap
+    query: "callers:app/controllers/users_controller.rb::UsersController.set_user"
+    expected:
+      - app/controllers/users_controller.rb::UsersController.show
+      - app/controllers/users_controller.rb::UsersController.update
+      - app/controllers/users_controller.rb::UsersController.destroy
+
+  # after_action :log_request — runs AFTER every action.
+  - id: di_gap-callers-log_request
+    tier: di_gap
+    query: "callers:app/controllers/users_controller.rb::UsersController.log_request"
+    expected:
+      - app/controllers/users_controller.rb::UsersController.index
+      - app/controllers/users_controller.rb::UsersController.show
+
+  # authorize_admin is before_action with only: :destroy (single symbol
+  # form, not an array). Verifies the extractor handles both shapes.
+  - id: di_gap-callers-authorize_admin
+    tier: di_gap
+    query: "callers:app/controllers/users_controller.rb::UsersController.authorize_admin"
+    expected:
+      - app/controllers/users_controller.rb::UsersController.destroy
+
+  # Forward direction: call_chain from a guarded action should include
+  # the before_action callbacks. Tests the same edges from the other
+  # side of the BFS.
+  - id: di_gap-call_chain-UsersController-show
+    tier: di_gap
+    query: "call_chain:app/controllers/users_controller.rb::UsersController.show"
+    expected:
+      - app/controllers/users_controller.rb::UsersController.set_user
+      - app/controllers/application_controller.rb::ApplicationController.require_login

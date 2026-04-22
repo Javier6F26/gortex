@@ -119,3 +119,50 @@ func TestExExtractor_LanguageAndExtensions(t *testing.T) {
 	assert.Equal(t, "elixir", e.Language())
 	assert.Equal(t, []string{".ex", ".exs"}, e.Extensions())
 }
+
+func TestExExtractor_PhoenixPlugDispatch(t *testing.T) {
+	// `plug :name` in a defmodule binds the named plug to every
+	// action function. `plug :name when action in [...]` binds only
+	// to the listed atoms. Both produce EdgeCalls edges from each
+	// matching action to the plug function.
+	src := []byte(`defmodule MyAppWeb.UserController do
+  plug :authenticate
+  plug :load_user when action in [:show, :update]
+
+  def index(conn, _params), do: conn
+  def show(conn, _params), do: conn
+  def update(conn, _params), do: conn
+
+  def authenticate(conn, _), do: conn
+  def load_user(conn, _), do: conn
+end
+`)
+	e := NewElixirExtractor()
+	result, err := e.Extract("user_controller.ex", src)
+	require.NoError(t, err)
+
+	authActions := map[string]bool{}
+	loadActions := map[string]bool{}
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		plug, _ := ed.Meta["phoenix_plug"].(string)
+		switch plug {
+		case "authenticate":
+			authActions[ed.From] = true
+		case "load_user":
+			loadActions[ed.From] = true
+		}
+	}
+
+	// authenticate (no filter) guards every action — index, show, update.
+	assert.Len(t, authActions, 3)
+	assert.Contains(t, authActions, "user_controller.ex::MyAppWeb.UserController.index")
+
+	// load_user is filtered to :show and :update.
+	assert.Len(t, loadActions, 2)
+	assert.Contains(t, loadActions, "user_controller.ex::MyAppWeb.UserController.show")
+	assert.Contains(t, loadActions, "user_controller.ex::MyAppWeb.UserController.update")
+	assert.NotContains(t, loadActions, "user_controller.ex::MyAppWeb.UserController.index")
+}

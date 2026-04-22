@@ -142,6 +142,11 @@ func (e *ElixirExtractor) handleDefmodule(callNode *sitter.Node, src []byte, fil
 		for i := 0; i < int(body.ChildCount()); i++ {
 			e.walkNode(body.Child(i), src, filePath, fileID, modName, result, seen)
 		}
+		// Phoenix plug dispatch: `plug :name` (optionally with
+		// `when action in [...]`) declares a middleware that fires
+		// before each action. Emit one EdgeCalls per (action, plug)
+		// pair after the body walk so defs are already registered.
+		e.emitPhoenixPlugBindings(body, src, filePath, modName, result)
 	}
 }
 
@@ -432,4 +437,127 @@ func (e *ElixirExtractor) findDoBlock(callNode *sitter.Node) *sitter.Node {
 		}
 	}
 	return nil
+}
+
+// emitPhoenixPlugBindings walks the body of a defmodule for
+// `plug :name` / `plug :name when action in [...]` macro calls and
+// emits synthetic EdgeCalls from each matching action function to
+// the named plug function. Phoenix dispatches plugs via module
+// metadata so there's no explicit call site in source — the edges
+// make `callers:plug_name` return the guarded actions.
+func (e *ElixirExtractor) emitPhoenixPlugBindings(body *sitter.Node, src []byte, filePath, modName string, result *parser.ExtractionResult) {
+	type plugEntry struct {
+		name   string
+		line   int
+		filter map[string]struct{} // empty = applies to all actions
+	}
+	var plugs []plugEntry
+	actions := make(map[string]int) // name → start line
+	allPlugs := make(map[string]struct{})
+
+	for i := 0; i < int(body.ChildCount()); i++ {
+		c := body.Child(i)
+		if c == nil || c.Type() != "call" {
+			continue
+		}
+		target := e.getCallTarget(c, src)
+		switch target {
+		case "plug":
+			entry := parsePhoenixPlugCall(c, src)
+			if entry.name == "" {
+				continue
+			}
+			plugs = append(plugs, plugEntry{
+				name:   entry.name,
+				line:   int(c.StartPoint().Row) + 1,
+				filter: entry.filter,
+			})
+			allPlugs[entry.name] = struct{}{}
+		case "def":
+			if name := e.extractFuncName(c, src); name != "" {
+				actions[name] = int(c.StartPoint().Row) + 1
+			}
+		}
+	}
+	if len(plugs) == 0 {
+		return
+	}
+	for _, p := range plugs {
+		plugID := filePath + "::" + modName + "." + p.name
+		for action := range actions {
+			// Plug functions themselves aren't actions — don't guard
+			// them with other plugs.
+			if _, isPlug := allPlugs[action]; isPlug {
+				continue
+			}
+			if len(p.filter) > 0 {
+				if _, ok := p.filter[action]; !ok {
+					continue
+				}
+			}
+			actionID := filePath + "::" + modName + "." + action
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     actionID,
+				To:       plugID,
+				Kind:     graph.EdgeCalls,
+				FilePath: filePath,
+				Line:     p.line,
+				Meta: map[string]any{
+					"dispatch_macro": "plug",
+					"phoenix_plug":   p.name,
+				},
+			})
+		}
+	}
+}
+
+// parsePhoenixPlugCall extracts the plug function name and an optional
+// set of action names (from `when action in [:a, :b, :c]`) from a plug
+// call node. Returns zero values when the call doesn't parse.
+type phoenixPlugParsed struct {
+	name   string
+	filter map[string]struct{}
+}
+
+func parsePhoenixPlugCall(callNode *sitter.Node, src []byte) phoenixPlugParsed {
+	var out phoenixPlugParsed
+	var args *sitter.Node
+	for i := 0; i < int(callNode.NamedChildCount()); i++ {
+		c := callNode.NamedChild(i)
+		if c != nil && c.Type() == "arguments" {
+			args = c
+			break
+		}
+	}
+	if args == nil || args.NamedChildCount() == 0 {
+		return out
+	}
+	arg := args.NamedChild(0)
+	switch arg.Type() {
+	case "atom":
+		out.name = strings.TrimPrefix(arg.Content(src), ":")
+	case "binary_operator":
+		// `:name when action in [...]` — the outer op is `when`,
+		// left is the plug atom, right is an `in` expression whose
+		// right side is a list of atoms.
+		left := arg.NamedChild(0)
+		right := arg.NamedChild(1)
+		if left == nil || left.Type() != "atom" || right == nil {
+			return out
+		}
+		out.name = strings.TrimPrefix(left.Content(src), ":")
+		if right.Type() == "binary_operator" {
+			list := right.NamedChild(1)
+			if list != nil && list.Type() == "list" {
+				out.filter = make(map[string]struct{})
+				for i := 0; i < int(list.NamedChildCount()); i++ {
+					item := list.NamedChild(i)
+					if item != nil && item.Type() == "atom" {
+						out.filter[strings.TrimPrefix(item.Content(src), ":")] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	return out
 }

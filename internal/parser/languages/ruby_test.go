@@ -130,3 +130,75 @@ end
 	require.Len(t, methods, 1)
 	assert.Equal(t, "bar", methods[0].Name)
 }
+
+func TestRubyExtractor_RailsBeforeAction(t *testing.T) {
+	// before_action :name binds a callback method to the class's
+	// action methods. With only: filters, only the listed actions
+	// fire the callback. This test covers the default (all actions
+	// bound) plus an only: list.
+	src := []byte(`
+class UsersController
+  before_action :authenticate
+  before_action :load_user, only: [:show, :update]
+
+  def index; end
+  def show; @user end
+  def update; @user end
+
+  private
+
+  def authenticate; end
+  def load_user; end
+end
+`)
+	e := NewRubyExtractor()
+	result, err := e.Extract("users_controller.rb", src)
+	require.NoError(t, err)
+
+	var authEdges, loadEdges int
+	actionsForAuth := map[string]bool{}
+	actionsForLoad := map[string]bool{}
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeCalls) {
+		if ed.Meta == nil {
+			continue
+		}
+		cb, _ := ed.Meta["rails_callback"].(string)
+		if cb == "authenticate" {
+			authEdges++
+			actionsForAuth[ed.From] = true
+		}
+		if cb == "load_user" {
+			loadEdges++
+			actionsForLoad[ed.From] = true
+		}
+	}
+	// authenticate guards every action (no only:/except:).
+	assert.Equal(t, 3, authEdges, "authenticate should bind to every action")
+	// load_user has only: [:show, :update].
+	assert.Equal(t, 2, loadEdges, "load_user should bind only to :show, :update")
+	assert.Contains(t, actionsForLoad, "users_controller.rb::UsersController.show")
+	assert.Contains(t, actionsForLoad, "users_controller.rb::UsersController.update")
+	assert.NotContains(t, actionsForLoad, "users_controller.rb::UsersController.index")
+}
+
+func TestRubyExtractor_SingletonMethod(t *testing.T) {
+	// `def self.x` (singleton_method) must be extracted alongside
+	// regular instance methods — previously the extractor missed them.
+	src := []byte(`
+class User
+  def instance; 1 end
+  def self.class_method; 2 end
+end
+`)
+	e := NewRubyExtractor()
+	result, err := e.Extract("user.rb", src)
+	require.NoError(t, err)
+	names := make(map[string]bool)
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindMethod {
+			names[n.Name] = true
+		}
+	}
+	assert.True(t, names["instance"])
+	assert.True(t, names["class_method"])
+}

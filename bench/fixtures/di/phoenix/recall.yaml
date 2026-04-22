@@ -1,0 +1,58 @@
+# Phoenix DI-recall fixture
+#
+# Phoenix's controller-level DI is `plug :function_name` — binds a
+# middleware function to run before each action. Same shape as Rails
+# before_action / NestJS @UseGuards: no explicit call site, framework
+# dispatches based on module metadata.
+#
+# Only controller-scoped plugs are covered here. Router-pipeline
+# plugs (`pipeline :browser do plug X end`) cross module boundaries
+# and are noted as future work.
+name: gortex-phoenix-di
+cases:
+
+  # exact
+  - id: exact-UserController
+    tier: exact
+    query: UserController
+    expected: [lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController]
+  - id: exact-authenticate
+    tier: exact
+    query: authenticate
+    expected: [lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.authenticate]
+  - id: exact-load_user
+    tier: exact
+    query: load_user
+    expected: [lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.load_user]
+
+  # di_gap: controller-scoped plug dispatch
+  # `plug :authenticate` runs for every action. callers:authenticate
+  # should return every action in the controller.
+  - id: di_gap-callers-authenticate
+    tier: di_gap
+    query: "callers:lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.authenticate"
+    expected:
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.index
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.show
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.update
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.delete
+
+  # `plug :load_user when action in [:show, :update, :delete]` —
+  # only fires for those three actions. index/index-like should NOT
+  # be linked.
+  - id: di_gap-callers-load_user
+    tier: di_gap
+    query: "callers:lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.load_user"
+    expected:
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.show
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.update
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.delete
+
+  # Forward direction: call_chain from a guarded action should reach
+  # the plug functions it depends on.
+  - id: di_gap-call_chain-show
+    tier: di_gap
+    query: "call_chain:lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.show"
+    expected:
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.authenticate
+      - lib/my_app_web/controllers/user_controller.ex::MyAppWeb.UserController.load_user
