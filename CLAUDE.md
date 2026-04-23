@@ -5,7 +5,7 @@ Code intelligence engine written in Go. Indexes repositories into an in-memory k
 ## Build & Test
 
 ```bash
-go build -o gortex ./cmd/gortex/   # requires CGO (tree-sitter C bindings)
+go build -o gortex ./cmd/gortex/   # pure Go; no C toolchain needed
 go test -race ./...                 # all test packages must pass
 ```
 

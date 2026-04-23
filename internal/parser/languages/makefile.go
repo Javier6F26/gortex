@@ -1,29 +1,32 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Makefile is target-and-recipe structured: a target line `NAME:` is
-// followed by tab-indented recipe lines. We model targets and
-// `define NAME ... endef` blocks as function nodes, variable
-// assignments as variables, and `include` / `-include` / `sinclude`
-// directives as imports.
-var (
-	makeTargetRe  = regexp.MustCompile(`(?m)^([A-Za-z_][\w./-]*(?:\.[A-Za-z_][\w./-]*)?)\s*:(?:[^=]|$)`)
-	makeDefineRe  = regexp.MustCompile(`(?m)^define\s+([A-Za-z_]\w*)`)
-	makeIncludeRe = regexp.MustCompile(`(?m)^(?:-include|sinclude|include)\s+(.+)$`)
-	makeVarRe     = regexp.MustCompile(`(?m)^([A-Za-z_][\w]*)\s*(?::=|\?=|\+=|=)\s*`)
-)
+// MakefileExtractor extracts Makefile source using tree-sitter.
+//
+// Relevant odvcencio grammar nodes:
+//   rule                 (targets ":" prerequisites? recipe?)
+//     targets              contains one or more `word` children
+//   variable_assignment  (word op text)
+//   include_directive    ("include" list(word*))
+//   define_directive     ("define" word raw_text "endef")
+//
+// Targets, variables, and `define` blocks become symbol nodes;
+// `include` / `-include` / `sinclude` become import edges.
+type MakefileExtractor struct {
+	lang *sitter.Language
+}
 
-// MakefileExtractor extracts Makefile source using regex.
-type MakefileExtractor struct{}
-
-func NewMakefileExtractor() *MakefileExtractor { return &MakefileExtractor{} }
+func NewMakefileExtractor() *MakefileExtractor {
+	return &MakefileExtractor{lang: grammars.MakeLanguage()}
+}
 
 func (e *MakefileExtractor) Language() string { return "makefile" }
 func (e *MakefileExtractor) Extensions() []string {
@@ -31,17 +34,33 @@ func (e *MakefileExtractor) Extensions() []string {
 }
 
 func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
+	lineCount := strings.Count(string(src), "\n") + 1
+	if lineCount < 1 {
+		lineCount = 1
+	}
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: lineCount,
 		Language: "makefile",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	type topHit struct {
+		name string
+		line int
+		kind graph.NodeKind
+	}
+	var tops []topHit
 	add := func(name string, kind graph.NodeKind, start, end int) {
 		if name == "" {
 			return
@@ -62,32 +81,84 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		})
 	}
 
-	// Collect target lines to compute end = line before next top-level
-	// definition (targets have no explicit terminator; indented tab
-	// lines are the recipe).
-	type topHit struct {
-		name string
-		line int
-		kind graph.NodeKind
-	}
-	var tops []topHit
-	for _, m := range makeTargetRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isMakeDirective(name) {
-			continue
+	// Iterate direct children of the makefile root in source order so we
+	// can compute accurate end-of-range values for rule/variable nodes
+	// that have no explicit terminator.
+	walkNodes(root, func(n *sitter.Node) {
+		if n == root {
+			return
 		}
-		line := lineAt(src, m[0])
-		tops = append(tops, topHit{name: name, line: line, kind: graph.KindFunction})
-	}
-	for _, m := range makeVarRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isMakeDirective(name) {
-			continue
+		start := int(n.StartPoint().Row) + 1
+		end := int(n.EndPoint().Row) + 1
+
+		switch parser.NodeType(n, e.lang) {
+		case "rule":
+			// One symbol per target `word` in the `targets` child.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				c := n.Child(i)
+				if c == nil || parser.NodeType(c, e.lang) != "targets" {
+					continue
+				}
+				for j := 0; j < int(c.ChildCount()); j++ {
+					w := c.Child(j)
+					if w == nil || parser.NodeType(w, e.lang) != "word" {
+						continue
+					}
+					name := w.Text(src)
+					if isMakeDirective(name) {
+						continue
+					}
+					tops = append(tops, topHit{name: name, line: start, kind: graph.KindFunction})
+				}
+			}
+
+		case "variable_assignment":
+			// LHS is the first `word` child.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				c := n.Child(i)
+				if c != nil && parser.NodeType(c, e.lang) == "word" {
+					name := c.Text(src)
+					if !isMakeDirective(name) {
+						tops = append(tops, topHit{name: name, line: start, kind: graph.KindVariable})
+					}
+					break
+				}
+			}
+
+		case "define_directive":
+			// Name is the first `word` child; body ends at `endef`.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				c := n.Child(i)
+				if c != nil && parser.NodeType(c, e.lang) == "word" {
+					add(c.Text(src), graph.KindFunction, start, end)
+					break
+				}
+			}
+
+		case "include_directive":
+			// `include a.mk b.mk` may list several files under `list`.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				c := n.Child(i)
+				if c == nil || parser.NodeType(c, e.lang) != "list" {
+					continue
+				}
+				for j := 0; j < int(c.ChildCount()); j++ {
+					w := c.Child(j)
+					if w == nil || parser.NodeType(w, e.lang) != "word" {
+						continue
+					}
+					result.Edges = append(result.Edges, &graph.Edge{
+						From: fileNode.ID, To: "unresolved::import::" + w.Text(src),
+						Kind: graph.EdgeImports, FilePath: filePath, Line: start,
+					})
+				}
+			}
 		}
-		line := lineAt(src, m[0])
-		tops = append(tops, topHit{name: name, line: line, kind: graph.KindVariable})
-	}
-	// Sort-by-line so end-of-range computation is monotonic.
+	})
+
+	// Preserve the legacy end-line computation: rule/variable symbols
+	// span from their starting line up to the line before the next
+	// top-level definition.
 	for i := 0; i < len(tops); i++ {
 		for j := i + 1; j < len(tops); j++ {
 			if tops[j].line < tops[i].line {
@@ -96,7 +167,7 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		}
 	}
 	for i, t := range tops {
-		endLine := len(lines)
+		endLine := lineCount
 		if i+1 < len(tops) {
 			endLine = tops[i+1].line - 1
 			if endLine < t.line {
@@ -106,29 +177,11 @@ func (e *MakefileExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		add(t.name, t.kind, t.line, endLine)
 	}
 
-	for _, m := range makeDefineRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findKeywordBlockEnd(lines, line, "endef"))
-	}
-
-	for _, m := range makeIncludeRe.FindAllSubmatchIndex(src, -1) {
-		arg := strings.TrimSpace(string(src[m[2]:m[3]]))
-		line := lineAt(src, m[0])
-		// `include a.mk b.mk` may list several files.
-		for _, f := range strings.Fields(arg) {
-			result.Edges = append(result.Edges, &graph.Edge{
-				From: fileNode.ID, To: "unresolved::import::" + f,
-				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-			})
-		}
-	}
-
 	return result, nil
 }
 
-// isMakeDirective filters out reserved-word collisions that the
-// variable regex would otherwise catch.
+// isMakeDirective filters out reserved words that `word`-based captures
+// would otherwise mistake for identifiers.
 func isMakeDirective(s string) bool {
 	switch s {
 	case "ifeq", "ifneq", "ifdef", "ifndef", "else", "endif",

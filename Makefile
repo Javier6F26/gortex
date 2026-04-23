@@ -105,15 +105,15 @@ tag-release:
 	git tag -a "$$TAG" -m "Release $$TAG"; \
 	echo "Tagged $$TAG. Push with: git push origin $$TAG"
 
-# Cross-compile for Raspberry Pi (ARM64)
+# Cross-compile for Raspberry Pi (ARM64). Pure-Go runtime: no C toolchain.
 build-rpi:
-	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 		go build -ldflags '$(LDFLAGS)' -o gortex-rpi ./cmd/gortex/
 	@echo "✓ Built gortex-rpi (linux/arm64)"
 
-# Cross-compile for Raspberry Pi (ARMv7 / 32-bit)
+# Cross-compile for Raspberry Pi (ARMv7 / 32-bit).
 build-rpi32:
-	CGO_ENABLED=1 GOOS=linux GOARCH=arm GOARM=7 CC=arm-linux-gnueabihf-gcc \
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
 		go build -ldflags '$(LDFLAGS)' -o gortex-rpi32 ./cmd/gortex/
 	@echo "✓ Built gortex-rpi32 (linux/arm/v7)"
 
@@ -195,10 +195,11 @@ eval-setup: build
 	$(EVAL_PIP) install -q -e "$(EVAL_DIR)[dev]"
 	@echo "✓ Eval framework ready. Binary: ./$(BINARY)"
 
-# Build linux/amd64 binary for container injection (requires podman/docker)
+# Build linux/amd64 binary for container injection (requires podman/docker).
+# Pure-Go runtime: no apt packages or C toolchain needed inside the container.
 eval-build-linux:
 	podman run --rm --platform linux/amd64 -v $(CURDIR):/src -w /src golang:1.25 \
-		bash -c "apt-get update -qq && apt-get install -y -qq libtree-sitter-dev && go build -ldflags '$(LDFLAGS)' -o gortex-linux ./cmd/gortex/"
+		bash -c "CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o gortex-linux ./cmd/gortex/"
 	@echo "✓ Built gortex-linux (linux/amd64)"
 
 # Run Python eval tests

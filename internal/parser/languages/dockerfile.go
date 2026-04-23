@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/dockerfile"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -17,7 +17,7 @@ type DockerfileExtractor struct {
 }
 
 func NewDockerfileExtractor() *DockerfileExtractor {
-	return &DockerfileExtractor{lang: dockerfile.GetLanguage()}
+	return &DockerfileExtractor{lang: grammars.DockerfileLanguage()}
 }
 
 func (e *DockerfileExtractor) Language() string     { return "dockerfile" }
@@ -52,7 +52,7 @@ func (e *DockerfileExtractor) walk(node *sitter.Node, src []byte, filePath, file
 		return
 	}
 
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	switch nodeType {
 	case "from_instruction":
@@ -81,9 +81,9 @@ func (e *DockerfileExtractor) extractFrom(node *sitter.Node, src []byte, filePat
 		if child == nil {
 			continue
 		}
-		ct := child.Type()
+		ct := parser.NodeType(child, e.lang)
 		if ct == "image_spec" {
-			imageName := child.Content(src)
+			imageName := child.Text(src)
 			imageName = strings.TrimSpace(imageName)
 			if imageName != "" {
 				result.Edges = append(result.Edges, &graph.Edge{
@@ -107,7 +107,7 @@ func (e *DockerfileExtractor) extractEnvArg(node *sitter.Node, src []byte, fileP
 		if child == nil {
 			continue
 		}
-		ct := child.Type()
+		ct := parser.NodeType(child, e.lang)
 		// Look for env_pair, unquoted_string, or env_key.
 		if ct == "env_pair" {
 			// env_pair has name and value children.
@@ -116,12 +116,12 @@ func (e *DockerfileExtractor) extractEnvArg(node *sitter.Node, src []byte, fileP
 				nameNode = e.findChildOfType(child, "env_key")
 			}
 			if nameNode != nil {
-				varName := nameNode.Content(src)
+				varName := nameNode.Text(src)
 				e.addVariable(varName, prefix, node, filePath, fileID, result)
 			}
 		} else if ct == "unquoted_string" && i == 1 {
 			// ARG name or ARG name=value — first non-keyword child.
-			varName := child.Content(src)
+			varName := child.Text(src)
 			// Strip =value if present.
 			if idx := strings.Index(varName, "="); idx > 0 {
 				varName = varName[:idx]
@@ -151,7 +151,7 @@ func (e *DockerfileExtractor) extractInstruction(node *sitter.Node, src []byte, 
 	// Extract instruction as a variable for visibility.
 	label := strings.TrimSuffix(instrType, "_instruction")
 	label = strings.ToUpper(label)
-	text := node.Content(src)
+	text := node.Text(src)
 	// Truncate long instructions.
 	if len(text) > 80 {
 		text = text[:77] + "..."
@@ -177,7 +177,7 @@ func (e *DockerfileExtractor) extractInstruction(node *sitter.Node, src []byte, 
 func (e *DockerfileExtractor) findChildOfType(node *sitter.Node, childType string) *sitter.Node {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child != nil && child.Type() == childType {
+		if child != nil && parser.NodeType(child, e.lang) == childType {
 			return child
 		}
 	}

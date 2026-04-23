@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/csharp"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -110,7 +110,7 @@ type CSharpExtractor struct {
 }
 
 func NewCSharpExtractor() *CSharpExtractor {
-	return &CSharpExtractor{lang: csharp.GetLanguage()}
+	return &CSharpExtractor{lang: grammars.CSharpLanguage()}
 }
 
 func (e *CSharpExtractor) Language() string     { return "csharp" }
@@ -373,8 +373,8 @@ func (e *CSharpExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 			continue
 		}
 		walkNodes(defNode, func(n *sitter.Node) {
-			if n.Type() == "object_creation_expression" {
-				typeName := inferTypeFromCSharpNew(n, src)
+			if parser.NodeType(n, e.lang) == "object_creation_expression" {
+				typeName := inferTypeFromCSharpNew(n, src, e.lang)
 				if typeName != "" {
 					tenv[name] = typeName
 				}
@@ -415,12 +415,13 @@ func normalizeCSharpTypeName(t string) string {
 
 // inferTypeFromCSharpNew extracts the type name from a C# object_creation_expression.
 // new UserService(...) -> "UserService"
-func inferTypeFromCSharpNew(node *sitter.Node, src []byte) string {
+func inferTypeFromCSharpNew(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "identifier" || child.Type() == "type_identifier" ||
-			child.Type() == "generic_name" || child.Type() == "qualified_name" {
-			name := child.Content(src)
+		childType := parser.NodeType(child, lang)
+		if childType == "identifier" || childType == "type_identifier" ||
+			childType == "generic_name" || childType == "qualified_name" {
+			name := child.Text(src)
 			// Strip generics from generic_name.
 			if idx := strings.Index(name, "<"); idx > 0 {
 				name = name[:idx]
@@ -457,10 +458,10 @@ func (e *CSharpExtractor) extractMethods(
 		if def.Node != nil {
 			for i := 0; i < int(def.Node.ChildCount()); i++ {
 				child := def.Node.Child(i)
-				if child.Type() == "identifier" && string(src[child.StartByte():child.EndByte()]) == name {
+				if parser.NodeType(child, e.lang) == "identifier" && string(src[child.StartByte():child.EndByte()]) == name {
 					break
 				}
-				childType := child.Type()
+				childType := parser.NodeType(child, e.lang)
 				// Type nodes include predefined_type, identifier, qualified_name, generic_name, nullable_type, array_type, etc.
 				switch childType {
 				case "predefined_type", "identifier", "qualified_name", "generic_name",

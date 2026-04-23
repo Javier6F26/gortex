@@ -4,8 +4,8 @@ import (
 	"strings"
 	"unicode"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/python"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -58,7 +58,7 @@ type PythonExtractor struct {
 }
 
 func NewPythonExtractor() *PythonExtractor {
-	return &PythonExtractor{lang: python.GetLanguage()}
+	return &PythonExtractor{lang: grammars.PythonLanguage()}
 }
 
 func (e *PythonExtractor) Language() string     { return "python" }
@@ -108,7 +108,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		}
 		// Extract return type hint from the function_definition node.
 		if def.Node != nil {
-			if rt := extractPyReturnType(def.Node, src); rt != "" {
+			if rt := extractPyReturnType(def.Node, src, e.lang); rt != "" {
 				node.Meta["return_type"] = rt
 			}
 		}
@@ -194,9 +194,9 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		stmt := def.Node
 		for i := 0; i < int(stmt.NamedChildCount()); i++ {
 			child := stmt.NamedChild(i)
-			switch child.Type() {
+			switch parser.NodeType(child, e.lang) {
 			case "dotted_name":
-				dotted := child.Content(src)
+				dotted := child.Text(src)
 				alias := dotted
 				if j := strings.Index(dotted, "."); j >= 0 {
 					alias = dotted[:j] // `import os.path` binds `os`
@@ -206,11 +206,11 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 				var modulePath, alias string
 				for j := 0; j < int(child.NamedChildCount()); j++ {
 					cc := child.NamedChild(j)
-					switch cc.Type() {
+					switch parser.NodeType(cc, e.lang) {
 					case "dotted_name":
-						modulePath = cc.Content(src)
+						modulePath = cc.Text(src)
 					case "identifier":
-						alias = cc.Content(src)
+						alias = cc.Text(src)
 					}
 				}
 				if alias != "" && modulePath != "" {
@@ -257,7 +257,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		// the first identifier argument of Depends so the target shows
 		// up as a caller relationship.
 		if name == "Depends" && expr.Node != nil {
-			if dep := firstIdentifierArg(expr.Node, src); dep != "" {
+			if dep := firstIdentifierArg(expr.Node, src, e.lang); dep != "" {
 				result.Edges = append(result.Edges, &graph.Edge{
 					From: callerID, To: "unresolved::" + dep,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: expr.StartLine + 1,
@@ -310,7 +310,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		name := m.Captures["var.name"].Text
 		def := m.Captures["var.def"]
 		// Only top-level: parent is module.
-		if def.Node != nil && def.Node.Parent() != nil && def.Node.Parent().Type() == "module" {
+		if def.Node != nil && def.Node.Parent() != nil && parser.NodeType(def.Node.Parent(), e.lang) == "module" {
 			id := filePath + "::" + name
 			if seen[id] || strings.HasPrefix(name, "_") {
 				continue
@@ -369,8 +369,8 @@ func (e *PythonExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 // itself, to show up as the called symbol. Non-identifier arguments —
 // lambdas, attribute access, calls — are skipped because they can't
 // be statically resolved to a graph node.
-func firstIdentifierArg(callNode *sitter.Node, src []byte) string {
-	args := callNode.ChildByFieldName("arguments")
+func firstIdentifierArg(callNode *sitter.Node, src []byte, lang *sitter.Language) string {
+	args := callNode.ChildByFieldName("arguments", lang)
 	if args == nil {
 		return ""
 	}
@@ -381,11 +381,11 @@ func firstIdentifierArg(callNode *sitter.Node, src []byte) string {
 		}
 		// Skip keyword arguments — Depends(use_cache=False, ...) shouldn't
 		// produce a call edge to `False`.
-		if arg.Type() == "keyword_argument" {
+		if parser.NodeType(arg, lang) == "keyword_argument" {
 			continue
 		}
-		if arg.Type() == "identifier" {
-			return arg.Content(src)
+		if parser.NodeType(arg, lang) == "identifier" {
+			return arg.Text(src)
 		}
 		return ""
 	}
@@ -394,14 +394,14 @@ func firstIdentifierArg(callNode *sitter.Node, src []byte) string {
 
 // extractPyReturnType walks a function_definition node for a return_type child
 // (the `-> Type` annotation) and returns the normalized type name.
-func extractPyReturnType(funcNode *sitter.Node, src []byte) string {
+func extractPyReturnType(funcNode *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(funcNode.NamedChildCount()); i++ {
 		child := funcNode.NamedChild(i)
-		if child.Type() == "type" {
+		if parser.NodeType(child, lang) == "type" {
 			// Check if preceding sibling token is "->".
 			// In tree-sitter Python grammar, the return type is a "type" child
 			// that appears after the parameters.
-			return normalizePyTypeName(child.Content(src))
+			return normalizePyTypeName(child.Text(src))
 		}
 	}
 	return ""

@@ -1,8 +1,8 @@
 package languages
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/toml"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -14,7 +14,7 @@ type TOMLExtractor struct {
 }
 
 func NewTOMLExtractor() *TOMLExtractor {
-	return &TOMLExtractor{lang: toml.GetLanguage()}
+	return &TOMLExtractor{lang: grammars.TomlLanguage()}
 }
 
 func (e *TOMLExtractor) Language() string     { return "toml" }
@@ -48,7 +48,7 @@ func (e *TOMLExtractor) walk(node *sitter.Node, src []byte, filePath, fileID str
 		return
 	}
 
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	switch nodeType {
 	case "table":
@@ -79,7 +79,7 @@ func (e *TOMLExtractor) walk(node *sitter.Node, src []byte, filePath, fileID str
 			keyNode = e.findChild(node, "quoted_key")
 		}
 		if keyNode != nil {
-			keyName := keyNode.Content(src)
+			keyName := keyNode.Text(src)
 			if keyName != "" && !seen["pair::"+keyName] {
 				seen["pair::"+keyName] = true
 				id := filePath + "::" + keyName
@@ -111,13 +111,13 @@ func (e *TOMLExtractor) extractTableName(tableNode *sitter.Node, src []byte) str
 		if child == nil {
 			continue
 		}
-		ct := child.Type()
+		ct := parser.NodeType(child, e.lang)
 		if ct == "bare_key" || ct == "dotted_key" || ct == "quoted_key" {
-			return child.Content(src)
+			return child.Text(src)
 		}
 		// Some grammars wrap the key in a different node.
 		if ct != "[" && ct != "]" && ct != "comment" {
-			text := child.Content(src)
+			text := child.Text(src)
 			if text != "" && text != "[" && text != "]" {
 				return text
 			}
@@ -129,7 +129,7 @@ func (e *TOMLExtractor) extractTableName(tableNode *sitter.Node, src []byte) str
 func (e *TOMLExtractor) findChild(node *sitter.Node, childType string) *sitter.Node {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child != nil && child.Type() == childType {
+		if child != nil && parser.NodeType(child, e.lang) == childType {
 			return child
 		}
 	}

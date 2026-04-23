@@ -1,8 +1,8 @@
 package languages
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/sql"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -13,7 +13,7 @@ type SQLExtractor struct {
 }
 
 func NewSQLExtractor() *SQLExtractor {
-	return &SQLExtractor{lang: sql.GetLanguage()}
+	return &SQLExtractor{lang: grammars.SqlLanguage()}
 }
 
 func (e *SQLExtractor) Language() string     { return "sql" }
@@ -38,34 +38,40 @@ func (e *SQLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 
 	seen := make(map[string]bool)
 
-	// Walk top-level statements.
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		stmt := root.NamedChild(i)
-		if stmt.Type() != "statement" {
-			continue
+	// Walk top-level statements. odvcencio's SQL grammar emits the
+	// CREATE variants directly under the source_file (or nested inside
+	// a wrapping "statement" node depending on the dialect). Handle
+	// both shapes so the extractor is robust across grammar versions.
+	var visit func(n *sitter.Node)
+	visit = func(n *sitter.Node) {
+		switch parser.NodeType(n, e.lang) {
+		case "create_table_statement", "create_table":
+			e.extractCreateTable(n, src, filePath, fileNode.ID, seen, result)
+			return
+		case "create_view_statement", "create_view":
+			e.extractCreateView(n, src, filePath, fileNode.ID, seen, result)
+			return
+		case "create_function_statement", "create_function":
+			e.extractCreateFunction(n, src, filePath, fileNode.ID, seen, result)
+			return
+		case "create_index_statement", "create_index":
+			e.extractCreateIndex(n, src, filePath, fileNode.ID, seen, result)
+			return
+		case "create_trigger_statement", "create_trigger":
+			e.extractCreateTrigger(n, src, filePath, fileNode.ID, seen, result)
+			return
 		}
-		for j := 0; j < int(stmt.NamedChildCount()); j++ {
-			child := stmt.NamedChild(j)
-			switch child.Type() {
-			case "create_table":
-				e.extractCreateTable(child, src, filePath, fileNode.ID, seen, result)
-			case "create_view":
-				e.extractCreateView(child, src, filePath, fileNode.ID, seen, result)
-			case "create_function":
-				e.extractCreateFunction(child, src, filePath, fileNode.ID, seen, result)
-			case "create_index":
-				e.extractCreateIndex(child, src, filePath, fileNode.ID, seen, result)
-			case "create_trigger":
-				e.extractCreateTrigger(child, src, filePath, fileNode.ID, seen, result)
-			}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			visit(n.NamedChild(i))
 		}
 	}
+	visit(root)
 
 	return result, nil
 }
 
 func (e *SQLExtractor) extractCreateTable(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findObjectName(node, src)
+	name := findObjectName(node, src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -81,37 +87,45 @@ func (e *SQLExtractor) extractCreateTable(node *sitter.Node, src []byte, filePat
 		FilePath: filePath, Line: int(node.StartPoint().Row) + 1,
 	})
 
-	// Extract column names as variables with EdgeMemberOf.
+	// Extract column names as variables with EdgeMemberOf. The odvcencio
+	// grammar wraps them in "table_parameters" → "table_column"; the
+	// older naming ("column_definitions" → "column_definition") is kept
+	// so any legacy parse path still works.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "column_definitions" {
+		switch parser.NodeType(child, e.lang) {
+		case "table_parameters", "column_definitions":
 			for k := 0; k < int(child.NamedChildCount()); k++ {
 				col := child.NamedChild(k)
-				if col.Type() == "column_definition" {
-					colName := firstNamedChildOfType(col, "identifier", src)
-					if colName != "" {
-						colID := id + "." + colName
-						if !seen[colID] {
-							seen[colID] = true
-							result.Nodes = append(result.Nodes, &graph.Node{
-								ID: colID, Kind: graph.KindVariable, Name: colName,
-								FilePath: filePath, StartLine: int(col.StartPoint().Row) + 1, EndLine: int(col.EndPoint().Row) + 1,
-								Language: "sql",
-							})
-							result.Edges = append(result.Edges, &graph.Edge{
-								From: colID, To: id, Kind: graph.EdgeMemberOf,
-								FilePath: filePath, Line: int(col.StartPoint().Row) + 1,
-							})
-						}
-					}
+				colType := parser.NodeType(col, e.lang)
+				if colType != "table_column" && colType != "column_definition" {
+					continue
 				}
+				colName := firstNamedChildOfType(col, "identifier", src, e.lang)
+				if colName == "" {
+					continue
+				}
+				colID := id + "." + colName
+				if seen[colID] {
+					continue
+				}
+				seen[colID] = true
+				result.Nodes = append(result.Nodes, &graph.Node{
+					ID: colID, Kind: graph.KindVariable, Name: colName,
+					FilePath: filePath, StartLine: int(col.StartPoint().Row) + 1, EndLine: int(col.EndPoint().Row) + 1,
+					Language: "sql",
+				})
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: colID, To: id, Kind: graph.EdgeMemberOf,
+					FilePath: filePath, Line: int(col.StartPoint().Row) + 1,
+				})
 			}
 		}
 	}
 }
 
 func (e *SQLExtractor) extractCreateView(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findObjectName(node, src)
+	name := findObjectName(node, src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -129,7 +143,7 @@ func (e *SQLExtractor) extractCreateView(node *sitter.Node, src []byte, filePath
 }
 
 func (e *SQLExtractor) extractCreateFunction(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findObjectName(node, src)
+	name := findObjectName(node, src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -147,7 +161,7 @@ func (e *SQLExtractor) extractCreateFunction(node *sitter.Node, src []byte, file
 }
 
 func (e *SQLExtractor) extractCreateIndex(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findObjectName(node, src)
+	name := findObjectName(node, src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -165,7 +179,7 @@ func (e *SQLExtractor) extractCreateIndex(node *sitter.Node, src []byte, filePat
 }
 
 func (e *SQLExtractor) extractCreateTrigger(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findObjectName(node, src)
+	name := findObjectName(node, src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -182,24 +196,25 @@ func (e *SQLExtractor) extractCreateTrigger(node *sitter.Node, src []byte, fileP
 	})
 }
 
-// findObjectName extracts the name from a CREATE statement by finding
-// the first object_reference > identifier child.
-func findObjectName(node *sitter.Node, src []byte) string {
+// findObjectName extracts the name from a CREATE statement. The odvcencio
+// grammar puts the name as a direct `identifier` child of the statement;
+// older smacker-era grammars wrapped it in `object_reference`. Handle both.
+func findObjectName(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "object_reference" {
-			return firstNamedChildOfType(child, "identifier", src)
+		if parser.NodeType(child, lang) == "object_reference" {
+			return firstNamedChildOfType(child, "identifier", src, lang)
 		}
 	}
-	// Fallback: first identifier child directly.
-	return firstNamedChildOfType(node, "identifier", src)
+	// Direct identifier (odvcencio shape).
+	return firstNamedChildOfType(node, "identifier", src, lang)
 }
 
-func firstNamedChildOfType(node *sitter.Node, nodeType string, src []byte) string {
+func firstNamedChildOfType(node *sitter.Node, nodeType string, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == nodeType {
-			return child.Content(src)
+		if parser.NodeType(child, lang) == nodeType {
+			return child.Text(src)
 		}
 	}
 	return ""

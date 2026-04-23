@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/elixir"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -36,7 +36,7 @@ type ElixirExtractor struct {
 }
 
 func NewElixirExtractor() *ElixirExtractor {
-	return &ElixirExtractor{lang: elixir.GetLanguage()}
+	return &ElixirExtractor{lang: grammars.ElixirLanguage()}
 }
 
 func (e *ElixirExtractor) Language() string     { return "elixir" }
@@ -76,7 +76,7 @@ func (e *ElixirExtractor) walkNode(node *sitter.Node, src []byte, filePath, file
 		return
 	}
 
-	if node.Type() == "call" {
+	if parser.NodeType(node, e.lang) == "call" {
 		target := e.getCallTarget(node, src)
 		switch target {
 		case "defmodule":
@@ -91,7 +91,7 @@ func (e *ElixirExtractor) walkNode(node *sitter.Node, src []byte, filePath, file
 	}
 
 	// Handle module attributes: @attr value
-	if node.Type() == "unary_operator" {
+	if parser.NodeType(node, e.lang) == "unary_operator" {
 		e.handleAttribute(node, src, filePath, fileID, currentModule, result, seen)
 	}
 
@@ -106,8 +106,8 @@ func (e *ElixirExtractor) walkNode(node *sitter.Node, src []byte, filePath, file
 func (e *ElixirExtractor) getCallTarget(callNode *sitter.Node, src []byte) string {
 	for i := 0; i < int(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
-		if callNode.FieldNameForChild(i) == "target" && child.Type() == "identifier" {
-			return child.Content(src)
+		if callNode.FieldNameForChild(i, e.lang) == "target" && parser.NodeType(child, e.lang) == "identifier" {
+			return child.Text(src)
 		}
 	}
 	return ""
@@ -232,14 +232,14 @@ func (e *ElixirExtractor) handleImport(callNode *sitter.Node, src []byte, filePa
 
 // handleAttribute extracts module attributes (@attr value) as variables.
 func (e *ElixirExtractor) handleAttribute(node *sitter.Node, src []byte, filePath, fileID, currentModule string, result *parser.ExtractionResult, seen map[string]bool) {
-	if node.Type() != "unary_operator" {
+	if parser.NodeType(node, e.lang) != "unary_operator" {
 		return
 	}
 	// Check if operator is "@".
 	opText := ""
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "@" || (node.FieldNameForChild(i) == "operator" && child.Content(src) == "@") {
+		if parser.NodeType(child, e.lang) == "@" || (node.FieldNameForChild(i, e.lang) == "operator" && child.Text(src) == "@") {
 			opText = "@"
 			break
 		}
@@ -252,12 +252,12 @@ func (e *ElixirExtractor) handleAttribute(node *sitter.Node, src []byte, filePat
 	attrName := ""
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		fieldName := node.FieldNameForChild(i)
+		fieldName := node.FieldNameForChild(i, e.lang)
 		if fieldName == "operand" {
-			if child.Type() == "call" {
+			if parser.NodeType(child, e.lang) == "call" {
 				attrName = e.getCallTarget(child, src)
-			} else if child.Type() == "identifier" {
-				attrName = child.Content(src)
+			} else if parser.NodeType(child, e.lang) == "identifier" {
+				attrName = child.Text(src)
 			}
 			break
 		}
@@ -340,14 +340,14 @@ func (e *ElixirExtractor) extractModuleName(callNode *sitter.Node, src []byte) s
 	}
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		child := args.NamedChild(i)
-		t := child.Type()
+		t := parser.NodeType(child, e.lang)
 		if t == "alias" || t == "dot" {
-			return child.Content(src)
+			return child.Text(src)
 		}
 	}
 	// Fallback: first named child.
 	if args.NamedChildCount() > 0 {
-		text := args.NamedChild(0).Content(src)
+		text := args.NamedChild(0).Text(src)
 		text = strings.TrimSpace(text)
 		if text != "" && text != "do" {
 			return text
@@ -365,20 +365,20 @@ func (e *ElixirExtractor) extractFuncName(callNode *sitter.Node, src []byte) str
 	}
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		child := args.NamedChild(i)
-		if child.Type() == "call" {
+		if parser.NodeType(child, e.lang) == "call" {
 			// def func_name(args) -> call target is func_name
 			return e.getCallTarget(child, src)
 		}
-		if child.Type() == "identifier" {
+		if parser.NodeType(child, e.lang) == "identifier" {
 			// def func_name (no args)
-			return child.Content(src)
+			return child.Text(src)
 		}
-		if child.Type() == "binary_operator" {
+		if parser.NodeType(child, e.lang) == "binary_operator" {
 			// Pattern: def func_name(args) when guard -> binary_operator with "when"
 			// The left side should be the call with the function name.
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				sub := child.NamedChild(j)
-				if sub.Type() == "call" {
+				if parser.NodeType(sub, e.lang) == "call" {
 					name := e.getCallTarget(sub, src)
 					if name != "" {
 						return name
@@ -398,7 +398,7 @@ func (e *ElixirExtractor) extractFirstArgText(callNode *sitter.Node, src []byte)
 	}
 	if args.NamedChildCount() > 0 {
 		child := args.NamedChild(0)
-		text := child.Content(src)
+		text := child.Text(src)
 		text = strings.TrimSpace(text)
 		return text
 	}
@@ -411,7 +411,7 @@ func (e *ElixirExtractor) extractFirstArgText(callNode *sitter.Node, src []byte)
 func (e *ElixirExtractor) findArguments(callNode *sitter.Node) *sitter.Node {
 	for i := 0; i < int(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
-		if child.Type() == "arguments" {
+		if parser.NodeType(child, e.lang) == "arguments" {
 			return child
 		}
 	}
@@ -422,7 +422,7 @@ func (e *ElixirExtractor) findArguments(callNode *sitter.Node) *sitter.Node {
 func (e *ElixirExtractor) findDoBlock(callNode *sitter.Node) *sitter.Node {
 	for i := 0; i < int(callNode.ChildCount()); i++ {
 		child := callNode.Child(i)
-		if child.Type() == "do_block" {
+		if parser.NodeType(child, e.lang) == "do_block" {
 			return child
 		}
 	}
@@ -431,7 +431,7 @@ func (e *ElixirExtractor) findDoBlock(callNode *sitter.Node) *sitter.Node {
 	if args != nil {
 		for i := 0; i < int(args.ChildCount()); i++ {
 			child := args.Child(i)
-			if child.Type() == "do_block" {
+			if parser.NodeType(child, e.lang) == "do_block" {
 				return child
 			}
 		}
@@ -457,13 +457,13 @@ func (e *ElixirExtractor) emitPhoenixPlugBindings(body *sitter.Node, src []byte,
 
 	for i := 0; i < int(body.ChildCount()); i++ {
 		c := body.Child(i)
-		if c == nil || c.Type() != "call" {
+		if c == nil || parser.NodeType(c, e.lang) != "call" {
 			continue
 		}
 		target := e.getCallTarget(c, src)
 		switch target {
 		case "plug":
-			entry := parsePhoenixPlugCall(c, src)
+			entry := parsePhoenixPlugCall(c, src, e.lang)
 			if entry.name == "" {
 				continue
 			}
@@ -519,12 +519,12 @@ type phoenixPlugParsed struct {
 	filter map[string]struct{}
 }
 
-func parsePhoenixPlugCall(callNode *sitter.Node, src []byte) phoenixPlugParsed {
+func parsePhoenixPlugCall(callNode *sitter.Node, src []byte, lang *sitter.Language) phoenixPlugParsed {
 	var out phoenixPlugParsed
 	var args *sitter.Node
 	for i := 0; i < int(callNode.NamedChildCount()); i++ {
 		c := callNode.NamedChild(i)
-		if c != nil && c.Type() == "arguments" {
+		if c != nil && parser.NodeType(c, lang) == "arguments" {
 			args = c
 			break
 		}
@@ -533,27 +533,27 @@ func parsePhoenixPlugCall(callNode *sitter.Node, src []byte) phoenixPlugParsed {
 		return out
 	}
 	arg := args.NamedChild(0)
-	switch arg.Type() {
+	switch parser.NodeType(arg, lang) {
 	case "atom":
-		out.name = strings.TrimPrefix(arg.Content(src), ":")
+		out.name = strings.TrimPrefix(arg.Text(src), ":")
 	case "binary_operator":
 		// `:name when action in [...]` — the outer op is `when`,
 		// left is the plug atom, right is an `in` expression whose
 		// right side is a list of atoms.
 		left := arg.NamedChild(0)
 		right := arg.NamedChild(1)
-		if left == nil || left.Type() != "atom" || right == nil {
+		if left == nil || parser.NodeType(left, lang) != "atom" || right == nil {
 			return out
 		}
-		out.name = strings.TrimPrefix(left.Content(src), ":")
-		if right.Type() == "binary_operator" {
+		out.name = strings.TrimPrefix(left.Text(src), ":")
+		if parser.NodeType(right, lang) == "binary_operator" {
 			list := right.NamedChild(1)
-			if list != nil && list.Type() == "list" {
+			if list != nil && parser.NodeType(list, lang) == "list" {
 				out.filter = make(map[string]struct{})
 				for i := 0; i < int(list.NamedChildCount()); i++ {
 					item := list.NamedChild(i)
-					if item != nil && item.Type() == "atom" {
-						out.filter[strings.TrimPrefix(item.Content(src), ":")] = struct{}{}
+					if item != nil && parser.NodeType(item, lang) == "atom" {
+						out.filter[strings.TrimPrefix(item.Text(src), ":")] = struct{}{}
 					}
 				}
 			}

@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/lua"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -15,7 +15,7 @@ type LuaExtractor struct {
 }
 
 func NewLuaExtractor() *LuaExtractor {
-	return &LuaExtractor{lang: lua.GetLanguage()}
+	return &LuaExtractor{lang: grammars.LuaLanguage()}
 }
 
 func (e *LuaExtractor) Language() string     { return "lua" }
@@ -47,11 +47,11 @@ func (e *LuaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 			continue
 		}
 
-		switch child.Type() {
-		case "function_statement":
+		switch parser.NodeType(child, e.lang) {
+		case "function_statement", "function_declaration":
 			e.extractFunction(child, src, filePath, fileNode, result, seen)
 
-		case "variable_declaration":
+		case "variable_declaration", "assignment_statement", "local_declaration":
 			e.extractVariable(child, src, filePath, fileNode, result, seen)
 
 		case "function_call":
@@ -73,7 +73,6 @@ func (e *LuaExtractor) extractFunction(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	isLocal := false
 	name := ""
 	receiver := ""
 
@@ -82,13 +81,13 @@ func (e *LuaExtractor) extractFunction(
 		if child == nil {
 			continue
 		}
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "local":
-			isLocal = true
-		case "function_name":
-			// function_name may contain dots: M.greet → identifier "M", table_dot ".", identifier "greet"
-			name = child.Content(src)
-			// Check if it's a method-style: M.func or M:method
+			// local marker — affects scoping but not the name extraction.
+		case "function_name", "dot_index_expression", "method_index_expression":
+			// function_name may contain dots: M.greet → identifier "M", table_dot ".", identifier "greet".
+			// odvcencio's grammar emits dot_index_expression / method_index_expression directly.
+			name = child.Text(src)
 			if strings.Contains(name, ".") {
 				parts := strings.SplitN(name, ".", 2)
 				receiver = parts[0]
@@ -99,9 +98,11 @@ func (e *LuaExtractor) extractFunction(
 				name = parts[1]
 			}
 		case "identifier":
-			// local function name — identifier is a direct child
-			if isLocal && name == "" {
-				name = child.Content(src)
+			// local function name — identifier is a direct child, and in the
+			// odvcencio grammar the bare `function greet(...)` also carries
+			// the name as a direct identifier child.
+			if name == "" {
+				name = child.Text(src)
 			}
 		}
 	}
@@ -152,7 +153,11 @@ func (e *LuaExtractor) extractFunction(
 
 	// Extract nested function definitions inside the body.
 	walkNodes(node, func(inner *sitter.Node) {
-		if inner == node || inner.Type() != "function_statement" {
+		if inner == node {
+			return
+		}
+		t := parser.NodeType(inner, e.lang)
+		if t != "function_statement" && t != "function_declaration" {
 			return
 		}
 		e.extractFunction(inner, src, filePath, fileNode, result, seen)
@@ -164,24 +169,11 @@ func (e *LuaExtractor) extractVariable(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	name := ""
-	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		if child == nil {
-			continue
-		}
-		if child.Type() == "variable_declarator" {
-			// variable_declarator → identifier
-			for j := 0; j < int(child.ChildCount()); j++ {
-				part := child.Child(j)
-				if part != nil && part.Type() == "identifier" {
-					name = part.Content(src)
-					break
-				}
-			}
-			break
-		}
-	}
+	// The variable name lives somewhere under the declaration: the
+	// grammar shape varies between variable_declaration → variable_declarator
+	// (older) and variable_declaration → assignment_statement → variable_list
+	// → identifier (odvcencio). Walk down to the first identifier.
+	name := firstIdentifier(node, src, e.lang)
 
 	if name == "" {
 		return
@@ -206,6 +198,24 @@ func (e *LuaExtractor) extractVariable(
 	})
 }
 
+// firstIdentifier descends into a subtree to find the first identifier's text.
+// Helper for grammars that wrap variable names in extra nodes
+// (variable_list, variable_declarator, assignment_statement, …).
+func firstIdentifier(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	if node == nil {
+		return ""
+	}
+	if parser.NodeType(node, lang) == "identifier" {
+		return node.Text(src)
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		if name := firstIdentifier(node.Child(i), src, lang); name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 // extractTopLevelCall handles top-level require() calls as imports.
 func (e *LuaExtractor) extractTopLevelCall(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
@@ -219,14 +229,23 @@ func (e *LuaExtractor) extractTopLevelCall(
 		if child == nil {
 			continue
 		}
-		if child.Type() == "identifier" && funcName == "" {
-			funcName = strings.TrimSpace(child.Content(src))
+		ct := parser.NodeType(child, e.lang)
+		if ct == "identifier" && funcName == "" {
+			funcName = strings.TrimSpace(child.Text(src))
 		}
-		if child.Type() == "function_arguments" {
+		if ct == "function_arguments" || ct == "arguments" {
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				argNode := child.NamedChild(j)
-				if argNode != nil && argNode.Type() == "string" {
-					arg = strings.Trim(argNode.Content(src), `"'`)
+				if argNode == nil {
+					continue
+				}
+				switch parser.NodeType(argNode, e.lang) {
+				case "string":
+					arg = strings.Trim(argNode.Text(src), `"'`)
+				case "string_content":
+					arg = argNode.Text(src)
+				}
+				if arg != "" {
 					break
 				}
 			}
@@ -247,7 +266,7 @@ func (e *LuaExtractor) extractCalls(
 	result *parser.ExtractionResult, funcRanges []funcRange,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "function_call" {
+		if parser.NodeType(node, e.lang) != "function_call" {
 			return
 		}
 
@@ -263,8 +282,8 @@ func (e *LuaExtractor) extractCalls(
 		var names []string
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			if child != nil && child.Type() == "identifier" {
-				names = append(names, child.Content(src))
+			if child != nil && parser.NodeType(child, e.lang) == "identifier" {
+				names = append(names, child.Text(src))
 			}
 		}
 

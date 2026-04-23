@@ -4,34 +4,56 @@ import (
 	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Jinja2 wraps control flow in `{% ... %}` and expressions in
-// `{{ ... }}`. The extractor captures `{% block name %}` and
-// `{% macro name(args) %}` as function nodes, and the family of
-// `extends`, `include`, `import`, `from ... import ...` tags as
-// import edges. Block and macro bodies are closed by matching
-// `{% endblock %}` / `{% endmacro %}` which we find by keyword scan.
+// Jinja2 grammar in odvcencio is lexer-only: it emits `jinja_expression`
+// wrappers around `{% %}` / `{{ }}` blocks but does not parse the
+// individual tag names, arguments, or block structure. The top-level
+// node is often `ERROR` on typical templates because control-flow tags
+// leave the parser out of balance.
+//
+// Until a richer Jinja grammar ships upstream, we use tree-sitter only
+// to confirm parseability (and to hold the *sitter.Language handle for
+// parity with other adapters). Symbol extraction is done with narrow
+// regexes over the raw source — the same ones the legacy implementation
+// used, kept tight so they cannot accidentally match expression
+// contents. Extractions:
+//
+//   - `{% block NAME %}` / `{% endblock %}`   → KindFunction
+//   - `{% macro NAME(args) %}` / `{% endmacro %}` → KindFunction
+//   - `{% extends "X" %}` / include / import / from "X" import → EdgeImports
 var (
-	jinjaBlockRe     = regexp.MustCompile(`(?m)\{%\s*block\s+([A-Za-z_][\w]*)`)
-	jinjaMacroRe     = regexp.MustCompile(`(?m)\{%\s*macro\s+([A-Za-z_][\w]*)\s*\(`)
-	jinjaExtendsRe   = regexp.MustCompile(`(?m)\{%\s*extends\s+['"]([^'"]+)['"]`)
-	jinjaIncludeRe   = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
-	jinjaImportRe    = regexp.MustCompile(`(?m)\{%\s*import\s+['"]([^'"]+)['"]`)
+	jinjaBlockRe      = regexp.MustCompile(`(?m)\{%\s*block\s+([A-Za-z_][\w]*)`)
+	jinjaMacroRe      = regexp.MustCompile(`(?m)\{%\s*macro\s+([A-Za-z_][\w]*)\s*\(`)
+	jinjaExtendsRe    = regexp.MustCompile(`(?m)\{%\s*extends\s+['"]([^'"]+)['"]`)
+	jinjaIncludeRe    = regexp.MustCompile(`(?m)\{%\s*include\s+['"]([^'"]+)['"]`)
+	jinjaImportRe     = regexp.MustCompile(`(?m)\{%\s*import\s+['"]([^'"]+)['"]`)
 	jinjaFromImportRe = regexp.MustCompile(`(?m)\{%\s*from\s+['"]([^'"]+)['"]\s+import`)
 )
 
-// JinjaExtractor extracts Jinja2 templates using regex.
-type JinjaExtractor struct{}
+// JinjaExtractor extracts Jinja2 templates.
+type JinjaExtractor struct {
+	lang *sitter.Language
+}
 
-func NewJinjaExtractor() *JinjaExtractor { return &JinjaExtractor{} }
+func NewJinjaExtractor() *JinjaExtractor {
+	return &JinjaExtractor{lang: grammars.Jinja2Language()}
+}
 
 func (e *JinjaExtractor) Language() string     { return "jinja" }
 func (e *JinjaExtractor) Extensions() []string { return []string{".jinja", ".jinja2", ".j2"} }
 
 func (e *JinjaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	// Run the tree-sitter parse so parse failures still surface, even
+	// though we extract via regex. Discard the tree once parsed.
+	if tree, err := parser.ParseFile(src, e.lang); err == nil {
+		tree.Close()
+	}
+
 	lines := strings.Split(string(src), "\n")
 	result := &parser.ExtractionResult{}
 

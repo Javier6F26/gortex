@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/kotlin"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -58,7 +58,7 @@ type KotlinExtractor struct {
 }
 
 func NewKotlinExtractor() *KotlinExtractor {
-	return &KotlinExtractor{lang: kotlin.GetLanguage()}
+	return &KotlinExtractor{lang: grammars.KotlinLanguage()}
 }
 
 func (e *KotlinExtractor) Language() string     { return "kotlin" }
@@ -89,7 +89,14 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	// We'll use a manual walk approach for this distinction.
 	e.extractClassesAndInterfaces(root, src, filePath, fileNode, result, seen)
 
-	// Object declarations.
+	// Object declarations. The odvcencio Kotlin grammar sometimes
+	// misparses top-level `object Name { ... }` as an infix_expression
+	// whose left operand is `object_literal` (the `object` keyword) and
+	// whose lambda body carries the member functions. Recover that case
+	// via a manual walk before (and in addition to) the native query so
+	// singleton objects still land in the graph.
+	e.extractObjects(root, src, filePath, fileNode, result, seen)
+
 	matches, _ := parser.RunQuery(kotlinQObject, e.lang, root, src)
 	for _, m := range matches {
 		name := m.Captures["obj.name"].Text
@@ -125,7 +132,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		seen[id] = true
 		seen[filePath+"::_method_L"+fmt.Sprint(def.StartLine+1)] = true
 		meta := map[string]any{"receiver": objName}
-		if rt := extractKotlinReturnType(def.Node, src); rt != "" {
+		if rt := extractKotlinReturnType(def.Node, src, e.lang); rt != "" {
 			meta["return_type"] = rt
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -159,7 +166,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		seen[id] = true
 		seen[filePath+"::_method_L"+fmt.Sprint(def.StartLine+1)] = true
 		meta := map[string]any{"receiver": className}
-		if rt := extractKotlinReturnType(def.Node, src); rt != "" {
+		if rt := extractKotlinReturnType(def.Node, src, e.lang); rt != "" {
 			meta["return_type"] = rt
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -210,7 +217,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		name := m.Captures["prop.name"].Text
 		def := m.Captures["prop.def"]
 		// Only include top-level properties (direct children of source_file).
-		if def.Node.Parent() != nil && def.Node.Parent().Type() == "source_file" {
+		if def.Node.Parent() != nil && parser.NodeType(def.Node.Parent(), e.lang) == "source_file" {
 			id := filePath + "::" + name
 			if seen[id] {
 				continue
@@ -320,12 +327,12 @@ func (e *KotlinExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 		}
 		// Walk the property declaration looking for call_expression with uppercase identifier.
 		walkNodes(defNode, func(n *sitter.Node) {
-			if n.Type() == "call_expression" {
+			if parser.NodeType(n, e.lang) == "call_expression" {
 				// First child should be the function name (simple_identifier).
 				if n.NamedChildCount() > 0 {
 					nameNode := n.NamedChild(0)
-					if nameNode.Type() == "simple_identifier" {
-						funcName := nameNode.Content(src)
+					if parser.NodeType(nameNode, e.lang) == "simple_identifier" {
+						funcName := nameNode.Text(src)
 						if len(funcName) > 0 && funcName[0] >= 'A' && funcName[0] <= 'Z' {
 							tenv[name] = funcName
 						}
@@ -368,7 +375,7 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "class_declaration" {
+		if parser.NodeType(node, e.lang) != "class_declaration" {
 			return
 		}
 
@@ -376,8 +383,8 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 		var name string
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			if child.Type() == "type_identifier" {
-				name = child.Content(src)
+			if parser.NodeType(child, e.lang) == "type_identifier" {
+				name = child.Text(src)
 				break
 			}
 		}
@@ -398,7 +405,7 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 		var enumBody *sitter.Node
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			switch child.Type() {
+			switch parser.NodeType(child, e.lang) {
 			case "interface":
 				isInterface = true
 			case "enum_class_body":
@@ -433,14 +440,14 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 		if enumBody != nil {
 			for i := 0; i < int(enumBody.ChildCount()); i++ {
 				entry := enumBody.Child(i)
-				if entry == nil || entry.Type() != "enum_entry" {
+				if entry == nil || parser.NodeType(entry, e.lang) != "enum_entry" {
 					continue
 				}
 				var entryName string
 				for j := 0; j < int(entry.ChildCount()); j++ {
 					ch := entry.Child(j)
-					if ch != nil && ch.Type() == "simple_identifier" {
-						entryName = ch.Content(src)
+					if ch != nil && parser.NodeType(ch, e.lang) == "simple_identifier" {
+						entryName = ch.Text(src)
 						break
 					}
 				}
@@ -465,9 +472,116 @@ func (e *KotlinExtractor) extractClassesAndInterfaces(
 	})
 }
 
+// extractObjects walks the AST for Kotlin `object Name { ... }` declarations
+// that the odvcencio grammar misparses as an `infix_expression` whose left
+// operand is the `object` keyword (as `object_literal`). When that shape is
+// detected, emit the same node + method set the native object_declaration
+// path produces so Singleton-style objects still index correctly.
+func (e *KotlinExtractor) extractObjects(
+	root *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
+	result *parser.ExtractionResult, seen map[string]bool,
+) {
+	walkNodes(root, func(node *sitter.Node) {
+		if parser.NodeType(node, e.lang) != "infix_expression" {
+			return
+		}
+		// Expect: object_literal, simple_identifier, lambda_literal.
+		var nameNode, body *sitter.Node
+		sawObjLit := false
+		for i := 0; i < int(node.ChildCount()); i++ {
+			c := node.Child(i)
+			if c == nil {
+				continue
+			}
+			switch parser.NodeType(c, e.lang) {
+			case "object_literal":
+				if strings.TrimSpace(c.Text(src)) == "object" {
+					sawObjLit = true
+				}
+			case "simple_identifier":
+				if sawObjLit && nameNode == nil {
+					nameNode = c
+				}
+			case "lambda_literal":
+				if sawObjLit && body == nil {
+					body = c
+				}
+			}
+		}
+		if !sawObjLit || nameNode == nil {
+			return
+		}
+
+		name := nameNode.Text(src)
+		id := filePath + "::" + name
+		if !seen[id] {
+			seen[id] = true
+			startLine := int(node.StartPoint().Row) + 1
+			endLine := int(node.EndPoint().Row) + 1
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID: id, Kind: graph.KindType, Name: name,
+				FilePath: filePath, StartLine: startLine, EndLine: endLine,
+				Language: "kotlin",
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
+			})
+		}
+
+		if body == nil {
+			return
+		}
+		// Pick up function_declaration children as methods on this object.
+		walkNodes(body, func(inner *sitter.Node) {
+			if parser.NodeType(inner, e.lang) != "function_declaration" {
+				return
+			}
+			var methodNameNode *sitter.Node
+			for i := 0; i < int(inner.ChildCount()); i++ {
+				c := inner.Child(i)
+				if c != nil && parser.NodeType(c, e.lang) == "simple_identifier" {
+					methodNameNode = c
+					break
+				}
+			}
+			if methodNameNode == nil {
+				return
+			}
+			mName := methodNameNode.Text(src)
+			startLine := int(inner.StartPoint().Row) + 1
+			methodID := filePath + "::" + name + "." + mName
+			if seen[methodID] {
+				methodID = filePath + "::" + name + "." + mName + "_L" + fmt.Sprint(startLine)
+			}
+			if seen[methodID] {
+				return
+			}
+			seen[methodID] = true
+			seen[filePath+"::_method_L"+fmt.Sprint(startLine)] = true
+
+			meta := map[string]any{"receiver": name}
+			if rt := extractKotlinReturnType(inner, src, e.lang); rt != "" {
+				meta["return_type"] = rt
+			}
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID: methodID, Kind: graph.KindMethod, Name: mName,
+				FilePath: filePath, StartLine: startLine, EndLine: int(inner.EndPoint().Row) + 1,
+				Language: "kotlin",
+				Meta:     meta,
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: methodID, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine,
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: methodID, To: id, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine,
+			})
+		})
+	})
+}
+
 // extractKotlinReturnType walks a function_declaration node to find the return type annotation.
 // Kotlin functions have optional `: ReturnType` after the parameter list.
-func extractKotlinReturnType(node *sitter.Node, src []byte) string {
+func extractKotlinReturnType(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	if node == nil {
 		return ""
 	}
@@ -475,12 +589,12 @@ func extractKotlinReturnType(node *sitter.Node, src []byte) string {
 	pastParams := false
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "function_value_parameters" {
+		if parser.NodeType(child, lang) == "function_value_parameters" {
 			pastParams = true
 			continue
 		}
 		if pastParams {
-			switch child.Type() {
+			switch parser.NodeType(child, lang) {
 			case "user_type", "nullable_type":
 				rawType := string(src[child.StartByte():child.EndByte()])
 				if rt := normalizeKotlinTypeName(rawType); rt != "" {

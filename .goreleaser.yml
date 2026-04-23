@@ -1,14 +1,14 @@
 version: 2
 
-# Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
-# cross-compile toolchains for all four targets below so CGO (tree-sitter)
-# links cleanly on a single Linux runner. See .github/workflows/release.yml.
+# Pure-Go tree-sitter runtime (odvcencio/gotreesitter) means CGO is off and
+# every GOOS/GOARCH cross-compiles from a single Linux runner with no
+# toolchain plumbing. See .github/workflows/release.yml.
 before:
   hooks:
     - go mod tidy
-    # Tests run in CI on every push. Re-running ./... inside
-    # goreleaser-cross slows the tag-to-artifact loop without catching
-    # anything new — the tag is already on a green commit.
+    # Tests run in CI on every push. Re-running ./... at release time
+    # slows the tag-to-artifact loop without catching anything new — the
+    # tag is already on a green commit.
 
 builds:
   - id: main
@@ -20,39 +20,14 @@ builds:
       # `gortex version` output round-trips as canonical semver.
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     goos:
       - linux
       - darwin
+      - windows
     goarch:
       - amd64
       - arm64
-    # Per-target CC + CXX. goreleaser-cross exposes these cross-toolchains
-    # on PATH; CGO needs both set per target triple because some deps
-    # (tree-sitter yaml scanner, etc.) ship C++. Without CXX, the system
-    # default x86_64-linux-gnu-g++ leaks in and rejects macOS flags like
-    # -arch.
-    overrides:
-      - goos: darwin
-        goarch: amd64
-        env:
-          - CC=o64-clang
-          - CXX=o64-clang++
-      - goos: darwin
-        goarch: arm64
-        env:
-          - CC=oa64-clang
-          - CXX=oa64-clang++
-      - goos: linux
-        goarch: amd64
-        env:
-          - CC=x86_64-linux-gnu-gcc
-          - CXX=x86_64-linux-gnu-g++
-      - goos: linux
-        goarch: arm64
-        env:
-          - CC=aarch64-linux-gnu-gcc
-          - CXX=aarch64-linux-gnu-g++
 
 archives:
   - formats: [tar.gz]

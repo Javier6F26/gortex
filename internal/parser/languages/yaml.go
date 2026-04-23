@@ -1,8 +1,8 @@
 package languages
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/yaml"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -14,7 +14,7 @@ type YAMLExtractor struct {
 }
 
 func NewYAMLExtractor() *YAMLExtractor {
-	return &YAMLExtractor{lang: yaml.GetLanguage()}
+	return &YAMLExtractor{lang: grammars.YamlLanguage()}
 }
 
 func (e *YAMLExtractor) Language() string     { return "yaml" }
@@ -55,17 +55,17 @@ func (e *YAMLExtractor) findTopLevelPairs(node *sitter.Node, src []byte, filePat
 		return
 	}
 
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	// If we hit a block_mapping_pair at the top-level mapping, extract the key.
 	if nodeType == "block_mapping_pair" && depth <= 5 {
 		// The first child is typically the key.
-		keyNode := node.ChildByFieldName("key")
+		keyNode := node.ChildByFieldName("key", e.lang)
 		if keyNode == nil && node.ChildCount() > 0 {
 			keyNode = node.Child(0)
 		}
 		if keyNode != nil {
-			keyName := keyNode.Content(src)
+			keyName := keyNode.Text(src)
 			if keyName != "" && !seen[keyName] {
 				seen[keyName] = true
 				id := filePath + "::" + keyName

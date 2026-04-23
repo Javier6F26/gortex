@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/php"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -16,7 +16,7 @@ type PHPExtractor struct {
 }
 
 func NewPHPExtractor() *PHPExtractor {
-	return &PHPExtractor{lang: php.GetLanguage()}
+	return &PHPExtractor{lang: grammars.PhpLanguage()}
 }
 
 func (e *PHPExtractor) Language() string     { return "php" }
@@ -53,7 +53,7 @@ func (e *PHPExtractor) walkNode(
 	result *parser.ExtractionResult, seen map[string]bool,
 	currentClass string,
 ) {
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	switch nodeType {
 	case "namespace_definition":
@@ -106,7 +106,7 @@ func (e *PHPExtractor) extractNamespace(
 	if name == nil {
 		return
 	}
-	nsName := name.Content(src)
+	nsName := name.Text(src)
 	id := filePath + "::" + nsName
 	if seen[id] {
 		return
@@ -134,7 +134,7 @@ func (e *PHPExtractor) extractNamespace(
 	// Some namespaces don't use braces; walk remaining children.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() != "namespace_name" && child.Type() != "compound_statement" {
+		if parser.NodeType(child, e.lang) != "namespace_name" && parser.NodeType(child, e.lang) != "compound_statement" {
 			e.walkNode(child, src, filePath, fileNode, result, seen, "")
 		}
 	}
@@ -149,7 +149,7 @@ func (e *PHPExtractor) extractClass(
 	if nameNode == nil {
 		return
 	}
-	className := nameNode.Content(src)
+	className := nameNode.Text(src)
 	id := filePath + "::" + className
 	if seen[id] {
 		return
@@ -174,9 +174,9 @@ func (e *PHPExtractor) extractClass(
 	methodNodes := make(map[string]*sitter.Node) // name → method_declaration node
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		child := body.NamedChild(i)
-		if child.Type() == "method_declaration" {
+		if parser.NodeType(child, e.lang) == "method_declaration" {
 			if n := e.findChildByFieldName(child, "name"); n != nil {
-				methodNodes[n.Content(src)] = child
+				methodNodes[n.Text(src)] = child
 			}
 			e.extractMethod(child, src, filePath, fileNode, result, seen, className)
 		}
@@ -205,7 +205,7 @@ func (e *PHPExtractor) extractInterface(
 	if nameNode == nil {
 		return
 	}
-	ifaceName := nameNode.Content(src)
+	ifaceName := nameNode.Text(src)
 	id := filePath + "::" + ifaceName
 	if seen[id] {
 		return
@@ -229,7 +229,7 @@ func (e *PHPExtractor) extractInterface(
 	}
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		child := body.NamedChild(i)
-		if child.Type() == "method_declaration" {
+		if parser.NodeType(child, e.lang) == "method_declaration" {
 			e.extractMethod(child, src, filePath, fileNode, result, seen, ifaceName)
 		}
 	}
@@ -244,7 +244,7 @@ func (e *PHPExtractor) extractFunction(
 	if nameNode == nil {
 		return
 	}
-	funcName := nameNode.Content(src)
+	funcName := nameNode.Text(src)
 	id := filePath + "::" + funcName
 	if seen[id] {
 		return
@@ -278,7 +278,7 @@ func (e *PHPExtractor) extractMethod(
 	if nameNode == nil {
 		return
 	}
-	methodName := nameNode.Content(src)
+	methodName := nameNode.Text(src)
 	id := filePath + "::" + className + "." + methodName
 	startLine := int(node.StartPoint().Row) + 1
 	endLine := int(node.EndPoint().Row) + 1
@@ -320,19 +320,19 @@ func (e *PHPExtractor) extractUseImport(
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
 		var importPath string
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "namespace_use_clause":
 			nameNode := e.findChildByType(child, "qualified_name")
 			if nameNode == nil {
 				nameNode = e.findChildByType(child, "namespace_name")
 			}
 			if nameNode != nil {
-				importPath = nameNode.Content(src)
+				importPath = nameNode.Text(src)
 			} else {
-				importPath = child.Content(src)
+				importPath = child.Text(src)
 			}
 		case "qualified_name", "namespace_name":
-			importPath = child.Content(src)
+			importPath = child.Text(src)
 		default:
 			continue
 		}
@@ -357,7 +357,7 @@ func (e *PHPExtractor) extractRequireInclude(
 	// Look for require, require_once, include, include_once expressions.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		ct := child.Type()
+		ct := parser.NodeType(child, e.lang)
 		if ct == "require_expression" || ct == "require_once_expression" ||
 			ct == "include_expression" || ct == "include_once_expression" {
 			// The path is a string/encapsed_string containing a string_content child.
@@ -378,11 +378,11 @@ func (e *PHPExtractor) extractCallSites(
 	filePath string, callerID string,
 	result *parser.ExtractionResult,
 ) {
-	switch node.Type() {
+	switch parser.NodeType(node, e.lang) {
 	case "function_call_expression":
-		funcNode := node.ChildByFieldName("function")
+		funcNode := node.ChildByFieldName("function", e.lang)
 		if funcNode != nil {
-			name := funcNode.Content(src)
+			name := funcNode.Text(src)
 			if idx := strings.LastIndex(name, "\\"); idx >= 0 {
 				name = name[idx+1:]
 			}
@@ -393,9 +393,9 @@ func (e *PHPExtractor) extractCallSites(
 			})
 		}
 	case "member_call_expression", "scoped_call_expression":
-		nameNode := node.ChildByFieldName("name")
+		nameNode := node.ChildByFieldName("name", e.lang)
 		if nameNode != nil {
-			name := nameNode.Content(src)
+			name := nameNode.Text(src)
 			line := int(node.StartPoint().Row) + 1
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: callerID, To: "unresolved::*." + name,
@@ -415,7 +415,7 @@ func (e *PHPExtractor) extractCallSites(
 func (e *PHPExtractor) findChildByType(node *sitter.Node, typeName string) *sitter.Node {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == typeName {
+		if parser.NodeType(child, e.lang) == typeName {
 			return child
 		}
 	}
@@ -424,13 +424,13 @@ func (e *PHPExtractor) findChildByType(node *sitter.Node, typeName string) *sitt
 
 // findChildByFieldName finds a child by its field name.
 func (e *PHPExtractor) findChildByFieldName(node *sitter.Node, fieldName string) *sitter.Node {
-	return node.ChildByFieldName(fieldName)
+	return node.ChildByFieldName(fieldName, e.lang)
 }
 
 // extractStringContent recursively finds the first string_content node and returns its text.
 func (e *PHPExtractor) extractStringContent(node *sitter.Node, src []byte) string {
-	if node.Type() == "string_content" {
-		return node.Content(src)
+	if parser.NodeType(node, e.lang) == "string_content" {
+		return node.Text(src)
 	}
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		if result := e.extractStringContent(node.NamedChild(i), src); result != "" {
@@ -490,15 +490,15 @@ func (e *PHPExtractor) emitLaravelMiddleware(methodNodes map[string]*sitter.Node
 		if n == nil {
 			return
 		}
-		if n.Type() == "member_call_expression" {
+		if parser.NodeType(n, e.lang) == "member_call_expression" {
 			if _, dup := processed[n]; !dup {
 				// Only process if the parent isn't another
 				// member_call_expression whose object is us —
 				// that would mean we're the inner call of a filter
 				// chain, already handled above.
 				parent := n.Parent()
-				if parent == nil || parent.Type() != "member_call_expression" || parent.ChildByFieldName("object") != n {
-					mw, chainCalls := parseLaravelMiddlewareCall(n, src)
+				if parent == nil || parser.NodeType(parent, e.lang) != "member_call_expression" || parent.ChildByFieldName("object", e.lang) != n {
+					mw, chainCalls := parseLaravelMiddlewareCall(n, src, e.lang)
 					for _, c := range chainCalls {
 						processed[c] = struct{}{}
 					}
@@ -551,25 +551,25 @@ type laravelMiddleware struct {
 // class name and any action filters. The outermost call is passed in;
 // we unwrap nested member_call_expressions to find both the filter
 // chain and the original middleware() call.
-func parseLaravelMiddlewareCall(outer *sitter.Node, src []byte) (laravelMiddleware, []*sitter.Node) {
+func parseLaravelMiddlewareCall(outer *sitter.Node, src []byte, lang *sitter.Language) (laravelMiddleware, []*sitter.Node) {
 	var out laravelMiddleware
 	var chain []*sitter.Node
 	cur := outer
-	for cur != nil && cur.Type() == "member_call_expression" {
+	for cur != nil && parser.NodeType(cur, lang) == "member_call_expression" {
 		chain = append(chain, cur)
-		name := phpMethodName(cur, src)
+		name := phpMethodName(cur, src, lang)
 		if name == "middleware" {
 			// Found the base call. Extract the first argument.
-			args := phpCallArgs(cur)
+			args := phpCallArgs(cur, lang)
 			if args != nil && args.NamedChildCount() > 0 {
-				out.class = phpExtractClassRef(args.NamedChild(0), src)
+				out.class = phpExtractClassRef(args.NamedChild(0), src, lang)
 			}
 			return out, chain
 		}
 		if name == "only" || name == "except" {
-			args := phpCallArgs(cur)
+			args := phpCallArgs(cur, lang)
 			if args != nil && args.NamedChildCount() > 0 {
-				set := phpExtractStringArray(args.NamedChild(0), src)
+				set := phpExtractStringArray(args.NamedChild(0), src, lang)
 				if name == "only" {
 					out.only = set
 				} else {
@@ -579,7 +579,7 @@ func parseLaravelMiddlewareCall(outer *sitter.Node, src []byte) (laravelMiddlewa
 		}
 		// Follow the chain — the inner object of this call is the
 		// next member_call_expression to inspect.
-		inner := cur.ChildByFieldName("object")
+		inner := cur.ChildByFieldName("object", lang)
 		if inner == nil {
 			return laravelMiddleware{}, chain
 		}
@@ -608,15 +608,15 @@ func (e *PHPExtractor) emitLaravelBindings(methodNodes map[string]*sitter.Node, 
 		if n == nil {
 			return
 		}
-		if n.Type() == "member_call_expression" {
-			method := phpMethodName(n, src)
+		if parser.NodeType(n, e.lang) == "member_call_expression" {
+			method := phpMethodName(n, src, e.lang)
 			switch method {
 			case "bind", "singleton", "instance":
-				args := phpCallArgs(n)
+				args := phpCallArgs(n, e.lang)
 				if args == nil || args.NamedChildCount() < 1 {
 					break
 				}
-				first := phpExtractClassRef(args.NamedChild(0), src)
+				first := phpExtractClassRef(args.NamedChild(0), src, e.lang)
 				if first == "" {
 					break
 				}
@@ -626,7 +626,7 @@ func (e *PHPExtractor) emitLaravelBindings(methodNodes map[string]*sitter.Node, 
 				// their own call edges from the closure body.
 				var impl string
 				if args.NamedChildCount() >= 2 {
-					impl = phpExtractClassRef(args.NamedChild(1), src)
+					impl = phpExtractClassRef(args.NamedChild(1), src, e.lang)
 				}
 				line := int(n.StartPoint().Row) + 1
 				if impl != "" && impl != first {
@@ -674,47 +674,47 @@ func (e *PHPExtractor) emitLaravelBindings(methodNodes map[string]*sitter.Node, 
 }
 
 // phpMethodName returns the method identifier in a member_call_expression.
-func phpMethodName(call *sitter.Node, src []byte) string {
-	nameNode := call.ChildByFieldName("name")
+func phpMethodName(call *sitter.Node, src []byte, lang *sitter.Language) string {
+	nameNode := call.ChildByFieldName("name", lang)
 	if nameNode != nil {
-		return nameNode.Content(src)
+		return nameNode.Text(src)
 	}
 	return ""
 }
 
 // phpCallArgs returns the arguments node of a member_call_expression.
-func phpCallArgs(call *sitter.Node) *sitter.Node {
-	return call.ChildByFieldName("arguments")
+func phpCallArgs(call *sitter.Node, lang *sitter.Language) *sitter.Node {
+	return call.ChildByFieldName("arguments", lang)
 }
 
 // phpExtractClassRef pulls a class name out of an argument node. Handles
 // the `X::class` shape (scoped_call_expression / class_constant_access),
 // bare identifiers, and simple string literals (middleware aliases).
 // Returns "" when the argument isn't a static class reference.
-func phpExtractClassRef(arg *sitter.Node, src []byte) string {
+func phpExtractClassRef(arg *sitter.Node, src []byte, lang *sitter.Language) string {
 	if arg == nil {
 		return ""
 	}
-	switch arg.Type() {
+	switch parser.NodeType(arg, lang) {
 	case "argument":
 		// Argument wrapper — unwrap to the contained expression.
 		if arg.NamedChildCount() > 0 {
-			return phpExtractClassRef(arg.NamedChild(0), src)
+			return phpExtractClassRef(arg.NamedChild(0), src, lang)
 		}
 		return ""
 	case "class_constant_access_expression", "scoped_call_expression":
 		// X::class — the class name is the first named child.
 		if arg.NamedChildCount() > 0 {
-			return arg.NamedChild(0).Content(src)
+			return arg.NamedChild(0).Text(src)
 		}
 	case "name", "qualified_name":
-		return arg.Content(src)
+		return arg.Text(src)
 	case "string":
 		// middleware('auth') alias form — return the alias verbatim.
 		for i := 0; i < int(arg.NamedChildCount()); i++ {
 			c := arg.NamedChild(i)
-			if c != nil && c.Type() == "string_content" {
-				return c.Content(src)
+			if c != nil && parser.NodeType(c, lang) == "string_content" {
+				return c.Text(src)
 			}
 		}
 	}
@@ -724,19 +724,19 @@ func phpExtractClassRef(arg *sitter.Node, src []byte) string {
 // phpExtractStringArray collects string values or X::class names out
 // of an `array(...)` / `[...]` expression for `->only([...])` /
 // `->except([...])` filter chains. Returns a set keyed by method name.
-func phpExtractStringArray(arg *sitter.Node, src []byte) map[string]struct{} {
+func phpExtractStringArray(arg *sitter.Node, src []byte, lang *sitter.Language) map[string]struct{} {
 	out := make(map[string]struct{})
 	if arg == nil {
 		return out
 	}
 	// Unwrap argument wrapper.
-	if arg.Type() == "argument" {
+	if parser.NodeType(arg, lang) == "argument" {
 		if arg.NamedChildCount() > 0 {
-			return phpExtractStringArray(arg.NamedChild(0), src)
+			return phpExtractStringArray(arg.NamedChild(0), src, lang)
 		}
 		return out
 	}
-	if arg.Type() != "array_creation_expression" {
+	if parser.NodeType(arg, lang) != "array_creation_expression" {
 		return out
 	}
 	for i := 0; i < int(arg.NamedChildCount()); i++ {
@@ -744,7 +744,7 @@ func phpExtractStringArray(arg *sitter.Node, src []byte) map[string]struct{} {
 		if el == nil {
 			continue
 		}
-		if el.Type() == "array_element_initializer" {
+		if parser.NodeType(el, lang) == "array_element_initializer" {
 			// The actual value is the first named child.
 			if el.NamedChildCount() > 0 {
 				el = el.NamedChild(0)
@@ -753,17 +753,17 @@ func phpExtractStringArray(arg *sitter.Node, src []byte) map[string]struct{} {
 		if el == nil {
 			continue
 		}
-		switch el.Type() {
+		switch parser.NodeType(el, lang) {
 		case "string":
 			for j := 0; j < int(el.NamedChildCount()); j++ {
 				c := el.NamedChild(j)
-				if c != nil && c.Type() == "string_content" {
-					out[c.Content(src)] = struct{}{}
+				if c != nil && parser.NodeType(c, lang) == "string_content" {
+					out[c.Text(src)] = struct{}{}
 				}
 			}
 		case "class_constant_access_expression":
 			if el.NamedChildCount() > 0 {
-				out[el.NamedChild(0).Content(src)] = struct{}{}
+				out[el.NamedChild(0).Text(src)] = struct{}{}
 			}
 		}
 	}
@@ -787,13 +787,13 @@ func (e *PHPExtractor) emitSymfonyAttributeDispatch(classNode *sitter.Node, meth
 	// signature is discovered via the method attributes. We still
 	// emit a class-level consumer edge so find_usages(Event) returns
 	// the class even when every listener lives on a method.
-	if clsAttrs := collectPhpAttributes(classNode, src); len(clsAttrs) > 0 {
+	if clsAttrs := collectPhpAttributes(classNode, src, e.lang); len(clsAttrs) > 0 {
 		emitAttributeEdges(clsAttrs, classID, filePath, int(classNode.StartPoint().Row)+1, result)
 	}
 	// Method-level attributes. Each method_declaration has its own
 	// attribute_list immediately before its modifiers.
 	for name, methodNode := range methodNodes {
-		attrs := collectPhpAttributes(methodNode, src)
+		attrs := collectPhpAttributes(methodNode, src, e.lang)
 		if len(attrs) == 0 {
 			continue
 		}
@@ -805,32 +805,32 @@ func (e *PHPExtractor) emitSymfonyAttributeDispatch(classNode *sitter.Node, meth
 // phpAttribute captures the parsed form of one #[Attr(...)] instance —
 // just what we need for dispatch extraction.
 type phpAttribute struct {
-	name   string
-	line   int
-	args   map[string]string // key → value (class ref / string literal)
+	name string
+	line int
+	args map[string]string // key → value (class ref / string literal)
 }
 
 // collectPhpAttributes scans a class_declaration or method_declaration
 // for its attribute_list children and parses every attribute inside
 // each group. Returns nil when the node carries no attributes.
-func collectPhpAttributes(node *sitter.Node, src []byte) []phpAttribute {
+func collectPhpAttributes(node *sitter.Node, src []byte, lang *sitter.Language) []phpAttribute {
 	var out []phpAttribute
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		c := node.NamedChild(i)
-		if c == nil || c.Type() != "attribute_list" {
+		if c == nil || parser.NodeType(c, lang) != "attribute_list" {
 			continue
 		}
 		for j := 0; j < int(c.NamedChildCount()); j++ {
 			group := c.NamedChild(j)
-			if group == nil || group.Type() != "attribute_group" {
+			if group == nil || parser.NodeType(group, lang) != "attribute_group" {
 				continue
 			}
 			for k := 0; k < int(group.NamedChildCount()); k++ {
 				attr := group.NamedChild(k)
-				if attr == nil || attr.Type() != "attribute" {
+				if attr == nil || parser.NodeType(attr, lang) != "attribute" {
 					continue
 				}
-				parsed := parsePhpAttribute(attr, src)
+				parsed := parsePhpAttribute(attr, src, lang)
 				if parsed.name != "" {
 					out = append(out, parsed)
 				}
@@ -844,15 +844,15 @@ func collectPhpAttributes(node *sitter.Node, src []byte) []phpAttribute {
 // `#[ ]` wrapper) into a phpAttribute. Pulls named arguments the
 // attribute's constructor expects (event:, method:, priority:) when
 // they're simple class refs or string literals.
-func parsePhpAttribute(attr *sitter.Node, src []byte) phpAttribute {
+func parsePhpAttribute(attr *sitter.Node, src []byte, lang *sitter.Language) phpAttribute {
 	var out phpAttribute
-	nameNode := attr.ChildByFieldName("name")
+	nameNode := attr.ChildByFieldName("name", lang)
 	if nameNode == nil {
 		// Grammar sometimes lacks the field name; fall back to the
 		// first child of type "name".
 		for i := 0; i < int(attr.NamedChildCount()); i++ {
 			c := attr.NamedChild(i)
-			if c != nil && (c.Type() == "name" || c.Type() == "qualified_name") {
+			if c != nil && (parser.NodeType(c, lang) == "name" || parser.NodeType(c, lang) == "qualified_name") {
 				nameNode = c
 				break
 			}
@@ -861,14 +861,14 @@ func parsePhpAttribute(attr *sitter.Node, src []byte) phpAttribute {
 	if nameNode == nil {
 		return out
 	}
-	out.name = nameNode.Content(src)
+	out.name = nameNode.Text(src)
 	out.line = int(attr.StartPoint().Row) + 1
-	args := attr.ChildByFieldName("arguments")
+	args := attr.ChildByFieldName("arguments", lang)
 	if args == nil {
 		// Some grammars expose arguments as a positional NamedChild.
 		for i := 0; i < int(attr.NamedChildCount()); i++ {
 			c := attr.NamedChild(i)
-			if c != nil && c.Type() == "arguments" {
+			if c != nil && parser.NodeType(c, lang) == "arguments" {
 				args = c
 				break
 			}
@@ -880,7 +880,7 @@ func parsePhpAttribute(attr *sitter.Node, src []byte) phpAttribute {
 	out.args = make(map[string]string)
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		arg := args.NamedChild(i)
-		if arg == nil || arg.Type() != "argument" {
+		if arg == nil || parser.NodeType(arg, lang) != "argument" {
 			continue
 		}
 		// Named arguments have a `name` child first, then the value.
@@ -891,8 +891,8 @@ func parsePhpAttribute(attr *sitter.Node, src []byte) phpAttribute {
 			if c == nil {
 				continue
 			}
-			if c.Type() == "name" && key == "" {
-				key = c.Content(src)
+			if parser.NodeType(c, lang) == "name" && key == "" {
+				key = c.Text(src)
 				continue
 			}
 			valNode = c
@@ -901,7 +901,7 @@ func parsePhpAttribute(attr *sitter.Node, src []byte) phpAttribute {
 		if valNode == nil {
 			continue
 		}
-		if v := phpExtractClassRef(valNode, src); v != "" {
+		if v := phpExtractClassRef(valNode, src, lang); v != "" {
 			out.args[key] = v
 		}
 	}

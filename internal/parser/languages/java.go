@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/java"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -92,7 +92,7 @@ type JavaExtractor struct {
 }
 
 func NewJavaExtractor() *JavaExtractor {
-	return &JavaExtractor{lang: java.GetLanguage()}
+	return &JavaExtractor{lang: grammars.JavaLanguage()}
 }
 
 func (e *JavaExtractor) Language() string     { return "java" }
@@ -248,7 +248,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		}
 		// Extract return type from the method_declaration node.
 		if def.Node != nil {
-			if rt := extractJavaMethodReturnType(def.Node, src); rt != "" {
+			if rt := extractJavaMethodReturnType(def.Node, src, e.lang); rt != "" {
 				node.Meta["return_type"] = rt
 			}
 		}
@@ -268,7 +268,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		// method so the indexer's DI post-pass links consumers typed
 		// as the return type back to this factory. Without this,
 		// `callers:systemClock` on an @Bean method returns empty.
-		if def.Node != nil && javaMethodHasAnnotation(def.Node, src, "Bean") {
+		if def.Node != nil && javaMethodHasAnnotation(def.Node, src, "Bean", e.lang) {
 			rt, _ := node.Meta["return_type"].(string)
 			if rt != "" {
 				result.Edges = append(result.Edges, &graph.Edge{
@@ -334,7 +334,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		// post-pass can match consumers to factory methods by type
 		// name. Simpler and more precise than scanning method bodies.
 		meta := map[string]any{"receiver": className}
-		if params := javaParamsSource(def.Node, src); params != "" {
+		if params := javaParamsSource(def.Node, src, e.lang); params != "" {
 			meta["params_src"] = params
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -508,8 +508,8 @@ func (e *JavaExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 			continue
 		}
 		walkNodes(defNode, func(n *sitter.Node) {
-			if n.Type() == "object_creation_expression" {
-				typeName := inferTypeFromJavaNewExpr(n, src)
+			if parser.NodeType(n, e.lang) == "object_creation_expression" {
+				typeName := inferTypeFromJavaNewExpr(n, src, e.lang)
 				if typeName != "" {
 					tenv[name] = typeName
 				}
@@ -547,14 +547,14 @@ func normalizeJavaTypeName(t string) string {
 // method's formal_parameters child, including the parentheses. Used
 // by the DI post-pass to string-match parameter types without a full
 // re-parse of the method signature.
-func javaParamsSource(methodNode *sitter.Node, src []byte) string {
+func javaParamsSource(methodNode *sitter.Node, src []byte, lang *sitter.Language) string {
 	if methodNode == nil {
 		return ""
 	}
 	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
 		c := methodNode.NamedChild(i)
-		if c != nil && c.Type() == "formal_parameters" {
-			return c.Content(src)
+		if c != nil && parser.NodeType(c, lang) == "formal_parameters" {
+			return c.Text(src)
 		}
 	}
 	return ""
@@ -565,10 +565,10 @@ func javaParamsSource(methodNode *sitter.Node, src []byte) string {
 // "Autowired"). The tree-sitter-java grammar places annotations inside
 // a `modifiers` wrapper as either `marker_annotation` (no args) or
 // `annotation` (with args). Name is the bare identifier after @.
-func javaMethodHasAnnotation(methodNode *sitter.Node, src []byte, name string) bool {
+func javaMethodHasAnnotation(methodNode *sitter.Node, src []byte, name string, lang *sitter.Language) bool {
 	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
 		c := methodNode.NamedChild(i)
-		if c == nil || c.Type() != "modifiers" {
+		if c == nil || parser.NodeType(c, lang) != "modifiers" {
 			continue
 		}
 		for j := 0; j < int(c.NamedChildCount()); j++ {
@@ -576,11 +576,12 @@ func javaMethodHasAnnotation(methodNode *sitter.Node, src []byte, name string) b
 			if m == nil {
 				continue
 			}
-			if m.Type() != "marker_annotation" && m.Type() != "annotation" {
+			mt := parser.NodeType(m, lang)
+			if mt != "marker_annotation" && mt != "annotation" {
 				continue
 			}
-			nameNode := m.ChildByFieldName("name")
-			if nameNode != nil && nameNode.Content(src) == name {
+			nameNode := m.ChildByFieldName("name", lang)
+			if nameNode != nil && nameNode.Text(src) == name {
 				return true
 			}
 		}
@@ -588,19 +589,19 @@ func javaMethodHasAnnotation(methodNode *sitter.Node, src []byte, name string) b
 	return false
 }
 
-func extractJavaMethodReturnType(methodNode *sitter.Node, src []byte) string {
+func extractJavaMethodReturnType(methodNode *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
 		child := methodNode.NamedChild(i)
-		switch child.Type() {
+		switch parser.NodeType(child, lang) {
 		case "type_identifier":
-			return normalizeJavaTypeName(child.Content(src))
+			return normalizeJavaTypeName(child.Text(src))
 		case "generic_type":
 			// e.g., List<User> — take the first named child (the base type).
 			if child.NamedChildCount() > 0 {
-				return normalizeJavaTypeName(child.NamedChild(0).Content(src))
+				return normalizeJavaTypeName(child.NamedChild(0).Text(src))
 			}
 		case "array_type":
-			return normalizeJavaTypeName(child.Content(src))
+			return normalizeJavaTypeName(child.Text(src))
 		}
 	}
 	return ""
@@ -608,11 +609,11 @@ func extractJavaMethodReturnType(methodNode *sitter.Node, src []byte) string {
 
 // inferTypeFromJavaNewExpr extracts the class name from an object_creation_expression node.
 // new User(...) -> "User", new ArrayList<String>() -> "ArrayList"
-func inferTypeFromJavaNewExpr(node *sitter.Node, src []byte) string {
+func inferTypeFromJavaNewExpr(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "type_identifier" {
-			name := child.Content(src)
+		if parser.NodeType(child, lang) == "type_identifier" {
+			name := child.Text(src)
 			if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
 				return name
 			}

@@ -4,16 +4,21 @@ import (
 	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Cairo (StarkNet) is Rust-flavoured: brace bodies, `fn` / `struct`
-// / `enum` / `trait` / `mod` keywords, and `use X::Y` imports. The
-// `#[external]` / `#[view]` annotations can precede a `fn` but do
-// not change how we capture it; the regex for `fn` tolerates
-// leading whitespace only, so attributes on a prior line are simply
-// ignored.
+// Cairo (StarkNet) is Rust-flavoured. The odvcencio Cairo grammar is
+// still immature — `#[external]` / `#[view]` attribute-prefixed `fn`
+// declarations, trait bodies, and enum variants all drop into ERROR
+// recovery, so we can't rely on the AST for faithful symbol extraction.
+//
+// Strategy: hold the grammar on the struct for parse-probe parity with
+// other adapters (enables future upgrade with zero adapter churn), but
+// keep the regex-based extractor as the source of truth. When the
+// grammar stabilises upstream, swap to a tree-sitter walker.
 var (
 	cairoFnRe     = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)`)
 	cairoStructRe = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?struct\s+([A-Za-z_]\w*)`)
@@ -23,10 +28,16 @@ var (
 	cairoUseRe    = regexp.MustCompile(`(?m)^\s*use\s+([\w:]+)`)
 )
 
-// CairoExtractor extracts StarkNet Cairo source using regex.
-type CairoExtractor struct{}
+// CairoExtractor extracts StarkNet Cairo source files. The grammar is
+// currently unreliable so the work is regex-based; the `lang` field
+// exists for parse-probe parity with the other tree-sitter adapters.
+type CairoExtractor struct {
+	lang *sitter.Language
+}
 
-func NewCairoExtractor() *CairoExtractor { return &CairoExtractor{} }
+func NewCairoExtractor() *CairoExtractor {
+	return &CairoExtractor{lang: grammars.CairoLanguage()}
+}
 
 func (e *CairoExtractor) Language() string     { return "cairo" }
 func (e *CairoExtractor) Extensions() []string { return []string{".cairo"} }
@@ -41,6 +52,15 @@ func (e *CairoExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		Language: "cairo",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
+
+	// Parse-probe: ensures the grammar is wired up and the extractor
+	// participates in the pure-Go parser lifecycle. Result is ignored
+	// because the grammar mis-parses too many Cairo idioms to use.
+	if len(src) > 0 {
+		if tree, err := parser.ParseFile(src, e.lang); err == nil {
+			tree.Close()
+		}
+	}
 
 	seen := make(map[string]bool)
 	add := func(name string, kind graph.NodeKind, start, end int) {

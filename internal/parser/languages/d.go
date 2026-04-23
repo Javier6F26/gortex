@@ -1,9 +1,8 @@
 package languages
 
 import (
-	"regexp"
-	"strings"
-
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -11,32 +10,41 @@ import (
 // The D language is C-like and brace-delimited. It has the full
 // ML-ish aggregate set (struct/class/interface/enum/union/template),
 // plus a `module` statement that names the unit (not a symbol).
-var (
-	dFuncRe      = regexp.MustCompile(`(?m)^\s*(?:(?:public|private|protected|package|static|final|override|pure|nothrow|extern(?:\([^)]*\))?|export|pragma\([^)]*\))\s+)*(?:[\w\[\]\*\.!\(\)]+)\s+(\w+)\s*(?:\([^)]*\))?\s*(?:\([^)]*\))?\s*\{`)
-	dStructRe    = regexp.MustCompile(`(?m)^\s*struct\s+(\w+)`)
-	dClassRe     = regexp.MustCompile(`(?m)^\s*(?:abstract\s+|final\s+)*class\s+(\w+)`)
-	dInterfaceRe = regexp.MustCompile(`(?m)^\s*interface\s+(\w+)`)
-	dEnumRe      = regexp.MustCompile(`(?m)^\s*enum\s+(\w+)`)
-	dUnionRe     = regexp.MustCompile(`(?m)^\s*union\s+(\w+)`)
-	dTemplateRe  = regexp.MustCompile(`(?m)^\s*template\s+(\w+)\s*\(`)
-	dImportRe    = regexp.MustCompile(`(?m)^\s*(?:static\s+|public\s+|private\s+)?import\s+([\w.]+)`)
-)
+//
+// The odvcencio D grammar exposes:
+//   source_file → module_def
+//     module_declaration(module, module_fqn)
+//     import_declaration(import, imported → module_fqn)
+//     struct_declaration / class_declaration / interface_declaration /
+//     enum_declaration / union_declaration / template_declaration
+//     function_declaration(type, identifier, parameters, function_body)
+//     constructor(this, parameters, function_body)
 
-// DExtractor extracts D-language source using regex.
-type DExtractor struct{}
+// DExtractor extracts D-language source files into graph nodes and edges.
+type DExtractor struct {
+	lang *sitter.Language
+}
 
-func NewDExtractor() *DExtractor { return &DExtractor{} }
+func NewDExtractor() *DExtractor {
+	return &DExtractor{lang: grammars.DLanguage()}
+}
 
 func (e *DExtractor) Language() string     { return "d" }
 func (e *DExtractor) Extensions() []string { return []string{".d", ".di"} }
 
 func (e *DExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "d",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -62,50 +70,55 @@ func (e *DExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRes
 		})
 	}
 
-	for _, m := range dStructRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dClassRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dInterfaceRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindInterface, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dEnumRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dUnionRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dTemplateRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range dFuncRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findBlockEnd(lines, line))
+	firstIdent := func(node *sitter.Node) string {
+		for i := 0; i < int(node.ChildCount()); i++ {
+			child := node.Child(i)
+			if child != nil && parser.NodeType(child, e.lang) == "identifier" {
+				return child.Text(src)
+			}
+		}
+		return ""
 	}
 
-	for _, m := range dImportRe.FindAllSubmatchIndex(src, -1) {
-		mod := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
+	walkNodes(root, func(node *sitter.Node) {
+		t := parser.NodeType(node, e.lang)
+		startLine := int(node.StartPoint().Row) + 1
+		endLine := int(node.EndPoint().Row) + 1
+
+		switch t {
+		case "struct_declaration", "class_declaration", "enum_declaration",
+			"union_declaration", "template_declaration":
+			add(firstIdent(node), graph.KindType, startLine, endLine)
+
+		case "interface_declaration":
+			add(firstIdent(node), graph.KindInterface, startLine, endLine)
+
+		case "function_declaration":
+			add(firstIdent(node), graph.KindFunction, startLine, endLine)
+
+		case "import_declaration":
+			// Each `imported` child holds a module_fqn.
+			for i := 0; i < int(node.ChildCount()); i++ {
+				child := node.Child(i)
+				if child == nil || parser.NodeType(child, e.lang) != "imported" {
+					continue
+				}
+				for j := 0; j < int(child.ChildCount()); j++ {
+					gc := child.Child(j)
+					if gc == nil {
+						continue
+					}
+					if parser.NodeType(gc, e.lang) == "module_fqn" {
+						mod := gc.Text(src)
+						result.Edges = append(result.Edges, &graph.Edge{
+							From: fileNode.ID, To: "unresolved::import::" + mod,
+							Kind: graph.EdgeImports, FilePath: filePath, Line: startLine,
+						})
+					}
+				}
+			}
+		}
+	})
 
 	return result, nil
 }

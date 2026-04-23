@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/cpp"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -45,7 +45,7 @@ type CppExtractor struct {
 }
 
 func NewCppExtractor() *CppExtractor {
-	return &CppExtractor{lang: cpp.GetLanguage()}
+	return &CppExtractor{lang: grammars.CppLanguage()}
 }
 
 func (e *CppExtractor) Language() string     { return "cpp" }
@@ -146,7 +146,7 @@ func (e *CppExtractor) extractClassMethods(classNode *sitter.Node, src []byte, f
 	var body *sitter.Node
 	for i := 0; i < int(classNode.NamedChildCount()); i++ {
 		child := classNode.NamedChild(i)
-		if child.Type() == "field_declaration_list" {
+		if parser.NodeType(child, e.lang) == "field_declaration_list" {
 			body = child
 			break
 		}
@@ -159,17 +159,17 @@ func (e *CppExtractor) extractClassMethods(classNode *sitter.Node, src []byte, f
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		child := body.NamedChild(i)
 		// Handle access specifiers that wrap declarations.
-		if child.Type() == "access_specifier" {
+		if parser.NodeType(child, e.lang) == "access_specifier" {
 			continue
 		}
-		if child.Type() == "function_definition" {
+		if parser.NodeType(child, e.lang) == "function_definition" {
 			e.addMethodFromNode(child, src, filePath, fileID, className, classID, seen, result)
 		}
 		// Also check inside declaration_list (e.g. under access specifiers).
-		if child.Type() == "declaration_list" {
+		if parser.NodeType(child, e.lang) == "declaration_list" {
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				gc := child.NamedChild(j)
-				if gc.Type() == "function_definition" {
+				if parser.NodeType(gc, e.lang) == "function_definition" {
 					e.addMethodFromNode(gc, src, filePath, fileID, className, classID, seen, result)
 				}
 			}
@@ -179,7 +179,7 @@ func (e *CppExtractor) extractClassMethods(classNode *sitter.Node, src []byte, f
 
 func (e *CppExtractor) addMethodFromNode(funcNode *sitter.Node, src []byte, filePath, fileID, className, classID string, seen map[string]bool, result *parser.ExtractionResult) {
 	// Extract method name from function_definition -> declarator -> declarator.
-	methodName := extractFuncName(funcNode, src)
+	methodName := extractFuncName(funcNode, src, e.lang)
 	if methodName == "" {
 		return
 	}
@@ -213,19 +213,19 @@ func (e *CppExtractor) addMethodFromNode(funcNode *sitter.Node, src []byte, file
 
 // extractFuncName walks a function_definition node to find the function name.
 // It handles both `identifier` (free functions) and `field_identifier` (methods).
-func extractFuncName(funcNode *sitter.Node, src []byte) string {
+func extractFuncName(funcNode *sitter.Node, src []byte, lang *sitter.Language) string {
 	// function_definition -> declarator (function_declarator) -> declarator (identifier or field_identifier)
 	for i := 0; i < int(funcNode.NamedChildCount()); i++ {
 		child := funcNode.NamedChild(i)
-		if child.Type() == "function_declarator" {
+		if parser.NodeType(child, lang) == "function_declarator" {
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				gc := child.NamedChild(j)
-				switch gc.Type() {
+				switch parser.NodeType(gc, lang) {
 				case "identifier", "field_identifier", "destructor_name":
-					return gc.Content(src)
+					return gc.Text(src)
 				case "qualified_identifier":
 					// e.g. ClassName::methodName — extract last part.
-					return lastIdentifier(gc, src)
+					return lastIdentifier(gc, src, lang)
 				}
 			}
 		}
@@ -234,13 +234,13 @@ func extractFuncName(funcNode *sitter.Node, src []byte) string {
 }
 
 // lastIdentifier extracts the last identifier from a qualified_identifier.
-func lastIdentifier(node *sitter.Node, src []byte) string {
+func lastIdentifier(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	name := ""
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		switch child.Type() {
+		switch parser.NodeType(child, lang) {
 		case "identifier", "field_identifier", "destructor_name":
-			name = child.Content(src)
+			name = child.Text(src)
 		}
 	}
 	return name

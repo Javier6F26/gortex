@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/rust"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -91,7 +91,7 @@ type RustExtractor struct {
 }
 
 func NewRustExtractor() *RustExtractor {
-	return &RustExtractor{lang: rust.GetLanguage()}
+	return &RustExtractor{lang: grammars.RustLanguage()}
 }
 
 func (e *RustExtractor) Language() string     { return "rust" }
@@ -133,7 +133,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			"receiver":  typeName,
 			"signature": "fn " + methodName + "(...)",
 		}
-		if rt := extractRustReturnType(def.Node, src); rt != "" {
+		if rt := extractRustReturnType(def.Node, src, e.lang); rt != "" {
 			meta["return_type"] = rt
 		}
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -415,7 +415,7 @@ func (e *RustExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 		if valueNode == nil {
 			continue
 		}
-		if inferred := inferTypeFromRustExpr(valueNode, src); inferred != "" {
+		if inferred := inferTypeFromRustExpr(valueNode, src, e.lang); inferred != "" {
 			tenv[name] = inferred
 		}
 	}
@@ -424,7 +424,7 @@ func (e *RustExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 }
 
 // extractRustReturnType walks a function_item node to find the return type after `->`.
-func extractRustReturnType(node *sitter.Node, src []byte) string {
+func extractRustReturnType(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	if node == nil {
 		return ""
 	}
@@ -439,7 +439,7 @@ func extractRustReturnType(node *sitter.Node, src []byte) string {
 			continue
 		}
 		if pastArrow {
-			if child.Type() == "block" {
+			if parser.NodeType(child, lang) == "block" {
 				return ""
 			}
 			// This should be the return type node.
@@ -483,13 +483,13 @@ func normalizeRustTypeName(t string) string {
 
 // inferTypeFromRustExpr inspects a tree-sitter expression node to infer
 // the type of a let declaration's RHS.
-func inferTypeFromRustExpr(node *sitter.Node, src []byte) string {
-	switch node.Type() {
+func inferTypeFromRustExpr(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	switch parser.NodeType(node, lang) {
 	case "struct_expression":
 		// Config { port: 8080 } — first named child is the type name.
 		if node.NamedChildCount() > 0 {
 			typeNode := node.NamedChild(0)
-			name := typeNode.Content(src)
+			name := typeNode.Text(src)
 			// Strip module path.
 			if idx := strings.LastIndex(name, "::"); idx >= 0 {
 				name = name[idx+2:]
@@ -503,8 +503,8 @@ func inferTypeFromRustExpr(node *sitter.Node, src []byte) string {
 		// Type::new() — scoped_identifier with path containing ::new
 		if node.NamedChildCount() > 0 {
 			funcNode := node.NamedChild(0)
-			if funcNode.Type() == "scoped_identifier" {
-				funcText := funcNode.Content(src)
+			if parser.NodeType(funcNode, lang) == "scoped_identifier" {
+				funcText := funcNode.Text(src)
 				// e.g. "Config::new" or "module::Config::new"
 				if strings.HasSuffix(funcText, "::new") {
 					typePart := strings.TrimSuffix(funcText, "::new")

@@ -4,13 +4,20 @@ import (
 	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Mojo is Python-flavored with Rust-like `fn` and `struct`. Bodies
-// are indent-delimited. We capture `fn`/`def` functions, `struct`
-// and `trait` types, plus `from ... import ...` and `import ...`.
+// Mojo is Python-flavored with Rust-like `fn` and `struct`. The pinned
+// odvcencio grammar is Python-based and does not model `fn`, `struct`,
+// `trait`, `let`, or `var` — it produces ERROR nodes around them. Until
+// an upstream Mojo grammar ships we keep regex fallback for every graph
+// output. ParseFile still runs (cheap AST skeleton; no-op on error) so
+// future migrations only have to flip the switch.
+//
+// See spec-treesitter-migration.md — Mojo is flagged here explicitly.
 var (
 	mojoFuncRe   = regexp.MustCompile(`(?m)^\s*(?:async\s+)?(?:fn|def)\s+(\w+)\s*\(`)
 	mojoTypeRe   = regexp.MustCompile(`(?m)^\s*(?:struct|trait)\s+(\w+)`)
@@ -19,15 +26,27 @@ var (
 	mojoCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
 )
 
-// MojoExtractor extracts Mojo source using regex.
-type MojoExtractor struct{}
+// MojoExtractor extracts Mojo source. Tree-sitter skeleton with regex
+// fallback for actual extraction (see package comment).
+type MojoExtractor struct {
+	lang *sitter.Language
+}
 
-func NewMojoExtractor() *MojoExtractor { return &MojoExtractor{} }
+func NewMojoExtractor() *MojoExtractor {
+	return &MojoExtractor{lang: grammars.MojoLanguage()}
+}
 
 func (e *MojoExtractor) Language() string     { return "mojo" }
 func (e *MojoExtractor) Extensions() []string { return []string{".mojo", ".🔥"} }
 
 func (e *MojoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
+	// Best-effort parse; the grammar is known to emit ERROR nodes on
+	// valid Mojo. We keep the call for future-proofing and to surface
+	// any parser-setup errors (wrong language pointer, etc.).
+	if tree, err := parser.ParseFile(src, e.lang); err == nil {
+		tree.Close()
+	}
+
 	lines := strings.Split(string(src), "\n")
 	result := &parser.ExtractionResult{}
 

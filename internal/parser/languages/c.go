@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/c"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -45,7 +45,7 @@ type CExtractor struct {
 }
 
 func NewCExtractor() *CExtractor {
-	return &CExtractor{lang: c.GetLanguage()}
+	return &CExtractor{lang: grammars.CLanguage()}
 }
 
 func (e *CExtractor) Language() string     { return "c" }
@@ -300,7 +300,7 @@ func (e *CExtractor) extractGlobals(root *sitter.Node, src []byte, filePath, fil
 // extractCSignature extracts a function signature from its definition node.
 // It takes the text up to (but not including) the compound_statement body.
 func extractCSignature(node *sitter.Node, src []byte) string {
-	fullText := node.Content(src)
+	fullText := node.Text(src)
 	// Find the opening brace of the function body and trim there.
 	idx := strings.Index(fullText, "{")
 	if idx > 0 {

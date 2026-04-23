@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/javascript"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -58,7 +58,7 @@ type JavaScriptExtractor struct {
 }
 
 func NewJavaScriptExtractor() *JavaScriptExtractor {
-	return &JavaScriptExtractor{lang: javascript.GetLanguage()}
+	return &JavaScriptExtractor{lang: grammars.JavascriptLanguage()}
 }
 
 func (e *JavaScriptExtractor) Language() string     { return "javascript" }
@@ -260,10 +260,10 @@ func (e *JavaScriptExtractor) extractVariables(root *sitter.Node, src []byte, fi
 
 			// Only extract module-level variables.
 			parent := def.Node.Parent()
-			if parent != nil && parent.Type() == "export_statement" {
+			if parent != nil && parser.NodeType(parent, e.lang) == "export_statement" {
 				parent = parent.Parent()
 			}
-			if parent == nil || parent.Type() != "program" {
+			if parent == nil || parser.NodeType(parent, e.lang) != "program" {
 				continue
 			}
 

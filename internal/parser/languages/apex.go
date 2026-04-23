@@ -1,45 +1,52 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Apex is Salesforce's Java-ish language. Brace-delimited with the
-// usual OO primitives — class, interface, enum — plus the Salesforce-
-// specific `trigger NAME on Object (events...) { ... }`. Methods are
-// standard `modifier* ReturnType NAME(args) { ... }`. Apex has no
-// user-visible import statement (namespaces resolve via System/sObject
-// metadata), so we emit nothing on the import edge.
-var (
-	apexClassRe     = regexp.MustCompile(`(?m)^\s*(?:global\s+|public\s+|private\s+|protected\s+|virtual\s+|abstract\s+|with\s+sharing\s+|without\s+sharing\s+|inherited\s+sharing\s+)*class\s+(\w+)`)
-	apexInterfaceRe = regexp.MustCompile(`(?m)^\s*(?:global\s+|public\s+|private\s+)*interface\s+(\w+)`)
-	apexEnumRe      = regexp.MustCompile(`(?m)^\s*(?:global\s+|public\s+|private\s+)*enum\s+(\w+)`)
-	apexTriggerRe   = regexp.MustCompile(`(?m)^\s*trigger\s+(\w+)\s+on\s+\w+`)
-	// Method: modifiers + return type + NAME(args) {. We exclude keywords
-	// that would otherwise match (if, for, while, switch, return, new).
-	apexMethodRe = regexp.MustCompile(`(?m)^\s*(?:global\s+|public\s+|private\s+|protected\s+|static\s+|virtual\s+|override\s+|abstract\s+|final\s+|webservice\s+|testmethod\s+|transient\s+)+(?:[\w<>,.\[\]\s]+?)\s+(\w+)\s*\([^)]*\)\s*\{`)
-	apexCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
-)
+// ApexExtractor extracts Salesforce Apex source files using tree-sitter.
+//
+// Apex is Java-ish OO plus Salesforce-specific trigger declarations.
+// The grammar exposes:
+//
+//   - class_declaration      → KindType
+//   - interface_declaration  → KindInterface
+//   - enum_declaration       → KindType
+//   - trigger_declaration    → KindType  (Salesforce-specific)
+//   - method_declaration     → KindMethod
+//   - method_invocation      → EdgeCalls from enclosing method
+//
+// Apex has no user-visible import statement, so no import edges are
+// emitted.
+type ApexExtractor struct {
+	lang *sitter.Language
+}
 
-// ApexExtractor extracts Salesforce Apex source using regex.
-type ApexExtractor struct{}
-
-func NewApexExtractor() *ApexExtractor { return &ApexExtractor{} }
+func NewApexExtractor() *ApexExtractor {
+	return &ApexExtractor{lang: grammars.ApexLanguage()}
+}
 
 func (e *ApexExtractor) Language() string     { return "apex" }
 func (e *ApexExtractor) Extensions() []string { return []string{".cls", ".trigger", ".apex"} }
 
 func (e *ApexExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "apex",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -65,53 +72,91 @@ func (e *ApexExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 	}
 
-	for _, m := range apexClassRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range apexInterfaceRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindInterface, line, findBlockEnd(lines, line))
-	}
-	for _, m := range apexEnumRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range apexTriggerRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range apexMethodRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isApexKeyword(strings.ToLower(name)) {
-			continue
+	// Collect declarations via a full walk so nested methods inside
+	// classes/interfaces/triggers are captured regardless of depth.
+	walkNodes(root, func(n *sitter.Node) {
+		if n == nil {
+			return
 		}
-		line := lineAt(src, m[0])
-		add(name, graph.KindMethod, line, findBlockEnd(lines, line))
-	}
+		start := int(n.StartPoint().Row) + 1
+		end := int(n.EndPoint().Row) + 1
 
-	funcRanges := buildFuncRanges(result)
-	for _, m := range apexCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isApexKeyword(strings.ToLower(name)) {
-			continue
+		switch parser.NodeType(n, e.lang) {
+		case "class_declaration":
+			add(apexChildIdentifier(n, src, e.lang), graph.KindType, start, end)
+		case "interface_declaration":
+			add(apexChildIdentifier(n, src, e.lang), graph.KindInterface, start, end)
+		case "enum_declaration":
+			add(apexChildIdentifier(n, src, e.lang), graph.KindType, start, end)
+		case "trigger_declaration":
+			add(apexChildIdentifier(n, src, e.lang), graph.KindType, start, end)
+		case "method_declaration":
+			add(apexChildIdentifier(n, src, e.lang), graph.KindMethod, start, end)
 		}
-		line := lineAt(src, m[0])
+	})
+
+	// Call edges: method_invocation carries the callee on its last
+	// identifier child; walk once more to attribute each call to the
+	// enclosing method.
+	funcRanges := buildFuncRanges(result)
+	walkNodes(root, func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if parser.NodeType(n, e.lang) != "method_invocation" {
+			return
+		}
+		name := apexMethodInvocationName(n, src, e.lang)
+		if name == "" || isApexKeyword(strings.ToLower(name)) {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
+}
+
+// apexChildIdentifier returns the text of the first direct `identifier`
+// child of a declaration node (class/interface/enum/trigger/method all
+// share this shape — modifiers and types come first, then the identifier).
+func apexChildIdentifier(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		if parser.NodeType(child, lang) == "identifier" {
+			return child.Text(src)
+		}
+	}
+	return ""
+}
+
+// apexMethodInvocationName extracts the callee name from a
+// method_invocation node. The grammar renders `Foo.bar(x)` as a
+// method_invocation with two identifier children — the receiver then
+// the method — plus an argument_list; bare `bar(x)` has a single
+// identifier child.
+func apexMethodInvocationName(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	var last string
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		if parser.NodeType(child, lang) == "identifier" {
+			last = child.Text(src)
+		}
+	}
+	return last
 }
 
 func isApexKeyword(s string) bool {

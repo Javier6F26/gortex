@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/css"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -22,7 +22,7 @@ type CSSExtractor struct {
 }
 
 func NewCSSExtractor() *CSSExtractor {
-	return &CSSExtractor{lang: css.GetLanguage()}
+	return &CSSExtractor{lang: grammars.CssLanguage()}
 }
 
 func (e *CSSExtractor) Language() string     { return "css" }
@@ -141,12 +141,12 @@ func (e *CSSExtractor) extractCustomProperties(root *sitter.Node, src []byte, fi
 }
 
 func (e *CSSExtractor) walkForCustomProps(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
-	if node.Type() == "declaration" {
+	if parser.NodeType(node, e.lang) == "declaration" {
 		// Look for property_name child that starts with "--".
 		for i := 0; i < int(node.ChildCount()); i++ {
 			child := node.Child(i)
-			if child != nil && child.Type() == "property_name" {
-				propName := child.Content(src)
+			if child != nil && parser.NodeType(child, e.lang) == "property_name" {
+				propName := child.Text(src)
 				if strings.HasPrefix(propName, "--") {
 					id := filePath + "::" + propName
 					if !seen[id] {

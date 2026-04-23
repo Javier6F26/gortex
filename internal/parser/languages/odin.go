@@ -1,40 +1,46 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
+// OdinExtractor extracts Odin source files.
+//
 // Odin uses `name :: proc(args) { ... }` for procedures and
 // `Name :: struct { ... }` for types. Imports use `import "path"`
-// with an optional alias prefix.
-var (
-	odinProcRe        = regexp.MustCompile(`(?m)^\s*(\w+)\s*::\s*proc\b`)
-	odinTypeRe        = regexp.MustCompile(`(?m)^\s*(\w+)\s*::\s*(struct|enum|union)\b`)
-	odinImportRe      = regexp.MustCompile(`(?m)^\s*import\s+(?:(\w+)\s+)?"([^"]+)"`)
-	odinForeignImport = regexp.MustCompile(`(?m)^\s*foreign\s+import\s+\w+\s+"([^"]+)"`)
-	odinPackageRe     = regexp.MustCompile(`(?m)^\s*package\s+(\w+)`)
-	odinCallRe        = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
-)
+// with an optional alias prefix. The odvcencio grammar emits
+// `package_declaration`, `import_declaration`, `procedure_declaration`,
+// `struct_declaration`, `enum_declaration`, `union_declaration`, and
+// `call_expression` for the shapes we care about.
+type OdinExtractor struct {
+	lang *sitter.Language
+}
 
-// OdinExtractor extracts Odin source using regex.
-type OdinExtractor struct{}
-
-func NewOdinExtractor() *OdinExtractor { return &OdinExtractor{} }
+func NewOdinExtractor() *OdinExtractor {
+	return &OdinExtractor{lang: grammars.OdinLanguage()}
+}
 
 func (e *OdinExtractor) Language() string     { return "odin" }
 func (e *OdinExtractor) Extensions() []string { return []string{".odin"} }
 
 func (e *OdinExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "odin",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -60,57 +66,140 @@ func (e *OdinExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 	}
 
-	for _, m := range odinPackageRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, line)
-	}
-	for _, m := range odinProcRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findBlockEnd(lines, line))
-	}
-	for _, m := range odinTypeRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-
-	for _, m := range odinImportRe.FindAllSubmatchIndex(src, -1) {
-		mod := string(src[m[4]:m[5]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
-	for _, m := range odinForeignImport.FindAllSubmatchIndex(src, -1) {
-		mod := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
-
-	funcRanges := buildFuncRanges(result)
-	for _, m := range odinCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isOdinKeyword(name) {
+	// Walk top-level children to collect declarations and imports.
+	for i := 0; i < int(root.ChildCount()); i++ {
+		child := root.Child(i)
+		if child == nil {
 			continue
 		}
-		line := lineAt(src, m[0])
+		switch parser.NodeType(child, e.lang) {
+		case "package_declaration":
+			// package identifier
+			name := firstChildOfTypeText(child, "identifier", src, e.lang)
+			line := int(child.StartPoint().Row) + 1
+			add(name, graph.KindType, line, line)
+
+		case "import_declaration":
+			mod := extractOdinImportPath(child, src, e.lang)
+			if mod == "" {
+				continue
+			}
+			line := int(child.StartPoint().Row) + 1
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: "unresolved::import::" + mod,
+				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
+			})
+
+		case "foreign_import_declaration", "foreign_block_declaration":
+			// `foreign import name "path"` — capture the path string.
+			mod := extractOdinImportPath(child, src, e.lang)
+			if mod == "" {
+				continue
+			}
+			line := int(child.StartPoint().Row) + 1
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: "unresolved::import::" + mod,
+				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
+			})
+
+		case "procedure_declaration":
+			name := firstChildOfTypeText(child, "identifier", src, e.lang)
+			start := int(child.StartPoint().Row) + 1
+			end := int(child.EndPoint().Row) + 1
+			add(name, graph.KindFunction, start, end)
+
+		case "struct_declaration", "enum_declaration", "union_declaration":
+			name := firstChildOfTypeText(child, "identifier", src, e.lang)
+			start := int(child.StartPoint().Row) + 1
+			end := int(child.EndPoint().Row) + 1
+			add(name, graph.KindType, start, end)
+		}
+	}
+
+	// Call sites inside procedures.
+	funcRanges := buildFuncRanges(result)
+	walkNodes(root, func(node *sitter.Node) {
+		if parser.NodeType(node, e.lang) != "call_expression" {
+			return
+		}
+		// First child of call_expression is the callee — `identifier`
+		// for simple calls, `member_expression` for `math.sqrt`-style.
+		// We use the innermost identifier text as the call target.
+		var name string
+		if node.ChildCount() > 0 {
+			callee := node.Child(0)
+			if callee != nil {
+				switch parser.NodeType(callee, e.lang) {
+				case "identifier":
+					name = callee.Text(src)
+				default:
+					// Use last identifier for member access.
+					name = lastIdentifierText(callee, src, e.lang)
+				}
+			}
+		}
+		if name == "" || isOdinKeyword(name) {
+			return
+		}
+		line := int(node.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
+}
+
+// extractOdinImportPath returns the string literal path from an
+// import_declaration. Odin represents `"core:fmt"` as a `string` node
+// containing a `string_content` child — the content is what we want.
+func extractOdinImportPath(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		if parser.NodeType(child, lang) == "string" {
+			for j := 0; j < int(child.ChildCount()); j++ {
+				inner := child.Child(j)
+				if inner != nil && parser.NodeType(inner, lang) == "string_content" {
+					return inner.Text(src)
+				}
+			}
+			// Fallback: strip quotes from the full string text.
+			return strings.Trim(child.Text(src), `"`)
+		}
+	}
+	return ""
+}
+
+// firstChildOfTypeText returns the text of the first direct child whose
+// grammar-symbol name matches nodeType.
+func firstChildOfTypeText(node *sitter.Node, nodeType string, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child != nil && parser.NodeType(child, lang) == nodeType {
+			return child.Text(src)
+		}
+	}
+	return ""
+}
+
+// lastIdentifierText returns the text of the last identifier found
+// anywhere under node (depth-first).
+func lastIdentifierText(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	var last string
+	walkNodes(node, func(n *sitter.Node) {
+		if parser.NodeType(n, lang) == "identifier" {
+			last = n.Text(src)
+		}
+	})
+	return last
 }
 
 func isOdinKeyword(s string) bool {

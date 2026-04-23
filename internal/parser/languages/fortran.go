@@ -1,34 +1,22 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Fortran covers the fixed-form and free-form dialects alike. The
-// unit of code is `subroutine`, `function`, `module`, `program`, and
-// `type`. Imports are `use Module [, only: name]`; calls come through
-// `call name(...)` for subroutines or via expression context for
-// functions — we only catch the `call` form reliably.
-var (
-	fortranSubRe  = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?subroutine\s+(\w+)`)
-	fortranFnRe   = regexp.MustCompile(`(?im)^\s*(?:pure\s+|elemental\s+|recursive\s+)?(?:\w+\s+)?function\s+(\w+)\s*\(`)
-	// `module NAME` — but Fortran also uses `module procedure foo` inside
-	// interfaces; the capture filters `procedure` by name below.
-	fortranModRe  = regexp.MustCompile(`(?im)^\s*module\s+(\w+)`)
-	fortranProgRe = regexp.MustCompile(`(?im)^\s*program\s+(\w+)`)
-	fortranTypeRe = regexp.MustCompile(`(?im)^\s*type(?:\s*,\s*\w+)?\s*::\s*(\w+)`)
-	fortranUseRe  = regexp.MustCompile(`(?im)^\s*use\s+(\w+)`)
-	fortranCallRe = regexp.MustCompile(`(?im)\bcall\s+(\w+)\s*\(`)
-)
+// FortranExtractor extracts Fortran source using tree-sitter.
+type FortranExtractor struct {
+	lang *sitter.Language
+}
 
-// FortranExtractor extracts Fortran source using regex.
-type FortranExtractor struct{}
-
-func NewFortranExtractor() *FortranExtractor { return &FortranExtractor{} }
+func NewFortranExtractor() *FortranExtractor {
+	return &FortranExtractor{lang: grammars.FortranLanguage()}
+}
 
 func (e *FortranExtractor) Language() string { return "fortran" }
 func (e *FortranExtractor) Extensions() []string {
@@ -36,12 +24,18 @@ func (e *FortranExtractor) Extensions() []string {
 }
 
 func (e *FortranExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "fortran",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -68,61 +62,124 @@ func (e *FortranExtractor) Extract(filePath string, src []byte) (*parser.Extract
 		})
 	}
 
-	for _, m := range fortranModRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findKeywordBlockEnd(lines, line, "end module", "end")
-		add(name, graph.KindType, line, end, map[string]any{"fortran_kind": "module"})
-	}
-	for _, m := range fortranProgRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findKeywordBlockEnd(lines, line, "end program", "end")
-		add(name, graph.KindFunction, line, end, map[string]any{"fortran_kind": "program"})
-	}
-	for _, m := range fortranSubRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findKeywordBlockEnd(lines, line, "end subroutine", "end")
-		add(name, graph.KindFunction, line, end, map[string]any{"fortran_kind": "subroutine"})
-	}
-	for _, m := range fortranFnRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findKeywordBlockEnd(lines, line, "end function", "end")
-		add(name, graph.KindFunction, line, end, map[string]any{"fortran_kind": "function"})
-	}
-	for _, m := range fortranTypeRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findKeywordBlockEnd(lines, line, "end type", "end")
-		add(name, graph.KindType, line, end, nil)
-	}
+	// The Fortran grammar wraps everything in `translation_unit` and uses
+	// distinct nodes for each construct. Walk the tree; each declaration
+	// type has a `name` child that carries the identifier text.
+	walkNodes(root, func(n *sitter.Node) {
+		t := parser.NodeType(n, e.lang)
+		switch t {
+		case "module":
+			name := fortranHeaderName(n, "module_statement", e.lang, src)
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1,
+				map[string]any{"fortran_kind": "module"})
 
-	for _, m := range fortranUseRe.FindAllSubmatchIndex(src, -1) {
-		mod := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
+		case "program":
+			name := fortranHeaderName(n, "program_statement", e.lang, src)
+			add(name, graph.KindFunction,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1,
+				map[string]any{"fortran_kind": "program"})
 
+		case "function":
+			name := fortranHeaderName(n, "function_statement", e.lang, src)
+			add(name, graph.KindFunction,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1,
+				map[string]any{"fortran_kind": "function"})
+
+		case "subroutine":
+			name := fortranHeaderName(n, "subroutine_statement", e.lang, src)
+			add(name, graph.KindFunction,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1,
+				map[string]any{"fortran_kind": "subroutine"})
+
+		case "derived_type_definition":
+			// derived_type_statement → type_name
+			name := ""
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if parser.NodeType(c, e.lang) == "derived_type_statement" {
+					for j := 0; j < int(c.NamedChildCount()); j++ {
+						g := c.NamedChild(j)
+						if parser.NodeType(g, e.lang) == "type_name" {
+							name = g.Text(src)
+							break
+						}
+					}
+					break
+				}
+			}
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1, nil)
+
+		case "use_statement":
+			mod := ""
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if parser.NodeType(c, e.lang) == "module_name" {
+					mod = c.Text(src)
+					break
+				}
+			}
+			if mod == "" {
+				return
+			}
+			line := int(n.StartPoint().Row) + 1
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: "unresolved::import::" + mod,
+				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
+			})
+		}
+	})
+
+	// Call edges: subroutine_call nodes.
 	funcRanges := buildFuncRanges(result)
-	for _, m := range fortranCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
+	walkNodes(root, func(n *sitter.Node) {
+		if parser.NodeType(n, e.lang) != "subroutine_call" {
+			return
+		}
+		// The first identifier child is the callee name.
+		name := ""
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if parser.NodeType(c, e.lang) == "identifier" {
+				name = c.Text(src)
+				break
+			}
+		}
+		if name == "" || isFortranKeyword(strings.ToLower(name)) {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
+}
+
+// fortranHeaderName returns the `name` text under the first header
+// statement of a given kind inside a module/program/function/subroutine
+// node.
+func fortranHeaderName(node *sitter.Node, headerType string, lang *sitter.Language, src []byte) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		c := node.NamedChild(i)
+		if parser.NodeType(c, lang) != headerType {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			g := c.NamedChild(j)
+			if parser.NodeType(g, lang) == "name" {
+				return g.Text(src)
+			}
+		}
+	}
+	return ""
 }
 
 func isFortranKeyword(s string) bool {

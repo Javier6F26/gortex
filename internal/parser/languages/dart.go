@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/dartlang"
 )
 
 // DartExtractor extracts Dart source files.
@@ -16,7 +16,7 @@ type DartExtractor struct {
 }
 
 func NewDartExtractor() *DartExtractor {
-	return &DartExtractor{lang: dartlang.GetLanguage()}
+	return &DartExtractor{lang: grammars.DartLanguage()}
 }
 
 func (e *DartExtractor) Language() string     { return "dart" }
@@ -71,13 +71,13 @@ func (e *DartExtractor) extractTypes(
 		var name string
 		var kind graph.NodeKind
 
-		switch node.Type() {
+		switch parser.NodeType(node, e.lang) {
 		case "class_definition":
-			nameNode := node.ChildByFieldName("name")
+			nameNode := node.ChildByFieldName("name", e.lang)
 			if nameNode == nil {
 				return
 			}
-			name = nameNode.Content(src)
+			name = nameNode.Text(src)
 			kind = graph.KindType
 
 			// Check for abstract interface class → KindInterface.
@@ -86,11 +86,11 @@ func (e *DartExtractor) extractTypes(
 			}
 
 		case "enum_declaration":
-			nameNode := node.ChildByFieldName("name")
+			nameNode := node.ChildByFieldName("name", e.lang)
 			if nameNode == nil {
 				return
 			}
-			name = nameNode.Content(src)
+			name = nameNode.Text(src)
 			kind = graph.KindType
 
 		case "mixin_declaration":
@@ -102,12 +102,12 @@ func (e *DartExtractor) extractTypes(
 			kind = graph.KindType
 
 		case "extension_declaration":
-			nameNode := node.ChildByFieldName("name")
+			nameNode := node.ChildByFieldName("name", e.lang)
 			if nameNode == nil {
 				// Anonymous extension — skip.
 				return
 			}
-			name = nameNode.Content(src)
+			name = nameNode.Text(src)
 			kind = graph.KindType
 
 		default:
@@ -142,7 +142,7 @@ func (e *DartExtractor) extractMethods(
 	typeBodyRanges := e.collectTypeBodyRanges(root, src)
 
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "method_signature" {
+		if parser.NodeType(node, e.lang) != "method_signature" {
 			return
 		}
 
@@ -151,7 +151,7 @@ func (e *DartExtractor) extractMethods(
 		if parent == nil {
 			return
 		}
-		parentType := parent.Type()
+		parentType := parser.NodeType(parent, e.lang)
 		if parentType != "class_body" && parentType != "extension_body" && parentType != "enum_body" {
 			return
 		}
@@ -187,7 +187,7 @@ func (e *DartExtractor) extractMethods(
 		// brace-balancing fallbacks, coverage). Stretch EndLine to
 		// cover the adjacent function_body when present.
 		endLine := int(node.EndPoint().Row)
-		if body := nextDartFunctionBody(node); body != nil {
+		if body := nextDartFunctionBody(node, e.lang); body != nil {
 			endLine = int(body.EndPoint().Row)
 		}
 
@@ -214,15 +214,15 @@ func (e *DartExtractor) extractMethods(
 // immediate siblings (the Dart grammar occasionally interposes
 // whitespace / comment nodes between them). Returns nil when the
 // method is abstract or declared with `=>` without a brace block.
-func nextDartFunctionBody(sig *sitter.Node) *sitter.Node {
+func nextDartFunctionBody(sig *sitter.Node, lang *sitter.Language) *sitter.Node {
 	for s := sig.NextSibling(); s != nil; s = s.NextSibling() {
-		if s.Type() == "function_body" {
+		if parser.NodeType(s, lang) == "function_body" {
 			return s
 		}
 		// Stop if we've walked past the declaration grouping — the
 		// next signature wipes any chance of finding "this" one's
 		// body.
-		if s.Type() == "method_signature" || s.Type() == "function_signature" {
+		if parser.NodeType(s, lang) == "method_signature" || parser.NodeType(s, lang) == "function_signature" {
 			return nil
 		}
 	}
@@ -237,21 +237,21 @@ func (e *DartExtractor) extractTopLevelFunctions(
 ) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
-		if child.Type() != "function_signature" {
+		if parser.NodeType(child, e.lang) != "function_signature" {
 			continue
 		}
-		nameNode := child.ChildByFieldName("name")
+		nameNode := child.ChildByFieldName("name", e.lang)
 		if nameNode == nil {
 			continue
 		}
-		name := nameNode.Content(src)
+		name := nameNode.Text(src)
 		startLine := int(child.StartPoint().Row) + 1
 
 		// Check if next sibling is function_body to get end line.
 		endLine := int(child.EndPoint().Row) + 1
 		if i+1 < int(root.ChildCount()) {
 			next := root.Child(i + 1)
-			if next.Type() == "function_body" {
+			if parser.NodeType(next, e.lang) == "function_body" {
 				endLine = int(next.EndPoint().Row) + 1
 			}
 		}
@@ -284,13 +284,13 @@ func (e *DartExtractor) extractTopLevelVariables(
 ) {
 	for i := 0; i < int(root.ChildCount()); i++ {
 		child := root.Child(i)
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "initialized_variable_definition":
-			nameNode := child.ChildByFieldName("name")
+			nameNode := child.ChildByFieldName("name", e.lang)
 			if nameNode == nil {
 				continue
 			}
-			name := nameNode.Content(src)
+			name := nameNode.Text(src)
 			startLine := int(child.StartPoint().Row) + 1
 			id := filePath + "::" + name
 			if seen[id] {
@@ -310,7 +310,7 @@ func (e *DartExtractor) extractTopLevelVariables(
 			// Walk children for static_final_declaration nodes.
 			for j := 0; j < int(child.ChildCount()); j++ {
 				decl := child.Child(j)
-				if decl.Type() != "static_final_declaration" {
+				if parser.NodeType(decl, e.lang) != "static_final_declaration" {
 					continue
 				}
 				name := e.findChildIdentifier(decl, src)
@@ -342,12 +342,12 @@ func (e *DartExtractor) extractImports(
 	result *parser.ExtractionResult,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "import_or_export" {
+		if parser.NodeType(node, e.lang) != "import_or_export" {
 			return
 		}
 
 		// Extract URI from the import text.
-		text := node.Content(src)
+		text := node.Text(src)
 		uri := extractDartImportURI(text)
 		if uri == "" {
 			return
@@ -363,8 +363,10 @@ func (e *DartExtractor) extractImports(
 
 // extractCalls finds function/method call sites.
 // In Dart's tree-sitter grammar, calls appear as:
-//   expression_statement: identifier selector(argument_part) ...
-//   e.g. print('hello') → identifier "print", selector "(…)" with argument_part
+//
+//	expression_statement: identifier selector(argument_part) ...
+//	e.g. print('hello') → identifier "print", selector "(…)" with argument_part
+//
 // We detect an identifier followed by a selector sibling that contains an argument_part.
 //
 // NOTE: receiver attribution is not yet wired here. Dart uses
@@ -379,7 +381,7 @@ func (e *DartExtractor) extractCalls(
 	funcRanges := buildFuncRanges(result)
 
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "identifier" {
+		if parser.NodeType(node, e.lang) != "identifier" {
 			return
 		}
 
@@ -391,11 +393,11 @@ func (e *DartExtractor) extractCalls(
 		}
 
 		isCall := false
-		switch next.Type() {
+		switch parser.NodeType(next, e.lang) {
 		case "selector":
 			// selector may contain argument_part (direct call) like print(...)
 			for j := 0; j < int(next.ChildCount()); j++ {
-				if next.Child(j).Type() == "argument_part" {
+				if parser.NodeType(next.Child(j), e.lang) == "argument_part" {
 					isCall = true
 					break
 				}
@@ -408,7 +410,7 @@ func (e *DartExtractor) extractCalls(
 			return
 		}
 
-		name := node.Content(src)
+		name := node.Text(src)
 		line := int(node.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" {
@@ -425,7 +427,7 @@ func (e *DartExtractor) extractCalls(
 
 func (e *DartExtractor) hasChildType(node *sitter.Node, typeName string) bool {
 	for i := 0; i < int(node.ChildCount()); i++ {
-		if node.Child(i).Type() == typeName {
+		if parser.NodeType(node.Child(i), e.lang) == typeName {
 			return true
 		}
 	}
@@ -435,8 +437,8 @@ func (e *DartExtractor) hasChildType(node *sitter.Node, typeName string) bool {
 func (e *DartExtractor) findChildIdentifier(node *sitter.Node, src []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" {
-			return child.Content(src)
+		if parser.NodeType(child, e.lang) == "identifier" {
+			return child.Text(src)
 		}
 	}
 	return ""
@@ -448,26 +450,26 @@ func (e *DartExtractor) findChildIdentifier(node *sitter.Node, src []byte) strin
 func (e *DartExtractor) extractMethodName(node *sitter.Node, src []byte) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "function_signature":
-			nameNode := child.ChildByFieldName("name")
+			nameNode := child.ChildByFieldName("name", e.lang)
 			if nameNode != nil {
-				return nameNode.Content(src)
+				return nameNode.Text(src)
 			}
 		case "getter_signature":
-			nameNode := child.ChildByFieldName("name")
+			nameNode := child.ChildByFieldName("name", e.lang)
 			if nameNode != nil {
-				return nameNode.Content(src)
+				return nameNode.Text(src)
 			}
 		case "setter_signature":
-			nameNode := child.ChildByFieldName("name")
+			nameNode := child.ChildByFieldName("name", e.lang)
 			if nameNode != nil {
-				return "set " + nameNode.Content(src)
+				return "set " + nameNode.Text(src)
 			}
 		case "constructor_signature":
-			nameNode := child.ChildByFieldName("name")
+			nameNode := child.ChildByFieldName("name", e.lang)
 			if nameNode != nil {
-				return nameNode.Content(src)
+				return nameNode.Text(src)
 			}
 		case "factory_constructor_signature":
 			return e.findChildIdentifier(child, src)
@@ -475,8 +477,8 @@ func (e *DartExtractor) extractMethodName(node *sitter.Node, src []byte) string 
 			// operator + binary_operator child
 			for j := 0; j < int(child.ChildCount()); j++ {
 				c := child.Child(j)
-				if c.Type() == "binary_operator" || c.Type() == "tilde_operator" {
-					return "operator " + strings.TrimSpace(c.Content(src))
+				if parser.NodeType(c, e.lang) == "binary_operator" || parser.NodeType(c, e.lang) == "tilde_operator" {
+					return "operator " + strings.TrimSpace(c.Text(src))
 				}
 			}
 		}
@@ -494,23 +496,23 @@ func (e *DartExtractor) collectTypeBodyRanges(root *sitter.Node, src []byte) []d
 	var ranges []dartTypeRange
 	walkNodes(root, func(node *sitter.Node) {
 		var name string
-		switch node.Type() {
+		switch parser.NodeType(node, e.lang) {
 		case "class_definition":
-			n := node.ChildByFieldName("name")
+			n := node.ChildByFieldName("name", e.lang)
 			if n != nil {
-				name = n.Content(src)
+				name = n.Text(src)
 			}
 		case "enum_declaration":
-			n := node.ChildByFieldName("name")
+			n := node.ChildByFieldName("name", e.lang)
 			if n != nil {
-				name = n.Content(src)
+				name = n.Text(src)
 			}
 		case "mixin_declaration":
 			name = e.findChildIdentifier(node, src)
 		case "extension_declaration":
-			n := node.ChildByFieldName("name")
+			n := node.ChildByFieldName("name", e.lang)
 			if n != nil {
-				name = n.Content(src)
+				name = n.Text(src)
 			}
 		default:
 			return

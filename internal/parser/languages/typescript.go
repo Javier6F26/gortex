@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/typescript/typescript"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -77,7 +77,7 @@ type TypeScriptExtractor struct {
 }
 
 func NewTypeScriptExtractor() *TypeScriptExtractor {
-	return &TypeScriptExtractor{lang: typescript.GetLanguage()}
+	return &TypeScriptExtractor{lang: grammars.TypescriptLanguage()}
 }
 
 func (e *TypeScriptExtractor) Language() string     { return "typescript" }
@@ -202,12 +202,12 @@ func (e *TypeScriptExtractor) extractClasses(root *sitter.Node, src []byte, file
 		// useFactory / useExisting variants emit a different-shaped edge
 		// (module → token) that the DI-token feature consumes below.
 		if def.Node != nil {
-			emitModuleBindings(def.Node, src, id, filePath, result)
+			emitModuleBindings(def.Node, src, id, filePath, result, e.lang)
 			// @Inject(TOKEN) on constructor params: the declaring class
 			// consumes the token. Emit an EdgeConsumes from the class
 			// (not the constructor method) to the token so find_usages
 			// on the token surfaces the consumer directly.
-			emitInjectConsumers(def.Node, src, id, filePath, result)
+			emitInjectConsumers(def.Node, src, id, filePath, result, e.lang)
 		}
 	}
 }
@@ -243,7 +243,7 @@ func (e *TypeScriptExtractor) extractEnums(root *sitter.Node, src []byte, filePa
 		}
 		for i := 0; i < int(def.Node.ChildCount()); i++ {
 			child := def.Node.Child(i)
-			if child == nil || child.Type() != "enum_body" {
+			if child == nil || parser.NodeType(child, e.lang) != "enum_body" {
 				continue
 			}
 			for j := 0; j < int(child.ChildCount()); j++ {
@@ -253,14 +253,14 @@ func (e *TypeScriptExtractor) extractEnums(root *sitter.Node, src []byte, filePa
 				}
 				var memberName string
 				var memberNode *sitter.Node
-				switch mem.Type() {
+				switch parser.NodeType(mem, e.lang) {
 				case "property_identifier":
-					memberName = mem.Content(src)
+					memberName = mem.Text(src)
 					memberNode = mem
 				case "enum_assignment":
-					nameNode := mem.ChildByFieldName("name")
+					nameNode := mem.ChildByFieldName("name", e.lang)
 					if nameNode != nil {
-						memberName = nameNode.Content(src)
+						memberName = nameNode.Text(src)
 						memberNode = mem
 					}
 				}
@@ -324,7 +324,7 @@ func (e *TypeScriptExtractor) extractMethods(classNode *sitter.Node, src []byte,
 		}
 		// Walk the method_definition node's children for a return type annotation.
 		if def.Node != nil {
-			if rt := extractTSMethodReturnType(def.Node, src); rt != "" {
+			if rt := extractTSMethodReturnType(def.Node, src, e.lang); rt != "" {
 				node.Meta["return_type"] = rt
 			}
 		}
@@ -342,8 +342,8 @@ func (e *TypeScriptExtractor) extractMethods(classNode *sitter.Node, src []byte,
 		// method_definition inside class_body (not children), so we walk
 		// prev siblings backward until we hit a non-decorator node.
 		if def.Node != nil {
-			for sib := def.Node.PrevSibling(); sib != nil && sib.Type() == "decorator"; sib = sib.PrevSibling() {
-				emitDispatchFromDecorator(sib, src, id, filePath, result)
+			for sib := def.Node.PrevSibling(); sib != nil && parser.NodeType(sib, e.lang) == "decorator"; sib = sib.PrevSibling() {
+				emitDispatchFromDecorator(sib, src, id, filePath, result, e.lang)
 			}
 		}
 	}
@@ -359,7 +359,7 @@ func (e *TypeScriptExtractor) extractInterfaces(root *sitter.Node, src []byte, f
 		// Walk the interface body to extract method/property signature names.
 		var methods []string
 		if def.Node != nil {
-			methods = extractTSInterfaceMethods(def.Node, src)
+			methods = extractTSInterfaceMethods(def.Node, src, e.lang)
 		}
 
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -420,18 +420,18 @@ func (e *TypeScriptExtractor) extractImports(root *sitter.Node, src []byte, file
 		}
 		for i := 0; i < int(defCap.Node.NamedChildCount()); i++ {
 			child := defCap.Node.NamedChild(i)
-			if child.Type() != "import_clause" {
+			if parser.NodeType(child, e.lang) != "import_clause" {
 				continue
 			}
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				c := child.NamedChild(j)
-				switch c.Type() {
+				switch parser.NodeType(c, e.lang) {
 				case "identifier": // default import: `import Foo from ...`
-					imports[c.Content(src)] = importPath
+					imports[c.Text(src)] = importPath
 				case "namespace_import": // `import * as Foo from ...`
 					for k := 0; k < int(c.NamedChildCount()); k++ {
-						if id := c.NamedChild(k); id.Type() == "identifier" {
-							imports[id.Content(src)] = importPath
+						if id := c.NamedChild(k); parser.NodeType(id, e.lang) == "identifier" {
+							imports[id.Text(src)] = importPath
 						}
 					}
 				}
@@ -465,10 +465,10 @@ func (e *TypeScriptExtractor) extractVariables(root *sitter.Node, src []byte, fi
 		// should be the program (root) node or an export_statement whose parent
 		// is the program node.
 		parent := def.Node.Parent()
-		if parent != nil && parent.Type() == "export_statement" {
+		if parent != nil && parser.NodeType(parent, e.lang) == "export_statement" {
 			parent = parent.Parent()
 		}
-		if parent == nil || parent.Type() != "program" {
+		if parent == nil || parser.NodeType(parent, e.lang) != "program" {
 			continue
 		}
 
@@ -486,13 +486,14 @@ func (e *TypeScriptExtractor) extractVariables(root *sitter.Node, src []byte, fi
 
 // extractTSInterfaceMethods walks children of an interface_declaration node
 // to find method_signature and property_signature entries and returns their names.
-func extractTSInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
+func extractTSInterfaceMethods(ifaceNode *sitter.Node, src []byte, lang *sitter.Language) []string {
 	var methods []string
 	// Find the interface_body child.
 	var body *sitter.Node
 	for i := 0; i < int(ifaceNode.NamedChildCount()); i++ {
 		child := ifaceNode.NamedChild(i)
-		if child.Type() == "interface_body" || child.Type() == "object_type" {
+		ct := parser.NodeType(child, lang)
+		if ct == "interface_body" || ct == "object_type" {
 			body = child
 			break
 		}
@@ -503,13 +504,13 @@ func extractTSInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
 
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		child := body.NamedChild(i)
-		switch child.Type() {
+		switch parser.NodeType(child, lang) {
 		case "method_signature", "property_signature":
 			// The first named child is typically the property_identifier (name).
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				nameNode := child.NamedChild(j)
-				if nameNode.Type() == "property_identifier" {
-					methods = append(methods, nameNode.Content(src))
+				if parser.NodeType(nameNode, lang) == "property_identifier" {
+					methods = append(methods, nameNode.Text(src))
 					break
 				}
 			}
@@ -592,7 +593,7 @@ func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEn
 	// resolver falls back to "caller's receiver type" and method-name
 	// collisions inside the containing class cause self-loops — as
 	// seen with UsersController.create → UsersController.create.
-	collectThisParamTypes(root, src, tenv)
+	collectThisParamTypes(root, src, tenv, e.lang)
 
 	// Tier 1: new expressions — const x = new Type(...)
 	// Walk all variable declarators and check if RHS is a new_expression.
@@ -607,12 +608,13 @@ func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEn
 		if defNode == nil {
 			continue
 		}
+		lang := e.lang
 		walkNodes(defNode, func(n *sitter.Node) {
-			if n.Type() == "variable_declarator" {
+			if parser.NodeType(n, lang) == "variable_declarator" {
 				for i := 0; i < int(n.NamedChildCount()); i++ {
 					child := n.NamedChild(i)
-					if child.Type() == "new_expression" {
-						typeName := inferTypeFromNewExpr(child, src)
+					if parser.NodeType(child, lang) == "new_expression" {
+						typeName := inferTypeFromNewExpr(child, src, lang)
 						if typeName != "" {
 							tenv[name] = typeName
 						}
@@ -634,22 +636,22 @@ func (e *TypeScriptExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEn
 // prefer Y when a call's receiver_type is X. Non-useClass providers
 // (useValue / useFactory / useExisting / bare class references) are
 // skipped here — they'll be handled by the @Inject(TOKEN) feature.
-func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult) {
+func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, lang *sitter.Language) {
 	// Decorators on classes come as siblings via an export_statement
 	// wrapper OR as children of class_declaration, depending on the
 	// grammar version and whether the class is exported. Walk both
 	// directions to be robust.
-	decorators := classDecorators(classNode)
+	decorators := classDecorators(classNode, lang)
 	for _, dec := range decorators {
-		call := nestDecoratorCall(dec)
+		call := nestDecoratorCall(dec, lang)
 		if call == nil {
 			continue
 		}
-		fn := call.ChildByFieldName("function")
-		if fn == nil || fn.Type() != "identifier" || fn.Content(src) != "Module" {
+		fn := call.ChildByFieldName("function", lang)
+		if fn == nil || parser.NodeType(fn, lang) != "identifier" || fn.Text(src) != "Module" {
 			continue
 		}
-		args := call.ChildByFieldName("arguments")
+		args := call.ChildByFieldName("arguments", lang)
 		if args == nil {
 			continue
 		}
@@ -657,7 +659,7 @@ func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath st
 		var config *sitter.Node
 		for i := 0; i < int(args.NamedChildCount()); i++ {
 			c := args.NamedChild(i)
-			if c != nil && c.Type() == "object" {
+			if c != nil && parser.NodeType(c, lang) == "object" {
 				config = c
 				break
 			}
@@ -665,14 +667,14 @@ func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath st
 		if config == nil {
 			continue
 		}
-		emitProvidersFromObject(config, src, classID, filePath, result, "@Module")
+		emitProvidersFromObject(config, src, classID, filePath, result, "@Module", lang)
 	}
 	// Dynamic modules: forRoot / forFeature / forRootAsync /
 	// forFeatureAsync are static methods returning a DynamicModule
 	// config object with the same `providers:` shape as the @Module
 	// decorator. Extraction mirrors the decorator path — the static
 	// method's return object feeds the same helper.
-	emitDynamicModuleBindings(classNode, src, classID, filePath, result)
+	emitDynamicModuleBindings(classNode, src, classID, filePath, result, lang)
 }
 
 // emitProvidersFromObject walks the `providers: [...]` array inside a
@@ -681,22 +683,22 @@ func emitModuleBindings(classNode *sitter.Node, src []byte, classID, filePath st
 // EdgeProvides edges. originTag names the decorator / method the
 // binding originated from so find_usages can tell the agent where to
 // look for the module wiring.
-func emitProvidersFromObject(config *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, originTag string) {
-	providersNode := objectFieldValue(config, src, "providers")
-	if providersNode == nil || providersNode.Type() != "array" {
+func emitProvidersFromObject(config *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, originTag string, lang *sitter.Language) {
+	providersNode := objectFieldValue(config, src, "providers", lang)
+	if providersNode == nil || parser.NodeType(providersNode, lang) != "array" {
 		return
 	}
 	for i := 0; i < int(providersNode.NamedChildCount()); i++ {
 		entry := providersNode.NamedChild(i)
-		if entry == nil || entry.Type() != "object" {
+		if entry == nil || parser.NodeType(entry, lang) != "object" {
 			continue
 		}
-		abstract := objectFieldToken(entry, src, "provide")
+		abstract := objectFieldToken(entry, src, "provide", lang)
 		if abstract == "" {
 			continue
 		}
 		// useClass: abstract type bound to a concrete implementation.
-		if concrete := objectFieldIdentifier(entry, src, "useClass"); concrete != "" {
+		if concrete := objectFieldIdentifier(entry, src, "useClass", lang); concrete != "" {
 			result.Edges = append(result.Edges, &graph.Edge{
 				From:     classID,
 				To:       "unresolved::" + concrete,
@@ -714,7 +716,7 @@ func emitProvidersFromObject(config *sitter.Node, src []byte, classID, filePath 
 		// useValue / useFactory / useExisting: the token IS the public
 		// face of the binding.
 		for _, variant := range []string{"useValue", "useFactory", "useExisting"} {
-			if objectFieldValue(entry, src, variant) == nil {
+			if objectFieldValue(entry, src, variant, lang) == nil {
 				continue
 			}
 			result.Edges = append(result.Edges, &graph.Edge{
@@ -750,25 +752,25 @@ var dynamicModuleMethods = map[string]struct{}{
 	"registerAsync":   {},
 }
 
-func emitDynamicModuleBindings(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult) {
+func emitDynamicModuleBindings(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, lang *sitter.Language) {
 	walkNodes(classNode, func(n *sitter.Node) {
-		if n.Type() != "method_definition" {
+		if parser.NodeType(n, lang) != "method_definition" {
 			return
 		}
-		nameNode := n.ChildByFieldName("name")
+		nameNode := n.ChildByFieldName("name", lang)
 		if nameNode == nil {
 			return
 		}
-		if _, ok := dynamicModuleMethods[nameNode.Content(src)]; !ok {
+		if _, ok := dynamicModuleMethods[nameNode.Text(src)]; !ok {
 			return
 		}
 		// Static-only: plain instance methods with these names are not
 		// NestJS dynamic-module factories. Look for a `static` keyword
 		// among the method's children.
-		if !methodIsStatic(n) {
+		if !methodIsStatic(n, lang) {
 			return
 		}
-		body := n.ChildByFieldName("body")
+		body := n.ChildByFieldName("body", lang)
 		if body == nil {
 			return
 		}
@@ -778,12 +780,12 @@ func emitDynamicModuleBindings(classNode *sitter.Node, src []byte, classID, file
 		// attempted here — they're rare and ambiguous.
 		var cfg *sitter.Node
 		walkNodes(body, func(m *sitter.Node) {
-			if cfg != nil || m.Type() != "return_statement" {
+			if cfg != nil || parser.NodeType(m, lang) != "return_statement" {
 				return
 			}
 			for i := 0; i < int(m.NamedChildCount()); i++ {
 				c := m.NamedChild(i)
-				if c != nil && c.Type() == "object" {
+				if c != nil && parser.NodeType(c, lang) == "object" {
 					cfg = c
 					return
 				}
@@ -792,17 +794,17 @@ func emitDynamicModuleBindings(classNode *sitter.Node, src []byte, classID, file
 		if cfg == nil {
 			return
 		}
-		emitProvidersFromObject(cfg, src, classID, filePath, result, nameNode.Content(src))
+		emitProvidersFromObject(cfg, src, classID, filePath, result, nameNode.Text(src), lang)
 	})
 }
 
 // methodIsStatic reports whether a method_definition has the `static`
 // modifier among its children. Tree-sitter-typescript places modifiers
 // as unnamed children (anonymous tokens) preceding the method name.
-func methodIsStatic(m *sitter.Node) bool {
+func methodIsStatic(m *sitter.Node, lang *sitter.Language) bool {
 	for i := 0; i < int(m.ChildCount()); i++ {
 		c := m.Child(i)
-		if c != nil && c.Type() == "static" {
+		if c != nil && parser.NodeType(c, lang) == "static" {
 			return true
 		}
 	}
@@ -813,21 +815,21 @@ func methodIsStatic(m *sitter.Node) bool {
 // In tree-sitter-typescript, decorators appear either as children of the
 // class_declaration directly or, when the class is `export`-ed, as
 // children of the enclosing export_statement preceding the class.
-func classDecorators(classNode *sitter.Node) []*sitter.Node {
+func classDecorators(classNode *sitter.Node, lang *sitter.Language) []*sitter.Node {
 	var decs []*sitter.Node
 	// Direct children first.
 	for i := 0; i < int(classNode.ChildCount()); i++ {
 		c := classNode.Child(i)
-		if c != nil && c.Type() == "decorator" {
+		if c != nil && parser.NodeType(c, lang) == "decorator" {
 			decs = append(decs, c)
 		}
 	}
 	// Parent export_statement siblings.
 	parent := classNode.Parent()
-	if parent != nil && parent.Type() == "export_statement" {
+	if parent != nil && parser.NodeType(parent, lang) == "export_statement" {
 		for i := 0; i < int(parent.ChildCount()); i++ {
 			c := parent.Child(i)
-			if c != nil && c.Type() == "decorator" {
+			if c != nil && parser.NodeType(c, lang) == "decorator" {
 				decs = append(decs, c)
 			}
 		}
@@ -838,20 +840,20 @@ func classDecorators(classNode *sitter.Node) []*sitter.Node {
 // objectFieldValue returns the `value` child of a `pair` node inside the
 // given object literal whose key matches the supplied name, or nil when
 // absent. Works on tree-sitter's JS/TS object grammar.
-func objectFieldValue(objNode *sitter.Node, src []byte, name string) *sitter.Node {
+func objectFieldValue(objNode *sitter.Node, src []byte, name string, lang *sitter.Language) *sitter.Node {
 	for i := 0; i < int(objNode.NamedChildCount()); i++ {
 		p := objNode.NamedChild(i)
-		if p == nil || p.Type() != "pair" {
+		if p == nil || parser.NodeType(p, lang) != "pair" {
 			continue
 		}
-		key := p.ChildByFieldName("key")
+		key := p.ChildByFieldName("key", lang)
 		if key == nil {
 			continue
 		}
-		if key.Content(src) != name {
+		if key.Text(src) != name {
 			continue
 		}
-		return p.ChildByFieldName("value")
+		return p.ChildByFieldName("value", lang)
 	}
 	return nil
 }
@@ -859,12 +861,12 @@ func objectFieldValue(objNode *sitter.Node, src []byte, name string) *sitter.Nod
 // objectFieldIdentifier is a thin wrapper on objectFieldValue that only
 // returns a value when it's a plain identifier (the shape we care about
 // for `useClass: Y` entries). Returns "" otherwise.
-func objectFieldIdentifier(objNode *sitter.Node, src []byte, name string) string {
-	v := objectFieldValue(objNode, src, name)
-	if v == nil || v.Type() != "identifier" {
+func objectFieldIdentifier(objNode *sitter.Node, src []byte, name string, lang *sitter.Language) string {
+	v := objectFieldValue(objNode, src, name, lang)
+	if v == nil || parser.NodeType(v, lang) != "identifier" {
 		return ""
 	}
-	return v.Content(src)
+	return v.Text(src)
 }
 
 // objectFieldToken accepts either an identifier or a string literal —
@@ -872,18 +874,18 @@ func objectFieldIdentifier(objNode *sitter.Node, src []byte, name string) string
 // `{ provide: MyToken, ... }` (identifier) and `{ provide: 'MY_TOKEN',
 // ... }` (literal). The returned string is the token name with any
 // surrounding quotes stripped.
-func objectFieldToken(objNode *sitter.Node, src []byte, name string) string {
-	v := objectFieldValue(objNode, src, name)
+func objectFieldToken(objNode *sitter.Node, src []byte, name string, lang *sitter.Language) string {
+	v := objectFieldValue(objNode, src, name, lang)
 	if v == nil {
 		return ""
 	}
-	switch v.Type() {
+	switch parser.NodeType(v, lang) {
 	case "identifier":
-		return v.Content(src)
+		return v.Text(src)
 	case "string":
 		// String literal: strip the two surrounding quotes. Escape
 		// handling isn't needed — injection tokens are simple ASCII.
-		s := v.Content(src)
+		s := v.Text(src)
 		if len(s) >= 2 {
 			return s[1 : len(s)-1]
 		}
@@ -902,10 +904,10 @@ func objectFieldToken(objNode *sitter.Node, src []byte, name string) string {
 // prev siblings per field. The edge source is the class (not the ctor
 // method or field), matching the grain callers get when they ask
 // `find_usages(TOKEN)`.
-func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult) {
+func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath string, result *parser.ExtractionResult, lang *sitter.Language) {
 	seen := make(map[string]struct{})
 	emit := func(dec *sitter.Node) {
-		tok := injectDecoratorArg(dec, src)
+		tok := injectDecoratorArg(dec, src, lang)
 		if tok == "" {
 			return
 		}
@@ -926,13 +928,13 @@ func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath s
 		})
 	}
 	walkNodes(classNode, func(n *sitter.Node) {
-		switch n.Type() {
+		switch parser.NodeType(n, lang) {
 		case "method_definition":
-			nameNode := n.ChildByFieldName("name")
-			if nameNode == nil || nameNode.Content(src) != "constructor" {
+			nameNode := n.ChildByFieldName("name", lang)
+			if nameNode == nil || nameNode.Text(src) != "constructor" {
 				return
 			}
-			params := n.ChildByFieldName("parameters")
+			params := n.ChildByFieldName("parameters", lang)
 			if params == nil {
 				return
 			}
@@ -943,7 +945,7 @@ func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath s
 				}
 				for j := 0; j < int(p.ChildCount()); j++ {
 					c := p.Child(j)
-					if c != nil && c.Type() == "decorator" {
+					if c != nil && parser.NodeType(c, lang) == "decorator" {
 						emit(c)
 					}
 				}
@@ -954,7 +956,7 @@ func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath s
 			// siblings. Walk direct children for decorator entries.
 			for i := 0; i < int(n.ChildCount()); i++ {
 				c := n.Child(i)
-				if c != nil && c.Type() == "decorator" {
+				if c != nil && parser.NodeType(c, lang) == "decorator" {
 					emit(c)
 				}
 			}
@@ -965,16 +967,16 @@ func emitInjectConsumers(classNode *sitter.Node, src []byte, classID, filePath s
 // injectDecoratorArg returns the first identifier or string-literal
 // argument of an `@Inject(...)` decorator, or "" when the decorator
 // isn't @Inject or its argument isn't a simple token.
-func injectDecoratorArg(dec *sitter.Node, src []byte) string {
-	call := nestDecoratorCall(dec)
+func injectDecoratorArg(dec *sitter.Node, src []byte, lang *sitter.Language) string {
+	call := nestDecoratorCall(dec, lang)
 	if call == nil {
 		return ""
 	}
-	fn := call.ChildByFieldName("function")
-	if fn == nil || fn.Type() != "identifier" || fn.Content(src) != "Inject" {
+	fn := call.ChildByFieldName("function", lang)
+	if fn == nil || parser.NodeType(fn, lang) != "identifier" || fn.Text(src) != "Inject" {
 		return ""
 	}
-	args := call.ChildByFieldName("arguments")
+	args := call.ChildByFieldName("arguments", lang)
 	if args == nil {
 		return ""
 	}
@@ -983,11 +985,11 @@ func injectDecoratorArg(dec *sitter.Node, src []byte) string {
 		if arg == nil {
 			continue
 		}
-		switch arg.Type() {
+		switch parser.NodeType(arg, lang) {
 		case "identifier":
-			return arg.Content(src)
+			return arg.Text(src)
 		case "string":
-			s := arg.Content(src)
+			s := arg.Text(src)
 			if len(s) >= 2 {
 				return s[1 : len(s)-1]
 			}
@@ -1015,29 +1017,29 @@ var nestDispatchDecorators = map[string]string{
 // receiver_type so the resolver's Pass 1 disambiguates by class rather
 // than falling back to name-only heuristics. Non-identifier arguments
 // (`new X()`, literals) are silently skipped.
-func emitDispatchFromDecorator(dec *sitter.Node, src []byte, methodID, filePath string, result *parser.ExtractionResult) {
-	callNode := nestDecoratorCall(dec)
+func emitDispatchFromDecorator(dec *sitter.Node, src []byte, methodID, filePath string, result *parser.ExtractionResult, lang *sitter.Language) {
+	callNode := nestDecoratorCall(dec, lang)
 	if callNode == nil {
 		return
 	}
-	fn := callNode.ChildByFieldName("function")
-	if fn == nil || fn.Type() != "identifier" {
+	fn := callNode.ChildByFieldName("function", lang)
+	if fn == nil || parser.NodeType(fn, lang) != "identifier" {
 		return
 	}
-	entryMethod, ok := nestDispatchDecorators[fn.Content(src)]
+	entryMethod, ok := nestDispatchDecorators[fn.Text(src)]
 	if !ok {
 		return
 	}
-	args := callNode.ChildByFieldName("arguments")
+	args := callNode.ChildByFieldName("arguments", lang)
 	if args == nil {
 		return
 	}
 	for j := 0; j < int(args.NamedChildCount()); j++ {
 		arg := args.NamedChild(j)
-		if arg == nil || arg.Type() != "identifier" {
+		if arg == nil || parser.NodeType(arg, lang) != "identifier" {
 			continue
 		}
-		argClass := arg.Content(src)
+		argClass := arg.Text(src)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From:     methodID,
 			To:       "unresolved::*." + entryMethod,
@@ -1046,7 +1048,7 @@ func emitDispatchFromDecorator(dec *sitter.Node, src []byte, methodID, filePath 
 			Line:     int(dec.StartPoint().Row) + 1,
 			Meta: map[string]any{
 				"receiver_type":      argClass,
-				"dispatch_decorator": fn.Content(src),
+				"dispatch_decorator": fn.Text(src),
 			},
 		})
 	}
@@ -1055,10 +1057,10 @@ func emitDispatchFromDecorator(dec *sitter.Node, src []byte, methodID, filePath 
 // nestDecoratorCall returns the call_expression child of a decorator node
 // if the decorator has the shape `@Name(args)`. Plain `@Name` without
 // parens returns nil (those can't bind arguments, so nothing to emit).
-func nestDecoratorCall(dec *sitter.Node) *sitter.Node {
+func nestDecoratorCall(dec *sitter.Node, lang *sitter.Language) *sitter.Node {
 	for i := 0; i < int(dec.NamedChildCount()); i++ {
 		c := dec.NamedChild(i)
-		if c != nil && c.Type() == "call_expression" {
+		if c != nil && parser.NodeType(c, lang) == "call_expression" {
 			return c
 		}
 	}
@@ -1072,19 +1074,19 @@ func nestDecoratorCall(dec *sitter.Node) *sitter.Node {
 // property is a required_parameter whose first child is an accessibility
 // or readonly modifier — that's how the tree-sitter-typescript grammar
 // distinguishes them from plain constructor args.
-func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv) {
+func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv, lang *sitter.Language) {
 	walkNodes(root, func(n *sitter.Node) {
-		if n.Type() != "class_declaration" {
+		if parser.NodeType(n, lang) != "class_declaration" {
 			return
 		}
 		walkNodes(n, func(m *sitter.Node) {
-			switch m.Type() {
+			switch parser.NodeType(m, lang) {
 			case "method_definition":
-				nameNode := m.ChildByFieldName("name")
-				if nameNode == nil || nameNode.Content(src) != "constructor" {
+				nameNode := m.ChildByFieldName("name", lang)
+				if nameNode == nil || nameNode.Text(src) != "constructor" {
 					return
 				}
-				params := m.ChildByFieldName("parameters")
+				params := m.ChildByFieldName("parameters", lang)
 				if params == nil {
 					return
 				}
@@ -1095,17 +1097,18 @@ func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv) {
 					}
 					// Only required_parameter nodes can carry the parameter-
 					// property shorthand; plain identifiers bail out.
-					if p.Type() != "required_parameter" && p.Type() != "optional_parameter" {
+					pt := parser.NodeType(p, lang)
+					if pt != "required_parameter" && pt != "optional_parameter" {
 						continue
 					}
-					if !hasParameterPropertyModifier(p) {
+					if !hasParameterPropertyModifier(p, lang) {
 						continue
 					}
-					paramName := paramIdentifier(p, src)
+					paramName := paramIdentifier(p, src, lang)
 					if paramName == "" {
 						continue
 					}
-					typeName := paramTypeAnnotation(p, src)
+					typeName := paramTypeAnnotation(p, src, lang)
 					if typeName == "" {
 						continue
 					}
@@ -1122,17 +1125,17 @@ func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv) {
 				// this the resolver's same-dir name-match fallback
 				// picks an arbitrary method when more than one class
 				// defines the called name.
-				name := classFieldName(m, src)
+				name := classFieldName(m, src, lang)
 				if name == "" {
 					return
 				}
 				// Prefer an explicit type annotation when present; fall
 				// back to inject() initializer inference.
-				if t := classFieldTypeAnnotation(m, src); t != "" {
+				if t := classFieldTypeAnnotation(m, src, lang); t != "" {
 					tenv["this."+name] = t
 					return
 				}
-				if t := injectInitializerType(m, src); t != "" {
+				if t := injectInitializerType(m, src, lang); t != "" {
 					tenv["this."+name] = t
 				}
 			}
@@ -1143,20 +1146,20 @@ func collectThisParamTypes(root *sitter.Node, src []byte, tenv typeEnv) {
 // classFieldName returns the identifier name of a public_field_definition
 // node (`private readonly NAME: T = ...`). Returns "" when the field
 // has no identifier or is a computed property.
-func classFieldName(field *sitter.Node, src []byte) string {
-	nameNode := field.ChildByFieldName("name")
-	if nameNode == nil || nameNode.Type() != "property_identifier" {
+func classFieldName(field *sitter.Node, src []byte, lang *sitter.Language) string {
+	nameNode := field.ChildByFieldName("name", lang)
+	if nameNode == nil || parser.NodeType(nameNode, lang) != "property_identifier" {
 		return ""
 	}
-	return nameNode.Content(src)
+	return nameNode.Text(src)
 }
 
 // classFieldTypeAnnotation returns the normalised type name from a
 // field's type_annotation child, or "" when absent.
-func classFieldTypeAnnotation(field *sitter.Node, src []byte) string {
+func classFieldTypeAnnotation(field *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(field.NamedChildCount()); i++ {
 		c := field.NamedChild(i)
-		if c == nil || c.Type() != "type_annotation" {
+		if c == nil || parser.NodeType(c, lang) != "type_annotation" {
 			continue
 		}
 		for j := 0; j < int(c.NamedChildCount()); j++ {
@@ -1164,7 +1167,7 @@ func classFieldTypeAnnotation(field *sitter.Node, src []byte) string {
 			if tn == nil {
 				continue
 			}
-			return normalizeTypeName(tn.Content(src))
+			return normalizeTypeName(tn.Text(src))
 		}
 	}
 	return ""
@@ -1174,16 +1177,16 @@ func classFieldTypeAnnotation(field *sitter.Node, src []byte) string {
 // `inject(X)` call when that call is the initializer of a class field.
 // Returns "" when the field has no initializer, the initializer isn't
 // an inject() call, or the argument isn't a plain identifier.
-func injectInitializerType(field *sitter.Node, src []byte) string {
-	value := field.ChildByFieldName("value")
-	if value == nil || value.Type() != "call_expression" {
+func injectInitializerType(field *sitter.Node, src []byte, lang *sitter.Language) string {
+	value := field.ChildByFieldName("value", lang)
+	if value == nil || parser.NodeType(value, lang) != "call_expression" {
 		return ""
 	}
-	fn := value.ChildByFieldName("function")
-	if fn == nil || fn.Type() != "identifier" || fn.Content(src) != "inject" {
+	fn := value.ChildByFieldName("function", lang)
+	if fn == nil || parser.NodeType(fn, lang) != "identifier" || fn.Text(src) != "inject" {
 		return ""
 	}
-	args := value.ChildByFieldName("arguments")
+	args := value.ChildByFieldName("arguments", lang)
 	if args == nil {
 		return ""
 	}
@@ -1192,8 +1195,8 @@ func injectInitializerType(field *sitter.Node, src []byte) string {
 		if arg == nil {
 			continue
 		}
-		if arg.Type() == "identifier" {
-			return arg.Content(src)
+		if parser.NodeType(arg, lang) == "identifier" {
+			return arg.Text(src)
 		}
 		return ""
 	}
@@ -1203,13 +1206,13 @@ func injectInitializerType(field *sitter.Node, src []byte) string {
 // hasParameterPropertyModifier reports whether a required_parameter node
 // carries one of the visibility/readonly modifiers that promote a ctor
 // arg to a class member in TypeScript.
-func hasParameterPropertyModifier(p *sitter.Node) bool {
+func hasParameterPropertyModifier(p *sitter.Node, lang *sitter.Language) bool {
 	for i := 0; i < int(p.ChildCount()); i++ {
 		c := p.Child(i)
 		if c == nil {
 			continue
 		}
-		switch c.Type() {
+		switch parser.NodeType(c, lang) {
 		case "accessibility_modifier", "readonly":
 			return true
 		case "override_modifier":
@@ -1222,16 +1225,16 @@ func hasParameterPropertyModifier(p *sitter.Node) bool {
 
 // paramIdentifier finds the underlying identifier name for a required_parameter
 // — handles both `foo: T` and `foo?: T` / `foo = default`.
-func paramIdentifier(p *sitter.Node, src []byte) string {
-	pattern := p.ChildByFieldName("pattern")
-	if pattern != nil && pattern.Type() == "identifier" {
-		return pattern.Content(src)
+func paramIdentifier(p *sitter.Node, src []byte, lang *sitter.Language) string {
+	pattern := p.ChildByFieldName("pattern", lang)
+	if pattern != nil && parser.NodeType(pattern, lang) == "identifier" {
+		return pattern.Text(src)
 	}
 	// Fallback: first identifier child.
 	for i := 0; i < int(p.NamedChildCount()); i++ {
 		c := p.NamedChild(i)
-		if c != nil && c.Type() == "identifier" {
-			return c.Content(src)
+		if c != nil && parser.NodeType(c, lang) == "identifier" {
+			return c.Text(src)
 		}
 	}
 	return ""
@@ -1240,14 +1243,14 @@ func paramIdentifier(p *sitter.Node, src []byte) string {
 // paramTypeAnnotation extracts the type name from a required_parameter's
 // type_annotation child, applying the same normalization as Tier 0 var
 // declarations (strip generics, arrays, nullable unions, primitives).
-func paramTypeAnnotation(p *sitter.Node, src []byte) string {
-	ta := p.ChildByFieldName("type")
+func paramTypeAnnotation(p *sitter.Node, src []byte, lang *sitter.Language) string {
+	ta := p.ChildByFieldName("type", lang)
 	if ta == nil {
 		// Some grammar versions don't expose a "type" field on parameters;
 		// fall back to the first type_annotation child.
 		for i := 0; i < int(p.NamedChildCount()); i++ {
 			c := p.NamedChild(i)
-			if c != nil && c.Type() == "type_annotation" {
+			if c != nil && parser.NodeType(c, lang) == "type_annotation" {
 				ta = c
 				break
 			}
@@ -1261,7 +1264,7 @@ func paramTypeAnnotation(p *sitter.Node, src []byte) string {
 		if c == nil {
 			continue
 		}
-		return normalizeTypeName(c.Content(src))
+		return normalizeTypeName(c.Text(src))
 	}
 	return ""
 }
@@ -1294,14 +1297,14 @@ func normalizeTypeName(t string) string {
 
 // extractTSMethodReturnType walks a method_definition node's children to find
 // a type_annotation child and returns the normalized type name.
-func extractTSMethodReturnType(methodNode *sitter.Node, src []byte) string {
+func extractTSMethodReturnType(methodNode *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(methodNode.NamedChildCount()); i++ {
 		child := methodNode.NamedChild(i)
-		if child.Type() == "type_annotation" {
+		if parser.NodeType(child, lang) == "type_annotation" {
 			// The type_annotation's first named child is the actual type node.
 			if child.NamedChildCount() > 0 {
 				typeNode := child.NamedChild(0)
-				return normalizeTypeName(typeNode.Content(src))
+				return normalizeTypeName(typeNode.Text(src))
 			}
 		}
 	}
@@ -1310,11 +1313,12 @@ func extractTSMethodReturnType(methodNode *sitter.Node, src []byte) string {
 
 // inferTypeFromNewExpr extracts the class name from a new_expression node.
 // new User(...) → "User"
-func inferTypeFromNewExpr(node *sitter.Node, src []byte) string {
+func inferTypeFromNewExpr(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "identifier" || child.Type() == "type_identifier" {
-			name := child.Content(src)
+		ct := parser.NodeType(child, lang)
+		if ct == "identifier" || ct == "type_identifier" {
+			name := child.Text(src)
 			if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
 				return name
 			}

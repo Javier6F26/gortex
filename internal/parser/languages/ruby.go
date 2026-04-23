@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/ruby"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -50,7 +50,7 @@ type RubyExtractor struct {
 }
 
 func NewRubyExtractor() *RubyExtractor {
-	return &RubyExtractor{lang: ruby.GetLanguage()}
+	return &RubyExtractor{lang: grammars.RubyLanguage()}
 }
 
 func (e *RubyExtractor) Language() string     { return "ruby" }
@@ -214,7 +214,7 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		callNode := expr.Node
 		var target string
 		if callNode != nil {
-			receiver := callNode.ChildByFieldName("receiver")
+			receiver := callNode.ChildByFieldName("receiver", e.lang)
 			if receiver != nil {
 				target = "unresolved::*." + name
 			} else {
@@ -261,7 +261,7 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	// site. For each match we emit one EdgeCalls per (action, callback)
 	// pair so both `callers:callback` and `call_chain:action` answer
 	// the way a Rails developer would expect.
-	emitRailsCallbacks(root, src, filePath, result)
+	emitRailsCallbacks(root, src, filePath, result, e.lang)
 
 	return result, nil
 }
@@ -281,7 +281,7 @@ var railsCallbackMethods = map[string]struct{}{
 	"around_filter":  {},
 }
 
-func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult) {
+func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *parser.ExtractionResult, lang *sitter.Language) {
 	// Walk every class body looking for top-level call expressions
 	// whose method identifier matches a callback macro.
 	var walk func(*sitter.Node)
@@ -289,12 +289,12 @@ func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *
 		if n == nil {
 			return
 		}
-		if n.Type() == "class" {
-			nameNode := n.ChildByFieldName("name")
+		if parser.NodeType(n, lang) == "class" {
+			nameNode := n.ChildByFieldName("name", lang)
 			if nameNode == nil {
 				return
 			}
-			className := nameNode.Content(src)
+			className := nameNode.Text(src)
 			classID := filePath + "::" + className
 
 			// Actions = instance methods of this class. Build a quick
@@ -305,7 +305,7 @@ func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *
 			var bodyStatements *sitter.Node
 			for i := 0; i < int(n.NamedChildCount()); i++ {
 				c := n.NamedChild(i)
-				if c != nil && c.Type() == "body_statement" {
+				if c != nil && parser.NodeType(c, lang) == "body_statement" {
 					bodyStatements = c
 					break
 				}
@@ -320,12 +320,12 @@ func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *
 				if c == nil {
 					continue
 				}
-				if c.Type() == "method" || c.Type() == "singleton_method" {
-					nn := c.ChildByFieldName("name")
+				if parser.NodeType(c, lang) == "method" || parser.NodeType(c, lang) == "singleton_method" {
+					nn := c.ChildByFieldName("name", lang)
 					if nn == nil {
 						continue
 					}
-					name := nn.Content(src)
+					name := nn.Text(src)
 					methodIDs[name] = filePath + "::" + className + "." + name
 				}
 			}
@@ -337,46 +337,46 @@ func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *
 			allCallbacks := make(map[string]struct{})
 			for i := 0; i < int(bodyStatements.NamedChildCount()); i++ {
 				c := bodyStatements.NamedChild(i)
-				if c == nil || c.Type() != "call" {
+				if c == nil || parser.NodeType(c, lang) != "call" {
 					continue
 				}
-				methodNode := c.ChildByFieldName("method")
+				methodNode := c.ChildByFieldName("method", lang)
 				if methodNode == nil {
 					continue
 				}
-				if _, ok := railsCallbackMethods[methodNode.Content(src)]; !ok {
+				if _, ok := railsCallbackMethods[methodNode.Text(src)]; !ok {
 					continue
 				}
-				args := c.ChildByFieldName("arguments")
+				args := c.ChildByFieldName("arguments", lang)
 				if args == nil {
 					continue
 				}
 				for i := 0; i < int(args.NamedChildCount()); i++ {
 					arg := args.NamedChild(i)
-					if arg != nil && arg.Type() == "simple_symbol" {
-						allCallbacks[strings.TrimPrefix(arg.Content(src), ":")] = struct{}{}
+					if arg != nil && parser.NodeType(arg, lang) == "simple_symbol" {
+						allCallbacks[strings.TrimPrefix(arg.Text(src), ":")] = struct{}{}
 					}
 				}
 			}
 			// Second pass: emit edges.
 			for i := 0; i < int(bodyStatements.NamedChildCount()); i++ {
 				c := bodyStatements.NamedChild(i)
-				if c == nil || c.Type() != "call" {
+				if c == nil || parser.NodeType(c, lang) != "call" {
 					continue
 				}
-				methodNode := c.ChildByFieldName("method")
+				methodNode := c.ChildByFieldName("method", lang)
 				if methodNode == nil {
 					continue
 				}
-				macro := methodNode.Content(src)
+				macro := methodNode.Text(src)
 				if _, ok := railsCallbackMethods[macro]; !ok {
 					continue
 				}
-				args := c.ChildByFieldName("arguments")
+				args := c.ChildByFieldName("arguments", lang)
 				if args == nil {
 					continue
 				}
-				emitRailsCallbackEdges(args, src, filePath, int(c.StartPoint().Row)+1, classID, className, methodIDs, allCallbacks, macro, result)
+				emitRailsCallbackEdges(args, src, filePath, int(c.StartPoint().Row)+1, classID, className, methodIDs, allCallbacks, macro, result, lang)
 			}
 			return
 		}
@@ -391,7 +391,7 @@ func emitRailsCallbacks(root *sitter.Node, src []byte, filePath string, result *
 // applies only:/except: filters against the class's action methods,
 // and emits one EdgeCalls per (action, callback) pair. Class-level
 // callbacks without only:/except: fan out to every action.
-func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line int, classID, className string, methodIDs map[string]string, allCallbacks map[string]struct{}, macro string, result *parser.ExtractionResult) {
+func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line int, classID, className string, methodIDs map[string]string, allCallbacks map[string]struct{}, macro string, result *parser.ExtractionResult, lang *sitter.Language) {
 	var callbackSyms []string
 	onlyFilter := map[string]struct{}{}
 	exceptFilter := map[string]struct{}{}
@@ -402,19 +402,19 @@ func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line
 		if arg == nil {
 			continue
 		}
-		switch arg.Type() {
+		switch parser.NodeType(arg, lang) {
 		case "simple_symbol":
 			// `:name` — the most common form.
-			sym := strings.TrimPrefix(arg.Content(src), ":")
+			sym := strings.TrimPrefix(arg.Text(src), ":")
 			callbackSyms = append(callbackSyms, sym)
 		case "pair":
 			// `only: :show` or `except: [:a, :b]`.
-			keyNode := arg.ChildByFieldName("key")
-			valNode := arg.ChildByFieldName("value")
+			keyNode := arg.ChildByFieldName("key", lang)
+			valNode := arg.ChildByFieldName("value", lang)
 			if keyNode == nil || valNode == nil {
 				continue
 			}
-			key := strings.TrimSuffix(strings.TrimPrefix(keyNode.Content(src), ":"), ":")
+			key := strings.TrimSuffix(strings.TrimPrefix(keyNode.Text(src), ":"), ":")
 			target := &onlyFilter
 			set := &hasOnly
 			switch key {
@@ -426,7 +426,7 @@ func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line
 			default:
 				continue
 			}
-			for _, sym := range collectRubySymbols(valNode, src) {
+			for _, sym := range collectRubySymbols(valNode, src, lang) {
 				(*target)[sym] = struct{}{}
 			}
 			if len(*target) > 0 {
@@ -497,16 +497,16 @@ func emitRailsCallbackEdges(args *sitter.Node, src []byte, filePath string, line
 
 // collectRubySymbols gathers bare symbol tokens from an expression that
 // may be a single symbol (`:foo`) or an array of them (`[:a, :b]`).
-func collectRubySymbols(n *sitter.Node, src []byte) []string {
+func collectRubySymbols(n *sitter.Node, src []byte, lang *sitter.Language) []string {
 	var out []string
-	switch n.Type() {
+	switch parser.NodeType(n, lang) {
 	case "simple_symbol":
-		out = append(out, strings.TrimPrefix(n.Content(src), ":"))
+		out = append(out, strings.TrimPrefix(n.Text(src), ":"))
 	case "array":
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			c := n.NamedChild(i)
-			if c != nil && c.Type() == "simple_symbol" {
-				out = append(out, strings.TrimPrefix(c.Content(src), ":"))
+			if c != nil && parser.NodeType(c, lang) == "simple_symbol" {
+				out = append(out, strings.TrimPrefix(c.Text(src), ":"))
 			}
 		}
 	}

@@ -1,44 +1,59 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Pug (formerly Jade) is indent-delimited. Meaningful symbols are
-// `mixin name(args)` (function-like reusable blocks) and `block name`
-// (inheritance slots). Cross-template wiring comes from top-of-file
-// `extends path` / `include path` directives which we model as
-// import edges. Mixin and block bodies are indent-delimited and
-// handled via findIndentedBlockEnd.
-var (
-	pugMixinRe   = regexp.MustCompile(`(?m)^\s*mixin\s+([A-Za-z_][\w-]*)`)
-	pugBlockRe   = regexp.MustCompile(`(?m)^\s*block\s+(?:append\s+|prepend\s+)?([A-Za-z_][\w-]*)`)
-	pugIncludeRe = regexp.MustCompile(`(?m)^\s*include(?:\s+[A-Za-z:\-]+)?\s+([^\s]+)`)
-	pugExtendsRe = regexp.MustCompile(`(?m)^\s*extends\s+([^\s]+)`)
-)
+// PugExtractor extracts Pug/Jade templates.
+//
+// The odvcencio Pug grammar is young and emits many ERROR nodes for
+// regular tag content — but the structural pieces we care about
+// (`mixin_definition`, `block_definition`, `extends`, `include`) are
+// exposed cleanly. We walk the whole tree to pick them out regardless
+// of how deeply ERRORs wrap them.
+//
+// `extends` / `include` use a `filename` child whose text includes the
+// leading whitespace that follows the keyword; we trim it.
+type PugExtractor struct {
+	lang *sitter.Language
+}
 
-// PugExtractor extracts Pug/Jade templates using regex.
-type PugExtractor struct{}
-
-func NewPugExtractor() *PugExtractor { return &PugExtractor{} }
+func NewPugExtractor() *PugExtractor {
+	return &PugExtractor{lang: grammars.PugLanguage()}
+}
 
 func (e *PugExtractor) Language() string     { return "pug" }
 func (e *PugExtractor) Extensions() []string { return []string{".pug", ".jade"} }
 
 func (e *PugExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
+	endLine := 1
+	if root != nil {
+		endLine = int(root.EndPoint().Row) + 1
+	}
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: endLine,
 		Language: "pug",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
+
+	if root == nil {
+		return result, nil
+	}
 
 	seen := make(map[string]bool)
 	add := func(name string, kind graph.NodeKind, start, end int) {
@@ -61,27 +76,34 @@ func (e *PugExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		})
 	}
 
-	for _, m := range pugMixinRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findIndentedBlockEnd(lines, line))
-	}
-	for _, m := range pugBlockRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findIndentedBlockEnd(lines, line))
-	}
+	walkNodes(root, func(n *sitter.Node) {
+		switch parser.NodeType(n, e.lang) {
+		case "mixin_definition":
+			// tag_name holds the mixin's name.
+			name := firstChildOfTypeText(n, "tag_name", src, e.lang)
+			line := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			add(name, graph.KindFunction, line, end)
 
-	for _, re := range []*regexp.Regexp{pugIncludeRe, pugExtendsRe} {
-		for _, m := range re.FindAllSubmatchIndex(src, -1) {
-			mod := string(src[m[2]:m[3]])
-			line := lineAt(src, m[0])
+		case "block_definition":
+			// `block_name` holds the block's label.
+			name := firstChildOfTypeText(n, "block_name", src, e.lang)
+			line := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			add(name, graph.KindFunction, line, end)
+
+		case "extends", "include":
+			line := int(n.StartPoint().Row) + 1
+			mod := strings.TrimSpace(firstChildOfTypeText(n, "filename", src, e.lang))
+			if mod == "" {
+				return
+			}
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: fileNode.ID, To: "unresolved::import::" + mod,
 				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 			})
 		}
-	}
+	})
 
 	return result, nil
 }

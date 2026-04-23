@@ -1,210 +1,274 @@
 package languages
 
 import (
-	"regexp"
-	"strings"
-
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-var (
-	clojureNsRe      = regexp.MustCompile(`(?m)\(ns\s+([\w.\-]+)`)
-	clojureDefnRe    = regexp.MustCompile(`(?m)\(defn-?\s+([\w\-!?*+<>=]+)`)
-	clojureMacroRe   = regexp.MustCompile(`(?m)\(defmacro\s+([\w\-!?*+<>=]+)`)
-	clojureRecordRe  = regexp.MustCompile(`(?m)\(defrecord\s+(\w+)`)
-	clojureTypeRe    = regexp.MustCompile(`(?m)\(deftype\s+(\w+)`)
-	clojureProtoRe   = regexp.MustCompile(`(?m)\(defprotocol\s+(\w+)`)
-	clojureRequireRe = regexp.MustCompile(`(?m)(?:\(require|\(:require|\(use|\(:import)\s+[\[\s]*(?:\[?\s*)?(['\s]?[\w.\-]+)`)
-	clojureCallRe    = regexp.MustCompile(`\(([\w\-!?*+<>=]+)[\s)]`)
-)
+// ClojureExtractor extracts Clojure source files.
+//
+// The odvcencio Clojure grammar emits `list_lit` for parenthesised
+// forms; the first named child is the head `sym_lit`. We pattern-match
+// on that head (`defn`, `defn-`, `defmacro`, `defrecord`, `deftype`,
+// `defprotocol`, `ns`, `def`) and pull the following `sym_lit` as the
+// symbol name.
+type ClojureExtractor struct {
+	lang *sitter.Language
+}
 
-// ClojureExtractor extracts Clojure source files using regex.
-type ClojureExtractor struct{}
-
-func NewClojureExtractor() *ClojureExtractor { return &ClojureExtractor{} }
+func NewClojureExtractor() *ClojureExtractor {
+	return &ClojureExtractor{lang: grammars.ClojureLanguage()}
+}
 
 func (e *ClojureExtractor) Language() string     { return "clojure" }
 func (e *ClojureExtractor) Extensions() []string { return []string{".clj", ".cljs", ".cljc", ".edn"} }
 
 func (e *ClojureExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
 	result := &parser.ExtractionResult{}
+
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+	root := tree.RootNode()
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "clojure",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
-
-	// Namespace
-	if m := clojureNsRe.FindSubmatchIndex(src); m != nil {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		id := filePath + "::" + name
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindPackage, Name: name,
-			FilePath: filePath, StartLine: line, EndLine: line,
-			Language: "clojure",
-		})
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
-			FilePath: filePath, Line: line,
-		})
-		seen[id] = true
-	}
-
-	// Functions (defn, defn-)
-	for _, m := range clojureDefnRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		endLine := clojureFormEnd(lines, line)
+	addDef := func(name string, kind graph.NodeKind, start, end int, meta map[string]any) {
+		if name == "" {
+			return
+		}
 		id := filePath + "::" + name
 		if seen[id] {
-			continue
+			return
 		}
 		seen[id] = true
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindFunction, Name: name,
-			FilePath: filePath, StartLine: line, EndLine: endLine,
+		n := &graph.Node{
+			ID: id, Kind: kind, Name: name,
+			FilePath: filePath, StartLine: start, EndLine: end,
 			Language: "clojure",
-		})
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
-			FilePath: filePath, Line: line,
-		})
-	}
-
-	// Macros
-	for _, m := range clojureMacroRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		id := filePath + "::" + name
-		if seen[id] {
-			continue
 		}
-		seen[id] = true
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindFunction, Name: name,
-			FilePath: filePath, StartLine: line, EndLine: line,
-			Language: "clojure", Meta: map[string]any{"macro": true},
-		})
+		if meta != nil {
+			n.Meta = meta
+		}
+		result.Nodes = append(result.Nodes, n)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
-			FilePath: filePath, Line: line,
+			FilePath: filePath, Line: start,
 		})
 	}
 
-	// Types: defrecord, deftype, defprotocol
-	for _, re := range []*regexp.Regexp{clojureRecordRe, clojureTypeRe, clojureProtoRe} {
-		for _, m := range re.FindAllSubmatchIndex(src, -1) {
-			name := string(src[m[2]:m[3]])
-			line := lineAt(src, m[0])
-			kind := graph.KindType
-			if re == clojureProtoRe {
-				kind = graph.KindInterface
+	// Walk top-level list_lit forms. Clojure's special forms are all
+	// list-shaped, so a single pass is enough.
+	var nsName string
+	walkNodes(root, func(n *sitter.Node) {
+		if n == nil || parser.NodeType(n, e.lang) != "list_lit" {
+			return
+		}
+		head := clojureListHead(n, src, e.lang)
+		switch head {
+		case "ns":
+			// (ns my.app (:require …) (:import …))
+			nsSym := clojureNthSym(n, 1, src, e.lang)
+			if nsSym != "" {
+				nsName = nsSym
+				start := int(n.StartPoint().Row) + 1
+				end := int(n.EndPoint().Row) + 1
+				addDef(nsSym, graph.KindPackage, start, end, nil)
 			}
-			id := filePath + "::" + name
-			if seen[id] {
-				continue
+			for _, ri := range clojureRequireImports(n, src, e.lang) {
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: fileNode.ID, To: "unresolved::import::" + ri.name,
+					Kind: graph.EdgeImports, FilePath: filePath, Line: ri.line,
+				})
 			}
-			seen[id] = true
-			result.Nodes = append(result.Nodes, &graph.Node{
-				ID: id, Kind: kind, Name: name,
-				FilePath: filePath, StartLine: line, EndLine: line,
-				Language: "clojure",
-			})
-			result.Edges = append(result.Edges, &graph.Edge{
-				From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
-				FilePath: filePath, Line: line,
-			})
+		case "defn", "defn-":
+			name := clojureNthSym(n, 1, src, e.lang)
+			start := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			addDef(name, graph.KindFunction, start, end, nil)
+		case "defmacro":
+			name := clojureNthSym(n, 1, src, e.lang)
+			start := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			addDef(name, graph.KindFunction, start, end, map[string]any{"macro": true})
+		case "defrecord", "deftype":
+			name := clojureNthSym(n, 1, src, e.lang)
+			start := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			addDef(name, graph.KindType, start, end, nil)
+		case "defprotocol":
+			name := clojureNthSym(n, 1, src, e.lang)
+			start := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			addDef(name, graph.KindInterface, start, end, nil)
+		case "def":
+			name := clojureNthSym(n, 1, src, e.lang)
+			start := int(n.StartPoint().Row) + 1
+			end := int(n.EndPoint().Row) + 1
+			addDef(name, graph.KindVariable, start, end, nil)
 		}
-	}
+	})
+	_ = nsName
 
-	// Variables (def, excluding defn/defmacro/defrecord/deftype/defprotocol)
-	defAllRe := regexp.MustCompile(`(?m)\(def\s+([\w\-!?*+<>=]+)`)
-	for _, m := range defAllRe.FindAllSubmatchIndex(src, -1) {
-		// Check that "def" is not followed by n, macro, record, type, protocol
-		afterDef := string(src[m[0]+4 : m[2]])
-		if strings.HasPrefix(strings.TrimSpace(afterDef), "n") ||
-			strings.HasPrefix(strings.TrimSpace(afterDef), "macro") ||
-			strings.HasPrefix(strings.TrimSpace(afterDef), "record") ||
-			strings.HasPrefix(strings.TrimSpace(afterDef), "type") ||
-			strings.HasPrefix(strings.TrimSpace(afterDef), "protocol") {
-			continue
-		}
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		id := filePath + "::" + name
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindVariable, Name: name,
-			FilePath: filePath, StartLine: line, EndLine: line,
-			Language: "clojure",
-		})
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
-			FilePath: filePath, Line: line,
-		})
-	}
-
-	// Imports
-	for _, m := range clojureRequireRe.FindAllSubmatchIndex(src, -1) {
-		mod := strings.TrimLeft(string(src[m[2]:m[3]]), "' ")
-		if mod == "" {
-			continue
-		}
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
-
-	// Call sites inside functions
+	// Call sites: any list_lit whose head sym_lit is not a special form
+	// or a known def-form. Attribute to the enclosing def-function.
 	funcRanges := buildFuncRanges(result)
-	for _, m := range clojureCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isClojureSpecialForm(name) {
-			continue
+	walkNodes(root, func(n *sitter.Node) {
+		if n == nil || parser.NodeType(n, e.lang) != "list_lit" {
+			return
 		}
-		line := lineAt(src, m[0])
+		head := clojureListHead(n, src, e.lang)
+		if head == "" || isClojureSpecialForm(head) {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
-		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+		if callerID == "" {
+			return
+		}
+		target := filePath + "::" + head
+		if callerID == target {
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
-			From: callerID, To: "unresolved::" + name,
+			From: callerID, To: "unresolved::" + head,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
 }
 
-// clojureFormEnd finds the end of a top-level form by matching parens.
-func clojureFormEnd(lines []string, startLine int) int {
-	depth := 0
-	for i := startLine - 1; i < len(lines); i++ {
-		for _, ch := range lines[i] {
-			switch ch {
-			case '(':
-				depth++
-			case ')':
-				depth--
-				if depth <= 0 {
-					return i + 1
+// clojureListHead returns the text of the first named `sym_lit` child of
+// a list_lit (its "head" symbol).
+func clojureListHead(list *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(list.NamedChildCount()); i++ {
+		c := list.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, lang) == "sym_lit" {
+			return symLitName(c, src, lang)
+		}
+	}
+	return ""
+}
+
+// clojureNthSym returns the n-th (0-based) named sym_lit child's name.
+func clojureNthSym(list *sitter.Node, n int, src []byte, lang *sitter.Language) string {
+	count := 0
+	for i := 0; i < int(list.NamedChildCount()); i++ {
+		c := list.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, lang) != "sym_lit" {
+			continue
+		}
+		if count == n {
+			return symLitName(c, src, lang)
+		}
+		count++
+	}
+	return ""
+}
+
+// symLitName pulls the raw name from a sym_lit node via its sym_name
+// child (falls back to the node's own text).
+func symLitName(sym *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(sym.NamedChildCount()); i++ {
+		c := sym.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, lang) == "sym_name" {
+			return c.Text(src)
+		}
+	}
+	return sym.Text(src)
+}
+
+type clojureImportHit struct {
+	name string
+	line int
+}
+
+// clojureRequireImports pulls module names out of (:require …) and
+// (:import …) forms inside an `ns` list. Each require-vec's first
+// symbol (or the bare sym_lit under :import) becomes an import edge.
+func clojureRequireImports(nsList *sitter.Node, src []byte, lang *sitter.Language) []clojureImportHit {
+	var out []clojureImportHit
+	for i := 0; i < int(nsList.NamedChildCount()); i++ {
+		clause := nsList.NamedChild(i)
+		if clause == nil || parser.NodeType(clause, lang) != "list_lit" {
+			continue
+		}
+		// First child of the clause should be a :kwd (kwd_lit with
+		// sym_name/ kwd_name text "require" or "import").
+		kwd := ""
+		for j := 0; j < int(clause.NamedChildCount()); j++ {
+			c := clause.NamedChild(j)
+			if c == nil {
+				continue
+			}
+			if parser.NodeType(c, lang) == "kwd_lit" {
+				for k := 0; k < int(c.NamedChildCount()); k++ {
+					sub := c.NamedChild(k)
+					if sub != nil && parser.NodeType(sub, lang) == "kwd_name" {
+						kwd = sub.Text(src)
+						break
+					}
+				}
+				break
+			}
+		}
+		if kwd != "require" && kwd != "import" {
+			continue
+		}
+		// Subsequent vec_lit children carry the module refs.
+		for j := 0; j < int(clause.NamedChildCount()); j++ {
+			c := clause.NamedChild(j)
+			if c == nil {
+				continue
+			}
+			switch parser.NodeType(c, lang) {
+			case "vec_lit":
+				// First sym_lit inside.
+				if name := firstSymName(c, src, lang); name != "" {
+					out = append(out, clojureImportHit{name: name, line: int(c.StartPoint().Row) + 1})
+				}
+			case "sym_lit":
+				// Bare import like (:import java.util.Date).
+				if name := symLitName(c, src, lang); name != "" {
+					out = append(out, clojureImportHit{name: name, line: int(c.StartPoint().Row) + 1})
 				}
 			}
 		}
 	}
-	return startLine
+	return out
+}
+
+func firstSymName(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		c := node.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, lang) == "sym_lit" {
+			return symLitName(c, src, lang)
+		}
+	}
+	return ""
 }
 
 func isClojureSpecialForm(s string) bool {
@@ -213,7 +277,8 @@ func isClojureSpecialForm(s string) bool {
 		"defrecord", "deftype", "defprotocol", "ns", "require", "use",
 		"import", "quote", "loop", "recur", "throw", "try", "catch",
 		"finally", "cond", "case", "when", "when-not", "when-let",
-		"if-let", "for", "doseq", "dotimes":
+		"if-let", "for", "doseq", "dotimes", "str", "+", "-", "*", "/",
+		":require", ":import":
 		return true
 	}
 	return false

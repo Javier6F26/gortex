@@ -1,8 +1,8 @@
 package languages
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/hcl"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -14,7 +14,7 @@ type HCLExtractor struct {
 }
 
 func NewHCLExtractor() *HCLExtractor {
-	return &HCLExtractor{lang: hcl.GetLanguage()}
+	return &HCLExtractor{lang: grammars.HclLanguage()}
 }
 
 func (e *HCLExtractor) Language() string     { return "hcl" }
@@ -48,7 +48,7 @@ func (e *HCLExtractor) walk(node *sitter.Node, src []byte, filePath, fileID stri
 		return
 	}
 
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	// HCL tree-sitter grammar uses "block" for top-level blocks.
 	if nodeType == "block" {
@@ -76,14 +76,14 @@ func (e *HCLExtractor) extractBlock(node *sitter.Node, src []byte, filePath, fil
 		if child == nil {
 			continue
 		}
-		ct := child.Type()
+		ct := parser.NodeType(child, e.lang)
 		switch ct {
 		case "identifier":
 			if blockType == "" {
-				blockType = child.Content(src)
+				blockType = child.Text(src)
 			}
 		case "string_lit":
-			text := child.Content(src)
+			text := child.Text(src)
 			// Strip quotes.
 			text = trimQuotes(text)
 			if text != "" {

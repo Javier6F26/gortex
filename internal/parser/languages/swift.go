@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/swift"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -50,7 +50,7 @@ type SwiftExtractor struct {
 }
 
 func NewSwiftExtractor() *SwiftExtractor {
-	return &SwiftExtractor{lang: swift.GetLanguage()}
+	return &SwiftExtractor{lang: grammars.SwiftLanguage()}
 }
 
 func (e *SwiftExtractor) Language() string     { return "swift" }
@@ -217,14 +217,14 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		}
 		for i := 0; i < int(body.Node.ChildCount()); i++ {
 			entry := body.Node.Child(i)
-			if entry == nil || entry.Type() != "enum_entry" {
+			if entry == nil || parser.NodeType(entry, e.lang) != "enum_entry" {
 				continue
 			}
 			var caseName string
 			for j := 0; j < int(entry.ChildCount()); j++ {
 				ch := entry.Child(j)
-				if ch != nil && ch.Type() == "simple_identifier" {
-					caseName = ch.Content(src)
+				if ch != nil && parser.NodeType(ch, e.lang) == "simple_identifier" {
+					caseName = ch.Text(src)
 					break
 				}
 			}

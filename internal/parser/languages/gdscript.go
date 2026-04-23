@@ -1,46 +1,39 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// GDScript is Godot's Python-flavored scripting language. The
-// extractor handles the common surface: `func`, `class_name`,
-// `extends`, `signal`, `var`, `const`, `enum`, inner `class`, and
-// `preload(...)` / `load(...)` imports. Indentation defines scope, so
-// `findBlockEnd` gives a reasonable function range.
-var (
-	gdFuncRe      = regexp.MustCompile(`(?m)^[ \t]*(?:static\s+)?func\s+(\w+)\s*\(`)
-	gdClassNameRe = regexp.MustCompile(`(?m)^\s*class_name\s+(\w+)`)
-	gdInnerClass  = regexp.MustCompile(`(?m)^[ \t]*class\s+(\w+)`)
-	gdExtendsRe   = regexp.MustCompile(`(?m)^\s*extends\s+([\w.]+)`)
-	gdVarRe       = regexp.MustCompile(`(?m)^[ \t]*(?:@\w+\s+)?(?:static\s+)?var\s+(\w+)`)
-	gdConstRe     = regexp.MustCompile(`(?m)^[ \t]*const\s+(\w+)`)
-	gdEnumRe      = regexp.MustCompile(`(?m)^[ \t]*enum\s+(\w+)`)
-	gdSignalRe    = regexp.MustCompile(`(?m)^[ \t]*signal\s+(\w+)`)
-	gdPreloadRe   = regexp.MustCompile(`\b(?:preload|load)\s*\(\s*["']([^"']+)["']\s*\)`)
-	gdCallRe      = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*\(`)
-)
+// GDScriptExtractor extracts Godot GDScript using tree-sitter.
+type GDScriptExtractor struct {
+	lang *sitter.Language
+}
 
-// GDScriptExtractor extracts Godot GDScript source using regex.
-type GDScriptExtractor struct{}
-
-func NewGDScriptExtractor() *GDScriptExtractor { return &GDScriptExtractor{} }
+func NewGDScriptExtractor() *GDScriptExtractor {
+	return &GDScriptExtractor{lang: grammars.GdscriptLanguage()}
+}
 
 func (e *GDScriptExtractor) Language() string     { return "gdscript" }
 func (e *GDScriptExtractor) Extensions() []string { return []string{".gd"} }
 
 func (e *GDScriptExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "gdscript",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -58,8 +51,7 @@ func (e *GDScriptExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: kind, Name: name,
 			FilePath: filePath, StartLine: start, EndLine: end,
-			Language: "gdscript",
-			Meta:     meta,
+			Language: "gdscript", Meta: meta,
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
@@ -67,93 +59,161 @@ func (e *GDScriptExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 		})
 	}
 
-	for _, m := range gdClassNameRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, line, map[string]any{"gd_kind": "class_name"})
-	}
-	for _, m := range gdInnerClass.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findIndentedBlockEnd(lines, line)
-		add(name, graph.KindType, line, end, map[string]any{"gd_kind": "inner_class"})
-	}
-	for _, m := range gdFuncRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findIndentedBlockEnd(lines, line)
-		kind := graph.KindFunction
-		if strings.HasPrefix(name, "_") && name != "_init" && name != "_ready" && name != "_process" && name != "_physics_process" {
-			// Private-looking; still a function.
-			kind = graph.KindFunction
+	// Extract top-level constructs.
+	walkNodes(root, func(n *sitter.Node) {
+		t := parser.NodeType(n, e.lang)
+		switch t {
+		case "class_name_statement":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.StartPoint().Row)+1,
+				map[string]any{"gd_kind": "class_name"})
+
+		case "class_definition":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1,
+				map[string]any{"gd_kind": "inner_class"})
+
+		case "function_definition":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindFunction,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1, nil)
+
+		case "variable_statement":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindVariable,
+				int(n.StartPoint().Row)+1, int(n.StartPoint().Row)+1, nil)
+
+		case "const_statement":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindVariable,
+				int(n.StartPoint().Row)+1, int(n.StartPoint().Row)+1,
+				map[string]any{"const": true})
+
+		case "enum_definition":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.StartPoint().Row)+1,
+				map[string]any{"gd_kind": "enum"})
+
+		case "signal_statement":
+			name := firstNamedChildTextByType(n, "name", e.lang, src)
+			add(name, graph.KindMethod,
+				int(n.StartPoint().Row)+1, int(n.StartPoint().Row)+1,
+				map[string]any{"gd_kind": "signal"})
+
+		case "extends_statement":
+			// extends_statement → type → identifier ("." separated in
+			// the grammar's `type` node when qualified).
+			parent := ""
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if parser.NodeType(c, e.lang) == "type" {
+					parent = c.Text(src)
+					break
+				}
+			}
+			if parent == "" {
+				return
+			}
+			line := int(n.StartPoint().Row) + 1
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: "unresolved::" + parent,
+				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
+			})
 		}
-		add(name, kind, line, end, nil)
-	}
-	for _, m := range gdVarRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindVariable, line, line, nil)
-	}
-	for _, m := range gdConstRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindVariable, line, line, map[string]any{"const": true})
-	}
-	for _, m := range gdEnumRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, line, map[string]any{"gd_kind": "enum"})
-	}
-	for _, m := range gdSignalRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindMethod, line, line, map[string]any{"gd_kind": "signal"})
-	}
+	})
 
-	for _, m := range gdExtendsRe.FindAllSubmatchIndex(src, -1) {
-		parent := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
+	// preload(...) / load(...) imports.
+	walkNodes(root, func(n *sitter.Node) {
+		if parser.NodeType(n, e.lang) != "call" {
+			return
+		}
+		var funcName string
+		var firstStringArg string
+	loop:
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			switch parser.NodeType(c, e.lang) {
+			case "identifier":
+				if funcName == "" {
+					funcName = c.Text(src)
+				}
+			case "arguments":
+				for j := 0; j < int(c.NamedChildCount()); j++ {
+					arg := c.NamedChild(j)
+					if parser.NodeType(arg, e.lang) == "string" {
+						firstStringArg = strings.Trim(arg.Text(src), `"'`)
+						break loop
+					}
+				}
+			}
+		}
+		if funcName != "preload" && funcName != "load" {
+			return
+		}
+		if firstStringArg == "" {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::" + parent,
+			From: fileNode.ID, To: "unresolved::import::" + firstStringArg,
 			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 		})
-	}
-	for _, m := range gdPreloadRe.FindAllSubmatchIndex(src, -1) {
-		path := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + path,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
+	})
 
+	// Call edges.
 	funcRanges := buildFuncRanges(result)
-	for _, m := range gdCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isGDKeyword(name) {
-			continue
+	walkNodes(root, func(n *sitter.Node) {
+		if parser.NodeType(n, e.lang) != "call" {
+			return
 		}
-		line := lineAt(src, m[0])
+		name := ""
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if parser.NodeType(c, e.lang) == "identifier" {
+				name = c.Text(src)
+				break
+			}
+		}
+		if name == "" || isGDKeyword(name) || name == "preload" || name == "load" {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
 }
 
+// firstNamedChildTextByType returns the text of the first named child
+// whose type matches.
+func firstNamedChildTextByType(node *sitter.Node, typ string, lang *sitter.Language, src []byte) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		c := node.NamedChild(i)
+		if parser.NodeType(c, lang) == typ {
+			return c.Text(src)
+		}
+	}
+	return ""
+}
+
 func isGDKeyword(s string) bool {
 	switch s {
-	case "func", "var", "const", "class", "class_name", "extends", "enum",
-		"signal", "static", "if", "elif", "else", "for", "while", "break",
-		"continue", "return", "match", "pass", "in", "and", "or", "not",
-		"is", "as", "self", "true", "false", "null", "void", "int", "float",
-		"bool", "String", "Array", "Dictionary", "Vector2", "Vector3",
+	case "if", "elif", "else", "for", "while", "match", "break",
+		"continue", "pass", "return", "func", "var", "const", "enum",
+		"class", "class_name", "extends", "signal", "static", "export",
+		"onready", "tool", "self", "null", "true", "false", "and",
+		"or", "not", "in", "is", "as", "void", "int", "float", "bool",
+		"String", "Vector2", "Vector3", "Array", "Dictionary",
 		"preload", "load":
 		return true
 	}

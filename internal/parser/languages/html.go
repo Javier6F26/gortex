@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/html"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -15,7 +15,7 @@ type HTMLExtractor struct {
 }
 
 func NewHTMLExtractor() *HTMLExtractor {
-	return &HTMLExtractor{lang: html.GetLanguage()}
+	return &HTMLExtractor{lang: grammars.HtmlLanguage()}
 }
 
 func (e *HTMLExtractor) Language() string     { return "html" }
@@ -45,7 +45,7 @@ func (e *HTMLExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 }
 
 func (e *HTMLExtractor) walkNode(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
-	nodeType := node.Type()
+	nodeType := parser.NodeType(node, e.lang)
 
 	switch nodeType {
 	case "script_element":
@@ -65,16 +65,16 @@ func (e *HTMLExtractor) walkNode(node *sitter.Node, src []byte, filePath, fileID
 
 // extractScriptImport checks a script_element for a src attribute.
 func (e *HTMLExtractor) extractScriptImport(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
-	startTag := findChildByType(node, "start_tag")
+	startTag := findChildByType(node, "start_tag", e.lang)
 	if startTag == nil {
 		// Self-closing script tag.
-		startTag = findChildByType(node, "self_closing_tag")
+		startTag = findChildByType(node, "self_closing_tag", e.lang)
 	}
 	if startTag == nil {
 		return
 	}
 
-	srcAttr := findAttribute(startTag, "src", src)
+	srcAttr := findAttribute(startTag, "src", src, e.lang)
 	if srcAttr == "" {
 		return
 	}
@@ -90,23 +90,23 @@ func (e *HTMLExtractor) extractScriptImport(node *sitter.Node, src []byte, fileP
 
 // extractElement checks elements for link tags (stylesheet imports) and id attributes.
 func (e *HTMLExtractor) extractElement(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
-	startTag := findChildByType(node, "start_tag")
+	startTag := findChildByType(node, "start_tag", e.lang)
 	if startTag == nil {
-		startTag = findChildByType(node, "self_closing_tag")
+		startTag = findChildByType(node, "self_closing_tag", e.lang)
 	}
 	if startTag == nil {
 		return
 	}
 
-	tagName := findChildByType(startTag, "tag_name")
+	tagName := findChildByType(startTag, "tag_name", e.lang)
 	if tagName == nil {
 		return
 	}
-	tag := tagName.Content(src)
+	tag := tagName.Text(src)
 
 	// Link/stylesheet imports.
 	if tag == "link" {
-		href := findAttribute(startTag, "href", src)
+		href := findAttribute(startTag, "href", src, e.lang)
 		if href != "" {
 			result.Edges = append(result.Edges, &graph.Edge{
 				From:     fileID,
@@ -119,7 +119,7 @@ func (e *HTMLExtractor) extractElement(node *sitter.Node, src []byte, filePath, 
 	}
 
 	// Elements with id attributes.
-	idVal := findAttribute(startTag, "id", src)
+	idVal := findAttribute(startTag, "id", src, e.lang)
 	if idVal != "" {
 		id := filePath + "::#" + idVal
 		result.Nodes = append(result.Nodes, &graph.Node{
@@ -138,10 +138,10 @@ func (e *HTMLExtractor) extractElement(node *sitter.Node, src []byte, filePath, 
 }
 
 // findChildByType finds the first child node with the given type.
-func findChildByType(node *sitter.Node, typeName string) *sitter.Node {
+func findChildByType(node *sitter.Node, typeName string, lang *sitter.Language) *sitter.Node {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child != nil && child.Type() == typeName {
+		if child != nil && parser.NodeType(child, lang) == typeName {
 			return child
 		}
 	}
@@ -150,21 +150,21 @@ func findChildByType(node *sitter.Node, typeName string) *sitter.Node {
 
 // findAttribute looks for an attribute with the given name in a start_tag node
 // and returns its unquoted value.
-func findAttribute(startTag *sitter.Node, attrName string, src []byte) string {
+func findAttribute(startTag *sitter.Node, attrName string, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(startTag.ChildCount()); i++ {
 		child := startTag.Child(i)
-		if child == nil || child.Type() != "attribute" {
+		if child == nil || parser.NodeType(child, lang) != "attribute" {
 			continue
 		}
-		nameNode := findChildByType(child, "attribute_name")
-		if nameNode == nil || nameNode.Content(src) != attrName {
+		nameNode := findChildByType(child, "attribute_name", lang)
+		if nameNode == nil || nameNode.Text(src) != attrName {
 			continue
 		}
-		valNode := findChildByType(child, "quoted_attribute_value")
+		valNode := findChildByType(child, "quoted_attribute_value", lang)
 		if valNode == nil {
 			continue
 		}
-		val := valNode.Content(src)
+		val := valNode.Text(src)
 		val = strings.Trim(val, `"'`)
 		return val
 	}

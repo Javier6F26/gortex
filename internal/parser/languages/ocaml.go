@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/ocaml"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -16,7 +16,7 @@ type OCamlExtractor struct {
 }
 
 func NewOCamlExtractor() *OCamlExtractor {
-	return &OCamlExtractor{lang: ocaml.GetLanguage()}
+	return &OCamlExtractor{lang: grammars.OcamlLanguage()}
 }
 
 func (e *OCamlExtractor) Language() string     { return "ocaml" }
@@ -61,7 +61,7 @@ func (e *OCamlExtractor) walkExtract(
 			continue
 		}
 
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "value_definition":
 			e.extractValueDef(child, src, filePath, fileNode, result, seen, modulePrefix)
 
@@ -101,7 +101,7 @@ func (e *OCamlExtractor) extractValueDef(
 			continue
 		}
 
-		if child.Type() == "let_binding" {
+		if parser.NodeType(child, e.lang) == "let_binding" {
 			name := ""
 			kind := graph.KindFunction
 			hasParams := false
@@ -112,9 +112,9 @@ func (e *OCamlExtractor) extractValueDef(
 				if part == nil {
 					continue
 				}
-				switch part.Type() {
+				switch parser.NodeType(part, e.lang) {
 				case "value_name", "value_pattern":
-					name = part.Content(src)
+					name = part.Text(src)
 				case "parameter":
 					hasParams = true
 				case "fun_expression", "function_expression":
@@ -168,15 +168,15 @@ func (e *OCamlExtractor) extractTypeDef(
 ) {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child == nil || child.Type() != "type_binding" {
+		if child == nil || parser.NodeType(child, e.lang) != "type_binding" {
 			continue
 		}
 
 		name := ""
 		for j := 0; j < int(child.NamedChildCount()); j++ {
 			part := child.NamedChild(j)
-			if part != nil && (part.Type() == "type_constructor" || part.Type() == "type_variable") {
-				name = part.Content(src)
+			if part != nil && (parser.NodeType(part, e.lang) == "type_constructor" || parser.NodeType(part, e.lang) == "type_variable") {
+				name = part.Text(src)
 				break
 			}
 		}
@@ -184,7 +184,7 @@ func (e *OCamlExtractor) extractTypeDef(
 		if name == "" {
 			// Try first named child as name.
 			if child.NamedChildCount() > 0 {
-				name = child.NamedChild(0).Content(src)
+				name = child.NamedChild(0).Text(src)
 			}
 		}
 
@@ -227,15 +227,15 @@ func (e *OCamlExtractor) extractModuleDef(
 	// Find module_binding child.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		binding := node.NamedChild(i)
-		if binding == nil || binding.Type() != "module_binding" {
+		if binding == nil || parser.NodeType(binding, e.lang) != "module_binding" {
 			continue
 		}
 
 		name := ""
 		for j := 0; j < int(binding.NamedChildCount()); j++ {
 			child := binding.NamedChild(j)
-			if child != nil && child.Type() == "module_name" {
-				name = child.Content(src)
+			if child != nil && parser.NodeType(child, e.lang) == "module_name" {
+				name = child.Text(src)
 				break
 			}
 		}
@@ -270,7 +270,7 @@ func (e *OCamlExtractor) extractModuleDef(
 		// Recurse into module body (structure node) for nested definitions.
 		for j := 0; j < int(binding.NamedChildCount()); j++ {
 			child := binding.NamedChild(j)
-			if child != nil && (child.Type() == "structure" || child.Type() == "struct_expression") {
+			if child != nil && (parser.NodeType(child, e.lang) == "structure" || parser.NodeType(child, e.lang) == "struct_expression") {
 				e.walkExtract(child, src, filePath, fileNode, result, seen, qualName)
 			}
 		}
@@ -285,8 +285,8 @@ func (e *OCamlExtractor) extractModuleTypeDef(
 	name := ""
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child != nil && child.Type() == "module_type_name" {
-			name = child.Content(src)
+		if child != nil && parser.NodeType(child, e.lang) == "module_type_name" {
+			name = child.Text(src)
 			break
 		}
 	}
@@ -325,8 +325,8 @@ func (e *OCamlExtractor) extractOpen(
 ) {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child != nil && (child.Type() == "module_path" || child.Type() == "module_name" || child.Type() == "extended_module_path") {
-			moduleName := child.Content(src)
+		if child != nil && (parser.NodeType(child, e.lang) == "module_path" || parser.NodeType(child, e.lang) == "module_name" || parser.NodeType(child, e.lang) == "extended_module_path") {
+			moduleName := child.Text(src)
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: fileNode.ID, To: "unresolved::import::" + moduleName,
 				Kind: graph.EdgeImports, FilePath: filePath, Line: int(node.StartPoint().Row) + 1,
@@ -343,15 +343,15 @@ func (e *OCamlExtractor) extractClassDef(
 ) {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child == nil || child.Type() != "class_binding" {
+		if child == nil || parser.NodeType(child, e.lang) != "class_binding" {
 			continue
 		}
 
 		name := ""
 		for j := 0; j < int(child.NamedChildCount()); j++ {
 			part := child.NamedChild(j)
-			if part != nil && (part.Type() == "class_name" || part.Type() == "value_name") {
-				name = part.Content(src)
+			if part != nil && (parser.NodeType(part, e.lang) == "class_name" || parser.NodeType(part, e.lang) == "value_name") {
+				name = part.Text(src)
 				break
 			}
 		}
@@ -394,14 +394,14 @@ func (e *OCamlExtractor) extractMethods(
 	result *parser.ExtractionResult, seen map[string]bool, className string,
 ) {
 	walkNodes(classNode, func(node *sitter.Node) {
-		if node.Type() != "method_definition" {
+		if parser.NodeType(node, e.lang) != "method_definition" {
 			return
 		}
 		name := ""
 		for i := 0; i < int(node.NamedChildCount()); i++ {
 			child := node.NamedChild(i)
-			if child != nil && child.Type() == "method_name" {
-				name = child.Content(src)
+			if child != nil && parser.NodeType(child, e.lang) == "method_name" {
+				name = child.Text(src)
 				break
 			}
 		}
@@ -442,8 +442,8 @@ func (e *OCamlExtractor) extractExternal(
 	name := ""
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child != nil && child.Type() == "value_name" {
-			name = child.Content(src)
+		if child != nil && parser.NodeType(child, e.lang) == "value_name" {
+			name = child.Text(src)
 			break
 		}
 	}
@@ -484,8 +484,8 @@ func (e *OCamlExtractor) extractValueSpec(
 	name := ""
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child != nil && child.Type() == "value_name" {
-			name = child.Content(src)
+		if child != nil && parser.NodeType(child, e.lang) == "value_name" {
+			name = child.Text(src)
 			break
 		}
 	}
@@ -524,7 +524,7 @@ func (e *OCamlExtractor) extractCalls(
 	result *parser.ExtractionResult, funcRanges []funcRange,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
-		if node.Type() != "application" {
+		if parser.NodeType(node, e.lang) != "application" {
 			return
 		}
 
@@ -538,12 +538,12 @@ func (e *OCamlExtractor) extractCalls(
 		}
 
 		var callName string
-		switch funcNode.Type() {
+		switch parser.NodeType(funcNode, e.lang) {
 		case "value_path", "value_name":
-			callName = funcNode.Content(src)
+			callName = funcNode.Text(src)
 		case "field_get_expression":
 			// Module.function or record.field
-			callName = funcNode.Content(src)
+			callName = funcNode.Text(src)
 		default:
 			return
 		}

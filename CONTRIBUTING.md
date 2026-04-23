@@ -6,8 +6,8 @@ Thank you for considering contributing to Gortex! This guide will help you get s
 
 ### Prerequisites
 
-- Go 1.21+
-- CGO enabled (required for tree-sitter C bindings)
+- Go 1.25+
+- No C toolchain needed (pure-Go tree-sitter runtime)
 - Git
 
 ### Building

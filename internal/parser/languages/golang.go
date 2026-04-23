@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/golang"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -148,7 +148,7 @@ type GoExtractor struct {
 }
 
 func NewGoExtractor() *GoExtractor {
-	return &GoExtractor{lang: golang.GetLanguage()}
+	return &GoExtractor{lang: grammars.GoLanguage()}
 }
 
 func (e *GoExtractor) Language() string     { return "go" }
@@ -332,7 +332,7 @@ func (e *GoExtractor) extractTypes(root *sitter.Node, src []byte, filePath, file
 		// Extract method specs from the interface body by walking child nodes.
 		var methods []string
 		if body := m.Captures["iface.body"]; body != nil && body.Node != nil {
-			methods = extractInterfaceMethods(body.Node, src)
+			methods = extractInterfaceMethods(body.Node, src, e.lang)
 		}
 
 		node := &graph.Node{
@@ -842,16 +842,17 @@ func buildMethodSignature(receiver, name string, params, result *parser.Captured
 
 // extractInterfaceMethods walks the children of an interface_type node
 // and returns the names of all method_spec entries.
-func extractInterfaceMethods(ifaceNode *sitter.Node, src []byte) []string {
+func extractInterfaceMethods(ifaceNode *sitter.Node, src []byte, lang *sitter.Language) []string {
 	var methods []string
 	for i := 0; i < int(ifaceNode.NamedChildCount()); i++ {
 		child := ifaceNode.NamedChild(i)
-		if child.Type() == "method_elem" || child.Type() == "method_spec" {
+		childType := parser.NodeType(child, lang)
+		if childType == "method_elem" || childType == "method_spec" {
 			// The first named child of a method_spec is the field_identifier (name).
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				nameNode := child.NamedChild(j)
-				if nameNode.Type() == "field_identifier" {
-					methods = append(methods, nameNode.Content(src))
+				if parser.NodeType(nameNode, lang) == "field_identifier" {
+					methods = append(methods, nameNode.Text(src))
 					break
 				}
 			}
@@ -898,7 +899,7 @@ func (e *GoExtractor) buildTypeEnv(root *sitter.Node, src []byte) typeEnv {
 		if valueCap == nil || valueCap.Node == nil {
 			continue
 		}
-		if inferred := inferTypeFromGoExpr(valueCap.Node, src); inferred != "" {
+		if inferred := inferTypeFromGoExpr(valueCap.Node, src, e.lang); inferred != "" {
 			tenv[name] = inferred
 		}
 	}
@@ -921,22 +922,22 @@ func normalizeGoTypeName(t string) string {
 
 // inferTypeFromGoExpr inspects a tree-sitter expression node to infer
 // the type of a short variable declaration's RHS.
-func inferTypeFromGoExpr(node *sitter.Node, src []byte) string {
-	switch node.Type() {
+func inferTypeFromGoExpr(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	switch parser.NodeType(node, lang) {
 	case "composite_literal":
 		// User{} or User{field: val}
 		// First named child is the type identifier.
 		if node.NamedChildCount() > 0 {
 			typeNode := node.NamedChild(0)
-			return normalizeGoTypeName(typeNode.Content(src))
+			return normalizeGoTypeName(typeNode.Text(src))
 		}
 
 	case "unary_expression":
 		// &User{} — operand is composite_literal
 		for i := 0; i < int(node.NamedChildCount()); i++ {
 			child := node.NamedChild(i)
-			if child.Type() == "composite_literal" {
-				return inferTypeFromGoExpr(child, src)
+			if parser.NodeType(child, lang) == "composite_literal" {
+				return inferTypeFromGoExpr(child, src, lang)
 			}
 		}
 
@@ -944,8 +945,8 @@ func inferTypeFromGoExpr(node *sitter.Node, src []byte) string {
 		// NewUser() → "User" (Go constructor convention)
 		if node.NamedChildCount() > 0 {
 			funcNode := node.NamedChild(0)
-			if funcNode.Type() == "identifier" {
-				funcName := funcNode.Content(src)
+			if parser.NodeType(funcNode, lang) == "identifier" {
+				funcName := funcNode.Text(src)
 				if strings.HasPrefix(funcName, "New") && len(funcName) > 3 {
 					candidate := funcName[3:]
 					if len(candidate) > 0 && candidate[0] >= 'A' && candidate[0] <= 'Z' {

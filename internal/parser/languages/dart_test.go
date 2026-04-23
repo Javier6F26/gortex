@@ -3,12 +3,12 @@ package languages
 import (
 	"testing"
 
-	sitter "github.com/smacker/go-tree-sitter"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/dartlang"
 )
 
 // TestDartAST_Debug dumps the AST to verify node types used in queries.
@@ -56,7 +56,7 @@ void main() {
 
 const version = '1.0.0';
 `)
-	lang := dartlang.GetLanguage()
+	lang := grammars.DartLanguage()
 	tree, err := parser.ParseFile(src, lang)
 	require.NoError(t, err)
 	defer tree.Close()
@@ -69,10 +69,10 @@ const version = '1.0.0';
 			indent += "  "
 		}
 		if n.IsNamed() {
-			t.Logf("%s%s [%d:%d - %d:%d] %q", indent, n.Type(),
+			t.Logf("%s%s [%d:%d - %d:%d] %q", indent, parser.NodeType(n, lang),
 				n.StartPoint().Row, n.StartPoint().Column,
 				n.EndPoint().Row, n.EndPoint().Column,
-				truncate(n.Content(src), 60))
+				truncate(n.Text(src), 60))
 		}
 		for i := 0; i < int(n.ChildCount()); i++ {
 			walk(n.Child(i), depth+1)

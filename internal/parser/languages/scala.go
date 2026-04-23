@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/scala"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -16,7 +16,7 @@ type ScalaExtractor struct {
 }
 
 func NewScalaExtractor() *ScalaExtractor {
-	return &ScalaExtractor{lang: scala.GetLanguage()}
+	return &ScalaExtractor{lang: grammars.ScalaLanguage()}
 }
 
 func (e *ScalaExtractor) Language() string     { return "scala" }
@@ -52,7 +52,7 @@ func (e *ScalaExtractor) extractAll(
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
-		switch node.Type() {
+		switch parser.NodeType(node, e.lang) {
 		case "trait_definition":
 			e.extractTrait(node, src, filePath, fileNode, result, seen)
 		case "class_definition":
@@ -63,7 +63,7 @@ func (e *ScalaExtractor) extractAll(
 			e.extractImport(node, src, filePath, fileNode, result)
 		case "function_definition", "function_declaration":
 			// Only extract top-level functions (direct children of compilation_unit).
-			if node.Parent() != nil && node.Parent().Type() == "compilation_unit" {
+			if node.Parent() != nil && parser.NodeType(node.Parent(), e.lang) == "compilation_unit" {
 				e.extractTopLevelFunction(node, src, filePath, fileNode, result, seen)
 			}
 		case "call_expression":
@@ -77,7 +77,7 @@ func (e *ScalaExtractor) extractTrait(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	name := scalaFindChildIdentifier(node, src)
+	name := scalaFindChildIdentifier(node, src, e.lang)
 	if name == "" {
 		return
 	}
@@ -94,11 +94,12 @@ func (e *ScalaExtractor) extractTrait(
 	var methodNames []string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "template_body" {
+		if parser.NodeType(child, e.lang) == "template_body" {
 			for j := 0; j < int(child.ChildCount()); j++ {
 				member := child.Child(j)
-				if member.Type() == "function_declaration" || member.Type() == "function_definition" {
-					mName := scalaFindChildIdentifier(member, src)
+				mt := parser.NodeType(member, e.lang)
+				if mt == "function_declaration" || mt == "function_definition" {
+					mName := scalaFindChildIdentifier(member, src, e.lang)
 					if mName != "" {
 						methodNames = append(methodNames, mName)
 
@@ -150,7 +151,7 @@ func (e *ScalaExtractor) extractClass(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	name := scalaFindChildIdentifier(node, src)
+	name := scalaFindChildIdentifier(node, src, e.lang)
 	if name == "" {
 		return
 	}
@@ -182,7 +183,7 @@ func (e *ScalaExtractor) extractObject(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	name := scalaFindChildIdentifier(node, src)
+	name := scalaFindChildIdentifier(node, src, e.lang)
 	if name == "" {
 		return
 	}
@@ -218,15 +219,16 @@ func (e *ScalaExtractor) extractMembersFromBody(
 ) {
 	for i := 0; i < int(parent.ChildCount()); i++ {
 		child := parent.Child(i)
-		if child.Type() != "template_body" {
+		if parser.NodeType(child, e.lang) != "template_body" {
 			continue
 		}
 		for j := 0; j < int(child.ChildCount()); j++ {
 			member := child.Child(j)
-			if member.Type() != "function_definition" && member.Type() != "function_declaration" {
+			mt := parser.NodeType(member, e.lang)
+			if mt != "function_definition" && mt != "function_declaration" {
 				continue
 			}
-			mName := scalaFindChildIdentifier(member, src)
+			mName := scalaFindChildIdentifier(member, src, e.lang)
 			if mName == "" {
 				continue
 			}
@@ -267,8 +269,8 @@ func (e *ScalaExtractor) extractImport(
 	var parts []string
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" {
-			parts = append(parts, child.Content(src))
+		if parser.NodeType(child, e.lang) == "identifier" {
+			parts = append(parts, child.Text(src))
 		}
 	}
 	if len(parts) == 0 {
@@ -287,7 +289,7 @@ func (e *ScalaExtractor) extractTopLevelFunction(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	result *parser.ExtractionResult, seen map[string]bool,
 ) {
-	name := scalaFindChildIdentifier(node, src)
+	name := scalaFindChildIdentifier(node, src, e.lang)
 	if name == "" {
 		return
 	}
@@ -327,16 +329,16 @@ func (e *ScalaExtractor) extractCall(
 	}
 	callee := node.Child(0)
 	var callName string
-	switch callee.Type() {
+	switch parser.NodeType(callee, e.lang) {
 	case "identifier":
-		callName = callee.Content(src)
+		callName = callee.Text(src)
 	case "field_expression":
 		// field_expression has children: object, ".", field_name (identifier)
 		// The last identifier child is the method name.
 		for i := int(callee.ChildCount()) - 1; i >= 0; i-- {
 			fc := callee.Child(i)
-			if fc.Type() == "identifier" {
-				callName = fc.Content(src)
+			if parser.NodeType(fc, e.lang) == "identifier" {
+				callName = fc.Text(src)
 				break
 			}
 		}
@@ -361,11 +363,11 @@ func (e *ScalaExtractor) extractCall(
 
 // scalaFindChildIdentifier finds the first direct child of type "identifier"
 // and returns its text content.
-func scalaFindChildIdentifier(node *sitter.Node, src []byte) string {
+func scalaFindChildIdentifier(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
-		if child.Type() == "identifier" {
-			return child.Content(src)
+		if parser.NodeType(child, lang) == "identifier" {
+			return child.Text(src)
 		}
 	}
 	return ""

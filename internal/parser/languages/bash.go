@@ -3,8 +3,8 @@ package languages
 import (
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/bash"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -26,7 +26,7 @@ type BashExtractor struct {
 }
 
 func NewBashExtractor() *BashExtractor {
-	return &BashExtractor{lang: bash.GetLanguage()}
+	return &BashExtractor{lang: grammars.BashLanguage()}
 }
 
 func (e *BashExtractor) Language() string     { return "bash" }
@@ -78,7 +78,7 @@ func (e *BashExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		name := m.Captures["var.name"].Text
 		def := m.Captures["var.def"]
 		// Only top-level: parent is program.
-		if def.Node != nil && def.Node.Parent() != nil && def.Node.Parent().Type() == "program" {
+		if def.Node != nil && def.Node.Parent() != nil && parser.NodeType(def.Node.Parent(), e.lang) == "program" {
 			id := filePath + "::" + name
 			if seen[id] {
 				continue
@@ -110,7 +110,7 @@ func (e *BashExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			if cmdNode != nil && cmdNode.NamedChildCount() >= 2 {
 				arg := cmdNode.NamedChild(1)
 				if arg != nil {
-					importPath := arg.Content(src)
+					importPath := arg.Text(src)
 					// Strip quotes if present.
 					importPath = strings.Trim(importPath, "\"'")
 					result.Edges = append(result.Edges, &graph.Edge{

@@ -1,42 +1,49 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Solidity is the dominant smart-contract language for the EVM. Its
-// top-level constructs are `contract`, `library`, `interface`,
-// `abstract contract`; each holding functions, modifiers, events,
-// state variables, and struct / enum definitions. Imports resolve
-// to file paths (`./X.sol`) or named symbols
-// (`import {IERC20} from "./IERC20.sol"`).
-var (
-	solContractRe = regexp.MustCompile(`(?m)^\s*(abstract\s+contract|contract|library|interface)\s+(\w+)`)
-	solFuncRe     = regexp.MustCompile(`(?m)^\s*function\s+(\w+)\s*\(`)
-	solModifierRe = regexp.MustCompile(`(?m)^\s*modifier\s+(\w+)\s*\(?`)
-	solEventRe    = regexp.MustCompile(`(?m)^\s*event\s+(\w+)\s*\(`)
-	solStructRe   = regexp.MustCompile(`(?m)^\s*struct\s+(\w+)\s*\{`)
-	solEnumRe     = regexp.MustCompile(`(?m)^\s*enum\s+(\w+)\s*\{`)
-	solImportRe   = regexp.MustCompile(`(?m)^\s*import\s+(?:\{[^}]*\}\s+from\s+)?["']([^"']+)["']`)
-	solVarRe      = regexp.MustCompile(`(?m)^\s+(?:public|private|internal|external)?\s*(\w+(?:\[\])?)\s+(?:public\s+|private\s+|internal\s+|constant\s+|immutable\s+)*(\w+)\s*(?:=|;)`)
-	solCallRe     = regexp.MustCompile(`\b([A-Za-z_]\w*)\s*\(`)
-)
+// Solidity is the dominant smart-contract language for the EVM. The
+// odvcencio grammar surfaces well-formed top-level nodes:
+//   - `contract_declaration` / `interface_declaration` (plus `library`
+//     / `abstract contract`: the same grammar rule with an `abstract`
+//     keyword child).
+//   - Inside a contract_body: `function_definition`,
+//     `modifier_definition`, `event_definition`, `struct_declaration`,
+//     `enum_declaration`, `state_variable_declaration`.
+//   - `import_directive` with a `string` child holding the quoted
+//     path.
+// Calls: `call_expression` nodes whose first child is an `expression`
+// wrapping an identifier.
 
-// SolidityExtractor extracts Solidity source using regex.
-type SolidityExtractor struct{}
+// SolidityExtractor extracts Solidity source using tree-sitter.
+type SolidityExtractor struct {
+	lang *sitter.Language
+}
 
-func NewSolidityExtractor() *SolidityExtractor { return &SolidityExtractor{} }
+func NewSolidityExtractor() *SolidityExtractor {
+	return &SolidityExtractor{lang: grammars.SolidityLanguage()}
+}
 
 func (e *SolidityExtractor) Language() string     { return "solidity" }
 func (e *SolidityExtractor) Extensions() []string { return []string{".sol"} }
 
 func (e *SolidityExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
+	lines := strings.Split(string(src), "\n")
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
@@ -66,84 +73,221 @@ func (e *SolidityExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 			FilePath: filePath, Line: start,
 		})
 	}
-
-	for _, m := range solContractRe.FindAllSubmatchIndex(src, -1) {
-		keyword := strings.TrimSpace(string(src[m[2]:m[3]]))
-		name := string(src[m[4]:m[5]])
-		line := lineAt(src, m[0])
-		end := findBlockEnd(lines, line)
-		kind := graph.KindType
-		if strings.Contains(keyword, "interface") {
-			kind = graph.KindInterface
+	addImport := func(target string, line int) {
+		if target == "" {
+			return
 		}
-		add(name, kind, line, end, map[string]any{"sol_kind": keyword})
-	}
-
-	for _, m := range solFuncRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findBlockEnd(lines, line)
-		add(name, graph.KindMethod, line, end, nil)
-	}
-	for _, m := range solModifierRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findBlockEnd(lines, line)
-		add(name, graph.KindMethod, line, end, map[string]any{"sol_kind": "modifier"})
-	}
-	for _, m := range solEventRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindMethod, line, line, map[string]any{"sol_kind": "event"})
-	}
-	for _, m := range solStructRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findBlockEnd(lines, line)
-		add(name, graph.KindType, line, end, map[string]any{"sol_kind": "struct"})
-	}
-	for _, m := range solEnumRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		end := findBlockEnd(lines, line)
-		add(name, graph.KindType, line, end, map[string]any{"sol_kind": "enum"})
-	}
-	for _, m := range solVarRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[4]:m[5]])
-		if isSolidityType(strings.ToLower(name)) {
-			continue
-		}
-		line := lineAt(src, m[0])
-		add(name, graph.KindVariable, line, line, nil)
-	}
-
-	for _, m := range solImportRe.FindAllSubmatchIndex(src, -1) {
-		path := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
 		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + path,
+			From: fileNode.ID, To: "unresolved::import::" + target,
 			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 		})
 	}
 
-	funcRanges := buildFuncRanges(result)
-	for _, m := range solCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isSolidityKeyword(name) || isSolidityType(strings.ToLower(name)) {
-			continue
+	walkNodes(root, func(node *sitter.Node) {
+		nt := parser.NodeType(node, e.lang)
+		switch nt {
+		case "contract_declaration":
+			// `contract X` or `abstract contract X` or `library X`
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			kw := e.contractKeyword(node, src)
+			add(name, graph.KindType, start, end, map[string]any{"sol_kind": kw})
+		case "library_declaration":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindType, start, end, map[string]any{"sol_kind": "library"})
+		case "interface_declaration":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindInterface, start, end, map[string]any{"sol_kind": "interface"})
+		case "struct_declaration":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindType, start, end, map[string]any{"sol_kind": "struct"})
+		case "enum_declaration":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindType, start, end, map[string]any{"sol_kind": "enum"})
+		case "function_definition":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindMethod, start, end, nil)
+		case "modifier_definition":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			end := int(node.EndPoint().Row) + 1
+			add(name, graph.KindMethod, start, end, map[string]any{"sol_kind": "modifier"})
+		case "event_definition":
+			name := e.firstIdentifier(node, src)
+			start := int(node.StartPoint().Row) + 1
+			add(name, graph.KindMethod, start, start, map[string]any{"sol_kind": "event"})
+		case "state_variable_declaration":
+			name := e.stateVariableName(node, src)
+			start := int(node.StartPoint().Row) + 1
+			add(name, graph.KindVariable, start, start, nil)
+		case "import_directive":
+			path := e.importPath(node, src)
+			addImport(path, int(node.StartPoint().Row)+1)
 		}
-		line := lineAt(src, m[0])
+	})
+
+	// Call-site edges inside functions/modifiers/events.
+	funcRanges := buildFuncRanges(result)
+	walkNodes(root, func(node *sitter.Node) {
+		if parser.NodeType(node, e.lang) != "call_expression" {
+			return
+		}
+		name := e.callHead(node, src)
+		if name == "" || isSolidityKeyword(name) || isSolidityType(strings.ToLower(name)) {
+			return
+		}
+		line := int(node.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
+}
+
+// firstIdentifier returns the first direct `identifier` child's text.
+func (e *SolidityExtractor) firstIdentifier(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, e.lang) == "identifier" {
+			return strings.TrimSpace(c.Text(src))
+		}
+	}
+	return ""
+}
+
+// contractKeyword returns which keyword introduced a
+// contract_declaration: `contract`, `library`, or `abstract contract`.
+// The grammar puts these as bare keyword children before the identifier.
+func (e *SolidityExtractor) contractKeyword(node *sitter.Node, src []byte) string {
+	var parts []string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		t := parser.NodeType(c, e.lang)
+		switch t {
+		case "abstract", "contract", "library":
+			parts = append(parts, t)
+		case "identifier":
+			// Stop at the name.
+			if len(parts) == 0 {
+				// Fallback: inspect raw text up to the identifier start.
+				return strings.TrimSpace(
+					strings.SplitN(node.Text(src), c.Text(src), 2)[0])
+			}
+			return strings.Join(parts, " ")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// stateVariableName finds the variable name in a state variable
+// declaration. The grammar shape is:
+//
+//	state_variable_declaration → type_name, visibility?, identifier, ;
+func (e *SolidityExtractor) stateVariableName(node *sitter.Node, src []byte) string {
+	// The name is the last `identifier` direct child (earlier
+	// `identifier` children can appear inside nested type_names for
+	// user-defined types).
+	var last string
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, e.lang) == "identifier" {
+			last = strings.TrimSpace(c.Text(src))
+		}
+	}
+	return last
+}
+
+// importPath returns the unquoted path string of an import_directive.
+func (e *SolidityExtractor) importPath(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		if parser.NodeType(c, e.lang) == "string" {
+			raw := c.Text(src)
+			return strings.Trim(strings.TrimSpace(raw), "\"'")
+		}
+	}
+	return ""
+}
+
+// callHead extracts the identifier at the head of a call_expression.
+// The Solidity grammar wraps the head in an `expression` node which
+// contains either an `identifier`, a `primitive_type` (e.g. address(0)),
+// or a `member_expression` whose last property identifier is the name.
+func (e *SolidityExtractor) callHead(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		t := parser.NodeType(c, e.lang)
+		if t == "expression" {
+			return e.unwrapExpressionHead(c, src)
+		}
+		if t == "identifier" {
+			return strings.TrimSpace(c.Text(src))
+		}
+	}
+	return ""
+}
+
+func (e *SolidityExtractor) unwrapExpressionHead(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.ChildCount()); i++ {
+		c := node.Child(i)
+		if c == nil {
+			continue
+		}
+		t := parser.NodeType(c, e.lang)
+		switch t {
+		case "identifier":
+			return strings.TrimSpace(c.Text(src))
+		case "member_expression":
+			// last identifier child is the method name
+			for j := int(c.ChildCount()) - 1; j >= 0; j-- {
+				inner := c.Child(j)
+				if inner == nil {
+					continue
+				}
+				if parser.NodeType(inner, e.lang) == "identifier" {
+					return strings.TrimSpace(inner.Text(src))
+				}
+			}
+		case "primitive_type":
+			return strings.TrimSpace(c.Text(src))
+		}
+	}
+	return ""
 }
 
 func isSolidityKeyword(s string) bool {

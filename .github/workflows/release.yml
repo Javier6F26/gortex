@@ -26,43 +26,30 @@ jobs:
           # full history the changelog section will be empty or wrong.
           fetch-depth: 0
 
-      # cosign is installed on the host (outside the goreleaser-cross
-      # container) so keyless OIDC signing can use the runner's identity
-      # token directly — no need to plumb ACTIONS_ID_TOKEN_REQUEST_* vars
-      # through `docker run`.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # cosign keyless OIDC signing uses the runner's identity token
+      # directly. Installed on the host before any cross-compile step.
       - uses: sigstore/cosign-installer@v3
         with:
           cosign-release: v2.4.1
 
-      - name: Run GoReleaser (cross-compile via Docker)
-        # goreleaser-cross ships osxcross + aarch64/x86_64 gcc toolchains
-        # so all 4 targets (linux/amd64, linux/arm64, darwin/amd64,
-        # darwin/arm64) cross-compile from one ubuntu runner — no matrix,
-        # no macOS minutes burned.
-        #
-        # Image tag is pinned to the Go major.minor; bump together with
-        # go.mod and the setup-go step elsewhere in the workflows.
-        run: |
-          docker run --rm --privileged \
-            -v "$PWD":/go/src/gortex \
-            -w /go/src/gortex \
-            -e GITHUB_TOKEN \
-            -e HOMEBREW_TAP_TOKEN \
-            ghcr.io/goreleaser/goreleaser-cross:v1.25 \
-            release --clean
+      # Pure-Go tree-sitter runtime (odvcencio/gotreesitter) means every
+      # GOOS/GOARCH target cross-compiles on plain ubuntu-latest — no
+      # goreleaser-cross Docker image, no osxcross, no C toolchains.
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Personal access token with `repo` scope on zzet/homebrew-tap.
           # GITHUB_TOKEN can only push to the source repo, not the tap.
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-
-      # goreleaser-cross runs as root inside the container, so everything
-      # in dist/ is owned by root:root on the host. The subsequent cosign
-      # and SLSA steps run as the non-root `runner` user and need to write
-      # .sig / .pem files next to the artifacts — reclaim ownership now
-      # before any permission-denied errors surface.
-      - name: Reclaim ownership of dist/ from Docker
-        run: sudo chown -R "$(id -u):$(id -g)" dist
 
       # Keyless cosign signing: each artifact gets a `.sig` (signature) and
       # `.pem` (certificate chain binding the signature to this workflow's

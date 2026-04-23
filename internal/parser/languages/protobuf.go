@@ -1,8 +1,8 @@
 package languages
 
 import (
-	sitter "github.com/smacker/go-tree-sitter"
-	"github.com/smacker/go-tree-sitter/protobuf"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -12,7 +12,7 @@ type ProtobufExtractor struct {
 }
 
 func NewProtobufExtractor() *ProtobufExtractor {
-	return &ProtobufExtractor{lang: protobuf.GetLanguage()}
+	return &ProtobufExtractor{lang: grammars.ProtoLanguage()}
 }
 
 func (e *ProtobufExtractor) Language() string     { return "protobuf" }
@@ -38,7 +38,7 @@ func (e *ProtobufExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 
 	for i := 0; i < int(root.NamedChildCount()); i++ {
 		child := root.NamedChild(i)
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "message":
 			e.extractMessage(child, src, filePath, fileNode.ID, seen, result)
 		case "service":
@@ -54,7 +54,7 @@ func (e *ProtobufExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 }
 
 func (e *ProtobufExtractor) extractMessage(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findProtoName(node, "message_name", src)
+	name := findProtoName(node, "message_name", src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -72,11 +72,11 @@ func (e *ProtobufExtractor) extractMessage(node *sitter.Node, src []byte, filePa
 
 	for j := 0; j < int(node.NamedChildCount()); j++ {
 		body := node.NamedChild(j)
-		if body.Type() == "message_body" {
+		if parser.NodeType(body, e.lang) == "message_body" {
 			for k := 0; k < int(body.NamedChildCount()); k++ {
 				field := body.NamedChild(k)
-				if field.Type() == "field" {
-					fieldName := findDirectIdent(field, src)
+				if parser.NodeType(field, e.lang) == "field" {
+					fieldName := findDirectIdent(field, src, e.lang)
 					if fieldName != "" {
 						fieldID := id + "." + fieldName
 						if !seen[fieldID] {
@@ -99,7 +99,7 @@ func (e *ProtobufExtractor) extractMessage(node *sitter.Node, src []byte, filePa
 }
 
 func (e *ProtobufExtractor) extractService(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findProtoName(node, "service_name", src)
+	name := findProtoName(node, "service_name", src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -109,8 +109,8 @@ func (e *ProtobufExtractor) extractService(node *sitter.Node, src []byte, filePa
 	var methods []string
 	for j := 0; j < int(node.NamedChildCount()); j++ {
 		child := node.NamedChild(j)
-		if child.Type() == "rpc" {
-			rpcName := findProtoName(child, "rpc_name", src)
+		if parser.NodeType(child, e.lang) == "rpc" {
+			rpcName := findProtoName(child, "rpc_name", src, e.lang)
 			if rpcName != "" {
 				methods = append(methods, rpcName)
 			}
@@ -129,8 +129,8 @@ func (e *ProtobufExtractor) extractService(node *sitter.Node, src []byte, filePa
 
 	for j := 0; j < int(node.NamedChildCount()); j++ {
 		child := node.NamedChild(j)
-		if child.Type() == "rpc" {
-			rpcName := findProtoName(child, "rpc_name", src)
+		if parser.NodeType(child, e.lang) == "rpc" {
+			rpcName := findProtoName(child, "rpc_name", src, e.lang)
 			if rpcName != "" {
 				rpcID := id + "." + rpcName
 				if !seen[rpcID] {
@@ -155,7 +155,7 @@ func (e *ProtobufExtractor) extractService(node *sitter.Node, src []byte, filePa
 }
 
 func (e *ProtobufExtractor) extractEnum(node *sitter.Node, src []byte, filePath, fileID string, seen map[string]bool, result *parser.ExtractionResult) {
-	name := findProtoName(node, "enum_name", src)
+	name := findProtoName(node, "enum_name", src, e.lang)
 	if name == "" || seen[name] {
 		return
 	}
@@ -175,8 +175,8 @@ func (e *ProtobufExtractor) extractEnum(node *sitter.Node, src []byte, filePath,
 func (e *ProtobufExtractor) extractImport(node *sitter.Node, src []byte, filePath, fileID string, result *parser.ExtractionResult) {
 	for j := 0; j < int(node.NamedChildCount()); j++ {
 		child := node.NamedChild(j)
-		if child.Type() == "string" {
-			path := child.Content(src)
+		if parser.NodeType(child, e.lang) == "string" {
+			path := child.Text(src)
 			if len(path) >= 2 {
 				path = path[1 : len(path)-1]
 			}
@@ -188,27 +188,27 @@ func (e *ProtobufExtractor) extractImport(node *sitter.Node, src []byte, filePat
 	}
 }
 
-func findProtoName(node *sitter.Node, nameType string, src []byte) string {
+func findProtoName(node *sitter.Node, nameType string, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == nameType {
+		if parser.NodeType(child, lang) == nameType {
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				id := child.NamedChild(j)
-				if id.Type() == "identifier" {
-					return id.Content(src)
+				if parser.NodeType(id, lang) == "identifier" {
+					return id.Text(src)
 				}
 			}
-			return child.Content(src)
+			return child.Text(src)
 		}
 	}
 	return ""
 }
 
-func findDirectIdent(node *sitter.Node, src []byte) string {
+func findDirectIdent(node *sitter.Node, src []byte, lang *sitter.Language) string {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "identifier" {
-			return child.Content(src)
+		if parser.NodeType(child, lang) == "identifier" {
+			return child.Text(src)
 		}
 	}
 	return ""

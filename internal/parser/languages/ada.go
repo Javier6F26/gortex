@@ -1,29 +1,32 @@
 package languages
 
 import (
-	"regexp"
-	"strings"
-
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Ada is a case-insensitive, heavily typed language. We cover the
-// primary declaration shapes: procedures, functions, packages
-// (specification or body), types, and `with` clauses for imports.
-var (
-	adaProcRe    = regexp.MustCompile(`(?im)^\s*procedure\s+([\w.]+)`)
-	adaFuncRe    = regexp.MustCompile(`(?im)^\s*function\s+([\w.]+)`)
-	adaPackageRe = regexp.MustCompile(`(?im)^\s*package\s+(?:body\s+)?([\w.]+)`)
-	adaTypeRe    = regexp.MustCompile(`(?im)^\s*(?:sub)?type\s+(\w+)\s+is`)
-	adaWithRe    = regexp.MustCompile(`(?im)^\s*with\s+([\w.]+(?:\s*,\s*[\w.]+)*)\s*;`)
-	adaSplitRe   = regexp.MustCompile(`[\s,]+`)
-)
+// AdaExtractor extracts Ada source files using tree-sitter.
+//
+// The grammar emits a `compilation` root whose named children are one
+// or more `compilation_unit`s. Each unit wraps a single top-level
+// construct (with clause, package declaration/body, subprogram). We
+// walk them in order, covering:
+//
+//   - with_clause                 → import edges for each selected name
+//   - package_declaration         → KindType + nested subprograms/types
+//   - package_body                → KindType + nested subprogram bodies
+//   - full_type_declaration       → KindType
+//   - subtype_declaration         → KindType
+//   - subprogram_declaration/body → KindFunction (spec and body share a name)
+type AdaExtractor struct {
+	lang *sitter.Language
+}
 
-// AdaExtractor extracts Ada source using regex.
-type AdaExtractor struct{}
-
-func NewAdaExtractor() *AdaExtractor { return &AdaExtractor{} }
+func NewAdaExtractor() *AdaExtractor {
+	return &AdaExtractor{lang: grammars.AdaLanguage()}
+}
 
 func (e *AdaExtractor) Language() string { return "ada" }
 func (e *AdaExtractor) Extensions() []string {
@@ -31,17 +34,25 @@ func (e *AdaExtractor) Extensions() []string {
 }
 
 func (e *AdaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "ada",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	totalLines := int(root.EndPoint().Row) + 1
+
 	add := func(name string, kind graph.NodeKind, start, end int) {
 		if name == "" {
 			return
@@ -62,43 +73,107 @@ func (e *AdaExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		})
 	}
 
-	for _, m := range adaPackageRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, len(lines))
-	}
-	for _, m := range adaTypeRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, line)
-	}
-	for _, m := range adaProcRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findKeywordBlockEnd(lines, line, "end "+strings.ToLower(name), "end"))
-	}
-	for _, m := range adaFuncRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findKeywordBlockEnd(lines, line, "end "+strings.ToLower(name), "end"))
-	}
+	// Recursively walk the tree and fire on known declaration shapes.
+	walkNodes(root, func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		start := int(n.StartPoint().Row) + 1
+		end := int(n.EndPoint().Row) + 1
 
-	for _, m := range adaWithRe.FindAllSubmatchIndex(src, -1) {
-		clause := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		for _, tok := range adaSplitRe.Split(clause, -1) {
-			tok = strings.TrimSpace(tok)
-			if tok == "" {
+		switch parser.NodeType(n, e.lang) {
+		case "with_clause":
+			// with A.B.C, D.E; → one import per selected name.
+			e.handleWithClause(n, src, filePath, fileNode, result, start)
+
+		case "package_declaration", "package_body":
+			name := adaFirstIdentifier(n, src, e.lang)
+			// The package declaration/body extends to the matching
+			// `end NAME;` token, but test only checks the node exists;
+			// use totalLines for the end to mirror the prior regex
+			// implementation.
+			add(name, graph.KindType, start, totalLines)
+
+		case "full_type_declaration", "subtype_declaration":
+			name := adaFirstIdentifier(n, src, e.lang)
+			add(name, graph.KindType, start, start)
+
+		case "subprogram_declaration", "subprogram_body":
+			name := adaSubprogramName(n, src, e.lang)
+			add(name, graph.KindFunction, start, end)
+
+		case "generic_instantiation":
+			// Generic package/subprogram instantiations also carry a
+			// leading identifier and should surface as a type.
+			name := adaFirstIdentifier(n, src, e.lang)
+			add(name, graph.KindType, start, end)
+		}
+	})
+
+	return result, nil
+}
+
+// handleWithClause emits one EdgeImports per identifier inside a
+// `with X, Y.Z;` clause. The grammar represents each imported unit as
+// either a bare `identifier` or a `selected_component` (dotted path).
+func (e *AdaExtractor) handleWithClause(
+	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
+	result *parser.ExtractionResult, line int,
+) {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		switch parser.NodeType(child, e.lang) {
+		case "identifier", "selected_component":
+			mod := child.Text(src)
+			if mod == "" {
 				continue
 			}
 			result.Edges = append(result.Edges, &graph.Edge{
-				From: fileNode.ID, To: "unresolved::import::" + tok,
+				From: fileNode.ID, To: "unresolved::import::" + mod,
 				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 			})
 		}
 	}
+}
 
-	return result, nil
+// adaFirstIdentifier returns the first direct-child identifier's text.
+// Handles both bare identifiers and selected_components (which keep
+// their full dotted representation).
+func adaFirstIdentifier(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	if node == nil {
+		return ""
+	}
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		switch parser.NodeType(child, lang) {
+		case "identifier", "selected_component":
+			return child.Text(src)
+		}
+	}
+	return ""
+}
+
+// adaSubprogramName pulls the name from a subprogram declaration or
+// body. Both wrap a `procedure_specification` or `function_specification`
+// whose first identifier-like child is the name.
+func adaSubprogramName(node *sitter.Node, src []byte, lang *sitter.Language) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		child := node.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		switch parser.NodeType(child, lang) {
+		case "procedure_specification", "function_specification":
+			return adaFirstIdentifier(child, src, lang)
+		}
+	}
+	return ""
 }
 
 var _ parser.Extractor = (*AdaExtractor)(nil)

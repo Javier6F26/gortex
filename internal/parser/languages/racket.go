@@ -1,30 +1,33 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Racket. Definitions use `define` (value or function), `define-struct`,
-// `define-syntax`. Modules are `module name lang ...` (or file-level
-// `#lang` declarations, which we skip). Imports use `require` with
-// either a string path or a collection name.
-var (
-	racketDefineFnRe     = regexp.MustCompile(`\(define\s*\(\s*([\w:*/+<>?!=.-]+)`)
-	racketDefineValRe    = regexp.MustCompile(`\(define\s+([\w:*/+<>?!=.-]+)\s`)
-	racketDefineStructRe = regexp.MustCompile(`\(define-struct\s+([\w:*/+<>?!=.-]+)`)
-	racketDefineSyntaxRe = regexp.MustCompile(`\(define-syntax\s+\(?([\w:*/+<>?!=.-]+)`)
-	racketModuleRe       = regexp.MustCompile(`\(module\s+([\w:*/+<>?!=.-]+)`)
-	racketRequireRe      = regexp.MustCompile(`\(require\s+(?:"([^"]+)"|([\w/.-]+))`)
-)
+// RacketExtractor extracts Racket source files.
+//
+// Racket is S-expression based. The odvcencio grammar wraps every
+// parenthesised form in a `list` node whose children are the form's
+// tokens (`symbol`, nested `list`, `string`, `number`, …). Definitions
+// are lists whose first `symbol` is one of:
+//   - `define`           — value or function
+//   - `define-struct`    — type
+//   - `define-syntax`    — macro
+//   - `module`           — nested module
+// Imports use `(require …)`, with either a string literal path or a
+// collection symbol.
+type RacketExtractor struct {
+	lang *sitter.Language
+}
 
-// RacketExtractor extracts Racket source using regex.
-type RacketExtractor struct{}
-
-func NewRacketExtractor() *RacketExtractor { return &RacketExtractor{} }
+func NewRacketExtractor() *RacketExtractor {
+	return &RacketExtractor{lang: grammars.RacketLanguage()}
+}
 
 func (e *RacketExtractor) Language() string { return "racket" }
 func (e *RacketExtractor) Extensions() []string {
@@ -32,15 +35,29 @@ func (e *RacketExtractor) Extensions() []string {
 }
 
 func (e *RacketExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
+	endLine := 1
+	if root != nil {
+		endLine = int(root.EndPoint().Row) + 1
+	}
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: endLine,
 		Language: "racket",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
+
+	if root == nil {
+		return result, nil
+	}
 
 	seen := make(map[string]bool)
 	add := func(name string, kind graph.NodeKind, start, end int) {
@@ -63,50 +80,129 @@ func (e *RacketExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		})
 	}
 
-	for _, m := range racketModuleRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
-	for _, m := range racketDefineStructRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, line)
-	}
-	for _, m := range racketDefineSyntaxRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findBlockEnd(lines, line))
-	}
-	for _, m := range racketDefineFnRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findBlockEnd(lines, line))
-	}
-	for _, m := range racketDefineValRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindVariable, line, line)
-	}
+	walkNodes(root, func(n *sitter.Node) {
+		if parser.NodeType(n, e.lang) != "list" {
+			return
+		}
+		// First non-punctuation child is the form name (a `symbol`).
+		head, headText := firstSymbol(n, src, e.lang)
+		if head == nil {
+			return
+		}
+		start := int(n.StartPoint().Row) + 1
+		end := int(n.EndPoint().Row) + 1
 
-	for _, m := range racketRequireRe.FindAllSubmatchIndex(src, -1) {
-		var mod string
-		if m[2] >= 0 {
-			mod = string(src[m[2]:m[3]])
-		} else if m[4] >= 0 {
-			mod = string(src[m[4]:m[5]])
+		switch headText {
+		case "define":
+			// `(define name value)` or `(define (name args...) body)`.
+			target := nextSibling(n, head, e.lang)
+			if target == nil {
+				return
+			}
+			switch parser.NodeType(target, e.lang) {
+			case "symbol":
+				add(target.Text(src), graph.KindVariable, start, start)
+			case "list":
+				// Function form: first symbol inside is the name.
+				if _, name := firstSymbol(target, src, e.lang); name != "" {
+					add(name, graph.KindFunction, start, end)
+				}
+			}
+
+		case "define-struct":
+			target := nextSibling(n, head, e.lang)
+			if target == nil {
+				return
+			}
+			if parser.NodeType(target, e.lang) == "symbol" {
+				add(target.Text(src), graph.KindType, start, start)
+			}
+
+		case "define-syntax":
+			target := nextSibling(n, head, e.lang)
+			if target == nil {
+				return
+			}
+			switch parser.NodeType(target, e.lang) {
+			case "symbol":
+				add(target.Text(src), graph.KindFunction, start, end)
+			case "list":
+				if _, name := firstSymbol(target, src, e.lang); name != "" {
+					add(name, graph.KindFunction, start, end)
+				}
+			}
+
+		case "module", "module+", "module*":
+			target := nextSibling(n, head, e.lang)
+			if target == nil {
+				return
+			}
+			if parser.NodeType(target, e.lang) == "symbol" {
+				add(target.Text(src), graph.KindType, start, end)
+			}
+
+		case "require":
+			// Emit one import edge per sibling after `require`.
+			for i := 0; i < int(n.ChildCount()); i++ {
+				child := n.Child(i)
+				if child == nil || child == head {
+					continue
+				}
+				t := parser.NodeType(child, e.lang)
+				var mod string
+				switch t {
+				case "string":
+					mod = strings.Trim(child.Text(src), `"`)
+				case "symbol":
+					mod = child.Text(src)
+				}
+				if mod == "" || mod == "require" {
+					continue
+				}
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: fileNode.ID, To: "unresolved::import::" + mod,
+					Kind: graph.EdgeImports, FilePath: filePath, Line: int(child.StartPoint().Row) + 1,
+				})
+			}
 		}
-		if mod == "" {
-			continue
-		}
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
+	})
 
 	return result, nil
+}
+
+// firstSymbol returns the first `symbol` child of a `list` node along
+// with its text. Returns (nil, "") if none found.
+func firstSymbol(list *sitter.Node, src []byte, lang *sitter.Language) (*sitter.Node, string) {
+	for i := 0; i < int(list.ChildCount()); i++ {
+		child := list.Child(i)
+		if child != nil && parser.NodeType(child, lang) == "symbol" {
+			return child, child.Text(src)
+		}
+	}
+	return nil, ""
+}
+
+// nextSibling returns the child following `after` that has one of the
+// interesting types (symbol or list). Returns nil if not found.
+func nextSibling(parent, after *sitter.Node, lang *sitter.Language) *sitter.Node {
+	passed := false
+	for i := 0; i < int(parent.ChildCount()); i++ {
+		child := parent.Child(i)
+		if child == nil {
+			continue
+		}
+		if !passed {
+			if child == after {
+				passed = true
+			}
+			continue
+		}
+		t := parser.NodeType(child, lang)
+		if t == "symbol" || t == "list" {
+			return child
+		}
+	}
+	return nil
 }
 
 var _ parser.Extractor = (*RacketExtractor)(nil)

@@ -1,39 +1,39 @@
 package languages
 
 import (
-	"regexp"
 	"strings"
 
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
 
-// Gleam is a BEAM-family typed language with `pub fn` / `fn`
-// functions, `pub type` / `type` sum types, and `import x/y`
-// modules with optional `.{A, B}` unqualified imports and
-// `as Alias` renaming.
-var (
-	gleamFuncRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?fn\s+(\w+)\s*\(`)
-	gleamTypeRe   = regexp.MustCompile(`(?m)^\s*(?:pub\s+)?type\s+(\w+)\b`)
-	gleamImportRe = regexp.MustCompile(`(?m)^\s*import\s+([\w/]+)`)
-	gleamCallRe   = regexp.MustCompile(`\b([a-zA-Z_]\w*)\s*\(`)
-)
+// GleamExtractor extracts Gleam source using tree-sitter.
+type GleamExtractor struct {
+	lang *sitter.Language
+}
 
-// GleamExtractor extracts Gleam source using regex.
-type GleamExtractor struct{}
-
-func NewGleamExtractor() *GleamExtractor { return &GleamExtractor{} }
+func NewGleamExtractor() *GleamExtractor {
+	return &GleamExtractor{lang: grammars.GleamLanguage()}
+}
 
 func (e *GleamExtractor) Language() string     { return "gleam" }
 func (e *GleamExtractor) Extensions() []string { return []string{".gleam"} }
 
 func (e *GleamExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
-	lines := strings.Split(string(src), "\n")
+	tree, err := parser.ParseFile(src, e.lang)
+	if err != nil {
+		return nil, err
+	}
+	defer tree.Close()
+
+	root := tree.RootNode()
 	result := &parser.ExtractionResult{}
 
 	fileNode := &graph.Node{
 		ID: filePath, Kind: graph.KindFile, Name: filePath,
-		FilePath: filePath, StartLine: 1, EndLine: len(lines),
+		FilePath: filePath, StartLine: 1, EndLine: int(root.EndPoint().Row) + 1,
 		Language: "gleam",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
@@ -59,52 +59,100 @@ func (e *GleamExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		})
 	}
 
-	for _, m := range gleamFuncRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindFunction, line, findBlockEnd(lines, line))
-	}
-	for _, m := range gleamTypeRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		add(name, graph.KindType, line, findBlockEnd(lines, line))
-	}
+	// Top-level declarations are direct children of source_file.
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		n := root.NamedChild(i)
+		t := parser.NodeType(n, e.lang)
+		switch t {
+		case "import":
+			// import → module (text is slash-separated path).
+			mod := ""
+			for j := 0; j < int(n.NamedChildCount()); j++ {
+				c := n.NamedChild(j)
+				if parser.NodeType(c, e.lang) == "module" {
+					mod = c.Text(src)
+					break
+				}
+			}
+			if mod == "" {
+				continue
+			}
+			line := int(n.StartPoint().Row) + 1
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: fileNode.ID, To: "unresolved::import::" + mod,
+				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
+			})
 
-	for _, m := range gleamImportRe.FindAllSubmatchIndex(src, -1) {
-		mod := string(src[m[2]:m[3]])
-		line := lineAt(src, m[0])
-		result.Edges = append(result.Edges, &graph.Edge{
-			From: fileNode.ID, To: "unresolved::import::" + mod,
-			Kind: graph.EdgeImports, FilePath: filePath, Line: line,
-		})
-	}
+		case "type_definition":
+			// type_definition → type_name → type_identifier.
+			name := ""
+			for j := 0; j < int(n.NamedChildCount()); j++ {
+				c := n.NamedChild(j)
+				if parser.NodeType(c, e.lang) == "type_name" {
+					for k := 0; k < int(c.NamedChildCount()); k++ {
+						g := c.NamedChild(k)
+						if parser.NodeType(g, e.lang) == "type_identifier" {
+							name = g.Text(src)
+							break
+						}
+					}
+					break
+				}
+			}
+			add(name, graph.KindType,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1)
 
-	funcRanges := buildFuncRanges(result)
-	for _, m := range gleamCallRe.FindAllSubmatchIndex(src, -1) {
-		name := string(src[m[2]:m[3]])
-		if isGleamKeyword(name) {
-			continue
+		case "function":
+			// function → identifier (first direct named child).
+			name := ""
+			for j := 0; j < int(n.NamedChildCount()); j++ {
+				c := n.NamedChild(j)
+				if parser.NodeType(c, e.lang) == "identifier" {
+					name = c.Text(src)
+					break
+				}
+			}
+			add(name, graph.KindFunction,
+				int(n.StartPoint().Row)+1, int(n.EndPoint().Row)+1)
 		}
-		line := lineAt(src, m[0])
+	}
+
+	// Call edges: function_call nodes.
+	funcRanges := buildFuncRanges(result)
+	walkNodes(root, func(n *sitter.Node) {
+		if parser.NodeType(n, e.lang) != "function_call" {
+			return
+		}
+		name := ""
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if parser.NodeType(c, e.lang) == "identifier" {
+				name = c.Text(src)
+				break
+			}
+		}
+		if name == "" || isGleamKeyword(name) {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
 		callerID := findEnclosingFunc(funcRanges, line)
 		if callerID == "" || strings.HasSuffix(callerID, "::"+name) {
-			continue
+			return
 		}
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: callerID, To: "unresolved::" + name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
 		})
-	}
+	})
 
 	return result, nil
 }
 
 func isGleamKeyword(s string) bool {
 	switch s {
-	case "if", "else", "case", "let", "assert", "use",
-		"fn", "type", "pub", "import", "as", "opaque",
-		"const", "todo", "panic", "external", "try",
-		"True", "False", "Nil", "Ok", "Error":
+	case "let", "const", "fn", "pub", "import", "type", "as",
+		"case", "if", "else", "use", "external", "opaque",
+		"assert", "panic", "todo", "True", "False", "Nil":
 		return true
 	}
 	return false

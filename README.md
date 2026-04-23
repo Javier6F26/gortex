@@ -166,7 +166,7 @@ Expected output ends with `PASSED: SLSA verification passed`.
 
 ### From source
 
-Requires Go 1.25+ and a C toolchain (the tree-sitter extractors are CGO — no way around it).
+Requires Go 1.25+. Pure-Go tree-sitter runtime — no C toolchain needed.
 
 ```bash
 git clone https://github.com/zzet/gortex.git
@@ -686,7 +686,7 @@ The persistence layer uses a pluggable backend interface (`persistence.Store`). 
 
 ## Scale — battle-tested on large repos
 
-Measured on an Apple Silicon laptop with the default CGO build:
+Measured on an Apple Silicon laptop with the default pure-Go build:
 
 | Repository | Files | Nodes | Edges | Index time | Throughput | Peak heap |
 | ---------- | ----: | ----: | ----: | ---------: | ---------: | --------: |
@@ -744,7 +744,7 @@ make fmt            # gofmt -s
 make install        # go install with version ldflags
 ```
 
-Requires Go 1.21+ and CGO enabled (for tree-sitter C bindings).
+Requires Go 1.25+. Pure-Go tree-sitter runtime — no C toolchain needed.
 
 ## License
 

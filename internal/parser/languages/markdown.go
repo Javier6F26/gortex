@@ -4,8 +4,8 @@ import (
 	"regexp"
 	"strings"
 
-	sitter "github.com/smacker/go-tree-sitter"
-	tree_sitter_markdown "github.com/smacker/go-tree-sitter/markdown/tree-sitter-markdown"
+	sitter "github.com/odvcencio/gotreesitter"
+	"github.com/odvcencio/gotreesitter/grammars"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
 )
@@ -19,7 +19,7 @@ type MarkdownExtractor struct {
 }
 
 func NewMarkdownExtractor() *MarkdownExtractor {
-	return &MarkdownExtractor{lang: tree_sitter_markdown.GetLanguage()}
+	return &MarkdownExtractor{lang: grammars.MarkdownLanguage()}
 }
 
 func (e *MarkdownExtractor) Language() string     { return "markdown" }
@@ -48,14 +48,14 @@ func (e *MarkdownExtractor) Extract(filePath string, src []byte) (*parser.Extrac
 	// Walk the AST for headings, code blocks, and inline content.
 	var walk func(node *sitter.Node)
 	walk = func(node *sitter.Node) {
-		switch node.Type() {
+		switch parser.NodeType(node, e.lang) {
 		case "atx_heading":
 			e.extractHeading(node, src, filePath, fileNode.ID, seen, result)
 		case "fenced_code_block":
 			e.extractCodeBlock(node, src, filePath, fileNode.ID, seen, result)
 		case "paragraph", "inline":
 			// Extract links from inline text.
-			text := node.Content(src)
+			text := node.Text(src)
 			e.extractLinks(text, filePath, fileNode.ID, seenLinks, result, int(node.StartPoint().Row)+1)
 		}
 
@@ -74,7 +74,7 @@ func (e *MarkdownExtractor) extractHeading(node *sitter.Node, src []byte, filePa
 	var headingText string
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		switch child.Type() {
+		switch parser.NodeType(child, e.lang) {
 		case "atx_h1_marker":
 			level = 1
 		case "atx_h2_marker":
@@ -88,7 +88,7 @@ func (e *MarkdownExtractor) extractHeading(node *sitter.Node, src []byte, filePa
 		case "atx_h6_marker":
 			level = 6
 		case "inline":
-			headingText = strings.TrimSpace(child.Content(src))
+			headingText = strings.TrimSpace(child.Text(src))
 		}
 	}
 
@@ -117,11 +117,11 @@ func (e *MarkdownExtractor) extractCodeBlock(node *sitter.Node, src []byte, file
 	// Extract language from info_string.
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		child := node.NamedChild(i)
-		if child.Type() == "info_string" {
+		if parser.NodeType(child, e.lang) == "info_string" {
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				langNode := child.NamedChild(j)
-				if langNode.Type() == "language" {
-					lang := strings.TrimSpace(langNode.Content(src))
+				if parser.NodeType(langNode, e.lang) == "language" {
+					lang := strings.TrimSpace(langNode.Text(src))
 					if lang != "" {
 						id := filePath + "::codeblock:" + lang + ":" + string(rune('0'+int(node.StartPoint().Row)))
 						if !seen[id] {
