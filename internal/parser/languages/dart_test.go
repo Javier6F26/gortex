@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/dartlang"
+	"github.com/zzet/gortex/internal/parser/tsitter/dart"
 )
 
 // TestDartAST_Debug dumps the AST to verify node types used in queries.
@@ -56,7 +56,7 @@ void main() {
 
 const version = '1.0.0';
 `)
-	lang := dartlang.GetLanguage()
+	lang := dart.GetLanguage()
 	tree, err := parser.ParseFile(src, lang)
 	require.NoError(t, err)
 	defer tree.Close()

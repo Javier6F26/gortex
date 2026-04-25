@@ -7,7 +7,7 @@ import (
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/dartlang"
+	"github.com/zzet/gortex/internal/parser/tsitter/dart"
 )
 
 // DartExtractor extracts Dart source files.
@@ -16,7 +16,7 @@ type DartExtractor struct {
 }
 
 func NewDartExtractor() *DartExtractor {
-	return &DartExtractor{lang: dartlang.GetLanguage()}
+	return &DartExtractor{lang: dart.GetLanguage()}
 }
 
 func (e *DartExtractor) Language() string     { return "dart" }

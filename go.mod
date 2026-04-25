@@ -10,6 +10,12 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
 	github.com/gortexhq/gcx-go v0.1.0
+	github.com/gortexhq/tree-sitter-dart v0.1.0
+	github.com/gortexhq/tree-sitter-dockerfile v0.1.0
+	github.com/gortexhq/tree-sitter-markdown v0.1.0
+	github.com/gortexhq/tree-sitter-protobuf v0.1.0
+	github.com/gortexhq/tree-sitter-sql v0.1.0
+	github.com/gortexhq/tree-sitter-swift v0.1.1-0.20260424235305-8dde3a3327dd
 	github.com/jedib0t/go-pretty/v6 v6.7.9
 	github.com/knights-analytics/hugot v0.7.0
 	github.com/mark3labs/mcp-go v0.48.0

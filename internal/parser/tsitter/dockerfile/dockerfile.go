@@ -1,20 +1,15 @@
-// Package dockerfile vendors camdencheek/tree-sitter-dockerfile. The
-// upstream go.mod declares a module path that clashes with the parent
-// repo, so Go's module system can't import it as a submodule; we
-// compile the C grammar directly through CGO instead.
+// Package dockerfile re-exports the tree-sitter-dockerfile grammar.
+// The C parser lives in the sibling github.com/gortexhq/tree-sitter-dockerfile
+// module; this file is just the thin shim that bridges the upstream
+// binding into gortex's *tsitter.Language type.
 package dockerfile
 
-// #cgo CFLAGS: -I${SRCDIR}/src -std=c11 -fPIC
-// #include "src/parser.c"
-// #include "src/scanner.c"
-import "C"
 import (
-	"unsafe"
-
+	tree_sitter_dockerfile "github.com/gortexhq/tree-sitter-dockerfile/bindings/go"
 	"github.com/zzet/gortex/internal/parser/tsitter"
 )
 
 // GetLanguage returns the compiled Dockerfile language.
 func GetLanguage() *tsitter.Language {
-	return tsitter.NewLanguage(unsafe.Pointer(C.tree_sitter_dockerfile()))
+	return tsitter.NewLanguage(tree_sitter_dockerfile.Language())
 }
