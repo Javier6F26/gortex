@@ -60,8 +60,12 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// error the agent can surface in chat ("run `gortex track .`")
 	// rather than a silent wrong-result. Skipped when the session has
 	// no cwd (the CLI and test harnesses don't set one), so control-
-	// flow paths keep working unchanged.
-	if sess.CWD != "" && !d.isCWDTracked(sess.CWD) {
+	// flow paths keep working unchanged. With a multi-server router
+	// wired, a cwd that resolves to a remote workspace via the roster
+	// also counts as reachable — otherwise the cwd-walk priority
+	// chain in RouteForCwd would be dead code from the dispatcher's
+	// perspective.
+	if sess.CWD != "" && !d.cwdReachable(sess.CWD) {
 		return d.notTrackedError(sess, frame), nil
 	}
 
@@ -112,6 +116,45 @@ func (d *mcpDispatcher) SessionEnded(sess *daemon.Session) {
 	if d.srv != nil && sess != nil {
 		d.srv.ReleaseSession(sess.ID)
 	}
+}
+
+// cwdReachable reports whether a session cwd has any chance of
+// being served by this daemon — locally or remotely. The local arm
+// is isCWDTracked. The remote arm consults the router so a cwd
+// whose .gortex.yaml::workspace is hosted by a server in
+// servers.toml is treated as reachable; the call will be proxied by
+// tryProxyToolCall later in Dispatch. Without this, the cwd-walk
+// priority chain in RouteForCwd would never trigger from the MCP
+// path because the cwd-tracked guard rejects first.
+//
+// Reachable when:
+//   - cwd is empty (no opinion — control-style sessions),
+//   - cwd is inside a locally tracked repo,
+//   - or the router resolves cwd to a known workspace via an
+//     explicit signal: scope-override, .gortex.yaml::workspace, or a
+//     server's declared workspaces / cached roster.
+//
+// The "default-server fall-through" case is intentionally NOT
+// treated as reachable: a cwd that nobody claims would otherwise
+// silently route to whatever server happens to be marked default
+// in servers.toml, which is the same wrong-result class
+// repo_not_tracked is meant to prevent.
+func (d *mcpDispatcher) cwdReachable(cwd string) bool {
+	if cwd == "" {
+		return true
+	}
+	if d.isCWDTracked(cwd) {
+		return true
+	}
+	if d.router == nil {
+		return false
+	}
+	lookup := d.router.LookupForCwd(cwd, "")
+	switch lookup.Source {
+	case "scope-override", "config-yaml", "roster":
+		return true
+	}
+	return false
 }
 
 // isCWDTracked reports whether the proxy's cwd lies inside any tracked

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -139,4 +140,110 @@ func TestDispatcher_NilMultiIndexer_AllowsEverything(t *testing.T) {
 	d := newMCPDispatcher(nil, nil, zap.NewNop())
 	assert.True(t, d.isCWDTracked("/anywhere"))
 	assert.True(t, d.isCWDTracked(""))
+}
+
+// TestDispatcher_RemoteRoutableCWD_Passes covers the multi-server
+// case: a cwd that is NOT in any locally tracked repo but DOES
+// resolve to a workspace declared by a server in the roster must
+// pass the cwd guard so the request reaches tryProxyToolCall.
+//
+// Without this, the four-step priority chain in RouteForCwd is
+// dead code from the MCP dispatcher's perspective: any user who
+// `cd`s into a remote-served repo gets a repo_not_tracked error
+// even though the daemon could have proxied happily.
+func TestDispatcher_RemoteRoutableCWD_Passes(t *testing.T) {
+	// Local daemon tracks nothing.
+	tracked := t.TempDir()
+	d, _ := trackedPathMCPSetup(t, tracked)
+
+	// A repo on disk that the daemon does NOT track but whose
+	// .gortex.yaml declares a workspace claimed by a roster entry.
+	remote := t.TempDir()
+	require.NoError(t,
+		writeFile(filepath.Join(remote, ".gortex.yaml"), "workspace: remote-ws\n"))
+
+	cfg := &daemon.ServersConfig{
+		Server: []daemon.ServerEntry{
+			{Slug: "self", URL: "unix:///tmp/never-dialed.sock", Default: true},
+			{Slug: "remote", URL: "https://remote.example.com", Workspaces: []string{"remote-ws"}},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	router := daemon.NewRouter(daemon.RouterConfig{
+		Servers:   cfg,
+		Rosters:   daemon.NewWorkspaceRosterCache(0),
+		LocalSlug: "self",
+		Logger:    zap.NewNop(),
+	})
+	d.SetRouter(router)
+
+	// Sanity: cwdReachable agrees the remote-routable cwd passes.
+	assert.True(t, d.cwdReachable(remote),
+		"cwd inside remote-served repo must be reachable")
+	assert.False(t, d.cwdReachable(filepath.Join(t.TempDir(), "nowhere")),
+		"cwd with no .gortex.yaml + no roster match must be rejected")
+
+	// End-to-end: Dispatch must NOT short-circuit with repo_not_tracked
+	// for the remote-routable cwd. We don't need the proxy to actually
+	// succeed (the URL is unreachable in the test) — proving the guard
+	// passed is enough; tryProxyToolCall's failure path falls through
+	// to the local executor which returns a normal mcp-go reply.
+	sess := &daemon.Session{ID: "sess_remote", CWD: remote}
+	frame := []byte(`{"jsonrpc":"2.0","id":3,"method":"graph_stats","params":{}}`)
+	reply, err := d.Dispatch(context.Background(), sess, frame)
+	require.NoError(t, err)
+	require.NotNil(t, reply)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(reply, &parsed))
+	if errObj, ok := parsed["error"].(map[string]any); ok {
+		if data, ok := errObj["data"].(map[string]any); ok {
+			assert.NotEqual(t, "repo_not_tracked", data["error_code"],
+				"remote-routable cwd wrongly rejected by guard: %v", parsed)
+		}
+	}
+}
+
+// TestDispatcher_UnreachableCWD_StillRejected guards against the
+// fix becoming too permissive. A cwd that's neither locally tracked
+// nor matches any workspace declared in the roster (and has no
+// .gortex.yaml) must still get the repo_not_tracked error.
+func TestDispatcher_UnreachableCWD_StillRejected(t *testing.T) {
+	tracked := t.TempDir()
+	d, _ := trackedPathMCPSetup(t, tracked)
+
+	cfg := &daemon.ServersConfig{
+		Server: []daemon.ServerEntry{
+			{Slug: "self", URL: "unix:///tmp/never.sock", Default: true},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	router := daemon.NewRouter(daemon.RouterConfig{
+		Servers:   cfg,
+		Rosters:   daemon.NewWorkspaceRosterCache(0),
+		LocalSlug: "self",
+		Logger:    zap.NewNop(),
+	})
+	d.SetRouter(router)
+
+	stranger := t.TempDir() // no .gortex.yaml, not tracked, no roster match
+	assert.False(t, d.cwdReachable(stranger))
+
+	sess := &daemon.Session{ID: "sess_stranger", CWD: stranger}
+	frame := []byte(`{"jsonrpc":"2.0","id":4,"method":"graph_stats","params":{}}`)
+	reply, err := d.Dispatch(context.Background(), sess, frame)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(reply, &parsed))
+	errObj, ok := parsed["error"].(map[string]any)
+	require.True(t, ok, "stranger cwd must still be rejected: %v", parsed)
+	data, ok := errObj["data"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "repo_not_tracked", data["error_code"])
+}
+
+// writeFile is a tiny helper to keep test setup readable.
+func writeFile(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o644)
 }

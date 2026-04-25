@@ -228,3 +228,16 @@ func EncodeJSON(v any) ([]byte, error) {
 	}
 	return json.Marshal(v)
 }
+
+// LookupForCwd exposes RouteForCwd against the router's own
+// servers.toml + roster cache + cwd resolver. Callers (notably the
+// daemon's MCP dispatcher) use this to decide whether a session's
+// cwd has any chance of being routable — locally OR remotely —
+// before applying their own "is this cwd tracked?" gate. Returns a
+// zero LookupResult when the router has no servers.toml.
+func (r *Router) LookupForCwd(cwd, scopeOverride string) LookupResult {
+	if r == nil || r.cfg == nil {
+		return LookupResult{}
+	}
+	return RouteForCwd(r.cfg, r.rosters, r.resolveCwd, cwd, scopeOverride)
+}
