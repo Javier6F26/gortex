@@ -95,7 +95,7 @@ func newHugotProviderWithSpec(spec HugotVariant) (Provider, error) {
 	if spec.RepoID == "" || spec.OnnxFile == "" {
 		return nil, fmt.Errorf("invalid variant spec: RepoID=%q OnnxFile=%q", spec.RepoID, spec.OnnxFile)
 	}
-	session, err := hugot.NewGoSession()
+	session, err := hugot.NewGoSession(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("hugot session: %w", err)
 	}
@@ -132,8 +132,8 @@ func newHugotProviderWithSpec(spec HugotVariant) (Provider, error) {
 	}, nil
 }
 
-func (p *HugotProvider) Embed(_ context.Context, text string) ([]float32, error) {
-	vecs, err := p.EmbedBatch(context.Background(), []string{text})
+func (p *HugotProvider) Embed(ctx context.Context, text string) ([]float32, error) {
+	vecs, err := p.EmbedBatch(ctx, []string{text})
 	if err != nil {
 		return nil, err
 	}
@@ -143,11 +143,11 @@ func (p *HugotProvider) Embed(_ context.Context, text string) ([]float32, error)
 	return vecs[0], nil
 }
 
-func (p *HugotProvider) EmbedBatch(_ context.Context, texts []string) ([][]float32, error) {
+func (p *HugotProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	output, err := p.pipeline.RunPipeline(texts)
+	output, err := p.pipeline.RunPipeline(ctx, texts)
 	if err != nil {
 		return nil, fmt.Errorf("hugot run: %w", err)
 	}
@@ -191,7 +191,7 @@ func ensureHugotModel(spec HugotVariant) (string, error) {
 
 	opts := hugot.NewDownloadOptions()
 	opts.OnnxFilePath = spec.OnnxFile
-	path, err := hugot.DownloadModel(spec.RepoID, dest, opts)
+	path, err := hugot.DownloadModel(context.Background(), spec.RepoID, dest, opts)
 	if err != nil {
 		return "", fmt.Errorf("download %s (%s): %w", spec.RepoID, spec.OnnxFile, err)
 	}
