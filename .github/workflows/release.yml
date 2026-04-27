@@ -30,7 +30,7 @@ jobs:
       # container) so keyless OIDC signing can use the runner's identity
       # token directly — no need to plumb ACTIONS_ID_TOKEN_REQUEST_* vars
       # through `docker run`.
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.0
         with:
           cosign-release: v2.4.1
 
