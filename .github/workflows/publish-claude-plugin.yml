@@ -129,34 +129,50 @@ jobs:
         if: steps.diff.outputs.changed == 'true'
         working-directory: plugin-repo
         env:
-          GORTEX_TAG: ${{ steps.resolve.outputs.ref }}
+          GORTEX_REF: ${{ steps.resolve.outputs.ref }}
         run: |
           git config user.name "gortex-bot"
           git config user.email "bot@gortex.dev"
-          git commit -m "Sync from gortex ${GORTEX_TAG}"
-          git push origin "${{ env.PLUGIN_BRANCH }}"
+          git commit -m "Sync from gortex ${GORTEX_REF}"
+          # Fully-qualified refspec — fails loudly on any future name
+          # collision instead of pushing the wrong ref ambiguously.
+          git push origin "refs/heads/${{ env.PLUGIN_BRANCH }}:refs/heads/${{ env.PLUGIN_BRANCH }}"
 
       - name: Tag publish target with gortex version
         if: steps.diff.outputs.changed == 'true'
         working-directory: plugin-repo
         env:
-          GORTEX_TAG: ${{ steps.resolve.outputs.ref }}
+          GORTEX_REF: ${{ steps.resolve.outputs.ref }}
         run: |
-          # Tag the publish target with the gortex tag that produced
-          # the content. Useful for provenance: a marketplace user can
-          # cross-reference the plugin version against the gortex
-          # release that built it.
+          # Tag the publish target with the gortex release tag that
+          # produced the content. Useful for provenance — a marketplace
+          # user can cross-reference the plugin version against the
+          # gortex release that built it.
           #
-          # Skip silently if the tag already exists in the publish
-          # target. Re-running the workflow against a tag that already
-          # produced no content change would otherwise leave the
-          # workflow in a half-pushed state on retry.
-          if git rev-parse --verify "refs/tags/${GORTEX_TAG}" >/dev/null 2>&1; then
-            echo "Tag ${GORTEX_TAG} already exists in ${{ env.PLUGIN_REPO }}; skipping"
+          # Three guards:
+          #   1. Skip when the gortex ref isn't a release tag.
+          #      workflow_dispatch is allowed to take a branch (e.g.
+          #      "main") for testing, but tagging the publish target
+          #      with a branch name would collide with its own branches
+          #      of the same name and fail the push with "src refspec
+          #      matches more than one".
+          #   2. Skip silently if the tag already exists in the publish
+          #      target — re-runs against the same gortex tag that
+          #      produced no content change should be no-ops, not
+          #      half-pushed states.
+          #   3. Use fully-qualified refspecs on the push so a future
+          #      collision (branch and tag with the same name in the
+          #      publish target) fails loudly rather than ambiguously.
+          if [[ ! "${GORTEX_REF}" =~ ^v[0-9] ]]; then
+            echo "Ref '${GORTEX_REF}' is not a release tag (does not match ^v[0-9]); skipping publish-target tag"
             exit 0
           fi
-          git tag -a "${GORTEX_TAG}" -m "Plugin bundle from gortex ${GORTEX_TAG}"
-          git push origin "${GORTEX_TAG}"
+          if git rev-parse --verify "refs/tags/${GORTEX_REF}" >/dev/null 2>&1; then
+            echo "Tag ${GORTEX_REF} already exists in ${{ env.PLUGIN_REPO }}; skipping"
+            exit 0
+          fi
+          git tag -a "${GORTEX_REF}" -m "Plugin bundle from gortex ${GORTEX_REF}"
+          git push origin "refs/tags/${GORTEX_REF}:refs/tags/${GORTEX_REF}"
 
       - name: Summary
         if: always()
