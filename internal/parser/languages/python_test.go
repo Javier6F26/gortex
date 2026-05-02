@@ -373,3 +373,68 @@ func pyContains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestPythonExtractor_ThrowsRaise(t *testing.T) {
+	src := []byte(`def parse(s):
+    if not s:
+        raise ValueError("empty")
+    if len(s) > 10:
+        raise errors.TooLong()
+    return int(s)
+
+
+def silent():
+    try:
+        x = 1
+    except Exception:
+        pass
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("p.py", src)
+	require.NoError(t, err)
+
+	throws := edgesOfKind(result.Edges, graph.EdgeThrows)
+	parseTargets := map[string]bool{}
+	for _, e := range throws {
+		if e.From == "p.py::parse" {
+			parseTargets[e.To] = true
+		}
+	}
+	assert.True(t, parseTargets["unresolved::ValueError"], "ValueError missing")
+	assert.True(t, parseTargets["unresolved::TooLong"], "TooLong (attribute access) missing")
+
+	for _, e := range throws {
+		if e.From == "p.py::silent" {
+			t.Fatalf("silent() doesn't raise; got %v", e)
+		}
+	}
+}
+
+func TestPythonExtractor_ImportNodes(t *testing.T) {
+	// Note: relative imports (`from .local import x`) aren't covered
+	// by the current import query — pre-existing limitation. The
+	// import-node promotion only sees absolute paths today.
+	src := []byte(`import os
+import requests
+from app import service
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("svc.py", src)
+	require.NoError(t, err)
+
+	imports := nodesOfKind(result.Nodes, graph.KindImport)
+	require.GreaterOrEqual(t, len(imports), 3)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range imports {
+		byID[n.ID] = n
+	}
+
+	osNode := byID["svc.py::import::os"]
+	require.NotNil(t, osNode)
+	assert.Equal(t, false, osNode.Meta["is_external"], "os is stdlib")
+
+	req := byID["svc.py::import::requests"]
+	require.NotNil(t, req)
+	assert.Equal(t, true, req.Meta["is_external"])
+}

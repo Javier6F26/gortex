@@ -285,6 +285,7 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 
 	doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash)
 	visibility := rustVisibility(def.Node, src)
+	typeParams := rustTypeParams(def.Node, src)
 
 	implType := rustImplMethodReceiver(def.Node, src)
 	if implType != "" {
@@ -304,6 +305,9 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		if rt := extractRustReturnType(def.Node, src); rt != "" {
 			meta["return_type"] = rt
 		}
+		if len(typeParams) > 0 {
+			meta["type_params"] = typeParams
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindMethod, Name: name,
 			FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
@@ -317,6 +321,7 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 		})
 		emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+		emitRustThrowsEdges(def.Node, src, id, filePath, startLine1, result)
 		return
 	}
 
@@ -334,6 +339,9 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 	if doc != "" {
 		meta["doc"] = doc
 	}
+	if len(typeParams) > 0 {
+		meta["type_params"] = typeParams
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
@@ -343,6 +351,220 @@ func (e *RustExtractor) emitFunction(m parser.QueryResult, filePath, fileID stri
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
 	emitRustAnnotationEdges(rustCollectAttributes(def.Node), id, filePath, src, result, annotationSeen)
+	emitRustThrowsEdges(def.Node, src, id, filePath, startLine1, result)
+}
+
+// rustTypeParams reads the `type_parameters` child of a Rust item
+// (function_item, struct_item, enum_item, trait_item, impl_item) and
+// returns each declared type parameter as {name, bound} where bound
+// is optional. Multi-trait bounds (`T: Send + Sync`) are joined with
+// " + ".
+func rustTypeParams(item *sitter.Node, src []byte) []map[string]string {
+	if item == nil {
+		return nil
+	}
+	tps := item.ChildByFieldName("type_parameters")
+	if tps == nil {
+		// Some grammar versions don't expose the field name; fall
+		// back to a child-type scan.
+		for i := 0; i < int(item.ChildCount()); i++ {
+			c := item.Child(i)
+			if c != nil && c.Type() == "type_parameters" {
+				tps = c
+				break
+			}
+		}
+	}
+	if tps == nil {
+		return nil
+	}
+	var out []map[string]string
+	for i := 0; i < int(tps.NamedChildCount()); i++ {
+		tp := tps.NamedChild(i)
+		if tp == nil {
+			continue
+		}
+		// Lifetimes (`'a`) have their own node type; skip.
+		if tp.Type() == "lifetime" {
+			continue
+		}
+		// Plain identifier — `<T>`.
+		if tp.Type() == "type_identifier" {
+			out = append(out, map[string]string{"name": tp.Content(src)})
+			continue
+		}
+		// Constrained — `<T: Clone>` or `<T = u8>`. Older grammar
+		// versions emit these as `constrained_type_parameter`;
+		// newer ones flatten them under a `type_parameter` node.
+		entry := map[string]string{}
+		for j := 0; j < int(tp.ChildCount()); j++ {
+			c := tp.Child(j)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "type_identifier":
+				if entry["name"] == "" {
+					entry["name"] = c.Content(src)
+				}
+			case "trait_bounds":
+				txt := strings.TrimSpace(c.Content(src))
+				txt = strings.TrimPrefix(txt, ":")
+				entry["bound"] = strings.TrimSpace(txt)
+			}
+		}
+		// As a final fallback for grammars that store the constraint
+		// as raw text alongside the identifier, try to parse the full
+		// child content if we got a name but no bound.
+		if entry["name"] != "" && entry["bound"] == "" {
+			text := strings.TrimSpace(tp.Content(src))
+			if i := strings.Index(text, ":"); i >= 0 {
+				entry["bound"] = strings.TrimSpace(text[i+1:])
+			}
+		}
+		if entry["name"] != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// emitRustThrowsEdges inspects a function's return type for a Result
+// wrapper and emits an EdgeThrows to the error type when found. Idiom:
+//
+//   fn parse(s: &str) -> Result<i32, ParseError> {…}     → throws ParseError
+//   fn open(p: &Path) -> Result<File, std::io::Error> {…} → throws Error
+//   fn no_error() -> i32 {…}                              → no edge
+//
+// `Origin: ASTInferred` because we're pattern-matching the return
+// type text, not type-checking it.
+func emitRustThrowsEdges(funcNode *sitter.Node, src []byte, fromID, filePath string, line int, result *parser.ExtractionResult) {
+	if funcNode == nil {
+		return
+	}
+	rt := rustRawReturnType(funcNode, src)
+	if rt == "" {
+		return
+	}
+	errType := rustErrorTypeFromResult(rt)
+	if errType == "" {
+		return
+	}
+	target := "unresolved::" + errType
+	result.Edges = append(result.Edges, &graph.Edge{
+		From:     fromID,
+		To:       target,
+		Kind:     graph.EdgeThrows,
+		FilePath: filePath,
+		Line:     line,
+		Origin:   graph.OriginASTInferred,
+	})
+}
+
+// rustRawReturnType returns the verbatim return-type text of a Rust
+// function_item, including generic parameters. Unlike
+// extractRustReturnType, it does not normalize the type — preserves
+// Result<T, E> shape so the throws extractor can read both arguments.
+func rustRawReturnType(node *sitter.Node, src []byte) string {
+	if node == nil {
+		return ""
+	}
+	pastArrow := false
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child == nil {
+			continue
+		}
+		text := string(src[child.StartByte():child.EndByte()])
+		if text == "->" {
+			pastArrow = true
+			continue
+		}
+		if pastArrow {
+			if child.Type() == "block" {
+				return ""
+			}
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
+// rustErrorTypeFromResult parses a Rust return-type string and returns
+// the trailing identifier of the error parameter when the type is a
+// Result. Handles:
+//
+//   Result<T, E>            → E
+//   Result<T, std::io::E>   → E (trailing ident)
+//   Result<T, Box<dyn E>>   → E
+//   anyhow::Result<T>       → "" (single-arg form: error type elided)
+//
+// Returns "" for non-Result returns or when the error type can't be
+// extracted unambiguously.
+func rustErrorTypeFromResult(rt string) string {
+	rt = strings.TrimSpace(rt)
+	// Strip leading qualifier like `std::result::` to land on `Result`.
+	if i := strings.LastIndex(rt, "::"); i >= 0 {
+		head := rt[:i]
+		// Only strip qualifier when what follows starts with Result.
+		if strings.HasPrefix(rt[i+2:], "Result<") {
+			_ = head
+			rt = rt[i+2:]
+		}
+	}
+	if !strings.HasPrefix(rt, "Result<") {
+		return ""
+	}
+	inner := strings.TrimPrefix(rt, "Result<")
+	inner = strings.TrimSuffix(inner, ">")
+	// Split on the top-level comma — depth tracking for nested
+	// generics like Result<Vec<T>, MyError>.
+	depth := 0
+	parts := []string{}
+	start := 0
+	for i, r := range inner {
+		switch r {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, inner[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, inner[start:])
+	if len(parts) < 2 {
+		return ""
+	}
+	errPart := strings.TrimSpace(parts[1])
+	// Box<dyn ErrType> / Box<dyn ErrType + Send> → ErrType
+	for _, prefix := range []string{"Box<dyn ", "Box<", "Arc<dyn ", "Arc<"} {
+		if strings.HasPrefix(errPart, prefix) {
+			errPart = strings.TrimPrefix(errPart, prefix)
+			errPart = strings.TrimSuffix(errPart, ">")
+			break
+		}
+	}
+	if i := strings.Index(errPart, "+"); i >= 0 {
+		errPart = errPart[:i]
+	}
+	errPart = strings.TrimSpace(errPart)
+	// Strip qualifier like std::io::Error.
+	if i := strings.LastIndex(errPart, "::"); i >= 0 {
+		errPart = errPart[i+2:]
+	}
+	// Strip generic instantiation like Error<Foo>.
+	if i := strings.Index(errPart, "<"); i >= 0 {
+		errPart = errPart[:i]
+	}
+	errPart = strings.TrimSpace(errPart)
+	if errPart == "" || errPart == "_" {
+		return ""
+	}
+	return errPart
 }
 
 // rustCollectAttributes walks the previous siblings of an item node

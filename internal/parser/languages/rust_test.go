@@ -456,3 +456,53 @@ func rustTestContains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestRsExtractor_ThrowsResult(t *testing.T) {
+	src := []byte(`pub fn parse(s: &str) -> Result<i32, ParseError> { Ok(0) }
+
+pub fn open() -> Result<File, std::io::Error> { unimplemented!() }
+
+pub fn boxed() -> Result<u8, Box<dyn std::error::Error>> { Ok(0) }
+
+pub fn no_error() -> i32 { 0 }
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("lib.rs", src)
+	require.NoError(t, err)
+
+	throws := edgesOfKind(result.Edges, graph.EdgeThrows)
+	got := map[string]string{}
+	for _, e := range throws {
+		got[e.From] = e.To
+	}
+	assert.Equal(t, "unresolved::ParseError", got["lib.rs::parse"])
+	assert.Equal(t, "unresolved::Error", got["lib.rs::open"], "trailing ident of std::io::Error")
+	assert.Equal(t, "unresolved::Error", got["lib.rs::boxed"], "Box<dyn Error> should land on Error")
+
+	if _, ok := got["lib.rs::no_error"]; ok {
+		t.Fatalf("no_error has no Result return; should not throw")
+	}
+}
+
+func TestRsExtractor_GenericTypeParams(t *testing.T) {
+	src := []byte(`pub fn collect<T: Clone, U>(items: Vec<T>, mapper: impl Fn(T) -> U) -> Vec<U> {
+    items.into_iter().map(mapper).collect()
+}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("lib.rs", src)
+	require.NoError(t, err)
+
+	var collect *graph.Node
+	for _, n := range result.Nodes {
+		if n.Name == "collect" && n.Kind == graph.KindFunction {
+			collect = n
+		}
+	}
+	require.NotNil(t, collect)
+	tp, _ := collect.Meta["type_params"].([]map[string]string)
+	require.Len(t, tp, 2)
+	assert.Equal(t, "T", tp[0]["name"])
+	assert.Equal(t, "Clone", tp[0]["bound"])
+	assert.Equal(t, "U", tp[1]["name"])
+}

@@ -740,3 +740,110 @@ func main() {
 	}
 	assert.Equal(t, "unresolved::*.port", writes[0].To)
 }
+
+func TestGoExtractor_GenericTypeParams(t *testing.T) {
+	src := []byte(`package x
+
+func Map[T any, R comparable](in []T, f func(T) R) []R { return nil }
+
+func (m *Map[K, V]) Get(k K) V { var v V; return v }
+
+type List[T any] struct {
+	items []T
+}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("x.go", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	mapFn := byID["x.go::Map"]
+	require.NotNil(t, mapFn)
+	tp, _ := mapFn.Meta["type_params"].([]map[string]string)
+	require.Len(t, tp, 2)
+	assert.Equal(t, "T", tp[0]["name"])
+	assert.Equal(t, "any", tp[0]["bound"])
+	assert.Equal(t, "R", tp[1]["name"])
+	assert.Equal(t, "comparable", tp[1]["bound"])
+}
+
+func TestGoExtractor_ThrowsErrorReturn(t *testing.T) {
+	src := []byte(`package x
+
+func DoWork() error { return nil }
+
+func ParseInt(s string) (int, error) { return 0, nil }
+
+func MakeUser(name string) (*User, *MyError) { return nil, nil }
+
+func NoError() string { return "" }
+
+type MyError struct{}
+type User struct{}
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("x.go", src)
+	require.NoError(t, err)
+
+	throws := edgesOfKind(result.Edges, graph.EdgeThrows)
+	throwsFrom := map[string]string{}
+	for _, e := range throws {
+		throwsFrom[e.From] = e.To
+	}
+	assert.Equal(t, "external::error", throwsFrom["x.go::DoWork"], "DoWork should throw external::error")
+	assert.Equal(t, "external::error", throwsFrom["x.go::ParseInt"], "ParseInt's last return is error")
+	assert.Equal(t, "unresolved::MyError", throwsFrom["x.go::MakeUser"], "MakeUser throws *MyError")
+
+	if _, ok := throwsFrom["x.go::NoError"]; ok {
+		t.Fatalf("NoError shouldn't have an EdgeThrows")
+	}
+}
+
+func TestGoExtractor_ImportNodes(t *testing.T) {
+	src := []byte(`package x
+
+import (
+	"fmt"
+	"context"
+	"github.com/zzet/gortex/internal/graph"
+	g "github.com/zzet/gortex/internal/graph"
+)
+`)
+	e := NewGoExtractor()
+	result, err := e.Extract("x.go", src)
+	require.NoError(t, err)
+
+	imports := nodesOfKind(result.Nodes, graph.KindImport)
+	require.GreaterOrEqual(t, len(imports), 4)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range imports {
+		byID[n.ID] = n
+	}
+
+	fmtNode := byID["x.go::import::fmt"]
+	require.NotNil(t, fmtNode, "fmt import node missing")
+	assert.Equal(t, "fmt", fmtNode.Meta["path"])
+	assert.Equal(t, false, fmtNode.Meta["is_external"], "fmt is stdlib, not external")
+
+	graphNode := byID["x.go::import::github.com/zzet/gortex/internal/graph"]
+	require.NotNil(t, graphNode, "module import node missing")
+	assert.Equal(t, true, graphNode.Meta["is_external"], "github.com path should be external")
+
+	// Aliased imports: the same path appears once with rawAlias != ""
+	// (the second `g "..."` reuses the same ID since we key by path,
+	// not by alias). The alias surfaces on the node Meta when
+	// declared; for plain re-imports of the same path we keep the
+	// last-write-wins behaviour the indexer expects.
+	hasAlias := false
+	for _, n := range imports {
+		if a, _ := n.Meta["alias"].(string); a == "g" {
+			hasAlias = true
+		}
+	}
+	assert.True(t, hasAlias, "aliased import 'g' should surface in Meta")
+}

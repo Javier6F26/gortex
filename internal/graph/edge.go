@@ -65,6 +65,22 @@ const (
 	// learn to walk assignment AST nodes.
 	EdgeReads  EdgeKind = "reads"
 	EdgeWrites EdgeKind = "writes"
+	// EdgeThrows links a function/method to an error or exception
+	// type that can propagate from it. Per language:
+	//
+	//   go      function returns an error type → edge to that type
+	//           (custom *MyError type or external::error sentinel for
+	//           the built-in error interface).
+	//   python  `raise <Exception>` AST nodes inside the body.
+	//   java    method `throws` clause.
+	//   swift   `throws` / `rethrows` keyword on the function decl.
+	//   rust    return type contains Result<_, E> → edge to E.
+	//
+	// Lets agents ask "what error types can propagate from here" with
+	// a single forward walk and lets `analyze kind: "error_surface"`
+	// summarise every public function's error contract without
+	// re-deriving it from source.
+	EdgeThrows EdgeKind = "throws"
 )
 
 type Edge struct {

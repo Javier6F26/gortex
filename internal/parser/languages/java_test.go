@@ -457,3 +457,35 @@ func javaTestContains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestJavaExtractor_ThrowsClause(t *testing.T) {
+	src := []byte(`package x;
+
+public class Reader {
+    public String read() throws IOException, ParseException {
+        return "";
+    }
+
+    public void noThrows() {}
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("Reader.java", src)
+	require.NoError(t, err)
+
+	throws := edgesOfKind(result.Edges, graph.EdgeThrows)
+	throwTargets := map[string]bool{}
+	for _, e := range throws {
+		if e.From == "Reader.java::Reader.read" {
+			throwTargets[e.To] = true
+		}
+	}
+	assert.True(t, throwTargets["unresolved::IOException"], "IOException not surfaced")
+	assert.True(t, throwTargets["unresolved::ParseException"], "ParseException not surfaced")
+
+	for _, e := range throws {
+		if e.From == "Reader.java::Reader.noThrows" {
+			t.Fatalf("noThrows shouldn't have EdgeThrows, got %v", e)
+		}
+	}
+}

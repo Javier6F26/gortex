@@ -326,6 +326,9 @@ func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 		meta["doc"] = doc
 	}
 	meta["visibility"] = tsTopLevelVisibility(exported)
+	if tp := tsTypeParams(def.Node, src); len(tp) > 0 {
+		meta["type_params"] = tp
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
@@ -376,6 +379,9 @@ func (e *TypeScriptExtractor) emitClass(m parser.QueryResult, filePath, fileID s
 		meta["doc"] = doc
 	}
 	meta["visibility"] = tsTopLevelVisibility(exported)
+	if tp := tsTypeParams(def.Node, src); len(tp) > 0 {
+		meta["type_params"] = tp
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
@@ -526,9 +532,33 @@ func (e *TypeScriptExtractor) emitEnum(m parser.QueryResult, filePath, fileID st
 func (e *TypeScriptExtractor) emitImport(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, imports map[string]string) {
 	path := m.Captures["import.path"]
 	importPath := strings.Trim(path.Text, `"'`)
+	line := path.StartLine + 1
+
+	// Per-import node: one per `import` statement, deduped by path
+	// within a file. Lets find_usages on an import path return the
+	// importing files in one hop.
+	importNodeID := filePath + "::import::" + importPath
+	importMeta := map[string]any{
+		"path":        importPath,
+		"is_external": isExternalTSImport(importPath),
+	}
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID:        importNodeID,
+		Kind:      graph.KindImport,
+		Name:      tsImportDisplayName(importPath),
+		FilePath:  filePath,
+		StartLine: line,
+		EndLine:   line,
+		Language:  "typescript",
+		Meta:      importMeta,
+	})
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: fileID, To: importNodeID,
+		Kind: graph.EdgeDefines, FilePath: filePath, Line: line,
+	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: "unresolved::import::" + importPath,
-		Kind: graph.EdgeImports, FilePath: filePath, Line: path.StartLine + 1,
+		Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 	})
 	defCap, ok := m.Captures["import.def"]
 	if !ok || defCap.Node == nil {
@@ -1392,4 +1422,85 @@ func inferTypeFromNewExpr(node *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// tsTypeParams reads the `type_parameters` child of a TS declaration
+// (function_declaration / class_declaration / interface_declaration /
+// type_alias_declaration) and returns each declared type parameter
+// as {name, bound, default} where bound and default are optional.
+//
+// TS grammar: type_parameters wraps `type_parameter` children. Each
+// type_parameter has `name` (type_identifier), an optional
+// `constraint` (extends X) and an optional `default_type`.
+func tsTypeParams(decl *sitter.Node, src []byte) []map[string]string {
+	if decl == nil {
+		return nil
+	}
+	tps := decl.ChildByFieldName("type_parameters")
+	if tps == nil {
+		return nil
+	}
+	var out []map[string]string
+	for i := 0; i < int(tps.NamedChildCount()); i++ {
+		tp := tps.NamedChild(i)
+		if tp == nil || tp.Type() != "type_parameter" {
+			continue
+		}
+		entry := map[string]string{}
+		if n := tp.ChildByFieldName("name"); n != nil {
+			entry["name"] = n.Content(src)
+		}
+		// constraint child is the `extends X` part.
+		for j := 0; j < int(tp.ChildCount()); j++ {
+			c := tp.Child(j)
+			if c == nil {
+				continue
+			}
+			switch c.Type() {
+			case "constraint":
+				// Walk inner type — strip the leading "extends".
+				txt := strings.TrimSpace(c.Content(src))
+				txt = strings.TrimPrefix(txt, "extends")
+				entry["bound"] = strings.TrimSpace(txt)
+			case "default_type":
+				txt := strings.TrimSpace(c.Content(src))
+				txt = strings.TrimPrefix(txt, "=")
+				entry["default"] = strings.TrimSpace(txt)
+			}
+		}
+		if entry["name"] != "" {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// isExternalTSImport returns true when the import path looks like a
+// node module ("react", "@nestjs/common", "lodash/get") rather than a
+// relative-path source import ("./foo", "../bar").
+func isExternalTSImport(path string) bool {
+	if path == "" {
+		return false
+	}
+	if strings.HasPrefix(path, ".") || strings.HasPrefix(path, "/") {
+		return false
+	}
+	return true
+}
+
+// tsImportDisplayName picks a short name for an import node — the
+// trailing path segment for relative imports, or the module name (or
+// scoped/module pair) for node modules.
+func tsImportDisplayName(path string) string {
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		// Keep scoped @x/y → "@x/y", "@x/y/z" → "y/z" feels odd, but
+		// we want a stable handle. Use the bare last segment when the
+		// path has no '@' prefix; for scoped packages keep both
+		// segments to disambiguate.
+		if strings.HasPrefix(path, "@") {
+			return path
+		}
+		return path[i+1:]
+	}
+	return path
 }

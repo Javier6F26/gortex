@@ -938,3 +938,63 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+func TestTSExtractor_GenericTypeParams(t *testing.T) {
+	src := []byte(`export function map<T, R extends string>(in: T[], f: (t: T) => R): R[] {
+  return in.map(f);
+}
+
+export class Cache<K extends string, V = unknown> {}
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("u.ts", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	mapFn := byID["u.ts::map"]
+	require.NotNil(t, mapFn)
+	tp, _ := mapFn.Meta["type_params"].([]map[string]string)
+	require.Len(t, tp, 2)
+	assert.Equal(t, "T", tp[0]["name"])
+	assert.Equal(t, "R", tp[1]["name"])
+	assert.Equal(t, "string", tp[1]["bound"])
+
+	cache := byID["u.ts::Cache"]
+	require.NotNil(t, cache)
+	tp2, _ := cache.Meta["type_params"].([]map[string]string)
+	require.Len(t, tp2, 2)
+	assert.Equal(t, "K", tp2[0]["name"])
+	assert.Equal(t, "string", tp2[0]["bound"])
+	assert.Equal(t, "V", tp2[1]["name"])
+	assert.Equal(t, "unknown", tp2[1]["default"])
+}
+
+func TestTSExtractor_ImportNodes(t *testing.T) {
+	src := []byte(`import { Component } from "@nestjs/common";
+import * as fs from "fs";
+import { foo } from "./local";
+`)
+	e := NewTypeScriptExtractor()
+	result, err := e.Extract("a.ts", src)
+	require.NoError(t, err)
+
+	imports := nodesOfKind(result.Nodes, graph.KindImport)
+	require.GreaterOrEqual(t, len(imports), 3)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range imports {
+		byID[n.ID] = n
+	}
+
+	nest := byID[`a.ts::import::@nestjs/common`]
+	require.NotNil(t, nest)
+	assert.Equal(t, true, nest.Meta["is_external"])
+
+	local := byID[`a.ts::import::./local`]
+	require.NotNil(t, local)
+	assert.Equal(t, false, local.Meta["is_external"])
+}

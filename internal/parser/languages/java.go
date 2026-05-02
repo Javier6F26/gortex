@@ -481,6 +481,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 			}
 		}
 		emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+		emitJavaThrowsEdges(def.Node, src, id, filePath, startLine1, result)
 		return
 	}
 
@@ -761,6 +762,55 @@ type javaAnnotation struct {
 	name string
 	args string
 	line int
+}
+
+// emitJavaThrowsEdges walks a method_declaration's `throws_clause`
+// child and emits one EdgeThrows per declared exception type. Java's
+// throws clause is the canonical compiler-checked source of an
+// exception contract — every checked exception that can propagate
+// must appear here, so the resulting edges form a complete
+// error-surface for downstream queries.
+func emitJavaThrowsEdges(methodNode *sitter.Node, src []byte, fromID, filePath string, line int, result *parser.ExtractionResult) {
+	if methodNode == nil {
+		return
+	}
+	for i := 0; i < int(methodNode.ChildCount()); i++ {
+		c := methodNode.Child(i)
+		if c == nil || c.Type() != "throws" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			t := c.Child(j)
+			if t == nil {
+				continue
+			}
+			tt := t.Type()
+			if tt != "type_identifier" && tt != "scoped_type_identifier" && tt != "generic_type" {
+				continue
+			}
+			name := strings.TrimSpace(t.Content(src))
+			// For scoped_type_identifier (java.io.IOException), keep
+			// the trailing identifier — that's what the type-resolver
+			// can land on.
+			if i := strings.LastIndex(name, "."); i >= 0 {
+				name = name[i+1:]
+			}
+			if i := strings.Index(name, "<"); i >= 0 {
+				name = name[:i]
+			}
+			if name == "" {
+				continue
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     fromID,
+				To:       "unresolved::" + name,
+				Kind:     graph.EdgeThrows,
+				FilePath: filePath,
+				Line:     line,
+				Origin:   graph.OriginASTResolved,
+			})
+		}
+	}
 }
 
 func emitJavaAnnotationEdges(anns []javaAnnotation, fromID, filePath string, result *parser.ExtractionResult, seen map[string]bool) {

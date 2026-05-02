@@ -539,6 +539,9 @@ func (e *GoExtractor) emitFunction(m parser.QueryResult, filePath, fileID string
 			node.Meta["return_type"] = rt
 		}
 	}
+	if tp := goTypeParams(def.Node, src); len(tp) > 0 {
+		node.Meta["type_params"] = tp
+	}
 	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
 		node.Meta["doc"] = doc
 	}
@@ -548,6 +551,7 @@ func (e *GoExtractor) emitFunction(m parser.QueryResult, filePath, fileID string
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitGoThrowsEdges(node, m.Captures["func.result"], filePath, result)
 }
 
 func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
@@ -575,6 +579,9 @@ func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, 
 			node.Meta["return_type"] = rt
 		}
 	}
+	if tp := goTypeParams(def.Node, src); len(tp) > 0 {
+		node.Meta["type_params"] = tp
+	}
 	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
 		node.Meta["doc"] = doc
 	}
@@ -589,6 +596,147 @@ func (e *GoExtractor) emitMethod(m parser.QueryResult, filePath, fileID string, 
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitGoThrowsEdges(node, m.Captures["method.result"], filePath, result)
+}
+
+// goTypeParams reads the `type_parameters` child of a Go declaration
+// node (function_declaration, method_declaration, type_spec) and
+// returns the declared type parameters as a list of {name, bound}
+// maps. Multi-name parameter declarations like `[T, U comparable]`
+// produce one entry per name, each with the same bound. Returns nil
+// when the declaration is not generic.
+func goTypeParams(decl *sitter.Node, src []byte) []map[string]string {
+	if decl == nil {
+		return nil
+	}
+	tps := decl.ChildByFieldName("type_parameters")
+	if tps == nil {
+		// type_spec uses a different field shape — fall back to a
+		// child-type scan.
+		for i := 0; i < int(decl.ChildCount()); i++ {
+			c := decl.Child(i)
+			if c != nil && c.Type() == "type_parameter_list" {
+				tps = c
+				break
+			}
+		}
+	}
+	if tps == nil {
+		return nil
+	}
+	var out []map[string]string
+	for i := 0; i < int(tps.NamedChildCount()); i++ {
+		pd := tps.NamedChild(i)
+		if pd == nil {
+			continue
+		}
+		if pd.Type() != "parameter_declaration" && pd.Type() != "type_parameter_declaration" {
+			continue
+		}
+		// One parameter_declaration may carry multiple identifier
+		// names that share a single type/bound:
+		// `[T, U comparable]` → two names, one bound.
+		var names []string
+		var bound string
+		// Names appear via ChildByFieldName("name") — Go grammar uses
+		// field 'name' for the leading identifier list. For multi-name
+		// declarations the grammar emits multiple entries with the
+		// same field name; we walk children to find them all.
+		for j := 0; j < int(pd.ChildCount()); j++ {
+			c := pd.Child(j)
+			if c == nil {
+				continue
+			}
+			t := c.Type()
+			if t == "identifier" || t == "field_identifier" || t == "type_identifier" {
+				names = append(names, c.Content(src))
+			}
+		}
+		if tn := pd.ChildByFieldName("type"); tn != nil {
+			bound = strings.TrimSpace(tn.Content(src))
+		}
+		for _, n := range names {
+			entry := map[string]string{"name": n}
+			if bound != "" {
+				entry["bound"] = bound
+			}
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+// emitGoThrowsEdges inspects the result-type capture and emits an
+// EdgeThrows edge when the function returns an error. Two cases:
+//
+//   - last return type is the bare `error` interface → edge to the
+//     synthetic external::error sentinel so reverse-walks land on
+//     a single node regardless of file/repo.
+//   - last return type is a custom error type (`*MyErr`, `MyErr`)
+//     → edge to that type, resolved by name later.
+//
+// Functions that return only non-error types produce no edge.
+func emitGoThrowsEdges(node *graph.Node, resultCap *parser.CapturedNode, filePath string, result *parser.ExtractionResult) {
+	if resultCap == nil || resultCap.Text == "" {
+		return
+	}
+	errType := parseLastReturnTypeForError(resultCap.Text)
+	if errType == "" {
+		return
+	}
+	target := "external::error"
+	if errType != "error" {
+		target = "unresolved::" + errType
+	}
+	result.Edges = append(result.Edges, &graph.Edge{
+		From:     node.ID,
+		To:       target,
+		Kind:     graph.EdgeThrows,
+		FilePath: filePath,
+		Line:     node.StartLine,
+		Origin:   graph.OriginASTInferred,
+	})
+}
+
+// parseLastReturnTypeForError pulls the last identifier from a Go
+// result type expression and returns it when it looks like an error
+// type. Recognises the bare `error` interface plus the conventional
+// `*MyError` / `MyError` shapes. Returns "" for non-error returns.
+func parseLastReturnTypeForError(result string) string {
+	s := strings.TrimSpace(result)
+	if s == "" {
+		return ""
+	}
+	// Strip parens for tuple returns like `(int, error)`.
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		s = s[1 : len(s)-1]
+	}
+	parts := strings.Split(s, ",")
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if last == "" {
+		return ""
+	}
+	// Strip leading `*` for pointer returns.
+	last = strings.TrimPrefix(last, "*")
+	// Take the rightmost identifier of `pkg.Foo`.
+	if i := strings.LastIndex(last, "."); i >= 0 {
+		last = last[i+1:]
+	}
+	// Strip generic instantiation suffix `[T]`.
+	if i := strings.Index(last, "["); i >= 0 {
+		last = last[:i]
+	}
+	last = strings.TrimSpace(last)
+	if last == "error" {
+		return "error"
+	}
+	// Heuristic: identifier ending in "Error" or "Err" — common Go
+	// error type convention. Avoids false positives on things like
+	// `Result` or `Response` while catching MyError, ParseErr, etc.
+	if strings.HasSuffix(last, "Error") || strings.HasSuffix(last, "Err") {
+		return last
+	}
+	return ""
 }
 
 // emitTypeDecl handles the generic `type X <body>` form. The body node
@@ -798,30 +946,98 @@ func (e *GoExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID strin
 // used when classifying selector calls against imported packages. Blank
 // and dot imports are skipped in the map (they don't introduce a
 // callable identifier) but still produce EdgeImports.
+//
+// In addition to the existing file→import edge, emits a per-import
+// node (KindImport) with Meta carrying the import path, alias (if
+// renamed), and is_external flag. Lets agents query "what does this
+// file import from <pkg>" with one graph hop.
 func (e *GoExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, imports map[string]string) {
 	pathCap := m.Captures["import.path"]
 	importPath := strings.Trim(pathCap.Text, `"`)
+	line := pathCap.StartLine + 1
+
+	rawAlias := ""
+	if a, ok := m.Captures["import.alias"]; ok {
+		rawAlias = strings.TrimSpace(a.Text)
+	}
+	displayName := rawAlias
+	mapAlias := rawAlias
+	switch rawAlias {
+	case "_", ".":
+		// Blank and dot imports keep their special behaviour for
+		// the alias map (no callable identifier introduced) but the
+		// import node still gets emitted so reverse-walks work.
+		displayName = importPath
+		if i := strings.LastIndex(importPath, "/"); i >= 0 {
+			displayName = importPath[i+1:]
+		}
+	case "":
+		displayName = importPath
+		if i := strings.LastIndex(importPath, "/"); i >= 0 {
+			displayName = importPath[i+1:]
+		}
+		mapAlias = displayName
+	}
+
+	importNodeID := filePath + "::import::" + importPath
+	importMeta := map[string]any{
+		"path":        importPath,
+		"is_external": isExternalGoImport(importPath),
+	}
+	if rawAlias != "" {
+		importMeta["alias"] = rawAlias
+	}
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID:        importNodeID,
+		Kind:      graph.KindImport,
+		Name:      displayName,
+		FilePath:  filePath,
+		StartLine: line,
+		EndLine:   line,
+		Language:  "go",
+		Meta:      importMeta,
+	})
+	// File → import-node edge (Defines), so get_file_summary picks
+	// it up under the file's children.
+	result.Edges = append(result.Edges, &graph.Edge{
+		From:     fileID,
+		To:       importNodeID,
+		Kind:     graph.EdgeDefines,
+		FilePath: filePath,
+		Line:     line,
+	})
+	// Existing file → unresolved import-path edge for resolver
+	// behaviour (downstream code resolves the path to the imported
+	// repo's file node). Kept additive so consumers that read
+	// EdgeImports keep working unchanged.
 	result.Edges = append(result.Edges, &graph.Edge{
 		From:     fileID,
 		To:       "unresolved::import::" + importPath,
 		Kind:     graph.EdgeImports,
 		FilePath: filePath,
-		Line:     pathCap.StartLine + 1,
+		Line:     line,
 	})
-	alias := ""
-	if a, ok := m.Captures["import.alias"]; ok {
-		alias = strings.TrimSpace(a.Text)
-	}
-	switch alias {
-	case "_", ".":
+
+	if rawAlias == "_" || rawAlias == "." {
 		return
-	case "":
-		alias = importPath
-		if i := strings.LastIndex(importPath, "/"); i >= 0 {
-			alias = importPath[i+1:]
-		}
 	}
-	imports[alias] = importPath
+	imports[mapAlias] = importPath
+}
+
+// isExternalGoImport returns true when the import path doesn't look
+// like a stdlib import. Heuristic: the first path segment contains a
+// dot — i.e. it's a module path like `github.com/...` or
+// `golang.org/...`. Stdlib paths (`fmt`, `os/exec`) have no dot in
+// the first segment.
+func isExternalGoImport(path string) bool {
+	if path == "" {
+		return false
+	}
+	first := path
+	if i := strings.Index(path, "/"); i >= 0 {
+		first = path[:i]
+	}
+	return strings.Contains(first, ".")
 }
 
 func (e *GoExtractor) emitVar(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, tenv typeEnv) {

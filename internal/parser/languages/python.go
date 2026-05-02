@@ -280,6 +280,7 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: startLine1,
 		})
 		emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
+		emitPyThrowsEdges(def.Node, src, id, filePath, startLine1, result)
 		return
 	}
 
@@ -305,6 +306,94 @@ func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})
 	emitPyAnnotationEdges(decorators, id, filePath, src, result, annotationSeen)
+	emitPyThrowsEdges(def.Node, src, id, filePath, startLine1, result)
+}
+
+// emitPyThrowsEdges walks a function/method body for raise_statement
+// nodes and emits an EdgeThrows per distinct exception name.
+// `raise SomeError` and `raise SomeError("...")` both surface; bare
+// `raise` (re-raise) is skipped because there's no specific type.
+// `Origin: ASTInferred` because Python doesn't enforce a checked-
+// exception contract — the body scan is a best-effort summary, not
+// a proof of every exception that can propagate.
+func emitPyThrowsEdges(funcNode *sitter.Node, src []byte, fromID, filePath string, fromLine int, result *parser.ExtractionResult) {
+	if funcNode == nil {
+		return
+	}
+	body := funcNode.ChildByFieldName("body")
+	if body == nil {
+		return
+	}
+	seen := map[string]bool{}
+	pyWalkRaises(body, src, fromID, filePath, fromLine, seen, result)
+}
+
+func pyWalkRaises(node *sitter.Node, src []byte, fromID, filePath string, fromLine int, seen map[string]bool, result *parser.ExtractionResult) {
+	if node == nil {
+		return
+	}
+	if node.Type() == "raise_statement" {
+		name := pyRaiseExceptionName(node, src)
+		if name != "" && !seen[name] {
+			seen[name] = true
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     fromID,
+				To:       "unresolved::" + name,
+				Kind:     graph.EdgeThrows,
+				FilePath: filePath,
+				Line:     int(node.StartPoint().Row) + 1,
+				Origin:   graph.OriginASTInferred,
+			})
+		}
+		return
+	}
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		c := node.NamedChild(i)
+		// Don't descend into nested function/class bodies — their raises
+		// belong to those functions, not to us.
+		if c == nil {
+			continue
+		}
+		if c.Type() == "function_definition" || c.Type() == "class_definition" || c.Type() == "decorated_definition" || c.Type() == "lambda" {
+			continue
+		}
+		pyWalkRaises(c, src, fromID, filePath, fromLine, seen, result)
+	}
+}
+
+// pyRaiseExceptionName returns the exception type name from a
+// raise_statement. Handles `raise X`, `raise X("msg")`, `raise X(...)`,
+// and chained `raise X from Y` (we record X). Returns "" for bare
+// `raise` (re-raise).
+func pyRaiseExceptionName(raise *sitter.Node, src []byte) string {
+	for i := 0; i < int(raise.NamedChildCount()); i++ {
+		c := raise.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "identifier":
+			return c.Content(src)
+		case "attribute":
+			// e.g. errors.MyError → take the trailing attribute name.
+			text := c.Content(src)
+			if i := strings.LastIndex(text, "."); i >= 0 {
+				return strings.TrimSpace(text[i+1:])
+			}
+			return strings.TrimSpace(text)
+		case "call":
+			fn := c.ChildByFieldName("function")
+			if fn == nil {
+				continue
+			}
+			text := fn.Content(src)
+			if i := strings.LastIndex(text, "."); i >= 0 {
+				return strings.TrimSpace(text[i+1:])
+			}
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
 }
 
 func (e *PythonExtractor) emitClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
@@ -444,6 +533,7 @@ func pyDocstringFromDef(defNode *sitter.Node, src []byte) string {
 // by attribute-call classification.
 func (e *PythonExtractor) emitImport(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, imports map[string]string) {
 	name := m.Captures["import.name"]
+	pyEmitImportNode(filePath, fileID, name.Text, "", name.StartLine+1, result)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: "unresolved::import::" + name.Text,
 		Kind: graph.EdgeImports, FilePath: filePath, Line: name.StartLine + 1,
@@ -483,10 +573,75 @@ func (e *PythonExtractor) emitImport(m parser.QueryResult, filePath, fileID stri
 
 func (e *PythonExtractor) emitImportFrom(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
 	mod := m.Captures["import.module"]
+	pyEmitImportNode(filePath, fileID, mod.Text, "", mod.StartLine+1, result)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: "unresolved::import::" + mod.Text,
 		Kind: graph.EdgeImports, FilePath: filePath, Line: mod.StartLine + 1,
 	})
+}
+
+// pyEmitImportNode appends a KindImport node + Defines edge for a
+// Python `import X` or `from X import …` statement. is_external is
+// true when the path doesn't begin with a relative prefix and isn't
+// in the small stdlib whitelist — close enough for routing UX while
+// being trivially cheap.
+func pyEmitImportNode(filePath, fileID, importPath, alias string, line int, result *parser.ExtractionResult) {
+	if importPath == "" {
+		return
+	}
+	importNodeID := filePath + "::import::" + importPath
+	meta := map[string]any{
+		"path":        importPath,
+		"is_external": isExternalPyImport(importPath),
+	}
+	if alias != "" {
+		meta["alias"] = alias
+	}
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID:        importNodeID,
+		Kind:      graph.KindImport,
+		Name:      pyImportDisplayName(importPath),
+		FilePath:  filePath,
+		StartLine: line,
+		EndLine:   line,
+		Language:  "python",
+		Meta:      meta,
+	})
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: fileID, To: importNodeID,
+		Kind: graph.EdgeDefines, FilePath: filePath, Line: line,
+	})
+}
+
+func isExternalPyImport(path string) bool {
+	if path == "" || strings.HasPrefix(path, ".") {
+		return false
+	}
+	// Best-effort stdlib check: a small whitelist of common stdlib
+	// roots avoids tagging them as external. False negatives are
+	// harmless (the agent can still query the import), false
+	// positives would mislead "is this a third-party dep?" queries.
+	first := path
+	if i := strings.Index(path, "."); i >= 0 {
+		first = path[:i]
+	}
+	switch first {
+	case "os", "sys", "io", "re", "json", "math", "random", "time",
+		"datetime", "collections", "itertools", "functools", "typing",
+		"asyncio", "logging", "pathlib", "subprocess", "threading",
+		"multiprocessing", "abc", "enum", "dataclasses", "contextlib",
+		"copy", "tempfile", "shutil", "string", "struct", "hashlib",
+		"unittest", "ast", "types", "warnings", "weakref", "inspect":
+		return false
+	}
+	return true
+}
+
+func pyImportDisplayName(path string) string {
+	if i := strings.LastIndex(path, "."); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 func (e *PythonExtractor) emitTopLevelVar(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
