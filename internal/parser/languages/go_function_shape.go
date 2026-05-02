@@ -290,12 +290,51 @@ func emitGoClosureNodes(ownerID string, body *sitter.Node, src []byte, filePath 
 			Line:     startLine,
 			Origin:   graph.OriginASTResolved,
 		})
+		// `go func() {...}()` — the closure is launched as a
+		// goroutine. Emit an EdgeSpawns from the enclosing function
+		// to the closure, mirroring how named-call spawns produce
+		// EdgeSpawns to the called function. Without this, agents
+		// asking "what goroutines does Run launch?" miss the entire
+		// inline-closure pattern.
+		if isGoroutineSpawnedClosure(n) {
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     ownerID,
+				To:       closureID,
+				Kind:     graph.EdgeSpawns,
+				FilePath: filePath,
+				Line:     startLine,
+				Origin:   graph.OriginASTResolved,
+				Meta: map[string]any{
+					"mode": "goroutine",
+				},
+			})
+		}
 		// Don't recurse into nested func_literals — they belong to
 		// the inner closure, not the outer one. The outer walker will
 		// pick them up when (if) closures-within-closures are
 		// supported. For Phase 1 the flat enumeration is sufficient.
 		return false
 	})
+}
+
+// isGoroutineSpawnedClosure reports whether a func_literal node is
+// the operand of an immediately-invoked call inside a go_statement —
+// i.e. the `func() {...}` in `go func() {...}()`. The Go grammar
+// shape is go_statement → call_expression → func_literal, so two
+// Parent() hops are sufficient.
+func isGoroutineSpawnedClosure(funcLit *sitter.Node) bool {
+	if funcLit == nil {
+		return false
+	}
+	call := funcLit.Parent()
+	if call == nil || call.Type() != "call_expression" {
+		return false
+	}
+	stmt := call.Parent()
+	if stmt == nil {
+		return false
+	}
+	return stmt.Type() == "go_statement"
 }
 
 // walkGoNodes is a small DFS helper that calls visit on each node

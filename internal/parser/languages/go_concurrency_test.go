@@ -84,12 +84,11 @@ func Run() {
 }
 
 func TestGoConcurrency_ClosureSpawn(t *testing.T) {
-	// Anonymous-function spawns are very common in Go (`go func() {…}()`).
-	// The closure body's calls produce EdgeSpawns when the closure
-	// itself is launched via `go`. The current capture only handles
-	// named-call spawns; anonymous-function spawn-of-the-closure is a
-	// known v1 limitation tracked separately. Document by asserting
-	// 0 spawns for this shape.
+	// `go func() {...}()` — the closure itself is the spawn target.
+	// The closure walker emits a KindClosure node for the
+	// func_literal and an EdgeSpawns from the enclosing function to
+	// that closure node. Calls inside the closure body (`println`)
+	// run synchronously inside the goroutine and are NOT spawn sites.
 	src := `package foo
 
 func Run() {
@@ -100,9 +99,38 @@ func Run() {
 `
 	fix := runGoExtract(t, src)
 
-	// The println inside the closure is NOT a goroutine spawn (it
-	// runs synchronously inside the spawned closure). 0 spawn edges.
+	closures := fix.nodesByKind[graph.KindClosure]
+	if len(closures) != 1 {
+		t.Fatalf("expected 1 closure, got %d", len(closures))
+	}
+	closureID := closures[0].ID
+
+	spawns := fix.edgesByKind[graph.EdgeSpawns]
+	if len(spawns) != 1 {
+		t.Fatalf("expected 1 EdgeSpawns to the closure, got %d: %+v", len(spawns), spawns)
+	}
+	if spawns[0].From != "pkg/foo.go::Run" {
+		t.Errorf("spawn from = %q", spawns[0].From)
+	}
+	if spawns[0].To != closureID {
+		t.Errorf("spawn to = %q, want closure %q", spawns[0].To, closureID)
+	}
+}
+
+func TestGoConcurrency_NonSpawnedClosureGetsNoSpawnEdge(t *testing.T) {
+	// Closure assigned to a variable then invoked synchronously —
+	// not a goroutine spawn, must not produce EdgeSpawns.
+	src := `package foo
+
+func Run() {
+	fn := func() {
+		println("hi")
+	}
+	fn()
+}
+`
+	fix := runGoExtract(t, src)
 	if got := len(fix.edgesByKind[graph.EdgeSpawns]); got != 0 {
-		t.Errorf("println inside spawned closure should not be a spawn site, got %d", got)
+		t.Errorf("synchronous closure invocation must not emit EdgeSpawns, got %d", got)
 	}
 }
