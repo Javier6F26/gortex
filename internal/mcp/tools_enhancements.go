@@ -105,8 +105,8 @@ func (s *Server) registerEnhancementTools() {
 	// analyze — unified graph analysis tool (dead_code, hotspots, cycles, would_create_cycle)
 	s.mcpServer.AddTool(
 		mcp.NewTool("analyze",
-			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id)."),
-			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle")),
+			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters."),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
 			mcp.WithString("format", mcp.Description("Output format: json (default) or gcx (GCX1 compact wire format, per-kind hand-tuned encoder)")),
 			mcp.WithBoolean("include_variables", mcp.Description("(dead_code) Include variable nodes (default false — usually false positives without data-flow analysis)")),
@@ -114,6 +114,10 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithString("scope", mcp.Description("(cycles) File path or package prefix to limit scope")),
 			mcp.WithString("from_id", mcp.Description("(would_create_cycle) Source symbol ID")),
 			mcp.WithString("to_id", mcp.Description("(would_create_cycle) Target symbol ID")),
+			mcp.WithString("tag", mcp.Description("(todos) Filter by tag — TODO / FIXME / HACK / XXX / NOTE — case-insensitive")),
+			mcp.WithString("assignee", mcp.Description("(todos) Filter by exact assignee — case-sensitive")),
+			mcp.WithString("ticket", mcp.Description("(todos) Filter by exact ticket reference — e.g. PROJ-42")),
+			mcp.WithBoolean("has_assignee", mcp.Description("(todos) Keep only TODOs that have an assignee set")),
 		),
 		s.handleAnalyze,
 	)
@@ -584,7 +588,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind, err := req.RequireString("kind")
 	if err != nil {
-		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle)"), nil
+		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle, todos)"), nil
 	}
 	switch kind {
 	case "dead_code":
@@ -595,9 +599,121 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleFindCycles(ctx, req)
 	case "would_create_cycle":
 		return s.handleWouldCreateCycle(ctx, req)
+	case "todos":
+		return s.handleAnalyzeTodos(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos)"), nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// handleAnalyzeTodos — list KindTodo nodes with filters
+// ---------------------------------------------------------------------------
+
+// handleAnalyzeTodos enumerates the KindTodo nodes in the graph,
+// optionally filtering by tag (TODO/FIXME/HACK/XXX/NOTE), assignee,
+// or ticket. Designed for the cleanup-loop workflow: find every
+// TODO assigned to me, every FIXME without a ticket, every TODO
+// older than the v1.4 release, etc. The temporal filter is left
+// for a v2 refinement that consumes git-blame enrichment.
+//
+// Returns one row per matching todo with file, line, tag,
+// assignee, due, ticket, and the truncated text.
+func (s *Server) handleAnalyzeTodos(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	tagFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "tag")))
+	assigneeFilter := strings.TrimSpace(stringArg(args, "assignee"))
+	ticketFilter := strings.TrimSpace(stringArg(args, "ticket"))
+	requireAssignee, _ := args["has_assignee"].(bool)
+
+	type todoRow struct {
+		ID       string `json:"id"`
+		Tag      string `json:"tag"`
+		File     string `json:"file"`
+		Line     int    `json:"line"`
+		Assignee string `json:"assignee,omitempty"`
+		Due      string `json:"due,omitempty"`
+		Ticket   string `json:"ticket,omitempty"`
+		Text     string `json:"text,omitempty"`
+	}
+
+	var rows []todoRow
+	for _, n := range s.graph.AllNodes() {
+		if n.Kind != graph.KindTodo {
+			continue
+		}
+		tag, _ := n.Meta["tag"].(string)
+		assignee, _ := n.Meta["assignee"].(string)
+		ticket, _ := n.Meta["ticket"].(string)
+		due, _ := n.Meta["due"].(string)
+		text, _ := n.Meta["text"].(string)
+
+		if tagFilter != "" && strings.ToLower(tag) != tagFilter {
+			continue
+		}
+		if assigneeFilter != "" && assignee != assigneeFilter {
+			continue
+		}
+		if ticketFilter != "" && ticket != ticketFilter {
+			continue
+		}
+		if requireAssignee && assignee == "" {
+			continue
+		}
+		rows = append(rows, todoRow{
+			ID:       n.ID,
+			Tag:      tag,
+			File:     n.FilePath,
+			Line:     n.StartLine,
+			Assignee: assignee,
+			Due:      due,
+			Ticket:   ticket,
+			Text:     text,
+		})
+	}
+	// Stable order: file then line. Predictable diffs across calls
+	// matter for cleanup workflows that compare results over time.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].File != rows[j].File {
+			return rows[i].File < rows[j].File
+		}
+		return rows[i].Line < rows[j].Line
+	})
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%s %s:%d", r.Tag, r.File, r.Line)
+			if r.Assignee != "" {
+				fmt.Fprintf(&b, " @%s", r.Assignee)
+			}
+			if r.Ticket != "" {
+				fmt.Fprintf(&b, " %s", r.Ticket)
+			}
+			if r.Text != "" {
+				fmt.Fprintf(&b, " — %s", r.Text)
+			}
+			b.WriteByte('\n')
+		}
+		if len(rows) == 0 {
+			b.WriteString("no todos matched\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+
+	return mcp.NewToolResultJSON(map[string]any{
+		"todos": rows,
+		"total": len(rows),
+	})
+}
+
+// stringArg returns args[key] as a trimmed string, or "" when the
+// key is missing or the value isn't a string.
+func stringArg(args map[string]any, key string) string {
+	if v, ok := args[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
