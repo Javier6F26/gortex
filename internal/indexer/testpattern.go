@@ -6,9 +6,9 @@ import (
 )
 
 // IsTestFile returns true when the file's name or directory matches a
-// recognised test convention. Mirrors the per-language tables in
-// spec-graph-detail.md §4.4. False positives here are downgraded
-// downstream by the symbol-name filter (IsTestSymbol).
+// recognised test convention from the table below. False positives
+// here are downgraded downstream by the symbol-name filter
+// (IsTestSymbol).
 //
 // Recognised conventions:
 //

@@ -21,8 +21,8 @@ const (
 	// previously emitted only type-ref edges from fields (Go, Rust,
 	// Java, C#).
 	KindField NodeKind = "field"
-	// Phase 1+ kinds added by spec-graph-coverage.md. Each kind is gated
-	// behind .gortex.yaml::index.<domain>.enabled. Parsers register a
+	// Coverage kinds: each is gated behind a per-domain
+	// .gortex.yaml::index.coverage.<domain>.enabled. Parsers register a
 	// kind on first use; the registry is permissive (validNodeKinds
 	// accepts all known kinds) so an unenabled domain simply produces no
 	// nodes of that kind, rather than failing extraction.
@@ -105,7 +105,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindMethod: true, KindType: true, KindInterface: true,
 	KindVariable: true, KindImport: true, KindContract: true,
 	KindField: true,
-	// spec-graph-coverage.md additions
+	// Coverage kinds — see Kind* doc comments above for usage notes.
 	KindParam: true, KindClosure: true, KindConstant: true,
 	KindEnumMember: true, KindGenericParam: true, KindModule: true,
 	KindTable: true, KindColumn: true, KindConfigKey: true,

@@ -128,11 +128,10 @@ type Indexer struct {
 	pendingContractReg *contracts.Registry
 
 	// codeownersOnce ensures the repo-level CODEOWNERS file is parsed
-	// exactly once per indexer lifetime. spec-graph-coverage.md §5.13
-	// stamps team ownership per-file via applyCodeowners. The rule
-	// list is derived from .github/CODEOWNERS / CODEOWNERS /
-	// docs/CODEOWNERS at first use; absent file → empty rules and a
-	// no-op applyCodeowners path.
+	// exactly once per indexer lifetime. The rule list is derived
+	// from .github/CODEOWNERS / CODEOWNERS / docs/CODEOWNERS at
+	// first use and applied per-file by applyCoverageDomains; an
+	// absent file produces empty rules and a no-op pass.
 	codeownersOnce  sync.Once
 	codeownersRules []codeowners.Rule
 }
@@ -488,11 +487,11 @@ func (idx *Indexer) todoMaxText() int {
 }
 
 // loadCodeownersRules lazily parses the repo's CODEOWNERS file. The
-// sync.Once guarantees one parse per indexer; applyCodeowners is
-// then a pure rule-match per file. Errors silently produce an empty
-// rule set — the spec gates this domain on file presence (§5.13)
-// rather than failing extraction when the file is missing or
-// malformed.
+// sync.Once guarantees one parse per indexer; applyCoverageDomains
+// is then a pure rule-match per file. Errors silently produce an
+// empty rule set — the ownership domain is implicitly gated on
+// file presence rather than failing extraction when the file is
+// missing or malformed.
 func (idx *Indexer) loadCodeownersRules() []codeowners.Rule {
 	idx.codeownersOnce.Do(func() {
 		rules, _, ok := codeowners.LoadFromRepo(idx.rootPath)
@@ -504,12 +503,12 @@ func (idx *Indexer) loadCodeownersRules() []codeowners.Rule {
 	return idx.codeownersRules
 }
 
-// applyCoverageDomains runs the per-file extractors from
-// spec-graph-coverage.md (Phase 1: todos, licenses, ownership). It
-// appends nodes/edges to the file's ExtractionResult so they go
-// through the same applyRepoPrefix / graph.AddNode pipeline as the
-// language extractor's output. Called from both the bulk index
-// worker pool (IndexCtx) and the incremental indexFile path.
+// applyCoverageDomains runs the per-file coverage extractors
+// (todos, licenses, ownership). It appends nodes/edges to the
+// file's ExtractionResult so they go through the same
+// applyRepoPrefix / graph.AddNode pipeline as the language
+// extractor's output. Called from both the bulk index worker pool
+// (IndexCtx) and the incremental indexFile path.
 //
 // relPath is the unprefixed file path; lang is the detected
 // language; src is the file bytes.
@@ -706,10 +705,10 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					continue
 				}
 
-				// spec-graph-coverage.md Phase 1: append todos /
-				// licenses / ownership artifacts before
-				// applyRepoPrefix so they get the same multi-repo
-				// namespacing treatment as language-extractor output.
+				// Append coverage artifacts (todos / licenses /
+				// ownership) before applyRepoPrefix so they get the
+				// same multi-repo namespacing treatment as
+				// language-extractor output.
 				idx.applyCoverageDomains(relPath, lang, src, result)
 
 				idx.applyRepoPrefix(result.Nodes, result.Edges)
@@ -968,9 +967,9 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		return err
 	}
 
-	// spec-graph-coverage.md Phase 1 extractors (todos, licenses,
-	// ownership) — see applyCoverageDomains. Called from both this
-	// incremental path and the bulk IndexCtx worker pool.
+	// Coverage extractors (todos, licenses, ownership). Same call
+	// site exists in the bulk IndexCtx worker pool — see
+	// applyCoverageDomains.
 	idx.applyCoverageDomains(relPath, lang, src, result)
 
 	idx.applyRepoPrefix(result.Nodes, result.Edges)

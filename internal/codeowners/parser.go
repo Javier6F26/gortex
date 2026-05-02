@@ -1,11 +1,12 @@
-// Package codeowners implements GitHub-style CODEOWNERS parsing per
-// spec-graph-coverage.md §5.13. It exposes the parsed rule list, a
-// last-match-wins matcher, and graph-artifact construction for team
-// nodes and EdgeOwns edges.
+// Package codeowners parses GitHub-style CODEOWNERS files into a
+// rule list, applies last-match-wins matching, and emits team and
+// person nodes plus EdgeOwns edges so blast-radius queries can
+// surface "who needs to know" alongside the changed files.
 //
-// CODEOWNERS file syntax follows GitHub's spec: gitignore-style
-// patterns, one rule per non-comment line, owners listed after the
-// pattern as @-prefixed handles. The last matching rule wins.
+// CODEOWNERS file syntax follows GitHub's documented format:
+// gitignore-style patterns, one rule per non-comment line, owners
+// listed after the pattern as @-prefixed handles. The last matching
+// rule wins.
 package codeowners
 
 import (

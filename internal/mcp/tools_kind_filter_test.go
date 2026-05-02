@@ -6,8 +6,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// TestFilterNodesByKind exercises the kind argument introduced for
-// search_symbols by spec-graph-coverage.md §7.2.
+// TestFilterNodesByKind exercises the kind argument on search_symbols
+// — comma-separated, case-insensitive, applied after BM25 ranking.
 func TestFilterNodesByKind(t *testing.T) {
 	nodes := []*graph.Node{
 		{ID: "a", Kind: graph.KindFunction, Name: "Foo"},

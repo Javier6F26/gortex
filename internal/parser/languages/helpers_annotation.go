@@ -8,9 +8,9 @@ import (
 )
 
 // annotationArgsMaxLen caps the verbatim argument text stored on the
-// edge. Per spec-graph-detail.md §4.3: 200 chars covers route strings,
-// dependency-injection tokens, and most decorator literals without
-// bloating large response payloads.
+// edge. 200 chars covers route strings, dependency-injection tokens,
+// and most decorator literals without bloating large response
+// payloads.
 const annotationArgsMaxLen = 200
 
 // AnnotationNodeID returns the canonical synthetic annotation node ID

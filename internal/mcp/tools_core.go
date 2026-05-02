@@ -224,9 +224,10 @@ func filterNodes(nodes []*graph.Node, allowed map[string]bool) []*graph.Node {
 // (treated as "no constraint of this name") so a typo is graceful
 // rather than silently empty. Case-insensitive.
 //
-// Used by search_symbols' `kind` argument introduced in
-// spec-graph-coverage.md §7.2 — lets callers scope a query to one of
-// the new domain-specific node kinds (todo, license, team, …).
+// Used by search_symbols' `kind` argument — lets callers scope a
+// query to one of the domain-specific node kinds (todo, license,
+// team, …) without paying the cost of an unrelated BM25 prefix
+// match.
 func filterNodesByKind(nodes []*graph.Node, kindArg string) []*graph.Node {
 	want := make(map[string]struct{})
 	for k := range strings.SplitSeq(kindArg, ",") {
@@ -379,7 +380,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
-			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds (spec-graph-coverage.md): param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
+			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 		),
 		s.handleSearchSymbols,
 	)
@@ -612,10 +613,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	nodes = filterNodes(nodes, allowed)
 
-	// spec-graph-coverage.md §7.2: kind filter so callers can scope
-	// to a single new node kind (todo, license, team, module, …).
-	// Comma-separated list — case-insensitive — kept post-search so
-	// BM25 ranking is preserved within the kept set.
+	// kind filter so callers can scope to a single new node kind
+	// (todo, license, team, module, …). Comma-separated list —
+	// case-insensitive — applied post-search so BM25 ranking is
+	// preserved within the kept set.
 	if kindArg := strings.TrimSpace(req.GetString("kind", "")); kindArg != "" {
 		nodes = filterNodesByKind(nodes, kindArg)
 	}

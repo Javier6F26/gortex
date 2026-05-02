@@ -1,14 +1,15 @@
-// Package todos implements the comment-marker scanner described by
-// spec-graph-coverage.md §5.12. It produces graph nodes and edges for
-// TODO / FIXME / HACK / XXX / NOTE markers found in source comments.
+// Package todos scans source comments for TODO / FIXME / HACK / XXX
+// / NOTE markers and emits graph nodes and edges for each finding,
+// so an agent can ask "list TODOs older than 90 days assigned to me"
+// with a single graph query rather than a multi-file grep.
 //
 // The scanner is intentionally simple: a per-line regex restricted to
 // "comment context" lines (preceded only by whitespace and a known
 // comment opener). String literals containing the word "TODO" are not
 // matched because they have non-whitespace content before the opener.
-// This is the v1 tradeoff — once every language parser exposes
-// comment AST nodes, the scanner will switch to AST-driven extraction
-// (see spec §10.1).
+// This is the v1 tradeoff — a future revision can switch to
+// AST-driven extraction once every language parser uniformly exposes
+// comment nodes.
 package todos
 
 import (

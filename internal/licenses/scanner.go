@@ -1,14 +1,15 @@
-// Package licenses implements SPDX license header recognition per
-// spec-graph-coverage.md §5.17. It produces a license node per
-// distinct SPDX identifier and an EdgeLicensedAs from each file to
-// the relevant license.
+// Package licenses recognises SPDX license headers in source files,
+// producing one license node per distinct SPDX identifier and an
+// EdgeLicensedAs from each file to the relevant license. Lets agents
+// answer "what's the license of this file" and "find every file
+// shipping under GPL" without grepping.
 //
 // Scope (v1): per-file SPDX-License-Identifier headers in the first
 // ten lines of source. The repo-level LICENSE-file fallback is not
 // emitted from here — it would belong at MultiIndexer level (one
-// pass per repo on warmup) and adds setup state that the Phase 1
-// scope does not require. Files without a header simply produce no
-// license edge; agents can detect that gap with a graph query.
+// pass per repo on warmup) and adds setup state out of scope here.
+// Files without a header simply produce no license edge; agents can
+// detect that gap with a graph query.
 package licenses
 
 import (
@@ -71,7 +72,7 @@ func Scan(source []byte) string {
 // repo prefix to every node ID — this is the same behaviour
 // `annotation::<lang>::<name>` nodes get today. So a "shared license
 // node" is repo-scoped, not graph-wide. Cross-repo de-duplication is
-// out of scope for v1 (see spec §10.2 open question 2).
+// out of scope for v1.
 //
 // filePath is the unprefixed path; applyRepoPrefix handles multi-
 // repo namespacing downstream.

@@ -4,7 +4,7 @@ API-contract extraction and matching — HTTP routes, gRPC services,
 GraphQL operations, message topics, WebSocket endpoints, env-var
 references, OpenAPI specs, and dependency-injection bindings.
 
-## Workspace boundary (spec-launch.md §4.2 / §11 steps F+G)
+## Workspace boundary
 
 Every `Contract` carries `WorkspaceID` and `ProjectID` slugs along
 with `RepoPrefix`. The matcher (`Match`) buckets contracts by the
@@ -14,10 +14,10 @@ different projects never pair, no matter how identical their IDs
 look.
 
 `EffectiveWorkspace`/`EffectiveProject` fall back to `RepoPrefix` when
-the explicit slug is empty. This is the spec §4.4 default ("missing
-→ repo-name") and preserves backwards compatibility for callers that
-haven't started populating slugs yet — single-repo single-project
-setups still pair correctly.
+the explicit slug is empty. The "missing → repo-name" default
+preserves backwards compatibility for callers that haven't started
+populating slugs yet — single-repo single-project setups still pair
+correctly.
 
 The boundary is what makes `gortex contracts check` for `tuck` not
 spuriously pair with `personal` even when both define
@@ -42,7 +42,7 @@ project: tuck
 With matching `workspace` + `project`, contracts in `tuck-api` and
 `tuck-app` pair as a `CrossRepo: true` link. Different `project`
 slugs (e.g. `services/api` vs `services/worker` in a monorepo) make
-the match drop to orphans by design — see §4.5 acceptance criterion 5.
+the match drop to orphans by design.
 
 ## Wrapper inlining
 

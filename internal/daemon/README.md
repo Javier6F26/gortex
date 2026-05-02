@@ -13,9 +13,9 @@ roster and editor-overlay machinery.
 | `client.go` | Connect-and-talk client used by the proxy CLI |
 | `servers.go` | `~/.gortex/servers.toml` loader + `ServerClient` (HTTP/unix) + `WorkspaceRosterCache` + `RouteForCwd` |
 | `overlay.go` | `OverlayManager` — register / push / delete editor buffer overrides |
-| `router.go` | `Router` — spec-launch.md §11 step P hybrid-read query router |
+| `router.go` | `Router` — hybrid-read query router |
 
-## Multi-server routing (spec-launch.md §11 steps L, M, N, O, P, Q)
+## Multi-server routing
 
 `~/.gortex/servers.toml` declares the set of Gortex servers reachable
 from this daemon. The schema:
@@ -38,8 +38,8 @@ workspaces = ["tuck"]
 discouraged) or `auth_token_env` (env-var name resolved per-call so
 rotation lands without a daemon restart).
 
-`Router.RouteToolCall` walks the §9.3 priority chain on every MCP
-tool invocation:
+`Router.RouteToolCall` walks the priority chain on every MCP tool
+invocation:
 
 1. Caller-supplied scope override (e.g. `workspace: "tuck"` on the
    tool args).
@@ -53,7 +53,7 @@ Resolved server == `LocalSlug` → run in-process via `LocalExecute`.
 Resolved server != `LocalSlug` → proxy via `ServerClient.ProxyTool`
 (POST `/v1/tools/<name>` with bearer auth).
 
-## Editor overlays (Step Q)
+## Editor overlays
 
 `OverlayManager` holds per-session in-flight file overrides so MCP
 clients can ask "what would `find_usages` look like with my unsaved
@@ -61,11 +61,11 @@ buffer?" The HTTP front door at `/v1/overlay/sessions/...` is wired
 in `internal/server`. `BaseSHA` drift detection refuses to merge a
 stale overlay so wrong-line-number errors don't surface as graph bugs.
 
-## Caveat: pre-§4 snapshots
+## Caveat: pre-workspace-slug snapshots
 
-Old snapshots written by daemons that predate spec-launch.md §4 carry
-no `WorkspaceID`/`ProjectID` fields on nodes (gob decodes additive
-fields as zero). The daemon's warmup path
+Old snapshots written by daemons that predate the workspace-slug
+schema carry no `WorkspaceID`/`ProjectID` fields on nodes (gob
+decodes additive fields as zero). The daemon's warmup path
 (`MultiIndexer.BackfillWorkspaceSlugs` invoked from
 `cmd/gortex/daemon_state.go::warmupDaemonState`) re-stamps them from
 the per-repo `.gortex.yaml`. Without that pass, the matcher's

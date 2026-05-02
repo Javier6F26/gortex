@@ -4,9 +4,9 @@ import (
 	"strings"
 )
 
-// docMaxLen caps the stored doc comment length. Per spec-graph-detail.md
-// §4.1: 400 chars covers a typical first paragraph (~80 tokens) without
-// bloating GCX1 responses.
+// docMaxLen caps the stored doc comment length. 400 chars covers a
+// typical first paragraph (~80 tokens) without bloating GCX1
+// responses.
 const docMaxLen = 400
 
 // docCommentLang controls which prefix-strip rule the helper applies.
@@ -327,7 +327,7 @@ func truncateDoc(s string) string {
 // --- Visibility ----------------------------------------------------
 
 // VisibilityPublic / VisibilityPrivate / etc. are the canonical values
-// for Node.Meta["visibility"]. Per spec-graph-detail.md §4.2.
+// for Node.Meta["visibility"].
 const (
 	VisibilityPublic    = "public"
 	VisibilityPrivate   = "private"

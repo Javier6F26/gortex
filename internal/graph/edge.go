@@ -48,8 +48,8 @@ const (
 	// fn-name conventions (Test*/Benchmark*/Fuzz* in Go, test_* /
 	// Test* in Python, *_test.dart, etc.). Override per-repo via
 	// .gortex.yaml::test_patterns when the project uses an unusual
-	// layout — false positives are an acknowledged tradeoff (see
-	// spec-graph-detail.md §4.4 for the heuristic catalogue).
+	// layout — false positives are an acknowledged tradeoff for
+	// keeping the heuristic dependency-free.
 	EdgeTests EdgeKind = "tests"
 	// EdgeReads / EdgeWrites split EdgeReferences for value-side uses
 	// of variables and fields. LHS of an assignment / op= / ++ / --
@@ -81,10 +81,10 @@ const (
 	// summarise every public function's error contract without
 	// re-deriving it from source.
 	EdgeThrows EdgeKind = "throws"
-	// Phase 1+ edges added by spec-graph-coverage.md. Each edge is
-	// produced only when the relevant index.<domain>.enabled gate is
-	// set; the registry is permissive (DefaultOriginFor handles
-	// unknown kinds via the confidence-score fallback).
+	// Coverage edges: each is produced only when the relevant
+	// index.coverage.<domain>.enabled gate is set; the registry is
+	// permissive (DefaultOriginFor handles unknown kinds via the
+	// confidence-score fallback).
 
 	// EdgeParamOf links a KindParam node to its owning function or
 	// method. Distinct from EdgeMemberOf (which is for fields of
@@ -257,8 +257,9 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeExtends, EdgeMemberOf,
 		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches,
-		// spec-graph-coverage.md additions: structural edges where the
-		// extractor produces an unambiguous source→target binding.
+		// Coverage structural edges: the extractor produces an
+		// unambiguous source→target binding for each, so they share
+		// the AST-resolved tier.
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
 		EdgeCaptures:

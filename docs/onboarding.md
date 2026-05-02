@@ -253,7 +253,7 @@ On macOS the unit lands at `~/Library/LaunchAgents/com.zzet.gortex.plist`; on Li
 | `gortex status` | Aggregate across tracked repos | One-shot local index |
 | `gortex daemon status` | PID, uptime, memory, sessions | "not running" |
 
-Full architectural spec: [`spec-daemon.md`](../spec-daemon.md).
+Full architectural notes live under `specs/` in the repo.
 
 ## Multi-Repo Workspaces
 

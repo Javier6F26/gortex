@@ -5,7 +5,7 @@ imports recorded as `unresolved::...` placeholders by the per-language
 extractors get rewritten to point at real graph nodes once those
 nodes exist.
 
-## Cross-repo + cross-workspace boundary (spec-launch.md §4.2 / §11 step H)
+## Cross-repo + cross-workspace boundary
 
 `CrossRepoResolver` searches across repository boundaries when no
 same-repo candidate exists. With a `CrossWorkspaceDepLookup` wired
@@ -20,14 +20,12 @@ workspace are accepted only when:
 For function/method-call edges (no import path available) the
 workspace-pair declaration alone is sufficient. The whole point of
 this layer is that an unresolved call into another workspace
-silently fails to resolve unless the user opted in — preserving §4.5
-criterion 4 ("cross-workspace happy path" only fires for declared
-deps).
+silently fails to resolve unless the user opted in.
 
-When the lookup is unset (legacy callers), the resolver behaves as
-it did pre-§4: any cross-repo candidate is fair game. This keeps
-existing tests and single-workspace setups working without code
-changes.
+When the lookup is unset (legacy callers), the resolver falls back
+to permissive cross-repo lookup: any cross-repo candidate is fair
+game. This keeps existing tests and single-workspace setups working
+without code changes.
 
 ## Wiring
 
@@ -40,4 +38,4 @@ the resolver in two places:
   Also re-run by `MultiIndexer.RunGlobalResolve` after warmup.
 
 If neither path runs (e.g. a single-repo `Indexer.ResolveAll`), the
-boundary is permissive — same as pre-§4 behaviour.
+boundary is permissive.

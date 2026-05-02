@@ -258,16 +258,16 @@ type IndexConfig struct {
 	// that drops real symbols silently is a worse default than a
 	// slightly slower full index.
 	MaxFileSize int64 `mapstructure:"max_file_size" yaml:"max_file_size,omitempty"`
-	// Coverage gates the spec-graph-coverage.md domains. Each
-	// sub-block has its own default; an empty Coverage block means
-	// "use the documented per-domain defaults" (cheap structural
-	// domains on, expensive ones off).
+	// Coverage gates the per-domain coverage extractors (todos,
+	// licenses, ownership, function shape, etc.). Each sub-block has
+	// its own default; an empty Coverage block means "use the
+	// documented per-domain defaults" — cheap structural domains on,
+	// expensive ones off.
 	Coverage CoverageConfig `mapstructure:"coverage" yaml:"coverage,omitempty"`
 }
 
-// CoverageConfig collects the per-domain extraction gates introduced
-// by spec-graph-coverage.md. Each sub-block is independently shippable
-// and gated; defaults are documented per spec §5.
+// CoverageConfig collects the per-domain coverage extraction gates.
+// Each sub-block is independently shippable and gated.
 //
 // Defaults (per-domain Enabled value when not set in YAML):
 //
