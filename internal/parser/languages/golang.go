@@ -212,6 +212,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	var fieldValIdents []goDeferredValueIdent
 	var observabilityEvents []goObservabilityEvent
 	var flagEvents []goFlagEvent
+	var configEvents []goConfigEvent
 	// writes buffers selector LHS of assignment / inc / dec
 	// statements. Emitted in the post-pass once funcRanges and tenv
 	// are settled so each EdgeWrites is attributed to its enclosing
@@ -272,6 +273,15 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					method:   method,
 					name:     flagName,
 					line:     expr.StartLine + 1,
+				})
+			}
+			if source, op, key, ok := detectGoConfigKey(expr.Node, method, src); ok {
+				configEvents = append(configEvents, goConfigEvent{
+					source: source,
+					op:     op,
+					method: method,
+					key:    key,
+					line:   expr.StartLine + 1,
 				})
 			}
 
@@ -477,6 +487,11 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 	// --- Feature flag checks ---
 	emitGoFlagChecks(flagEvents,
+		func(line int) string { return findEnclosingFunc(funcRanges, line) },
+		filePath, result)
+
+	// --- Config keys (viper) ---
+	emitGoConfigKeys(configEvents,
 		func(line int) string { return findEnclosingFunc(funcRanges, line) },
 		filePath, result)
 

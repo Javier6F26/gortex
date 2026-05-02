@@ -580,6 +580,37 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	if !idx.config.Coverage.IsEnabled("flags") {
 		stripFlagArtifacts(result)
 	}
+	if !idx.config.Coverage.IsEnabled("configs") {
+		stripConfigArtifacts(result)
+	}
+}
+
+// stripConfigArtifacts drops KindConfigKey nodes plus
+// EdgeReadsConfig / EdgeWritesConfig edges when the configs
+// coverage domain is gated off. Endpoint-aware so any leftover
+// edges to stripped key nodes are pruned.
+func stripConfigArtifacts(result *parser.ExtractionResult) {
+	stripped := make(map[string]struct{})
+	keptNodes := result.Nodes[:0]
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindConfigKey {
+			stripped[n.ID] = struct{}{}
+			continue
+		}
+		keptNodes = append(keptNodes, n)
+	}
+	result.Nodes = keptNodes
+	keptEdges := result.Edges[:0]
+	for _, e := range result.Edges {
+		if e.Kind == graph.EdgeReadsConfig || e.Kind == graph.EdgeWritesConfig {
+			continue
+		}
+		if _, ok := stripped[e.To]; ok {
+			continue
+		}
+		keptEdges = append(keptEdges, e)
+	}
+	result.Edges = keptEdges
 }
 
 // stripFlagArtifacts drops KindFlag nodes and EdgeTogglesFlag
