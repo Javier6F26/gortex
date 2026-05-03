@@ -191,6 +191,84 @@ func packageJSONBlock(deps map[string]string, kind string) []Spec {
 	return out
 }
 
+// ParsePackageLockJSON walks an npm v2/v3 package-lock.json
+// manifest's `packages` map and returns one Spec per declared
+// package with its resolved version. The lockfile carries the
+// concrete versions npm picked at install time, which is far
+// more useful for "is lodash@4 still in use" queries than the
+// semver ranges in package.json.
+//
+// v1 lockfiles (with a top-level `dependencies` map and no
+// `packages` entry) are not handled — they're rare in the
+// modern npm ecosystem and a parallel parser would mostly
+// duplicate this logic. The lockfileVersion field on the
+// manifest tells the caller which shape they have; the v1
+// shape can land as another switch case alongside this when
+// prioritised.
+//
+// The empty-string key in `packages` represents the root
+// project itself — skipped, the same way ParsePackageJSON
+// doesn't emit a self-reference. Production / dev classification
+// follows the same Replace-as-tag convention as the rest:
+// dev=true entries get Replace="dev"; everything else lands as
+// production.
+func ParsePackageLockJSON(source []byte) []Spec {
+	if len(source) == 0 {
+		return nil
+	}
+	var manifest struct {
+		LockfileVersion int `json:"lockfileVersion"`
+		Packages        map[string]struct {
+			Version string `json:"version"`
+			Dev     bool   `json:"dev"`
+			Optional bool  `json:"optional"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal(source, &manifest); err != nil {
+		return nil
+	}
+	if manifest.LockfileVersion < 2 {
+		// v1 lockfiles use a different shape we don't handle yet.
+		return nil
+	}
+	specs := make([]Spec, 0, len(manifest.Packages))
+	for key, entry := range manifest.Packages {
+		if key == "" {
+			// The root project's own manifest entry — skip.
+			continue
+		}
+		// Keys are `node_modules/<name>` (or
+		// `node_modules/<scope>/<name>` for scoped, or nested
+		// `node_modules/foo/node_modules/bar` for transitive).
+		// We strip the leading `node_modules/` prefix and use the
+		// remainder verbatim as the package name. Nested paths
+		// preserve their full chain, which keeps duplicate-name
+		// entries at different versions distinguishable.
+		name := strings.TrimPrefix(key, "node_modules/")
+		if name == "" || entry.Version == "" {
+			continue
+		}
+		spec := Spec{
+			Ecosystem: "npm",
+			Path:      name,
+			Version:   entry.Version,
+		}
+		switch {
+		case entry.Dev:
+			spec.Indirect = true
+			spec.Replace = "dev"
+		case entry.Optional:
+			spec.Indirect = true
+			spec.Replace = "optional"
+		}
+		specs = append(specs, spec)
+	}
+	sort.Slice(specs, func(i, j int) bool {
+		return specs[i].Path < specs[j].Path
+	})
+	return specs
+}
+
 // ParsePyProject walks a Python pyproject.toml file's dependency
 // declarations and returns one Spec per declared package. Both
 // PEP 621 (`[project] dependencies = ["pkg>=1.0", ...]`) and

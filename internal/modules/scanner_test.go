@@ -201,6 +201,89 @@ func TestParsePackageJSON_StableOrder(t *testing.T) {
 	}
 }
 
+func TestParsePackageLockJSON_v3(t *testing.T) {
+	src := []byte(`{
+  "name": "myapp",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "myapp",
+      "version": "1.0.0"
+    },
+    "node_modules/lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+      "integrity": "sha512-..."
+    },
+    "node_modules/react": {
+      "version": "18.2.0"
+    },
+    "node_modules/vitest": {
+      "version": "1.0.4",
+      "dev": true
+    },
+    "node_modules/@scope/util": {
+      "version": "2.5.0"
+    },
+    "node_modules/foo/node_modules/bar": {
+      "version": "1.0.0"
+    }
+  }
+}`)
+	specs := ParsePackageLockJSON(src)
+	if len(specs) != 5 {
+		t.Fatalf("expected 5 specs (root entry skipped), got %d: %+v", len(specs), specs)
+	}
+
+	got := map[string]Spec{}
+	for _, s := range specs {
+		got[s.Path] = s
+		if s.Ecosystem != "npm" {
+			t.Errorf("ecosystem = %q for %q", s.Ecosystem, s.Path)
+		}
+	}
+	if got["lodash"].Version != "4.17.21" {
+		t.Errorf("lodash version = %q (lockfile resolved value, not semver range)", got["lodash"].Version)
+	}
+	if got["react"].Version != "18.2.0" {
+		t.Errorf("react version = %q", got["react"].Version)
+	}
+	if !got["vitest"].Indirect || got["vitest"].Replace != "dev" {
+		t.Errorf("vitest dev classification wrong: %+v", got["vitest"])
+	}
+	if got["@scope/util"].Version != "2.5.0" {
+		t.Errorf("scoped package version = %q", got["@scope/util"].Version)
+	}
+	if got["foo/node_modules/bar"].Version != "1.0.0" {
+		t.Errorf("nested-transitive path %q should preserve full chain (multi-version differentiator)",
+			"foo/node_modules/bar")
+	}
+}
+
+func TestParsePackageLockJSON_RejectsV1(t *testing.T) {
+	src := []byte(`{
+  "name": "myapp",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "lodash": {"version": "4.17.21"}
+  }
+}`)
+	if got := ParsePackageLockJSON(src); got != nil {
+		t.Errorf("v1 lockfile should yield nil specs (unsupported shape), got %+v", got)
+	}
+}
+
+func TestParsePackageLockJSON_Empty(t *testing.T) {
+	if got := ParsePackageLockJSON(nil); got != nil {
+		t.Errorf("nil input should yield nil")
+	}
+	if got := ParsePackageLockJSON([]byte(`{"lockfileVersion": 3, "packages": {}}`)); len(got) != 0 {
+		t.Errorf("empty packages map should yield empty specs")
+	}
+}
+
 func TestParsePyProject_PEP621(t *testing.T) {
 	src := []byte(`[project]
 name = "myproj"

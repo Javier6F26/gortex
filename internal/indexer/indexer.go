@@ -2510,6 +2510,11 @@ func (idx *Indexer) extractExternalModules() {
 			ownPathFromSrc: readPackageJSONOwnName,
 		},
 		{
+			path:           "package-lock.json",
+			parse:          modules.ParsePackageLockJSON,
+			ownPathFromSrc: nil, // package-lock has no own-name notion separate from package.json
+		},
+		{
 			path:           "pyproject.toml",
 			parse:          modules.ParsePyProject,
 			ownPathFromSrc: readPyProjectOwnName,
@@ -2593,7 +2598,7 @@ func manifestLanguage(relPath string) string {
 	switch filepath.Base(relPath) {
 	case "go.mod":
 		return "go"
-	case "package.json":
+	case "package.json", "package-lock.json":
 		return "json"
 	case "pyproject.toml", "Cargo.toml":
 		return "toml"
