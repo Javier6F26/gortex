@@ -240,7 +240,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			e.emitTypeAlias(m, filePath, fileID, src, result, seenTypeName)
 
 		case m.Captures["import.spec"] != nil:
-			e.emitImport(m, filePath, fileID, result, imports)
+			e.emitImport(m, filePath, fileID, result, imports, fileNode)
 
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
@@ -1171,10 +1171,23 @@ func (e *GoExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID strin
 // node (KindImport) with Meta carrying the import path, alias (if
 // renamed), and is_external flag. Lets agents query "what does this
 // file import from <pkg>" with one graph hop.
-func (e *GoExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, imports map[string]string) {
+func (e *GoExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, imports map[string]string, fileNode *graph.Node) {
 	pathCap := m.Captures["import.path"]
 	importPath := strings.Trim(pathCap.Text, `"`)
 	line := pathCap.StartLine + 1
+
+	// Mark the file as a cgo user when it imports "C" — the
+	// pseudo-import that triggers Go's cgo preprocessor and
+	// signals the file has a C source dependency. Agents asking
+	// "which files would break if we removed cgo" or "what's the
+	// porting surface to a non-cgo build" can then filter by
+	// this meta flag without parsing source.
+	if importPath == "C" && fileNode != nil {
+		if fileNode.Meta == nil {
+			fileNode.Meta = map[string]any{}
+		}
+		fileNode.Meta["uses_cgo"] = true
+	}
 
 	rawAlias := ""
 	if a, ok := m.Captures["import.alias"]; ok {
