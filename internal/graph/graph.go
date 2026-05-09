@@ -487,10 +487,23 @@ func (g *Graph) ReindexEdge(e *Edge, oldTo string) {
 	// outEdges slot position doesn't move — only the key under which
 	// the sidecar records it changes. Avoid a churn of slice growth by
 	// swapping the sidecar entry in place.
+	//
+	// The parallel outEdgeKeys slice MUST be updated alongside
+	// outEdgeIdx. removeEdgeFromBucket reads outEdgeKeys[pos] to
+	// learn the swapped slot's insertion-time key during swap-with-
+	// last; leaving outEdgeKeys stale here would re-insert the old
+	// key into outEdgeIdx pointing at a swapped position, and the
+	// next swap on that key would compute a pos past the (now
+	// shorter) slice — the exact index-out-of-range panic that
+	// surfaces during evictEdgesLocked when warmup retargets a lot
+	// of edges via ReindexEdge.
 	if fromIdx, ok := sFrom.outEdgeIdx[e.From]; ok {
 		if pos, exists := fromIdx[oldKey]; exists {
 			delete(fromIdx, oldKey)
 			fromIdx[newKey] = pos
+			if keys, ok := sFrom.outEdgeKeys[e.From]; ok && pos < len(keys) {
+				keys[pos] = newKey
+			}
 		}
 	}
 

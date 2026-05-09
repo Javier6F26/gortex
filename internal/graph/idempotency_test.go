@@ -375,3 +375,144 @@ func TestRemoveEdgeFromBucket_SwappedEdgeWithMutatedTo(t *testing.T) {
 	// eHead has been migrated to its new target.
 	assert.Len(t, g.GetInEdges("y::Y"), 1, "eHead's new target should hold one edge")
 }
+
+// TestReindexEdge_OutEdgeKeysStayConsistent regresses the daemon
+// warmup panic:
+//
+//	panic: runtime error: index out of range [61] with length 58
+//	  graph.removeEdgeFromBucket
+//	  graph.(*Graph).evictEdgesLocked
+//	  graph.(*Graph).EvictFile
+//	  indexer.(*Indexer).indexFile
+//	  indexer.(*Indexer).IncrementalReindex
+//
+// The failure mode: ReindexEdge updates outEdgeIdx[oldKey→newKey] but
+// previously did NOT update the parallel outEdgeKeys[pos] slice. A
+// later swap-with-last removal in the same outEdges bucket reads
+// outEdgeKeys[swappedPos] — finds the stale insertion-time key — and
+// re-inserts THAT key into outEdgeIdx pointing at the swapped slot.
+// outEdgeIdx then holds both the live newKey (still pointing at the
+// original pre-swap position) AND a stale-key entry. The next op
+// that walks back to the original pos finds the slice has shrunk
+// past it and panics.
+//
+// The fix: ReindexEdge rewrites outEdgeKeys[pos] = newKey alongside
+// the outEdgeIdx update so the parallel slice never holds stale keys.
+func TestReindexEdge_OutEdgeKeysStayConsistent(t *testing.T) {
+	g := New()
+	g.AddNode(&Node{ID: "a::A", Name: "A", Kind: KindFunction, FilePath: "a"})
+	g.AddNode(&Node{ID: "t1", Name: "t1", Kind: KindFunction, FilePath: "t1"})
+	g.AddNode(&Node{ID: "t2", Name: "t2", Kind: KindFunction, FilePath: "t2"})
+	g.AddNode(&Node{ID: "t3", Name: "t3", Kind: KindFunction, FilePath: "t3"})
+	g.AddNode(&Node{ID: "t2-prime", Name: "t2'", Kind: KindFunction, FilePath: "t2p"})
+	g.AddNode(&Node{ID: "t2-prime-prime", Name: "t2''", Kind: KindFunction, FilePath: "t2pp"})
+
+	// Three edges share the same From, populating one outEdges bucket
+	// with three slots. Distinct lines so the keys differ.
+	e1 := &Edge{From: "a::A", To: "t1", Kind: EdgeCalls, FilePath: "a", Line: 1}
+	e2 := &Edge{From: "a::A", To: "t2", Kind: EdgeCalls, FilePath: "a", Line: 2}
+	e3 := &Edge{From: "a::A", To: "t3", Kind: EdgeCalls, FilePath: "a", Line: 3}
+	g.AddEdge(e1)
+	g.AddEdge(e2)
+	g.AddEdge(e3)
+	require.Len(t, g.GetOutEdges("a::A"), 3)
+
+	// ReindexEdge e2 — outEdgeKeys[1] would stay stale before the fix.
+	oldTo := e2.To
+	e2.To = "t2-prime"
+	g.ReindexEdge(e2, oldTo)
+
+	// Force a swap-with-last in the outEdges["a::A"] bucket by
+	// removing e1. With the bug, this propagates the stale key for
+	// slot 1 (e2's original key) into outEdgeIdx.
+	require.True(t, g.RemoveEdge(e1.From, e1.To, e1.Kind))
+
+	// ReindexEdge e2 a second time — drives outEdgeIdx into the
+	// inconsistent state where it holds both the new key and the
+	// stale key from the previous swap.
+	oldTo = e2.To
+	e2.To = "t2-prime-prime"
+	g.ReindexEdge(e2, oldTo)
+
+	// Removal that touches the bucket must NOT panic. With the bug,
+	// removing e3 via its resolved key triggered
+	// `slice[pos] = slice[last]` with pos past the shrunk slice.
+	require.NotPanics(t, func() {
+		g.RemoveEdge(e3.From, e3.To, e3.Kind)
+	}, "swap-with-last after repeated ReindexEdge must not panic")
+
+	// e2 still queryable at its final target — sanity check that the
+	// bucket bookkeeping survived intact.
+	out := g.GetOutEdges("a::A")
+	require.Len(t, out, 1)
+	assert.Equal(t, "t2-prime-prime", out[0].To)
+}
+
+// TestEvictFile_AfterReindex regresses the same panic via the actual
+// eviction path the daemon hit (EvictFile → evictEdgesLocked) instead
+// of going through the public RemoveEdge API. The fixture stages the
+// exact corruption window the daemon panic describes:
+//
+//  1. A multi-edge outEdges bucket on a single From.
+//  2. ReindexEdge against a non-last slot in that bucket — outEdgeKeys
+//     for that slot becomes stale (still holds the pre-mutation key).
+//  3. A swap-with-last removal earlier in the bucket pulls the stale
+//     key into outEdgeIdx pointing at the swapped position.
+//  4. The slice subsequently shrinks past that position.
+//  5. EvictFile on the reindexed edge's NEW target then walks
+//     inEdges[that target], grabs the still-correct live key from
+//     inEdgeKeys, and calls removeEdgeFromBucket(outEdges, ...) on
+//     the From bucket. With the bug, outEdgeIdx still has the live
+//     key pointing past the now-shrunk slice → panic.
+func TestEvictFile_AfterReindex(t *testing.T) {
+	g := New()
+	g.AddNode(&Node{ID: "src/a.go::A", Name: "A", Kind: KindFunction, FilePath: "src/a.go"})
+	g.AddNode(&Node{ID: "t1.go::T1", Name: "T1", Kind: KindFunction, FilePath: "t1.go"})
+	g.AddNode(&Node{ID: "t2.go::T2", Name: "T2", Kind: KindFunction, FilePath: "t2.go"})
+	g.AddNode(&Node{ID: "t3.go::T3", Name: "T3", Kind: KindFunction, FilePath: "t3.go"})
+	g.AddNode(&Node{ID: "t2p.go::T2P", Name: "T2P", Kind: KindFunction, FilePath: "t2p.go"})
+
+	// Three outgoing edges from A — slot 1 is the one we'll reindex.
+	e1 := &Edge{From: "src/a.go::A", To: "t1.go::T1", Kind: EdgeCalls, FilePath: "src/a.go", Line: 1}
+	e2 := &Edge{From: "src/a.go::A", To: "t2.go::T2", Kind: EdgeCalls, FilePath: "src/a.go", Line: 2}
+	e3 := &Edge{From: "src/a.go::A", To: "t3.go::T3", Kind: EdgeCalls, FilePath: "src/a.go", Line: 3}
+	g.AddEdge(e1)
+	g.AddEdge(e2)
+	g.AddEdge(e3)
+
+	// Step 1: reindex e2's To. Without the fix, outEdgeKeys[1] keeps
+	// the pre-mutation key while outEdgeIdx swaps to the new key.
+	old := e2.To
+	e2.To = "t2p.go::T2P"
+	g.ReindexEdge(e2, old)
+
+	// Step 2: evict T1 — its inEdges bucket holds e1; Phase 2 of
+	// evictEdgesLocked calls removeEdgeFromBucket(outEdges["src/a.go::A"], k_for_e1).
+	// Inside, swap-with-last picks slot 2's key (k_for_e3 — correct)
+	// because slot 2 is what the swap consumes. So no panic yet, but
+	// after the swap the bucket is shape [e3, e2] with outEdgeKeys
+	// = [k_for_e3, STALE_pre-reindex_e2_key].
+	require.NotPanics(t, func() { g.EvictFile("t1.go") })
+
+	// Step 3: evict T3 — its inEdges bucket now points at the
+	// swapped slot 0 (e3). removeEdgeFromBucket(outEdges, k_for_e3)
+	// runs, swap-with-last picks up outEdgeKeys[1] which is the
+	// STALE key. With the bug, that stale key gets re-inserted into
+	// outEdgeIdx at position 0 alongside the still-live e2 key
+	// (which now points at position 1, but the slice has shrunk to
+	// length 1).
+	require.NotPanics(t, func() { g.EvictFile("t3.go") })
+
+	// Step 4: evict T2P. inEdges[T2P] holds e2 with inEdgeKeys
+	// carrying the LIVE key (insertion via addEdgeToBucket during
+	// ReindexEdge used the new key). removeEdgeFromBucket(outEdges
+	// ["src/a.go::A"], LIVE_key) looks up outEdgeIdx[LIVE_key] = 1,
+	// then tries slice[1] in a slice of length 1 → panic with the
+	// bug, clean removal with the fix.
+	require.NotPanics(t, func() {
+		g.EvictFile("t2p.go")
+	}, "EvictFile on the reindexed edge's new target must not panic on stale outEdgeIdx")
+
+	// All edges removed — bucket should be empty.
+	assert.Empty(t, g.GetOutEdges("src/a.go::A"), "outEdges bucket must drain after every target was evicted")
+}
