@@ -136,9 +136,12 @@ func TestInstructionsBody_AdvertisesKeyTools(t *testing.T) {
 	for _, token := range []string{
 		"search_symbols", "smart_context", "get_editing_context",
 		"contracts", "find_usages", "graph_stats",
-		// CPG-lite dataflow surface — landed with I1.
+		// CPG-lite dataflow surface (flow_between / taint_paths).
 		"flow_between", "taint_paths",
 		"value_flow", "arg_of", "returns_to",
+		// Infrastructure-as-graph surface (K8s / Kustomize / Dockerfile).
+		"k8s_resources", "images", "kustomize",
+		"uses_env", "configures", "mounts", "exposes", "depends_on",
 	} {
 		if !strings.Contains(InstructionsBody, token) {
 			t.Errorf("InstructionsBody no longer mentions %q — a doc regression would ship to every adapter", token)
@@ -154,6 +157,9 @@ func TestGlobalInstructionsBody_AdvertisesKeyTools(t *testing.T) {
 	for _, token := range []string{
 		"search_symbols", "smart_context", "get_editing_context",
 		"flow_between", "taint_paths",
+		// Infrastructure surface — also written into the per-machine
+		// block by `gortex install`.
+		"k8s_resources", "images", "kustomize",
 	} {
 		if !strings.Contains(GlobalInstructionsBody, token) {
 			t.Errorf("GlobalInstructionsBody no longer mentions %q", token)

@@ -69,6 +69,9 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 | Manually hunting unused code          | ` + "`analyze`" + ` with ` + "`kind: \"dead_code\"`" + ` — zero incoming edges (excludes entry points, tests, exports) |
 | Guessing which symbols are over-coupled| ` + "`analyze`" + ` with ` + "`kind: \"hotspots\"`" + ` — ranks by fan-in, fan-out, community crossings |
 | Manually scanning for circular deps   | ` + "`analyze`" + ` with ` + "`kind: \"cycles\"`" + ` — Tarjan's SCC with severity classification |
+| Surveying K8s manifests in the repo   | ` + "`analyze`" + ` with ` + "`kind: \"k8s_resources\"`" + ` — KindResource fan-out (depends_on / configures / mounts / exposes / uses_env); ` + "`k8s_kind`" + ` / ` + "`namespace`" + ` / ` + "`name`" + ` filters |
+| Listing container images in use       | ` + "`analyze`" + ` with ` + "`kind: \"images\"`" + ` — KindImage with consumer count (Dockerfile FROM + K8s ` + "`container.image`" + `); ` + "`role`" + ` / ` + "`ref`" + ` / ` + "`tag`" + ` filters |
+| Mapping the Kustomize overlay tree    | ` + "`analyze`" + ` with ` + "`kind: \"kustomize\"`" + ` — KindKustomization with base / resource fan-out; ` + "`dir`" + ` filter |
 | Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
 | Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
 

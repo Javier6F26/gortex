@@ -279,7 +279,7 @@ type TypeHierarchySubtypesParams struct {
 }
 
 // ---------------------------------------------------------------------------
-// textDocument/codeAction support — H4 (LSP fix-all).
+// textDocument/codeAction support (LSP fix-all).
 // ---------------------------------------------------------------------------
 
 // Standard LSP code-action kinds (a subset).

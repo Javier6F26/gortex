@@ -260,6 +260,44 @@ const (
 	// rewrites From to the resolved callee ID by joining against the
 	// EdgeCalls edge from the same caller+line.
 	EdgeReturnsTo EdgeKind = "returns_to"
+	// Infrastructure-graph edges. Materialised by the K8s
+	// manifest, Kustomize, and Dockerfile extractors.
+	//
+	// EdgeConfigures links a workload Resource (Pod / Deployment /
+	// StatefulSet / DaemonSet / Job / CronJob) to a ConfigMap or
+	// Secret it pulls configuration from via `envFrom:`,
+	// `valueFrom: configMapKeyRef`, or `valueFrom: secretKeyRef`.
+	// Direction: consumer → provider (workload → ConfigMap/Secret).
+	// Origin: ast_resolved by construction.
+	EdgeConfigures EdgeKind = "configures"
+	// EdgeMounts links a workload Resource to a volume source —
+	// ConfigMap, Secret, or PersistentVolumeClaim — referenced from
+	// `spec.volumes`. Direction: workload → volume source. Distinct
+	// from EdgeConfigures (which is env-side wiring); EdgeMounts is
+	// the filesystem-side wiring. Origin: ast_resolved.
+	EdgeMounts EdgeKind = "mounts"
+	// EdgeExposes links a Resource or Image to a port surface it
+	// publishes. Source: K8s Service `spec.ports[]`, Deployment/Pod
+	// `containerPorts[]`, Ingress rules, Dockerfile `EXPOSE`. Target:
+	// a synthetic port node with ID `port::<proto>::<n>` (proto ∈
+	// tcp|udp|http|https|grpc). Origin: ast_resolved.
+	EdgeExposes EdgeKind = "exposes"
+	// EdgeDependsOn captures runtime/build dependencies between
+	// infrastructure entities — Ingress → Service backend, Service
+	// → Pod (selector), Kustomization → base Kustomization,
+	// Dockerfile stage → parent stage / external base Image,
+	// Resource → Image. Direction: dependent → dependency. Origin:
+	// ast_resolved.
+	EdgeDependsOn EdgeKind = "depends_on"
+	// EdgeUsesEnv links a Resource (workload) or Image (Dockerfile
+	// stage) to a KindConfigKey representing an environment variable
+	// it declares it needs at runtime. Direction: container surface
+	// → config_key. The config_key ID convention `cfg::env::<NAME>`
+	// matches what Go / Python / Node extractors emit for
+	// `os.Getenv("NAME")` (and equivalents) so the cross-ref between
+	// infra-side declaration and code-side consumption materialises
+	// for free via shared node IDs. Origin: ast_resolved.
+	EdgeUsesEnv EdgeKind = "uses_env"
 )
 
 type Edge struct {
@@ -368,7 +406,11 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		// inherit ast_resolved once the post-resolution pass has
 		// landed both ends; the dispatcher here just stamps the
 		// default tier so freshly emitted edges classify cleanly.
-		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo:
+		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo,
+		// Infrastructure-graph edges. Each is materialised by an
+		// extractor (K8s/Kustomize/Dockerfile) that resolves the
+		// relationship structurally from the manifest text.
+		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv:
 		return OriginASTResolved
 	}
 	// Resolution-derived edges fall back to confidence score.
@@ -399,7 +441,9 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 		// the contracts pipeline, model → table via the ORM detector,
 		// parent → child via JSX walking) so they ride at ast_resolved.
 		EdgeHandlesRoute, EdgeModelsTable, EdgeRendersChild,
-		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo:
+		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo,
+		// Infrastructure-graph edges (K8s / Kustomize / Dockerfile).
+		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv:
 		return "EXTRACTED"
 	}
 	// Resolution-derived edges: classify by confidence score.

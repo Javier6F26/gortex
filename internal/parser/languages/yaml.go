@@ -17,8 +17,16 @@ func NewYAMLExtractor() *YAMLExtractor {
 	return &YAMLExtractor{lang: yaml.GetLanguage()}
 }
 
-func (e *YAMLExtractor) Language() string     { return "yaml" }
-func (e *YAMLExtractor) Extensions() []string { return []string{".yaml", ".yml"} }
+func (e *YAMLExtractor) Language() string { return "yaml" }
+func (e *YAMLExtractor) Extensions() []string {
+	// `.yaml` / `.yml` cover the bulk of YAML files (including
+	// `kustomization.yaml`). `Kustomization` is the bare-basename
+	// form Kustomize accepts when no extension is desired — it
+	// must be registered as a basename so the registry routes it
+	// to the YAML extractor (which then dispatches into the
+	// kustomize path inside Extract).
+	return []string{".yaml", ".yml", "Kustomization"}
+}
 
 func (e *YAMLExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
@@ -36,6 +44,19 @@ func (e *YAMLExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		Language: "yaml",
 	}
 	result.Nodes = append(result.Nodes, fileNode)
+
+	// Specialised YAML dispatch. Order matters:
+	//   1. Kustomize files have a fixed basename — short-circuit.
+	//   2. K8s manifests are detected by content (apiVersion+kind).
+	//   3. Otherwise fall through to the generic top-level-keys
+	//      walker so plain config YAMLs still index.
+	if isKustomizationFile(filePath) {
+		extractKustomizeYAML(filePath, fileNode.ID, src, result)
+		return result, nil
+	}
+	if extractKubernetesYAML(filePath, fileNode.ID, src, result) {
+		return result, nil
+	}
 
 	// Walk only top-level block_mapping_pair nodes.
 	e.extractTopLevelKeys(root, src, filePath, fileNode.ID, result)

@@ -141,8 +141,8 @@ func (p *Provider) Enrich(g *graph.Graph, repoRoot string) (*semantic.EnrichResu
 	// Externals attribution: every Use of an external symbol becomes
 	// an EdgeCalls / EdgeReferences targeting a freshly materialised
 	// `ext::go:<importPath>::<name>` node, which itself carries an
-	// EdgeDependsOnModule to the owning KindModule. Mirrors A21 — the
-	// resolver previously left these calls pointing at stub strings
+	// EdgeDependsOnModule to the owning KindModule. Previously the
+	// resolver left these calls pointing at stub strings
 	// (`stdlib::fmt::Println`, `dep::github.com/.../foo::Bar`) that no
 	// node holds; goanalysis upgrades them to real graph nodes with
 	// LSP-grade origin.

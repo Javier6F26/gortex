@@ -29,10 +29,10 @@ type ProviderConfig struct {
 //
 // The order matters: per-language priority sorts ascending, so go-types
 // (priority 1) wins for Go even when scip-go and gopls are also
-// available. Phase H7 grew the LSP-server list significantly — every
-// known LSP server is enumerated via RegisterDefaultProviders so that,
-// when its binary is on PATH, the daemon spins it up automatically
-// without users editing `.gortex.yaml`.
+// available. Every known LSP server is enumerated via
+// RegisterDefaultProviders so that, when its binary is on PATH, the
+// daemon spins it up automatically without users editing
+// `.gortex.yaml`.
 func DefaultConfig() Config {
 	cfg := Config{
 		Enabled:           true,

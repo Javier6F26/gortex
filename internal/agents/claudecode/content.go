@@ -201,7 +201,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 ### Code Quality
 | Tool | What it gives you |
 |------|-------------------|
-| analyze | Unified graph analysis. Supported kinds: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, coverage_summary, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, error_surface, external_calls, routes, models, components |
+| analyze | Unified graph analysis. Supported kinds: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, coverage_summary, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, channel_ops, goroutine_spawns, field_writers, annotation_users, config_readers, event_emitters, error_surface, external_calls, routes, models, components, k8s_resources, images, kustomize |
 | analyze kind=dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
 | analyze kind=hotspots | Over-coupled symbols ranked by fan-in, fan-out, and community crossings |
 | analyze kind=cycles | Tarjan's SCC with severity classification |
@@ -229,6 +229,9 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | analyze kind=routes | Handler↔route pairs from the EdgeHandlesRoute layer (HTTP/gRPC/WS/GraphQL/topic); ` + "`method`" + ` / ` + "`path`" + ` / ` + "`type`" + ` filters |
 | analyze kind=models | Model→table edges from EdgeModelsTable across gorm / SQLAlchemy / Django / ActiveRecord / JPA / TypeORM / Ecto; ` + "`orm`" + ` / ` + "`table`" + ` / ` + "`model`" + ` filters |
 | analyze kind=components | Parent↔child fan-in/out from EdgeRendersChild (JSX/TSX + Phoenix HEEx); pass ` + "`id`" + ` for per-component child list |
+| analyze kind=k8s_resources | KindResource fan-out (depends_on / configures / mounts / exposes / uses_env); ` + "`k8s_kind`" + ` / ` + "`namespace`" + ` / ` + "`name`" + ` filters |
+| analyze kind=images | Container images (Dockerfile FROM target or K8s ` + "`container.image`" + `) with consumer count; ` + "`role`" + ` (base/stage) / ` + "`ref`" + ` / ` + "`tag`" + ` filters |
+| analyze kind=kustomize | KindKustomization overlay tree with base / resource fan-out; ` + "`dir`" + ` filter |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
 | gortex enrich blame\|coverage\|releases\|all (CLI) | Bulk-stamp the graph with the metadata that stale_*/coverage_*/ownership/releases analyzers need |
@@ -341,6 +344,9 @@ const commandDebug = `# Debugging with Gortex
 | Event/log volume spike  | analyze kind=event_emitters with level=error -> find every site that logs an error |
 | Mutation race suspicion | analyze kind=field_writers id=<field> -> every function that writes the contended field |
 | Annotation drift        | analyze kind=annotation_users name=Deprecated -> every site still using a deprecated API |
+| Env var read/write mismatch | find_usages on cfg::env::<NAME> -> Resources/Dockerfile stages declaring it (EdgeUsesEnv) plus code-side os.Getenv consumers via the shared config_key node |
+| K8s manifest blast radius | analyze kind=k8s_resources k8s_kind=ConfigMap -> orphan ConfigMaps. find_usages on a ConfigMap Resource ID surfaces every workload that envFroms or mounts it |
+| Container image audit   | analyze kind=images role=base -> every external image and how many Dockerfile stages / K8s Resources pull it. Filter by tag=latest to find the unpinned ones |
 `
 
 const commandImpact = `# Impact Analysis with Gortex

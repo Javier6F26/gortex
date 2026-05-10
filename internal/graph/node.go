@@ -108,6 +108,35 @@ const (
 	// Per-repo: applyRepoPrefix prefixes every node ID with the repo
 	// slug so two repos that emit the same string don't collide.
 	KindString NodeKind = "string"
+	// KindResource represents a Kubernetes manifest resource —
+	// Deployment, Service, ConfigMap, Secret, Ingress, CronJob,
+	// StatefulSet, DaemonSet, Job, ReplicaSet, ServiceAccount,
+	// Role, RoleBinding, ClusterRole, ClusterRoleBinding, Namespace,
+	// PersistentVolume, PersistentVolumeClaim, etc. ID convention:
+	// `k8s::<kind>::<namespace>::<name>` (namespace defaults to
+	// "_" when not declared in the manifest). Meta carries
+	// api_version, namespace, labels (truncated). Sourced from YAML
+	// extractors that detect K8s manifests by `apiVersion:` +
+	// `kind:` markers.
+	KindResource NodeKind = "resource"
+	// KindKustomization represents a Kustomize overlay — one per
+	// `kustomization.yaml` / `kustomization.yml` file in a repo.
+	// ID convention: `kustomize::<dir>` where dir is the directory
+	// holding the kustomization file relative to the repo root.
+	// Resources, bases, components, and patches are linked via
+	// EdgeDependsOn (overlay → base) and EdgeReferences
+	// (overlay → resource files).
+	KindKustomization NodeKind = "kustomization"
+	// KindImage represents a container image — either an external
+	// base image referenced by a Dockerfile FROM, or a build stage
+	// declared via `FROM ... AS <stage>`, or an image referenced
+	// by a K8s container spec. ID conventions:
+	//   `image::<name>:<tag>` for external/registry images (tag
+	//     defaults to "latest" when omitted)
+	//   `image::stage::<file>::<stage-name>` for Dockerfile build
+	//     stages
+	// Meta carries registry, digest (when pinned), platform.
+	KindImage NodeKind = "image"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -122,6 +151,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindFlag: true, KindEvent: true, KindMigration: true,
 	KindFixture: true, KindTodo: true, KindTeam: true,
 	KindRelease: true, KindLicense: true, KindString: true,
+	KindResource: true, KindKustomization: true, KindImage: true,
 }
 
 type Node struct {

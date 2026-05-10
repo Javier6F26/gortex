@@ -186,8 +186,9 @@ func TestExternals_ClaimsResolverStubEdge(t *testing.T) {
 	})
 
 	// Pre-seed the resolver-shaped stub edge that the parser+resolver
-	// would have written before A21. Goanalysis must rewrite this edge
-	// to point at the real ext:: node rather than leaving a duplicate.
+	// would have written before externals attribution landed.
+	// Goanalysis must rewrite this edge to point at the real ext::
+	// node rather than leaving a duplicate.
 	stubEdge := &graph.Edge{
 		From: "main.go::Greet", To: "stdlib::fmt::Println", Kind: graph.EdgeCalls,
 		FilePath: "main.go", Line: 10,

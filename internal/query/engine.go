@@ -90,14 +90,28 @@ func (e *Engine) GetFileSymbols(filePath string) *SubGraph {
 	}
 }
 
-// GetDependencies returns outgoing dependencies (imports, calls, references) up to depth hops.
+// dependencyEdgeKinds is the allowlist BFS follows for both
+// GetDependencies (outgoing) and GetDependents (incoming). It covers
+// the call-graph triple (imports/calls/references) plus the
+// infrastructure edges (depends_on / configures / mounts / exposes /
+// uses_env) so that "what does this Resource depend on" and "what
+// depends on this ConfigMap" walks land on the manifest surface,
+// not just the code surface.
+var dependencyEdgeKinds = []graph.EdgeKind{
+	graph.EdgeImports, graph.EdgeCalls, graph.EdgeReferences,
+	graph.EdgeDependsOn, graph.EdgeConfigures, graph.EdgeMounts,
+	graph.EdgeExposes, graph.EdgeUsesEnv,
+}
+
+// GetDependencies returns outgoing dependencies (imports, calls,
+// references, plus infrastructure edges) up to depth hops.
 func (e *Engine) GetDependencies(nodeID string, opts QueryOptions) *SubGraph {
-	return e.bfs(nodeID, opts, true, []graph.EdgeKind{graph.EdgeImports, graph.EdgeCalls, graph.EdgeReferences})
+	return e.bfs(nodeID, opts, true, dependencyEdgeKinds)
 }
 
 // GetDependents returns incoming dependents (blast radius) up to depth hops.
 func (e *Engine) GetDependents(nodeID string, opts QueryOptions) *SubGraph {
-	return e.bfs(nodeID, opts, false, []graph.EdgeKind{graph.EdgeImports, graph.EdgeCalls, graph.EdgeReferences})
+	return e.bfs(nodeID, opts, false, dependencyEdgeKinds)
 }
 
 // GetCallChain traces the call graph forward from a function. Follows
@@ -142,7 +156,7 @@ func (e *Engine) FindImplementations(interfaceID string) []*graph.Node {
 
 // FindOverrides returns the methods that override the given method
 // (i.e. children with EdgeOverrides → methodID). One-hop walk over
-// the type-hierarchy edges materialised by I2.
+// the type-hierarchy edges.
 func (e *Engine) FindOverrides(methodID string) []*graph.Node {
 	return e.FindOverridesMinTier(methodID, "")
 }
@@ -236,9 +250,22 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 		// both resolve into one of these, so find_usages on a token
 		// returns its providers and consumers alongside the usual
 		// call/reference/instantiate edges.
+		//
+		// Infrastructure edges complete the picture: find_usages
+		// on a ConfigMap returns workloads that consume it via
+		// `envFrom` (EdgeConfigures) or mount it (EdgeMounts);
+		// find_usages on a config_key returns workloads / Dockerfile
+		// stages that declare they use it (EdgeUsesEnv) plus code
+		// callers via the legacy reads_config path; find_usages on a
+		// Service returns Ingresses routing to it (EdgeDependsOn);
+		// find_usages on an Image returns workloads pulling it.
 		if edge.Kind == graph.EdgeCalls || edge.Kind == graph.EdgeReferences ||
 			edge.Kind == graph.EdgeInstantiates ||
-			edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes {
+			edge.Kind == graph.EdgeProvides || edge.Kind == graph.EdgeConsumes ||
+			edge.Kind == graph.EdgeReadsConfig || edge.Kind == graph.EdgeWritesConfig ||
+			edge.Kind == graph.EdgeUsesEnv || edge.Kind == graph.EdgeConfigures ||
+			edge.Kind == graph.EdgeMounts || edge.Kind == graph.EdgeExposes ||
+			edge.Kind == graph.EdgeDependsOn {
 			from := e.g.GetNode(edge.From)
 			if opts.WorkspaceID != "" && !opts.scopeAllows(from) {
 				continue

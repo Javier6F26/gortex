@@ -94,8 +94,7 @@ func newExternalsAttribution(g *graph.Graph, roots []*packages.Package, provider
 // External symbols become first-class graph nodes so the call graph can
 // reach into stdlib / module-cache without leaving stub-string targets
 // behind. Each external symbol gains an EdgeDependsOnModule to its
-// owning KindModule, which is the substrate the gap-analysis A21 entry
-// names "stdlib/dep attribution".
+// owning KindModule — i.e. stdlib/dep attribution.
 func (e *externalsAttribution) resolveSymbol(obj types.Object) string {
 	if obj == nil || obj.Pkg() == nil {
 		return ""
@@ -181,7 +180,7 @@ func (e *externalsAttribution) resolveSymbol(obj types.Object) string {
 //     and matches by trailing-name, which is enough to correctly claim
 //     the stub without bringing in line-unrelated false positives.
 //
-// Why this matters: before A21 the resolver wrote stub-string targets like
+// Why this matters: previously the resolver wrote stub-string targets like
 // "stdlib::fmt::Println" that no node holds. Once goanalysis materialises
 // the real ext::go:fmt::Println node, leaving the stub edge in place
 // would double-count the call (one stub, one real). ReindexEdge migrates

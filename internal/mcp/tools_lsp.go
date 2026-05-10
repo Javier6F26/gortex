@@ -14,7 +14,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic/lsp"
 )
 
-// registerLSPTools wires the H4 LSP-action MCP surface:
+// registerLSPTools wires the LSP-action MCP surface:
 //
 //	get_diagnostics   — most recent publishDiagnostics for a file
 //	get_code_actions  — textDocument/codeAction for a file (and optional range)

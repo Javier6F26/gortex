@@ -757,11 +757,19 @@ func stripSQLArtifacts(result *parser.ExtractionResult) {
 // EdgeReadsConfig / EdgeWritesConfig edges when the configs
 // coverage domain is gated off. Endpoint-aware so any leftover
 // edges to stripped key nodes are pruned.
+//
+// Infrastructure-origin config keys (Meta["origin"] in {"k8s",
+// "dockerfile"}) are preserved because they are emitted by the K8s
+// manifest, Kustomize, and Dockerfile extractors, which have no
+// dedicated coverage flag and always run. Stripping them would
+// also strip the EdgeUsesEnv edges those extractors produce (which
+// target the same node IDs), defeating the cross-ref between
+// container env declarations and code-side `os.Getenv` reads.
 func stripConfigArtifacts(result *parser.ExtractionResult) {
 	stripped := make(map[string]struct{})
 	keptNodes := result.Nodes[:0]
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindConfigKey {
+		if n.Kind == graph.KindConfigKey && !isInfraOriginConfigKey(n) {
 			stripped[n.ID] = struct{}{}
 			continue
 		}
@@ -779,6 +787,19 @@ func stripConfigArtifacts(result *parser.ExtractionResult) {
 		keptEdges = append(keptEdges, e)
 	}
 	result.Edges = keptEdges
+}
+
+// isInfraOriginConfigKey reports whether a KindConfigKey node was
+// emitted by the K8s / Kustomize / Dockerfile extractors. These
+// nodes carry Meta["origin"] = "k8s" or "dockerfile" by convention.
+// The code-side extractors (Go os.Getenv, Python os.environ, viper,
+// struct-tag, …) leave Meta["origin"] empty.
+func isInfraOriginConfigKey(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindConfigKey || n.Meta == nil {
+		return false
+	}
+	origin, _ := n.Meta["origin"].(string)
+	return origin == "k8s" || origin == "dockerfile"
 }
 
 // stripFlagArtifacts drops KindFlag nodes and EdgeTogglesFlag

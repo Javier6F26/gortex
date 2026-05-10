@@ -91,6 +91,9 @@ The `analyze` MCP tool is a unified dispatcher. Supported `kind` values:
 | Listing every HTTP/gRPC/WS route      | `analyze` with `kind: "routes"` — handler→route pairs from the EdgeHandlesRoute graph layer; `method`, `path`, `type` filters (`type` ∈ http/grpc/ws/graphql/topic) |
 | Mapping ORM models to tables          | `analyze` with `kind: "models"` — class→table edges from EdgeModelsTable across gorm / SQLAlchemy / Django / ActiveRecord / JPA / TypeORM / Ecto; `orm`, `table`, `model` filters |
 | Walking the component tree            | `analyze` with `kind: "components"` — parent↔child fan-in/out from EdgeRendersChild (JSX/TSX + Phoenix HEEx); pass `id` for per-component child list |
+| Surveying K8s manifests in the repo   | `analyze` with `kind: "k8s_resources"` — every KindResource with infra-edge fan-out (depends_on / configures / mounts / exposes / uses_env); `k8s_kind`, `namespace`, `name` filters |
+| Listing container images in use       | `analyze` with `kind: "images"` — every KindImage (Dockerfile FROM target or K8s container.image) with consumer count; `role` (base/stage), `ref`, `tag` filters |
+| Mapping the Kustomize overlay tree    | `analyze` with `kind: "kustomize"` — every KindKustomization with base / resource fan-out; `dir` filter |
 | Checking if the index is stale        | `index_health` — health score, parse failures, stale files |
 | Wondering what changed this session   | `get_symbol_history` — modification counts, flags churning (3+ edits) |
 | Hydrating blame / coverage / releases | `gortex enrich blame|coverage|releases|all` (CLI) — bulk-stamps the graph for the `stale_*`, `coverage_*`, `ownership`, and `releases` analyzers |
@@ -171,6 +174,7 @@ The `flow_between` and `taint_paths` MCP tools answer **"where does this value f
 **Node kinds** (filter `search_symbols` with `kind`):
 - Code structure: `file`, `package`, `function`, `method`, `type`, `interface`, `field`, `variable`, `constant`, `import`, `contract`, `param`, `closure`, `enum_member`, `generic_param`
 - Coverage extensions: `module` (ecosystem deps), `table` / `column` (db schema), `config_key` (env/viper/cli), `flag` (feature flags), `event` (logs/metrics/spans), `migration`, `fixture` (test data), `todo` (TODO/FIXME comments), `team` (CODEOWNERS), `license`, `release` (tag boundaries)
+- Infrastructure: `resource` (K8s manifest — Deployment/Service/Ingress/ConfigMap/Secret/CronJob/…), `kustomization` (Kustomize overlay), `image` (Dockerfile FROM target or K8s `container.image`)
 
 **Edge kinds** (used internally; many are queryable via `analyze` kinds above):
 - Calls / structure: `calls`, `imports`, `defines`, `implements`, `extends`, `references`, `member_of`, `instantiates`, `provides`, `consumes`, `composes`, `aliases`, `typed_as`, `returns`, `captures`, `param_of`
@@ -178,3 +182,4 @@ The `flow_between` and `taint_paths` MCP tools answer **"where does this value f
 - Mutation: `reads` / `writes` (fields), `reads_config` / `writes_config`
 - Dataflow (CPG-lite, `flow_between` / `taint_paths`): `value_flow` (intra-procedural assignment / return / range), `arg_of` (caller arg → callee param), `returns_to` (callee → assignment LHS)
 - Metadata: `annotated` (decorators), `emits` (events), `throws` (errors), `queries` (SQL), `reads_col` / `writes_col`, `toggles_flag`, `depends_on_module`, `matches` (fixtures), `generated_by`, `tests` (test → tested symbol), `covered_by`, `owns` (CODEOWNERS), `authored`, `licensed_as`
+- Infrastructure (K8s / Kustomize / Dockerfile): `configures` (workload → ConfigMap/Secret via env/envFrom), `mounts` (workload → volume source: ConfigMap/Secret/PVC), `exposes` (Resource/Image → `port::<proto>::<n>`), `depends_on` (Ingress→Service / stage→base image / overlay→base / Resource→Image), `uses_env` (Resource/Image → `cfg::env::<NAME>` config_key — shared ID with `os.Getenv` so cross-ref between infra declaration and code-side reads is automatic)

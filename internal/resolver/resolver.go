@@ -1342,7 +1342,7 @@ func (r *Resolver) InferImplements() int {
 // already lsp_resolved/lsp_dispatch (the LSP enrichment path stamps
 // EdgeOverrides directly with that origin).
 //
-// This is the AST half of I2 — works without an LSP available.
+// This is the AST half of override inference — works without an LSP available.
 func (r *Resolver) InferOverrides() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -35,11 +35,11 @@ type externalSymbolRow struct {
 }
 
 // handleAnalyzeExternalCalls surfaces the cross-repo / external symbol
-// attribution materialised by the goanalysis externals pass (gap-analysis
-// A21). It walks every edge whose target is an `ext::` node and groups
-// by the owning module, yielding either a per-module rollup ("which
-// stdlib / module-cache packages does this codebase reach into?") or a
-// per-symbol detail when the caller pins a module via the `id` filter.
+// attribution materialised by the goanalysis externals pass. It walks
+// every edge whose target is an `ext::` node and groups by the owning
+// module, yielding either a per-module rollup ("which stdlib /
+// module-cache packages does this codebase reach into?") or a per-
+// symbol detail when the caller pins a module via the `id` filter.
 //
 // Filters:
 //

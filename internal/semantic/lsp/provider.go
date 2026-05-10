@@ -407,7 +407,7 @@ func (p *Provider) ensureClient(workspaceRoot string) error {
 	// Reply OK to common reverse-RPC requests so servers don't stall.
 	// We never *need* to mutate workspace settings — saying "applied"
 	// to applyEdit when we're an indexer is wrong, so we say no by
-	// default and let H4's apply path opt in explicitly.
+	// default and let the apply-code-action path opt in explicitly.
 	client.OnRequest("workspace/configuration",
 		func(_ string, _ json.RawMessage) (any, *jsonRPCError) {
 			// Reply with one nil per requested item — servers that ask
@@ -420,9 +420,9 @@ func (p *Provider) ensureClient(workspaceRoot string) error {
 		func(_ string, _ json.RawMessage) (any, *jsonRPCError) { return nil, nil })
 	client.OnRequest("workspace/applyEdit",
 		func(_ string, _ json.RawMessage) (any, *jsonRPCError) {
-			// Default: refuse. The H4 apply path swaps this handler
-			// before issuing executeCommand so server-driven applies
-			// land on disk via WriteWorkspaceEdit.
+			// Default: refuse. The apply-code-action path swaps this
+			// handler before issuing executeCommand so server-driven
+			// applies land on disk via WriteWorkspaceEdit.
 			return ApplyWorkspaceEditResponse{Applied: false, FailureReason: "applies are routed through gortex"}, nil
 		})
 
@@ -839,8 +839,9 @@ func (p *Provider) ResolveCodeAction(action CodeActionOrCommand) (CodeActionOrCo
 	return resolved, nil
 }
 
-// ExecuteCommand issues workspace/executeCommand. Used by the H4 apply
-// path when a CodeAction has only a Command (legacy) form.
+// ExecuteCommand issues workspace/executeCommand. Used by the
+// apply-code-action path when a CodeAction has only a Command
+// (legacy) form.
 func (p *Provider) ExecuteCommand(cmd Command) (json.RawMessage, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("LSP client not initialized")
@@ -984,7 +985,8 @@ func (p *Provider) enrichTypeHierarchy(g *graph.Graph, absRoot string, result *s
 // Beyond the type-level edge, it also walks the methods of the child
 // type (the `from` side) and emits EdgeOverrides for every method
 // whose name matches a method on the parent — closing the
-// method-level half of I2 (Joern calls these CONTAINS + OVERRIDES).
+// method-level half of the type hierarchy (Joern calls these
+// CONTAINS + OVERRIDES).
 func (p *Provider) linkTypeHierarchy(g *graph.Graph, absRoot string, cur *graph.Node, other TypeHierarchyItem, asSupertype bool, result *semantic.EnrichResult) {
 	otherPath := uriToPath(other.URI, absRoot)
 	if otherPath == "" {
