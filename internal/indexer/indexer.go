@@ -145,6 +145,15 @@ type Indexer struct {
 	// deferResolve path (multi-repo IndexCtx already skips those passes).
 	deferGlobalPasses bool
 
+	// skipResolveInDeferred, when set, makes RunDeferredPasses skip the
+	// per-repo resolver.ResolveAll() call. ResolveAll walks the entire
+	// shared graph, so paying it once per indexer across hundreds of
+	// repos is O(R · E). MultiIndexer.RunDeferredPassesAll sets this
+	// flag on every indexer and runs a single resolver.New(graph).ResolveAll
+	// once at the end, which picks up every placeholder edge at once.
+	// Has no effect on direct (non-batch) callers of RunDeferredPasses.
+	skipResolveInDeferred bool
+
 	// codeownersOnce ensures the repo-level CODEOWNERS file is parsed
 	// exactly once per indexer lifetime. The rule list is derived
 	// from .github/CODEOWNERS / CODEOWNERS / docs/CODEOWNERS at
@@ -318,6 +327,13 @@ func (idx *Indexer) SetTrackedRepoModules(m map[string]string) { idx.trackedRepo
 // to a later RunDeferredPasses call. See the deferResolve field comment.
 func (idx *Indexer) SetDeferResolve(v bool) { idx.deferResolve = v }
 
+// SetSkipResolveInDeferred toggles whether RunDeferredPasses calls
+// idx.resolver.ResolveAll. The MultiIndexer batch driver sets this so
+// the per-repo resolver pass — which walks the entire shared graph —
+// runs exactly once globally instead of R times. See the
+// skipResolveInDeferred field comment.
+func (idx *Indexer) SetSkipResolveInDeferred(v bool) { idx.skipResolveInDeferred = v }
+
 // SetDeferGlobalPasses toggles whether the graph-wide derivation passes
 // (InferImplements, InferOverrides, markTestSymbolsAndEmitEdges) run
 // inline at the end of IndexCtx / IncrementalReindex. Set true when the
@@ -375,8 +391,16 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 	// of producing an `external::` stub.
 	idx.extractGoModContracts(idx.pendingContractReg)
 
-	reporter.Report("resolving references", 0, 0)
-	idx.resolver.ResolveAll()
+	// Per-repo resolver.ResolveAll walks the entire shared graph; with R
+	// repos and E edges that's O(R · E). The MultiIndexer batch driver
+	// sets skipResolveInDeferred so this runs exactly once globally
+	// (resolver.New(mi.graph).ResolveAll after every per-repo deferred
+	// pass has committed contracts). Direct (non-batch) callers leave
+	// the flag false and pay the standard single-repo cost.
+	if !idx.skipResolveInDeferred {
+		reporter.Report("resolving references", 0, 0)
+		idx.resolver.ResolveAll()
+	}
 
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 		reporter.Report("semantic enrichment", 0, 0)
@@ -3291,7 +3315,18 @@ func (idx *Indexer) extractOneModuleManifest(relPath string, parse func([]byte) 
 	if ownPathFromSrc != nil {
 		ownModulePath = ownPathFromSrc(src)
 	}
-	modules.LinkImports(idx.graph, specs, ownModulePath)
+	// Scope the walk to this repo's own import nodes. The unscoped
+	// LinkImports walks g.AllNodes(); under a warmup loop across
+	// hundreds of repos that's O(R · N). The per-repo byRepo bucket
+	// keeps this O(repo size).
+	repoNodes := idx.graph.GetRepoNodes(idx.repoPrefix)
+	importNodes := make([]*graph.Node, 0, len(repoNodes))
+	for _, n := range repoNodes {
+		if n.Kind == graph.KindImport {
+			importNodes = append(importNodes, n)
+		}
+	}
+	modules.LinkImportsIn(idx.graph, importNodes, specs, ownModulePath)
 }
 
 // manifestLanguage returns the language tag stamped on a manifest's

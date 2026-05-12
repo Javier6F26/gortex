@@ -907,7 +907,20 @@ func BuildGraphArtifacts(filePath string, specs []Spec) ([]*graph.Node, []*graph
 // match the longest spec; a manifest declaring both `bar` and
 // `bar/v2` will resolve `import bar/v2/sub` to the v2 spec.
 func LinkImports(g *graph.Graph, specs []Spec, ownModulePath string) int {
-	if g == nil || len(specs) == 0 {
+	if g == nil {
+		return 0
+	}
+	return LinkImportsIn(g, g.AllNodes(), specs, ownModulePath)
+}
+
+// LinkImportsIn is LinkImports scoped to a caller-supplied import-node
+// slice. Walking g.AllNodes() inside a warmup loop is O(R · N) — every
+// repo's manifest pass touches every node in the whole graph. Callers
+// in multi-repo mode should pass the repo's own KindImport nodes (e.g.
+// from g.GetRepoNodes(repoPrefix) filtered by Kind) so each pass stays
+// O(repo size).
+func LinkImportsIn(g *graph.Graph, importNodes []*graph.Node, specs []Spec, ownModulePath string) int {
+	if g == nil || len(specs) == 0 || len(importNodes) == 0 {
 		return 0
 	}
 	// Index specs by path for quick longest-prefix lookup. When two
@@ -930,7 +943,7 @@ func LinkImports(g *graph.Graph, specs []Spec, ownModulePath string) int {
 	})
 
 	emitted := 0
-	for _, n := range g.AllNodes() {
+	for _, n := range importNodes {
 		if n.Kind != graph.KindImport {
 			continue
 		}

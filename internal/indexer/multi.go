@@ -52,6 +52,16 @@ type MultiIndexer struct {
 	// (InferImplements / InferOverrides / markTestSymbolsAndEmitEdges)
 	// don't run R times against an R-repo graph.
 	deferGlobalPasses bool
+
+	// deferResolve, when set, propagates SetDeferResolve(true) to every
+	// per-repo Indexer constructed by this MultiIndexer. Used by the
+	// parallel warmup path: per-repo ResolveAll / contract extract /
+	// semantic enrich mutate the shared graph, so running them in
+	// parallel across repos races. With this flag the parallel loop
+	// just parses; RunDeferredPassesAll runs the per-repo passes
+	// serially after the loop. Independent of deferGlobalPasses — that
+	// flag covers a separate (cheaper) set of O(global) walks.
+	deferResolve bool
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -76,6 +86,7 @@ func (mi *MultiIndexer) newPerRepoIndexer(cfg config.IndexConfig) *Indexer {
 		idx.SetEmbedder(mi.embedder)
 	}
 	idx.SetDeferGlobalPasses(mi.deferGlobalPasses)
+	idx.SetDeferResolve(mi.deferResolve)
 	return idx
 }
 
@@ -93,6 +104,55 @@ func (mi *MultiIndexer) BeginBatch() {
 	}
 }
 
+// BeginParallelBatch is BeginBatch plus parallel-safety: it also
+// propagates SetDeferResolve(true) to every per-repo Indexer
+// constructed during the batch. Use this when running the per-repo
+// indexing loop across goroutines (warmup) — the parallel parsers
+// must not race each other inside ResolveAll / contract extract /
+// semantic enrich, which all mutate the shared graph. Pair with
+// EndBatch; call RunDeferredPassesAll between the parallel parse and
+// EndBatch to run the deferred per-repo passes serially.
+func (mi *MultiIndexer) BeginParallelBatch() {
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	mi.deferGlobalPasses = true
+	mi.deferResolve = true
+	for _, idx := range mi.indexers {
+		idx.SetDeferGlobalPasses(true)
+	}
+}
+
+// RunDeferredPassesAll runs RunDeferredPasses on every per-repo
+// Indexer that carries a pending contract registry. Pairs with
+// BeginParallelBatch: the parallel loop parses with deferResolve
+// turned on; this serial loop drains the deferred per-repo passes
+// (semantic enrich / contract extract+commit) without racing on the
+// shared graph. The per-repo resolver pass is suppressed on every
+// indexer because resolver.ResolveAll walks the entire shared graph
+// — paying it R times is O(R · E). One global resolver.New(graph).
+// ResolveAll at the end picks up every placeholder edge that the
+// per-repo passes added.
+func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
+	mi.mu.RLock()
+	indexers := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		indexers = append(indexers, idx)
+	}
+	mi.mu.RUnlock()
+	for _, idx := range indexers {
+		idx.SetSkipResolveInDeferred(true)
+	}
+	for _, idx := range indexers {
+		idx.RunDeferredPasses(ctx)
+	}
+	for _, idx := range indexers {
+		idx.SetSkipResolveInDeferred(false)
+	}
+	if mi.graph != nil {
+		resolver.New(mi.graph).ResolveAll()
+	}
+}
+
 // EndBatch turns off deferred-global-passes mode and runs the graph-
 // wide derivation passes (InferImplements, InferOverrides,
 // markTestSymbolsAndEmitEdges) once against the shared graph. Restores
@@ -101,6 +161,7 @@ func (mi *MultiIndexer) BeginBatch() {
 func (mi *MultiIndexer) EndBatch() {
 	mi.mu.Lock()
 	mi.deferGlobalPasses = false
+	mi.deferResolve = false
 	for _, idx := range mi.indexers {
 		idx.SetDeferGlobalPasses(false)
 	}
@@ -585,7 +646,15 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 		mi.logger.Warn("failed to add repo to config", zap.Error(err))
 	}
 
-	mi.ReconcileContractEdges()
+	// Skip the per-repo contract reconcile when batching: it walks every
+	// edge in the shared graph to evict stale EdgeMatches and rebuilds
+	// the matcher across every indexer, so paying it once per repo on a
+	// warmup over 100+ repos is O(R · E). The batch caller runs it once
+	// after the loop (RunGlobalResolve does, and the janitor's ReconcileAll
+	// fires it post-loop too).
+	if !mi.deferGlobalPasses {
+		mi.ReconcileContractEdges()
+	}
 
 	return result, nil
 }
@@ -689,7 +758,10 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		mi.logger.Warn("failed to add repo to config", zap.Error(err))
 	}
 
-	mi.ReconcileContractEdges()
+	// See TrackRepoCtx for why this is skipped under deferGlobalPasses.
+	if !mi.deferGlobalPasses {
+		mi.ReconcileContractEdges()
+	}
 
 	mi.logger.Info("daemon: reconciled repo from snapshot",
 		zap.String("prefix", prefix),

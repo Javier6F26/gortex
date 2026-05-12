@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -336,36 +338,97 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	}
 
 	ctx := progress.WithReporter(context.Background(), progress.Nop{})
-	// BeginBatch / EndBatch tells every per-repo Indexer constructed
-	// inside the loop to skip the graph-wide derivation passes
-	// (InferImplements / InferOverrides / markTestSymbolsAndEmitEdges).
-	// Those passes walk the entire shared graph, so paying them per
-	// repo across hundreds of tracked repos is O(R · global_size). The
-	// EndBatch call below runs them exactly once against the final
-	// graph.
-	state.multiIndexer.BeginBatch()
-	for _, entry := range state.configManager.Global().Repos {
-		// Route repos whose nodes came from the snapshot through
-		// ReconcileRepoCtx — it calls IncrementalReindex, which
-		// evicts files deleted while the daemon was down and
-		// re-indexes only files whose mtime changed. Repos not in
-		// the snapshot (newly tracked, or first startup after a
-		// schema bump) fall back to TrackRepoCtx, which does a full
-		// walk. Both paths end with the repo registered on the
-		// MultiIndexer and its contract edges reconciled.
-		priorMtimes := priorMtimesForEntry(state.snapshotRepos, entry)
-		if priorMtimes != nil {
-			if _, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes); err != nil {
-				logger.Warn("daemon: startup reconcile failed",
-					zap.String("path", entry.Path), zap.Error(err))
-			}
-			continue
-		}
-		if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
-			logger.Warn("daemon: startup track failed",
-				zap.String("path", entry.Path), zap.Error(err))
-		}
+	// BeginParallelBatch / EndBatch tells every per-repo Indexer
+	// constructed inside the loop to skip both the graph-wide
+	// derivation passes (InferImplements / InferOverrides /
+	// markTestSymbolsAndEmitEdges) AND the per-repo cross-cutting
+	// passes (ResolveAll / semantic enrich / contract extract+commit).
+	// The latter mutate the shared graph in ways that race when
+	// goroutines run them concurrently across repos, so the parallel
+	// loop below just parses; RunDeferredPassesAll drains the deferred
+	// per-repo passes serially before the global resolve. Without this
+	// batch wrapper, a 100+ repo warmup is O(R · global_size).
+	state.multiIndexer.BeginParallelBatch()
+
+	repos := state.configManager.Global().Repos
+	// Bounded worker pool — disk I/O dominates parsing for most repos,
+	// but a few CPU-heavy ones overlap with disk waits on others. NumCPU
+	// gives good throughput on local SSDs without thrashing slow
+	// external mounts (which dominate at this scale). Capped so a 32-core
+	// box doesn't over-subscribe a single spinning drive.
+	workers := runtime.NumCPU()
+	if workers < 2 {
+		workers = 2
 	}
+	if workers > 12 {
+		workers = 12
+	}
+	if workers > len(repos) {
+		workers = len(repos)
+	}
+	logger.Info("daemon: warmup phase start",
+		zap.String("phase", "parallel_parse"),
+		zap.Int("repos", len(repos)),
+		zap.Int("workers", workers))
+	phaseStart := time.Now()
+
+	jobs := make(chan config.RepoEntry, len(repos))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for entry := range jobs {
+				// Route repos whose nodes came from the snapshot through
+				// ReconcileRepoCtx — it calls IncrementalReindex, which
+				// evicts files deleted while the daemon was down and
+				// re-indexes only files whose mtime changed. Repos not in
+				// the snapshot (newly tracked, or first startup after a
+				// schema bump) fall back to TrackRepoCtx, which does a
+				// full walk. Both paths end with the repo registered on
+				// the MultiIndexer; contract reconciliation is deferred
+				// to the single RunGlobalResolve call below.
+				repoStart := time.Now()
+				priorMtimes := priorMtimesForEntry(state.snapshotRepos, entry)
+				pathFn := "track"
+				if priorMtimes != nil {
+					pathFn = "reconcile"
+					if _, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes); err != nil {
+						logger.Warn("daemon: startup reconcile failed",
+							zap.String("path", entry.Path), zap.Error(err))
+					}
+				} else if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+					logger.Warn("daemon: startup track failed",
+						zap.String("path", entry.Path), zap.Error(err))
+				}
+				elapsed := time.Since(repoStart)
+				if elapsed > 2*time.Second {
+					logger.Info("daemon: warmup repo elapsed",
+						zap.String("path", entry.Path),
+						zap.String("path_fn", pathFn),
+						zap.Duration("elapsed", elapsed))
+				}
+			}
+		}()
+	}
+	for _, entry := range repos {
+		jobs <- entry
+	}
+	close(jobs)
+	wg.Wait()
+	logger.Info("daemon: warmup phase done",
+		zap.String("phase", "parallel_parse"),
+		zap.Duration("elapsed", time.Since(phaseStart)))
+
+	// Drain deferred per-repo passes (ResolveAll / semantic enrich /
+	// contract extract+commit) serially across the indexers the parallel
+	// loop populated. Must run before RunGlobalResolve so cross-repo
+	// resolution sees fully-lifted per-repo placeholder edges.
+	phaseStart = time.Now()
+	state.multiIndexer.RunDeferredPassesAll(ctx)
+	logger.Info("daemon: warmup phase done",
+		zap.String("phase", "deferred_passes_all"),
+		zap.Duration("elapsed", time.Since(phaseStart)))
 
 	// Rehydrate per-repo contract registries from the snapshot. Only
 	// target indexers whose registry is still nil — a non-nil registry
@@ -376,6 +439,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// the contracts of repos whose files happened to change since the
 	// last shutdown.
 	if len(state.snapshotContracts) > 0 {
+		phaseStart = time.Now()
 		injectedRepos, injectedCount := 0, 0
 		for prefix := range state.multiIndexer.AllMetadata() {
 			idx := state.multiIndexer.GetIndexer(prefix)
@@ -397,7 +461,8 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		if injectedRepos > 0 {
 			logger.Info("daemon: rehydrated contract registries from snapshot",
 				zap.Int("repos", injectedRepos),
-				zap.Int("contracts", injectedCount))
+				zap.Int("contracts", injectedCount),
+				zap.Duration("elapsed", time.Since(phaseStart)))
 		}
 	}
 
@@ -408,10 +473,12 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// and explicit shared-workspace declarations stop working until
 	// every file is touched. Idempotent — re-running on a stamped
 	// graph is a no-op.
+	phaseStart = time.Now()
 	if nodes, conts := state.multiIndexer.BackfillWorkspaceSlugs(); nodes+conts > 0 {
 		logger.Info("daemon: backfilled workspace/project slugs from .gortex.yaml",
 			zap.Int("nodes", nodes),
-			zap.Int("contracts", conts))
+			zap.Int("contracts", conts),
+			zap.Duration("elapsed", time.Since(phaseStart)))
 	}
 
 	// Run a cross-repo resolution pass once warmup has stamped the
@@ -422,14 +489,22 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// for a fresh-start daemon (where there's no snapshot to reconcile
 	// against). After resolution, contract bridge edges may have
 	// changed too, so ReconcileContractEdges runs again.
+	phaseStart = time.Now()
 	state.multiIndexer.RunGlobalResolve()
+	logger.Info("daemon: warmup phase done",
+		zap.String("phase", "global_resolve"),
+		zap.Duration("elapsed", time.Since(phaseStart)))
 
 	// Finish the batch: turn off the per-repo skip flag and run the
 	// graph-wide derivation passes once. RunGlobalResolve above just
 	// lifted the last cross-repo placeholder EdgeCalls, so EdgeTests
 	// derivation here picks up cross-repo test→subject pairs that
 	// were unresolved during the per-repo loop.
+	phaseStart = time.Now()
 	state.multiIndexer.EndBatch()
+	logger.Info("daemon: warmup phase done",
+		zap.String("phase", "end_batch"),
+		zap.Duration("elapsed", time.Since(phaseStart)))
 
 	watchCfgs := make(map[string]config.WatchConfig)
 	for prefix := range state.multiIndexer.AllMetadata() {

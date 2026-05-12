@@ -24,6 +24,7 @@ func init() {
 	// coupling explicit so a stripped-down build (or a new caller that
 	// drops the persistence import) cannot silently regress.
 	gob.Register(map[string]any{})
+	gob.Register(map[string]string{})
 	gob.Register([]any{})
 	gob.Register([]string{})
 	gob.Register([]int{})
