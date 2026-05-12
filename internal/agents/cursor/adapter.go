@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/internalutil"
@@ -23,8 +24,28 @@ func New() *Adapter                { return &Adapter{} }
 func (a *Adapter) Name() string    { return Name }
 func (a *Adapter) DocsURL() string { return DocsURL }
 
+// cursorUserDataDir is the OS-default directory where Cursor stores
+// settings when the CLI has never created ~/.cursor/. Detecting it
+// avoids false negatives for users who use the app daily but have no
+// `cursor` shell helper on PATH yet.
+func cursorUserDataDir(home string) string {
+	if home == "" {
+		return ""
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "Cursor")
+	case "windows":
+		return filepath.Join(home, "AppData", "Roaming", "Cursor")
+	default:
+		// Linux and other Unix targets Cursor ships for.
+		return filepath.Join(home, ".config", "Cursor")
+	}
+}
+
 // Detect succeeds when any of: project has .cursor/, user has
-// ~/.cursor/, or "cursor" is on PATH.
+// ~/.cursor/, Cursor's application data directory exists, or the
+// `cursor` CLI is on PATH.
 func (a *Adapter) Detect(env agents.Env) (bool, error) {
 	if _, err := os.Stat(filepath.Join(env.Root, ".cursor")); err == nil {
 		return true, nil
@@ -32,6 +53,11 @@ func (a *Adapter) Detect(env agents.Env) (bool, error) {
 	if env.Home != "" {
 		if _, err := os.Stat(filepath.Join(env.Home, ".cursor")); err == nil {
 			return true, nil
+		}
+		if dir := cursorUserDataDir(env.Home); dir != "" {
+			if _, err := os.Stat(dir); err == nil {
+				return true, nil
+			}
 		}
 	}
 	if p, err := exec.LookPath("cursor"); err == nil && p != "" {
@@ -44,6 +70,12 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	p := &agents.Plan{Files: []agents.FileAction{
 		{Path: mcpConfigPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
 	}}
+	if env.Mode != agents.ModeGlobal {
+		p.Files = append(p.Files, agents.FileAction{
+			Path: workflowRulePath(env), Action: agents.ActionWouldCreate,
+			Keys: []string{"workflow-rule"},
+		})
+	}
 	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
 		p.Files = append(p.Files, agents.FileAction{
 			Path: communitiesRulePath(env), Action: agents.ActionWouldCreate,
@@ -74,6 +106,27 @@ func communitiesRulePath(env agents.Env) string {
 	return filepath.Join(env.Root, ".cursor", "rules", "gortex-communities.mdc")
 }
 
+// workflowRulePath is the stable Cursor rule that steers the agent
+// toward Gortex MCP tools. Regenerated on every `gortex init` so
+// wording stays aligned with shipped analyzers.
+func workflowRulePath(env agents.Env) string {
+	return filepath.Join(env.Root, ".cursor", "rules", "gortex-workflow.mdc")
+}
+
+// workflowRuleBody is intentionally concise: Cursor injects this on
+// every turn (alwaysApply) and we want high signal without drowning
+// project-specific rules.
+const workflowRuleBody = `## Gortex in Cursor
+
+This repository wires the **gortex** MCP server via .cursor/mcp.json (merge-managed by Gortex).
+
+**Prefer graph tools over blind file reads**
+
+- Start a new chat with **graph_stats** (or **index_health**) to confirm the daemon/index and orient in multi-repo workspaces.
+- Use **search_symbols**, **get_symbol_source**, **get_file_summary**, **get_call_chain**, **find_usages**, and **smart_context** instead of opening whole files or guessing with text search.
+- Before signature or API changes, run **verify_change**; for test selection use **get_test_targets**.
+`
+
 func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, error) {
 	res := &agents.Result{Name: Name, DocsURL: DocsURL}
 	detected, _ := a.Detect(env)
@@ -92,6 +145,17 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, action)
+
+	// Workflow MDC — project-local only (Cursor has no user-level MDC
+	// on disk). Tells the agent to reach for MCP graph tools first.
+	if env.Mode != agents.ModeGlobal {
+		wfBody := agents.CursorMDCFrontmatter(workflowRuleBody)
+		wfAction, err := agents.WriteOwnedFile(env.Stderr, workflowRulePath(env), wfBody, opts)
+		if err != nil {
+			return res, err
+		}
+		res.Files = append(res.Files, wfAction)
+	}
 
 	// Community-routing MDC file — always written fresh on init
 	// so the routing tracks the current graph. Skipped in global

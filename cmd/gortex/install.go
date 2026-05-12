@@ -233,7 +233,7 @@ func emitInstallJSON(w interface{ Write([]byte) (int, error) }, results []*agent
 
 func emitInstallHuman(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) {
 	emitAgentSummary(w, results, opts, []string{
-		"cd into any repo and run `gortex init` to wire repo-local config",
+		"cd into any repo and run `gortex init` to wire repo-local config for every detected assistant (MCP UIs differ by editor)",
 	})
 }
 

@@ -36,9 +36,9 @@ func TestCursorCreatesMergesAndSkips(t *testing.T) {
 	if !res.Configured {
 		t.Fatal("expected Configured=true after first apply")
 	}
-	// Two creates now: .cursor/mcp.json and the new .cursor/rules/gortex.mdc
-	// instructions file that tells Cursor to prefer Gortex over file reads.
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 2})
+	// Three creates: .cursor/mcp.json, gortex-workflow.mdc (always-on MCP
+	// guidance), and gortex-communities.mdc (routing from stub SkillsRouting).
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 3})
 	mcp := agentstest.ReadJSON(t, filepath.Join(env.Root, ".cursor", "mcp.json"))
 	servers := mcp["mcpServers"].(map[string]any)
 	if _, ok := servers["gortex"]; !ok {
@@ -68,9 +68,8 @@ func TestCursorMergeIntoExistingPreservesUserKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	// mcp.json pre-exists → merge; the new gortex.mdc rules file does
-	// not → create. Both are intentional.
-	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionMerge: 1, agents.ActionCreate: 1})
+	// mcp.json pre-exists → merge; workflow + communities rules are new.
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionMerge: 1, agents.ActionCreate: 2})
 	after := agentstest.ReadJSON(t, mcpPath)
 	servers := after["mcpServers"].(map[string]any)
 	if _, ok := servers["user-server"]; !ok {

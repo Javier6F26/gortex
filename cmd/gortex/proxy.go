@@ -24,6 +24,14 @@ func runProxy(ctx context.Context) (ran bool, err error) {
 	if wdErr != nil {
 		return false, fmt.Errorf("cwd: %w", wdErr)
 	}
+
+	// Antigravity (and some other IDEs) spawn the MCP server with a working directory of "/"
+	// even though the project is loaded. Fall back to PWD if available.
+	if cwd == "/" {
+		if pwd := os.Getenv("PWD"); pwd != "" {
+			cwd = pwd
+		}
+	}
 	h := daemon.Handshake{
 		Mode:       daemon.ModeMCP,
 		CWD:        cwd,
@@ -119,6 +127,8 @@ func detectClientName() string {
 		return "windsurf"
 	case os.Getenv("CODEX_WORKSPACE") != "":
 		return "codex"
+	case os.Getenv("ANTIGRAVITY_AGENT") != "":
+		return "antigravity"
 	case os.Getenv("VSCODE_PID") != "" || os.Getenv("VSCODE_IPC_HOOK") != "":
 		// VS Code with the MCP extension. Coarse — Continue / Cline
 		// embedders run inside VS Code too, so this is just a hint

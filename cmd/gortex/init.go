@@ -67,8 +67,9 @@ var (
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
 	Short: "Wire Gortex into the current repository for every detected AI coding assistant",
-	Long: `Configure Gortex for this repository: per-repo MCP config, (optional)
-hooks, community-derived routing, and a codebase overview.
+	Long: `Configure Gortex for this repository: per-repo MCP and instruction files for each
+detected assistant, optional Claude Code hooks, community-derived routing, and (with --analyze)
+a richer CLAUDE.md overview.
 
 For one-time machine-wide setup (user MCP config, user skills /
 Knowledge Items, user hooks), run ` + "`gortex install`" + ` once.`,
@@ -98,17 +99,18 @@ func init() {
 }
 
 // buildRegistry wires up every registered adapter. Registration
-// order is also execution order — Claude Code first because it's
-// the primary integration, then alphabetical for stable --json.
+// order is also execution order — Claude Code first (hooks-heavy),
+// then Cursor (common MCP + project rules), then alphabetical for
+// stable --json.
 func buildRegistry() *agents.Registry {
 	r := agents.NewRegistry()
 	r.Register(claudecode.New())
+	r.Register(cursor.New())
 	r.Register(aider.New())
 	r.Register(antigravity.New())
 	r.Register(cline.New())
 	r.Register(codex.New())
 	r.Register(continuedev.New())
-	r.Register(cursor.New())
 	r.Register(gemini.New())
 	r.Register(kilocode.New())
 	r.Register(kiro.New())
@@ -367,7 +369,8 @@ func emitJSONReport(w io.Writer, results []*agents.Result, opts agents.ApplyOpts
 // emitHumanSummary prints the per-agent file counts to stderr.
 func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOpts) {
 	emitAgentSummary(w, results, opts, []string{
-		"commit .mcp.json, .claude/commands/, .claude/settings.json, CLAUDE.md, and any detected agent configs",
+		"if your editor uses MCP, enable the gortex server there (and reload the window) when tools do not appear after the first init",
+		"commit the generated files your team relies on (.mcp.json, .claude/, .cursor/, CLAUDE.md, and other adapter outputs)",
 		"run `gortex install` once per machine to wire user-level integration",
 	})
 }
