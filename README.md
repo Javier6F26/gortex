@@ -57,6 +57,7 @@ For Homebrew, package managers (`.deb` / `.rpm` / `.apk`), direct binary downloa
 - **Infrastructure graph layer** — first-class `KindResource` (Kubernetes Deployments, Services, Ingresses, ConfigMaps, Secrets, CronJobs), `KindKustomization` (overlay tree), and `KindImage` (Dockerfile FROM targets and K8s `container.image`) with `depends_on` / `configures` / `mounts` / `exposes` / `uses_env` edges. Cross-references with code-side `os.Getenv` calls automatically. Surfaced via `analyze` `kind: "k8s_resources" / "kustomize" / "images"`
 - **CPG-lite dataflow** — `value_flow` (intra-procedural assignment / return / range), `arg_of` (caller arg → callee param), and `returns_to` (callee → assignment LHS) edges built at index time. `flow_between` returns ranked dataflow paths between two symbol IDs; `taint_paths` does pattern-driven source→sink sweeps for security audits
 - **3 MCP prompts** — `pre_commit`, `orientation`, `safe_to_change` for guided workflows
+- **LLM features (optional)** — opt-in `ask` research agent + LLM-assisted `search_symbols` ranking, behind a pluggable provider (`local` llama.cpp / Anthropic / OpenAI / Ollama). Off by default; the HTTP providers need no native dependencies. See [LLM Features](#llm-features-optional)
 - **Two-tier config** — global config (`~/.config/gortex/config.yaml`) for projects and repo lists, per-repo `.gortex.yaml` for guards, excludes, and local overrides
 - **Guard rules** — project-specific constraints (co-change, boundary) enforced via `check_guards`
 - **Watch mode** — surgical graph updates on file change across all tracked repos, live sync with agents
@@ -564,6 +565,60 @@ Opt-in faster backends via build tags:
 go build -tags embeddings_onnx ./cmd/gortex/   # needs: brew install onnxruntime
 go build -tags embeddings_gomlx ./cmd/gortex/  # auto-downloads XLA plugin
 ```
+
+## LLM Features (optional)
+
+Gortex can delegate code-intelligence work to an LLM. Two features, both **off by default** and gated on configuring a provider:
+
+- **`ask` MCP tool** — a research agent that drives Gortex's own tools (search, callers, contracts, dependencies) to answer an open-ended question and returns a synthesized answer, instead of the calling agent issuing many tool calls itself. `chain: true` traces cross-system call chains.
+- **`search_symbols` `assist` arg** — LLM-assisted ranking on `search_symbols`: `auto` (engage on natural-language queries only), `on`, `off`, `deep` (adds a body-grounded verification pass that reads candidate code + callers and honestly drops irrelevant matches).
+
+### Providers
+
+The backend is chosen by the `llm.provider` key. The three HTTP providers are pure Go — available in any build; only `local` needs a `-tags llama` build (it embeds llama.cpp).
+
+| `llm.provider` | Backend | Needs |
+|----------------|---------|-------|
+| `local` | in-process llama.cpp | a `-tags llama` build + a `.gguf` model file |
+| `anthropic` | Anthropic Messages API | `ANTHROPIC_API_KEY` |
+| `openai` | OpenAI Chat Completions | `OPENAI_API_KEY` |
+| `ollama` | Ollama daemon | a running Ollama + a pulled model |
+
+### Configuration
+
+The `llm:` block goes in `~/.config/gortex/config.yaml` or a per-repo `.gortex.yaml` (repo-local wins per field, global fills the rest). Configure only the provider you use:
+
+```yaml
+# ~/.config/gortex/config.yaml (or per-repo .gortex.yaml)
+llm:
+  provider: local            # local | anthropic | openai | ollama
+  max_steps: 16              # agent tool-loop cap (provider-agnostic)
+
+  local:                     # provider: local — requires a `-tags llama` build
+    model: ~/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+    ctx: 4096                # context window in tokens
+    gpu_layers: 999          # layers to offload to GPU (0 = CPU-only)
+    template: chatml         # chatml | llama3
+
+  anthropic:                 # provider: anthropic
+    model: claude-sonnet-4-6
+    api_key_env: ANTHROPIC_API_KEY   # env var holding the key (this is the default)
+    # base_url: https://api.anthropic.com
+
+  openai:                    # provider: openai
+    model: gpt-4o
+    api_key_env: OPENAI_API_KEY
+
+  ollama:                    # provider: ollama
+    model: qwen2.5-coder:7b
+    host: http://localhost:11434
+```
+
+Env overrides: `GORTEX_LLM_PROVIDER`, `GORTEX_LLM_MODEL` (targets the active provider's model), `GORTEX_LLM_MAX_STEPS`. API keys are read from the env var named by `api_key_env` — never stored in the config file.
+
+If the active provider can't be constructed (missing model or API key, or `local` without a `-tags llama` build), the daemon logs a warning and the LLM features stay absent — the rest of Gortex is unaffected. If the `ask` tool isn't in `tools/list`, no provider is configured.
+
+The `assist` prompts are tiered automatically — terser for hosted frontier models, rule-heavy for small local ones. `deep` mode in particular benefits from a 7B-class or hosted model; small local models are unreliable on its disambiguation cases.
 
 ## Token Savings
 
