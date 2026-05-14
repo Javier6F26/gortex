@@ -27,6 +27,7 @@ Thumbs.db
 
 # Debug
 __debug_bin*
+/debug/
 
 # Python
 __pycache__/
