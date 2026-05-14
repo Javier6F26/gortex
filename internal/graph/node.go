@@ -217,6 +217,18 @@ func (n *Node) Brief() map[string]any {
 		}
 		b["doc"] = d
 	}
+	// Test classification — stamped by the indexer's test-edge pass.
+	// Surfacing it on the listing row lets agents tell production
+	// callers from test callers without a follow-up call.
+	if v, ok := n.Meta["is_test"].(bool); ok && v {
+		b["is_test"] = true
+	}
+	if r, ok := n.Meta["test_role"].(string); ok && r != "" {
+		b["test_role"] = r
+	}
+	if v, ok := n.Meta["is_test_file"].(bool); ok && v {
+		b["is_test_file"] = true
+	}
 	return b
 }
 

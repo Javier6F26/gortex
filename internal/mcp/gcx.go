@@ -106,6 +106,26 @@ func nodeSig(n *graph.Node) string {
 	return ""
 }
 
+// nodeIsTest reports whether a node was flagged as a test by the
+// indexer's test-edge pass (Meta["is_test"]).
+func nodeIsTest(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	v, _ := n.Meta["is_test"].(bool)
+	return v
+}
+
+// nodeTestRole returns the node's specific test role — "test",
+// "benchmark", "fuzz", or "example" — or "" for non-test nodes.
+func nodeTestRole(n *graph.Node) string {
+	if n == nil || n.Meta == nil {
+		return ""
+	}
+	r, _ := n.Meta["test_role"].(string)
+	return r
+}
+
 // shouldSkipGraphNode filters File and Import pseudo-nodes the way the
 // legacy compact / TOON formatters do — they add noise without
 // informational value in symbol-oriented outputs.
@@ -128,7 +148,7 @@ func encodeWinnowSymbols(rows []winnowResult, total, limit int) ([]byte, error) 
 	truncated := total > limit
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "winnow_symbols",
-		[]string{"id", "kind", "name", "path", "line", "sig", "score", "fan_in", "fan_out", "churn", "community", "contributions"},
+		[]string{"id", "kind", "name", "path", "line", "sig", "score", "fan_in", "fan_out", "churn", "community", "contributions", "is_test", "test_role"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 		"weights", formatAxisWeights(winnowAxisWeights),
@@ -153,6 +173,8 @@ func encodeWinnowSymbols(rows []winnowResult, total, limit int) ([]byte, error) 
 			r.Churn,
 			r.Community,
 			formatContributions(r.Contributions),
+			nodeIsTest(r.Node),
+			nodeTestRole(r.Node),
 		); err != nil {
 			return nil, err
 		}
@@ -195,7 +217,7 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 	}
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "search_symbols",
-		[]string{"id", "kind", "name", "path", "line", "sig"},
+		[]string{"id", "kind", "name", "path", "line", "sig", "is_test", "test_role"},
 		"total", fmt.Sprintf("%d", total),
 		"truncated", boolString(truncated),
 	)
@@ -213,6 +235,8 @@ func encodeSearchSymbols(nodes []*graph.Node, total, limit int) ([]byte, error) 
 			n.FilePath,
 			n.StartLine,
 			nodeSig(n),
+			nodeIsTest(n),
+			nodeTestRole(n),
 		); err != nil {
 			return nil, err
 		}
@@ -284,7 +308,7 @@ func encodeBatchSymbols(rows []map[string]any, includeSource bool) ([]byte, erro
 func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := newGCX(&buf, "find_usages",
-		[]string{"from", "to", "edge_kind", "origin", "confidence", "from_name", "from_path", "from_line"},
+		[]string{"from", "to", "edge_kind", "origin", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role"},
 		"edges", fmt.Sprintf("%d", len(sg.Edges)),
 	)
 	nodeIdx := indexNodes(sg.Nodes)
@@ -299,7 +323,7 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 		}
 		if err := enc.WriteRow(
 			e.From, e.To, string(e.Kind), e.Origin, e.Confidence,
-			fname, fpath, fline,
+			fname, fpath, fline, nodeIsTest(fn), nodeTestRole(fn),
 		); err != nil {
 			return nil, err
 		}
@@ -320,12 +344,12 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		nodes = append(nodes, n)
 	}
 	nodeEnc := newGCX(&buf, tool+".nodes",
-		[]string{"id", "kind", "name", "path", "line"},
+		[]string{"id", "kind", "name", "path", "line", "is_test", "test_role"},
 		"total", fmt.Sprintf("%d", sg.TotalNodes),
 		"truncated", boolString(sg.Truncated),
 	)
 	for _, n := range nodes {
-		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.StartLine); err != nil {
+		if err := nodeEnc.WriteRow(n.ID, string(n.Kind), nodeShort(n), n.FilePath, n.StartLine, nodeIsTest(n), nodeTestRole(n)); err != nil {
 			return nil, err
 		}
 	}

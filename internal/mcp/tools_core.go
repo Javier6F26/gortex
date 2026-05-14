@@ -61,6 +61,8 @@ type toonNodeRow struct {
 	Name      string `toon:"name"`
 	FilePath  string `toon:"file_path"`
 	StartLine int    `toon:"start_line"`
+	IsTest    bool   `toon:"is_test"`
+	TestRole  string `toon:"test_role"`
 }
 
 // toonEdgeRow is a TOON-optimized flat representation of a graph edge.
@@ -94,12 +96,16 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 			continue
 		}
+		isTest, _ := n.Meta["is_test"].(bool)
+		testRole, _ := n.Meta["test_role"].(string)
 		rows = append(rows, toonNodeRow{
 			ID:        n.ID,
 			Kind:      string(n.Kind),
 			Name:      n.Name,
 			FilePath:  n.FilePath,
 			StartLine: n.StartLine,
+			IsTest:    isTest,
+			TestRole:  testRole,
 		})
 	}
 	return rows

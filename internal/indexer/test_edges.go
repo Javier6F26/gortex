@@ -7,9 +7,12 @@ import (
 // markTestSymbolsAndEmitEdges runs after the resolver and before
 // community detection. It performs two passes over the graph:
 //
-//  1. Walk every function/method node and stamp Meta["is_test"] = true
-//     when the node lives in a test file (per IsTestFile) or its name
-//     matches a per-language test convention (per IsTestSymbol).
+//  1. Walk every function/method node that lives in a test file (per
+//     IsTestFile) and stamp Meta["test_role"] — "benchmark", "fuzz",
+//     or "example" when the name matches a per-language convention
+//     (per TestRole), otherwise "test" for plain test support code.
+//     Meta["is_test"] = true is stamped alongside for back-compat with
+//     consumers that only need the boolean.
 //
 //  2. Walk every EdgeCalls. For each call whose source is a test
 //     function and whose target is non-test, emit a parallel
@@ -49,19 +52,25 @@ func markTestSymbolsAndEmitEdges(g *graph.Graph) (markedTests int, edgesEmitted 
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}
-		isTest := false
-		if testFiles[n.FilePath] {
-			isTest = true
-		} else if IsTestSymbol(n.Name, n.Language) {
-			isTest = true
-		}
-		if !isTest {
+		// Test-file membership is the authoritative signal. No standard
+		// runner (go test, pytest, ...) picks up a test by name outside
+		// a test file, so a production function that merely starts with
+		// "Test"/"Benchmark" (e.g. TestRole) must not be flagged. The
+		// name convention only refines the *role* — benchmark / fuzz /
+		// example — for symbols already inside a test file; anything
+		// else there is test support code: role "test".
+		if !testFiles[n.FilePath] {
 			continue
+		}
+		role := TestRole(n.Name, n.Language)
+		if role == "" {
+			role = "test"
 		}
 		if n.Meta == nil {
 			n.Meta = map[string]any{}
 		}
 		n.Meta["is_test"] = true
+		n.Meta["test_role"] = role
 		markedTests++
 	}
 

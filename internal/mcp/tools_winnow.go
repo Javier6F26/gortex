@@ -74,7 +74,15 @@ type winnowConstraints struct {
 	MinFanIn   int
 	MinFanOut  int
 	MinChurn   int
-	Limit      int
+	// IsTest is a tri-state test filter: nil leaves test-ness
+	// unconstrained, *true keeps only test symbols, *false keeps only
+	// production symbols.
+	IsTest *bool
+	// TestRoles, when non-empty, keeps only symbols whose
+	// Meta["test_role"] is in the set (test / benchmark / fuzz /
+	// example). Lowercased at parse time.
+	TestRoles []string
+	Limit     int
 }
 
 // winnowResult is a single ranked hit plus per-axis contribution breakdown.
@@ -92,7 +100,8 @@ type winnowResult struct {
 func (c winnowConstraints) isEmpty() bool {
 	return c.TextMatch == "" && len(c.Kinds) == 0 && c.Language == "" &&
 		len(c.PathPrefix) == 0 && c.Community == "" &&
-		c.MinFanIn == 0 && c.MinFanOut == 0 && c.MinChurn == 0
+		c.MinFanIn == 0 && c.MinFanOut == 0 && c.MinChurn == 0 &&
+		c.IsTest == nil && len(c.TestRoles) == 0
 }
 
 // handleWinnowSymbols answers structured constraint-chain queries. Where
@@ -106,7 +115,7 @@ func (s *Server) handleWinnowSymbols(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 	if c.isEmpty() {
-		return mcp.NewToolResultError("winnow_symbols requires at least one constraint (kind, language, path_prefix, community, text_match, min_fan_in, min_fan_out, or min_churn)"), nil
+		return mcp.NewToolResultError("winnow_symbols requires at least one constraint (kind, language, path_prefix, community, text_match, min_fan_in, min_fan_out, min_churn, is_test, or test_role)"), nil
 	}
 
 	if c.TextMatch != "" {
@@ -197,6 +206,15 @@ func parseWinnowConstraints(req mcp.CallToolRequest) (winnowConstraints, error) 
 	c.MinFanIn = req.GetInt("min_fan_in", 0)
 	c.MinFanOut = req.GetInt("min_fan_out", 0)
 	c.MinChurn = req.GetInt("min_churn", 0)
+
+	if v, set := boolArg(req.GetArguments(), "is_test"); set {
+		c.IsTest = &v
+	}
+	if tr := strings.TrimSpace(req.GetString("test_role", "")); tr != "" {
+		for _, role := range splitCSV(tr) {
+			c.TestRoles = append(c.TestRoles, strings.ToLower(role))
+		}
+	}
 
 	return c, nil
 }
@@ -332,15 +350,21 @@ func (s *Server) winnowSymbols(c winnowConstraints, allowed map[string]bool) []w
 	return rows
 }
 
-// applyWinnowPrefilter drops candidates that fail kind, language, or path
-// prefix constraints — filters that don't require edge traversal.
+// applyWinnowPrefilter drops candidates that fail kind, language, path
+// prefix, or test-classification constraints — filters that don't
+// require edge traversal.
 func applyWinnowPrefilter(nodes []*graph.Node, c winnowConstraints) []*graph.Node {
-	if len(c.Kinds) == 0 && c.Language == "" && len(c.PathPrefix) == 0 {
+	if len(c.Kinds) == 0 && c.Language == "" && len(c.PathPrefix) == 0 &&
+		c.IsTest == nil && len(c.TestRoles) == 0 {
 		return nodes
 	}
 	kindSet := make(map[graph.NodeKind]bool, len(c.Kinds))
 	for _, k := range c.Kinds {
 		kindSet[k] = true
+	}
+	roleSet := make(map[string]bool, len(c.TestRoles))
+	for _, r := range c.TestRoles {
+		roleSet[r] = true
 	}
 	out := make([]*graph.Node, 0, len(nodes))
 	for _, n := range nodes {
@@ -359,6 +383,24 @@ func applyWinnowPrefilter(nodes []*graph.Node, c winnowConstraints) []*graph.Nod
 				}
 			}
 			if !matched {
+				continue
+			}
+		}
+		if c.IsTest != nil {
+			isTest := false
+			if n.Meta != nil {
+				isTest, _ = n.Meta["is_test"].(bool)
+			}
+			if isTest != *c.IsTest {
+				continue
+			}
+		}
+		if len(roleSet) > 0 {
+			role := ""
+			if n.Meta != nil {
+				role, _ = n.Meta["test_role"].(string)
+			}
+			if !roleSet[role] {
 				continue
 			}
 		}

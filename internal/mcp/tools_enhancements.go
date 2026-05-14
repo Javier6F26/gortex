@@ -148,7 +148,7 @@ func (s *Server) registerEnhancementTools() {
 	// winnow_symbols — multi-axis constraint-chain retrieval
 	s.mcpServer.AddTool(
 		mcp.NewTool("winnow_symbols",
-			mcp.WithDescription("Structured constraint-chain retrieval. Combines BM25 text matching with structural filters (kind, language, fan-in/out, community, path prefix, churn) and returns a ranked list with per-axis score contributions. Use when search_symbols' free-text-only query is too coarse — e.g. 'methods in the auth community with fan-in >= 5 touching handlers/'."),
+			mcp.WithDescription("Structured constraint-chain retrieval. Combines BM25 text matching with structural filters (kind, language, fan-in/out, community, path prefix, churn, test classification) and returns a ranked list with per-axis score contributions. Use when search_symbols' free-text-only query is too coarse — e.g. 'methods in the auth community with fan-in >= 5 touching handlers/' or 'production functions only, no tests'."),
 			mcp.WithString("kind", mcp.Description("Comma-separated node kinds to keep (function, method, type, interface, variable, contract)")),
 			mcp.WithString("language", mcp.Description("Filter to a single language (go, typescript, python, ...)")),
 			mcp.WithString("path_prefix", mcp.Description("Comma-separated file path prefixes — any match passes")),
@@ -157,6 +157,8 @@ func (s *Server) registerEnhancementTools() {
 			mcp.WithNumber("min_fan_in", mcp.Description("Minimum incoming calls+references (default: 0)")),
 			mcp.WithNumber("min_fan_out", mcp.Description("Minimum outgoing calls (default: 0)")),
 			mcp.WithNumber("min_churn", mcp.Description("Minimum session modification count (default: 0)")),
+			mcp.WithBoolean("is_test", mcp.Description("Tri-state test filter: true keeps only test symbols, false keeps only production symbols. Omit for no constraint.")),
+			mcp.WithString("test_role", mcp.Description("Comma-separated test roles to keep: test, benchmark, fuzz, example")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
 			mcp.WithBoolean("paginate", mcp.Description("When true, the server caps each page at the project default budget and returns `next_cursor` for any tail.")),
