@@ -544,6 +544,18 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 			}
 		}
 		return buf.Bytes(), enc.Close()
+	case "cross_repo":
+		items, _ := payload.([]crossRepoItem)
+		enc := newGCX(&buf, "analyze.cross_repo",
+			[]string{"from_repo", "to_repo", "kind", "count", "samples"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.FromRepo, it.ToRepo, it.Kind, it.Count, it.Samples); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
 	default:
 		// Fall back to generic so analyze variants without a hand-tuned
 		// encoder still produce valid GCX instead of failing.
@@ -634,6 +646,14 @@ type errorSurfaceItem struct {
 	Line   int
 	Throws int
 	Errors string
+}
+
+type crossRepoItem struct {
+	FromRepo string
+	ToRepo   string
+	Kind     string
+	Count    int
+	Samples  string
 }
 
 // --------------------------------------------------------------------

@@ -395,8 +395,22 @@ func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string
 	case strings.HasPrefix(target, "extern::"):
 		// Package-qualified call (json.NewEncoder): the parser attached
 		// the full import path + symbol so we don't have to guess a
-		// receiver type.
+		// receiver type. resolveExtern accepts type candidates too, so a
+		// package-qualified embedded type (`extern::pkg::Base`) keeps
+		// its precise import-path evidence here rather than falling to
+		// the same-repo-only resolveTypeRef below.
 		r.resolveExtern(e, strings.TrimPrefix(target, "extern::"), stats)
+	case e.Kind == graph.EdgeExtends || e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeComposes:
+		// Type-hierarchy edges must land on a type or interface — never
+		// a function or method. Routing them through resolveFunctionCall
+		// or resolveMethodCall (the old default / `*.` paths) let
+		// `type EdgeKind string` "extend" a method named `string` in
+		// some other repo. resolveTypeRef accepts only KindType /
+		// KindInterface candidates and is placed ahead of the `*.`
+		// cases so a selector-shaped supertype target can't slip into
+		// method resolution. extern:: targets are handled above —
+		// their import path is real cross-repo evidence.
+		r.resolveTypeRef(e, target, stats)
 	case strings.HasPrefix(target, "*.") && (e.Kind == graph.EdgeWrites || e.Kind == graph.EdgeReads):
 		// Field write/read: prefer a KindField candidate whose
 		// receiver matches the edge's receiver_type hint. Falls back
@@ -464,9 +478,20 @@ func (r *Resolver) resolveExtern(e *graph.Edge, spec string, stats *ResolveStats
 			continue
 		}
 		dir := filepath.Dir(c.FilePath)
-		if strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath) {
+		crossRepo := callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo
+		var matches bool
+		if crossRepo {
+			// Cross-repo extern call: require a precise import-path
+			// suffix match. The old loose last-component test
+			// (`*/go`) resolved every tree-sitter binding's
+			// `Language` to whichever repo sorted first.
+			matches = dirMatchesImport(dir, importPath)
+		} else {
+			matches = strings.HasSuffix(dir, "/"+lastPathComponent(importPath)) || dir == importPath || strings.HasSuffix(dir, importPath)
+		}
+		if matches {
 			e.To = c.ID
-			if callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo {
+			if crossRepo {
 				e.CrossRepo = true
 			}
 			stats.Resolved++
@@ -531,7 +556,12 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 			}
 			return
 		}
-		if crossRepoNode == nil {
+		// Cross-repo file candidate: require a precise import-path
+		// suffix match. The lastDirIndex / full-scan fallbacks key on
+		// the last path component only, so without this gate an import
+		// of `.../tree-sitter-c/bindings/go` would resolve to whichever
+		// `*/bindings/go` directory sorts first.
+		if crossRepoNode == nil && dirMatchesImport(filepath.Dir(n.FilePath), importPath) {
 			crossRepoNode = n
 		}
 	}
@@ -596,16 +626,20 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 }
 
 func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *ResolveStats) {
-	candidates := r.graph.FindNodesByName(funcName)
+	callerRepo := r.callerRepoPrefix(e)
+	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(funcName))
 	if len(candidates) == 0 {
+		// No same-repo candidate. A genuine cross-repo callee is left
+		// unresolved here for CrossRepoResolver — which alone carries the
+		// import-reachability + workspace-boundary evidence — to lift.
+		// Guessing "first function named X anywhere in the graph" is the
+		// exact name-collision bug this gate removes.
 		stats.Unresolved++
 		return
 	}
 
 	// Prefer same-package (same directory) match.
-	callerFile := e.FilePath
-	callerDir := filepath.Dir(callerFile)
-
+	callerDir := filepath.Dir(e.FilePath)
 	for _, c := range candidates {
 		if (c.Kind == graph.KindFunction || c.Kind == graph.KindMethod) &&
 			filepath.Dir(c.FilePath) == callerDir {
@@ -615,14 +649,10 @@ func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *Re
 		}
 	}
 
-	// Fall back to first function match (may be cross-repo).
-	callerRepo := r.callerRepoPrefix(e)
+	// Fall back to the first same-repo function/method match.
 	for _, c := range candidates {
 		if c.Kind == graph.KindFunction || c.Kind == graph.KindMethod {
 			e.To = c.ID
-			if callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo {
-				e.CrossRepo = true
-			}
 			stats.Resolved++
 			return
 		}
@@ -634,15 +664,18 @@ func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *Re
 // resolveTypeOrFunc resolves unresolved edges that could be either a type
 // reference (composite literal, type assertion) or a function reference.
 // It first tries to match a type/interface node, then falls back to functions.
+// Candidates are restricted to the caller's own repo — a cross-repo
+// match here would be a name-only guess; CrossRepoResolver handles the
+// genuine cross-repo case with import-reachability evidence.
 func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveStats) {
-	candidates := r.graph.FindNodesByName(name)
+	callerRepo := r.callerRepoPrefix(e)
+	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(name))
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
 	}
 
-	callerFile := e.FilePath
-	callerDir := filepath.Dir(callerFile)
+	callerDir := filepath.Dir(e.FilePath)
 
 	// Prefer same-package type match.
 	for _, c := range candidates {
@@ -654,14 +687,10 @@ func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveS
 		}
 	}
 
-	// Fall back to any type match.
-	callerRepo := r.callerRepoPrefix(e)
+	// Fall back to any same-repo type match.
 	for _, c := range candidates {
 		if c.Kind == graph.KindType || c.Kind == graph.KindInterface {
 			e.To = c.ID
-			if callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo {
-				e.CrossRepo = true
-			}
 			stats.Resolved++
 			return
 		}
@@ -680,14 +709,51 @@ func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveS
 	for _, c := range candidates {
 		if c.Kind == graph.KindFunction || c.Kind == graph.KindMethod {
 			e.To = c.ID
-			if callerRepo != "" && c.RepoPrefix != "" && c.RepoPrefix != callerRepo {
-				e.CrossRepo = true
-			}
 			stats.Resolved++
 			return
 		}
 	}
 
+	stats.Unresolved++
+}
+
+// resolveTypeRef resolves an extends / implements / composes edge to a
+// type or interface node. It never accepts a function or method
+// candidate — a type-hierarchy edge whose target is a function is
+// always a misresolution (the bug that let `type EdgeKind string`
+// "extend" a method named `string`). Candidates are restricted to the
+// caller's own repo; a genuine cross-repo supertype is left unresolved
+// for CrossRepoResolver.
+func (r *Resolver) resolveTypeRef(e *graph.Edge, name string, stats *ResolveStats) {
+	// A selector-shaped target (`*.Base`, from an embedded `pkg.Base`)
+	// carries no usable package qualifier once it reaches here — strip
+	// the `*.` and resolve on the bare type name.
+	name = strings.TrimPrefix(name, "*.")
+	callerRepo := r.callerRepoPrefix(e)
+	candidates := filterSameRepo(callerRepo, r.graph.FindNodesByName(name))
+	if len(candidates) == 0 {
+		stats.Unresolved++
+		return
+	}
+	callerDir := filepath.Dir(e.FilePath)
+
+	// Prefer a same-directory type / interface (same package).
+	for _, c := range candidates {
+		if (c.Kind == graph.KindType || c.Kind == graph.KindInterface) &&
+			filepath.Dir(c.FilePath) == callerDir {
+			e.To = c.ID
+			stats.Resolved++
+			return
+		}
+	}
+	// Otherwise any same-repo type / interface.
+	for _, c := range candidates {
+		if c.Kind == graph.KindType || c.Kind == graph.KindInterface {
+			e.To = c.ID
+			stats.Resolved++
+			return
+		}
+	}
 	stats.Unresolved++
 }
 
@@ -698,7 +764,7 @@ func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveS
 // write but the runtime target is actually a method/property).
 func (r *Resolver) resolveFieldRef(e *graph.Edge, fieldName string, stats *ResolveStats) bool {
 	receiverType := edgeReceiverType(e)
-	candidates := r.graph.FindNodesByName(fieldName)
+	candidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(fieldName))
 	if len(candidates) == 0 {
 		return false
 	}
@@ -756,7 +822,11 @@ func (r *Resolver) resolveFieldRef(e *graph.Edge, fieldName string, stats *Resol
 }
 
 func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *ResolveStats) {
-	rawCandidates := r.graph.FindNodesByName(methodName)
+	// Same-repo gate first: the per-repo Resolver never resolves a
+	// method call across a repo boundary by name. A cross-repo method
+	// call is left unresolved for CrossRepoResolver, which carries the
+	// import-reachability + workspace-boundary evidence.
+	rawCandidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(methodName))
 	if len(rawCandidates) == 0 {
 		if r.applyBuiltinIfKnown(e, methodName, stats) {
 			return
@@ -985,7 +1055,11 @@ func (r *Resolver) applyBuiltinIfKnown(e *graph.Edge, methodName string, stats *
 // preferring same-directory matches so token names that happen to
 // collide across unrelated files don't pull spurious edges.
 func (r *Resolver) resolveTokenRef(e *graph.Edge, name string, stats *ResolveStats) {
-	candidates := r.graph.FindNodesByName(name)
+	// Same-repo gate: DI token names collide readily across unrelated
+	// repos ("TOKEN", "CONFIG", …); a cross-repo first-candidate pick
+	// is a name-only guess. CrossRepoResolver handles genuine cross-repo
+	// token references.
+	candidates := filterSameRepo(r.callerRepoPrefix(e), r.graph.FindNodesByName(name))
 	if len(candidates) == 0 {
 		stats.Unresolved++
 		return
@@ -999,8 +1073,9 @@ func (r *Resolver) resolveTokenRef(e *graph.Edge, name string, stats *ResolveSta
 			return
 		}
 	}
-	// No same-dir hit: take the first candidate so find_usages can still
-	// surface the relationship. Confidence drops to reflect uncertainty.
+	// No same-dir hit: take the first same-repo candidate so find_usages
+	// can still surface the relationship. Confidence drops to reflect
+	// uncertainty.
 	e.To = candidates[0].ID
 	e.Confidence = 0.7
 	stats.Resolved++
@@ -1181,6 +1256,7 @@ func (r *Resolver) InferImplements() int {
 	// Step 1: Collect all interfaces with their required method names.
 	type ifaceInfo struct {
 		id      string
+		repo    string
 		methods map[string]bool
 	}
 	var ifaces []ifaceInfo
@@ -1214,7 +1290,7 @@ func (r *Resolver) InferImplements() int {
 		if len(methodSet) == 0 {
 			continue
 		}
-		ifaces = append(ifaces, ifaceInfo{id: n.ID, methods: methodSet})
+		ifaces = append(ifaces, ifaceInfo{id: n.ID, repo: n.RepoPrefix, methods: methodSet})
 	}
 
 	if len(ifaces) == 0 {
@@ -1293,6 +1369,17 @@ func (r *Resolver) InferImplements() int {
 				}
 				for _, iface := range ifaces {
 					if iface.id == typeID {
+						continue
+					}
+					// Repo gate: structural method-set matching across
+					// repos is almost always coincidental — every type
+					// with a `String()` method would "implement" every
+					// other repo's Stringer-shaped interface. Only infer
+					// implementation when the type and the interface
+					// live in the same repo. A genuine cross-repo
+					// implementation still surfaces structurally when
+					// the type explicitly embeds / names the interface.
+					if typeNode.RepoPrefix != iface.repo {
 						continue
 					}
 					satisfies := true
@@ -1463,6 +1550,47 @@ func lastPathComponent(path string) string {
 		return path
 	}
 	return parts[len(parts)-1]
+}
+
+// dirMatchesImport reports whether the (repo-relative) directory dir
+// genuinely corresponds to importPath. Unlike a bare last-path-component
+// match, dir must be a real *suffix* of the import path — so
+// `tree-sitter-c/bindings/go` matches `github.com/x/tree-sitter-c/bindings/go`
+// but `tree-sitter-dockerfile/bindings/go` does not. This is the
+// precision gate that stops a loose `*/go` match from resolving every
+// tree-sitter binding to whichever repo happens to sort first.
+//
+// Used only to authorise *cross-repo* candidates: a precise import-path
+// match is real evidence the caller depends on that repo. Same-repo
+// candidates don't need it — a same-repo match can't be the cross-repo
+// false positive this guards against.
+func dirMatchesImport(dir, importPath string) bool {
+	if dir == "" || importPath == "" {
+		return false
+	}
+	return dir == importPath || strings.HasSuffix(importPath, "/"+dir)
+}
+
+// filterSameRepo drops every candidate proven to live in a different
+// repo than callerRepo. Empty callerRepo (single-repo graph) or empty
+// candidate RepoPrefix (synthetic / stdlib nodes) is treated as
+// same-repo — the per-repo Resolver only ever rejects a *provably*
+// cross-repo candidate. Genuine cross-repo resolution is left to
+// CrossRepoResolver, which alone carries the workspace-boundary and
+// import-reachability evidence needed to cross a repo line safely.
+//
+// Returns a fresh slice so the caller's input is never aliased.
+func filterSameRepo(callerRepo string, candidates []*graph.Node) []*graph.Node {
+	if callerRepo == "" {
+		return candidates
+	}
+	out := make([]*graph.Node, 0, len(candidates))
+	for _, c := range candidates {
+		if c.RepoPrefix == "" || c.RepoPrefix == callerRepo {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // callerRepoPrefix returns the RepoPrefix of the node that owns the edge's From field.

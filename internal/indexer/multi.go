@@ -199,6 +199,14 @@ func (mi *MultiIndexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cloneEdges),
 		)
 	}
+	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
+	// so the implements / extends edges they materialise across repo
+	// boundaries pick up their parallel cross_repo_* edges.
+	if crossRepoEdges := resolver.DetectCrossRepoEdges(mi.graph); crossRepoEdges > 0 {
+		mi.logger.Info("cross-repo edges emitted (global)",
+			zap.Int("edges", crossRepoEdges),
+		)
+	}
 }
 
 // cloneThreshold resolves the graph-wide Jaccard similarity cutoff for

@@ -313,7 +313,57 @@ const (
 	// of live code" — a near-duplicate of a live function that itself
 	// has zero callers.
 	EdgeSimilarTo EdgeKind = "similar_to"
+	// Cross-repo edge kinds. Materialised by the resolver's
+	// detectCrossRepoEdges pass: whenever a calls / implements / extends
+	// edge has a From node and a To node in two different repos, a
+	// parallel edge of the matching cross_repo_* kind is emitted
+	// alongside the base edge (the base edge keeps its kind and also
+	// gets Edge.CrossRepo set). The narrower kinds let
+	// `analyze kind=cross_repo` walk only the repo-boundary-crossing
+	// subset of the call / type-hierarchy graph without re-deriving the
+	// boundary test from node RepoPrefix on every edge. From/To/FilePath/
+	// Line/Origin/Confidence mirror the base edge; Origin is therefore
+	// inherited (lsp_resolved for an LSP-confirmed call, ast_resolved
+	// for a structural implements/extends, etc.). Idempotent —
+	// graph.AddEdge dedupes by edgeKey — and incremental-safe — EvictFile
+	// removes a node's edges in both directions, so a stale parallel
+	// edge cannot survive a reindex of either endpoint's file.
+	EdgeCrossRepoCalls      EdgeKind = "cross_repo_calls"
+	EdgeCrossRepoImplements EdgeKind = "cross_repo_implements"
+	EdgeCrossRepoExtends    EdgeKind = "cross_repo_extends"
 )
+
+// CrossRepoKindFor maps a base edge kind to its parallel cross-repo
+// variant. Only the call / type-hierarchy kinds named in M3 have a
+// variant; every other kind returns ok == false. The mapping is the
+// single source of truth for both the resolver's detectCrossRepoEdges
+// pass and `analyze kind=cross_repo`.
+func CrossRepoKindFor(base EdgeKind) (EdgeKind, bool) {
+	switch base {
+	case EdgeCalls:
+		return EdgeCrossRepoCalls, true
+	case EdgeImplements:
+		return EdgeCrossRepoImplements, true
+	case EdgeExtends:
+		return EdgeCrossRepoExtends, true
+	}
+	return "", false
+}
+
+// BaseKindForCrossRepo is the inverse of CrossRepoKindFor: it maps a
+// cross-repo edge kind back to the base relation it parallels. Returns
+// ok == false for any non-cross-repo kind.
+func BaseKindForCrossRepo(cr EdgeKind) (EdgeKind, bool) {
+	switch cr {
+	case EdgeCrossRepoCalls:
+		return EdgeCalls, true
+	case EdgeCrossRepoImplements:
+		return EdgeImplements, true
+	case EdgeCrossRepoExtends:
+		return EdgeExtends, true
+	}
+	return "", false
+}
 
 type Edge struct {
 	From     string   `json:"from"`
@@ -425,7 +475,13 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		// Infrastructure-graph edges. Each is materialised by an
 		// extractor (K8s/Kustomize/Dockerfile) that resolves the
 		// relationship structurally from the manifest text.
-		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv:
+		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv,
+		// Cross-repo type-hierarchy edges parallel the structural
+		// implements/extends edges, so they ride at the same tier.
+		// EdgeCrossRepoCalls is intentionally excluded — it parallels
+		// the resolution-derived `calls` edge and inherits that tier
+		// via the confidence fallback below.
+		EdgeCrossRepoImplements, EdgeCrossRepoExtends:
 		return OriginASTResolved
 	}
 	// Resolution-derived edges fall back to confidence score.
@@ -458,7 +514,11 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 		EdgeHandlesRoute, EdgeModelsTable, EdgeRendersChild,
 		EdgeValueFlow, EdgeArgOf, EdgeReturnsTo,
 		// Infrastructure-graph edges (K8s / Kustomize / Dockerfile).
-		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv:
+		EdgeConfigures, EdgeMounts, EdgeExposes, EdgeDependsOn, EdgeUsesEnv,
+		// Cross-repo type-hierarchy edges parallel structural
+		// implements/extends; EdgeCrossRepoCalls falls through to the
+		// confidence-score classifier like the base `calls` edge.
+		EdgeCrossRepoImplements, EdgeCrossRepoExtends:
 		return "EXTRACTED"
 	}
 	// Resolution-derived edges: classify by confidence score.

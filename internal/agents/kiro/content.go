@@ -90,6 +90,7 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 | Surveying K8s manifests in the repo   | ` + "`analyze`" + ` with ` + "`kind: \"k8s_resources\"`" + ` — KindResource fan-out (depends_on / configures / mounts / exposes / uses_env); ` + "`k8s_kind`" + ` / ` + "`namespace`" + ` / ` + "`name`" + ` filters |
 | Listing container images in use       | ` + "`analyze`" + ` with ` + "`kind: \"images\"`" + ` — KindImage with consumer count (Dockerfile FROM + K8s ` + "`container.image`" + `); ` + "`role`" + ` / ` + "`ref`" + ` / ` + "`tag`" + ` filters |
 | Mapping the Kustomize overlay tree    | ` + "`analyze`" + ` with ` + "`kind: \"kustomize\"`" + ` — KindKustomization with base / resource fan-out; ` + "`dir`" + ` filter |
+| Auditing what crosses repo boundaries | ` + "`analyze`" + ` with ` + "`kind: \"cross_repo\"`" + ` — calls / implements / extends edges crossing repo boundaries, grouped by source → target repo; ` + "`repo`" + ` / ` + "`base_kind`" + ` / ` + "`path_prefix`" + ` filters |
 | Checking if the index is stale        | ` + "`index_health`" + ` — health score, parse failures, stale files |
 | Wondering what changed this session   | ` + "`get_symbol_history`" + ` — modification counts, flags churning (3+ edits) |
 

@@ -41,17 +41,25 @@ func (h *Handler) CreateTuck() string { return "ok" }
 	return dir
 }
 
-// TestMultiRepo_ResolvesCallEdges guards against a regression where every
-// call edge in multi-repo mode stayed permanently unresolved. applyRepoPrefix
-// used to prefix the "unresolved::" sentinel (producing "web/unresolved::X")
-// which the resolver's HasPrefix check wouldn't recognize. Symptom was
-// universal: get_callers on any function in multi-repo mode returned empty.
-// Here: two Go files in two tracked repos, one calls the other. After index,
-// the call edge must resolve to the real target ID — not to an "unresolved::"
-// placeholder.
+// TestMultiRepo_ResolvesCallEdges guards two invariants of multi-repo
+// resolution:
+//
+//  1. Sentinel hygiene. applyRepoPrefix used to prefix the
+//     "unresolved::" sentinel (producing "web/unresolved::X") which the
+//     resolver's HasPrefix check wouldn't recognize — leaving every
+//     call edge permanently unresolved. No edge target may carry a
+//     prefixed sentinel.
+//  2. Repo-boundary discipline. repo B's Main() calls Greet() with NO
+//     import of repo A — two unrelated `package main` files in separate
+//     repos. That is not a real dependency (and not valid Go), so the
+//     resolver must NOT resolve the call across the repo boundary on a
+//     bare name match. It stays a clean "unresolved::Greet" sentinel.
+//     Resolving it would be the M3 cross-repo name-collision false
+//     positive. (Genuine cross-repo resolution — caller imports callee
+//     — is covered by the resolver package's own tests.)
 func TestMultiRepo_ResolvesCallEdges(t *testing.T) {
-	// repo A defines Greet(); repo B's Main() calls Greet — same package name
-	// so Go's same-package resolution still has work to do across repos.
+	// repo A defines Greet(); repo B's Main() calls a bare Greet() with
+	// no import linking the two repos.
 	repoA := filepath.Join(t.TempDir(), "lib-svc")
 	require.NoError(t, os.MkdirAll(repoA, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(repoA, "greet.go"),
@@ -99,19 +107,27 @@ func TestMultiRepo_ResolvesCallEdges(t *testing.T) {
 			"polluted the resolver sentinel:\n  %s",
 		strings.Join(leaked, "\n  "))
 
-	// Positive check: the cross-repo call edge lands on the right target.
+	// Repo-boundary check: Main()'s call to Greet() must NOT resolve to
+	// repo A's Greet — repo B never imports repo A, so a bare-name match
+	// across the repo line is the cross-repo false positive. The call
+	// edge must remain a clean "unresolved::Greet" sentinel.
 	main := "app-svc/main.go::Main"
-	greet := "lib-svc/greet.go::Greet"
-	found := false
+	crossRepoGreet := "lib-svc/greet.go::Greet"
+	var callEdge *graph.Edge
 	for _, e := range g.GetOutEdges(main) {
-		if e.Kind == graph.EdgeCalls && e.To == greet {
-			found = true
+		if e.Kind == graph.EdgeCalls {
+			callEdge = e
 			break
 		}
 	}
-	assert.True(t, found,
-		"expected resolved EdgeCalls %s → %s; out-edges from Main: %v",
-		main, greet, outEdgeSummaries(g, main))
+	if assert.NotNil(t, callEdge, "Main should have a call edge; out-edges: %v", outEdgeSummaries(g, main)) {
+		assert.NotEqual(t, crossRepoGreet, callEdge.To,
+			"call must not resolve across the repo boundary without an import")
+		assert.False(t, callEdge.CrossRepo,
+			"call edge must not be flagged cross-repo")
+		assert.Equal(t, "unresolved::Greet", callEdge.To,
+			"unimported cross-repo call stays a clean unresolved sentinel; got %q", callEdge.To)
+	}
 }
 
 func outEdgeSummaries(g *graph.Graph, id string) []string {

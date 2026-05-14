@@ -254,6 +254,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 | analyze kind=k8s_resources | KindResource fan-out (depends_on / configures / mounts / exposes / uses_env); ` + "`k8s_kind`" + ` / ` + "`namespace`" + ` / ` + "`name`" + ` filters |
 | analyze kind=images | Container images (Dockerfile FROM target or K8s ` + "`container.image`" + `) with consumer count; ` + "`role`" + ` (base/stage) / ` + "`ref`" + ` / ` + "`tag`" + ` filters |
 | analyze kind=kustomize | KindKustomization overlay tree with base / resource fan-out; ` + "`dir`" + ` filter |
+| analyze kind=cross_repo | Repo-boundary-crossing calls / implements / extends edges grouped by (source repo → target repo, relation); ` + "`repo`" + ` / ` + "`base_kind`" + ` / ` + "`path_prefix`" + ` filters |
 | index_health | Health score, parse failures, stale files, language coverage |
 | get_symbol_history | Symbols modified this session with counts; flags churning (3+ edits) |
 | gortex enrich blame\|coverage\|releases\|all (CLI) | Bulk-stamp the graph with the metadata that stale_*/coverage_*/ownership/releases analyzers need |
@@ -303,6 +304,7 @@ Quick reference for all Gortex MCP tools and the knowledge graph schema.
 - Dataflow (CPG-lite, ` + "`flow_between`" + ` / ` + "`taint_paths`" + `): value_flow (intra-procedural assignment / return / range), arg_of (caller arg → callee param), returns_to (callee → assignment LHS)
 - Metadata: annotated (decorators), emits (events), throws (errors), queries (SQL), reads_col / writes_col, toggles_flag, depends_on_module, matches (fixtures), generated_by, tests (test → tested symbol), covered_by, owns (CODEOWNERS), authored, licensed_as
 - Similarity: similar_to (function/method near-duplicate — MinHash + LSH clone detection, ` + "`find_clones`" + `)
+- Cross-repo: cross_repo_calls / cross_repo_implements / cross_repo_extends (parallel edges materialised when a calls/implements/extends edge crosses a repo boundary, ` + "`analyze kind=cross_repo`" + `)
 `
 
 const commandExplore = `# Exploring Codebases with Gortex

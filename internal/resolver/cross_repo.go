@@ -65,6 +65,16 @@ type CrossRepoResolver struct {
 	graph        *graph.Graph
 	dirIndex     map[string][]*graph.Node
 	lastDirIndex map[string][]*graph.Node
+	// reachableReposByFile maps a caller file's ID to the set of repo
+	// prefixes that file imports (derived from resolved EdgeImports
+	// edges). It is the import-reachability evidence gate: a name-only
+	// cross-repo function/method/type candidate is eligible only when
+	// the caller's file actually imports the candidate's repo. Without
+	// it, `FindNodesByName` spanning a multi-repo graph resolves short
+	// common names (`len`, `string`, `Language`, `set`) to whichever
+	// repo sorts first — the name-collision false positives M3's
+	// analyzer surfaced. Built once per Resolve* pass, torn down after.
+	reachableReposByFile map[string]map[string]struct{}
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
 	// the field of the same name on Resolver — see resolver.go for
@@ -161,6 +171,8 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
 	defer cr.clearDepModuleIndex()
+	cr.buildReachableReposIndex()
+	defer cr.clearReachableReposIndex()
 
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
@@ -171,6 +183,9 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 		}
 		cr.resolveEdge(e, stats)
 	}
+	// Materialise the cross_repo_* edge layer over the freshly lifted
+	// calls / implements / extends edges.
+	DetectCrossRepoEdges(cr.graph)
 	return stats
 }
 
@@ -184,6 +199,8 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 	defer cr.clearDirIndexes()
 	cr.buildDepModuleIndex()
 	defer cr.clearDepModuleIndex()
+	cr.buildReachableReposIndex()
+	defer cr.clearReachableReposIndex()
 
 	stats := &CrossRepoStats{ByRepo: make(map[string]int)}
 
@@ -197,6 +214,11 @@ func (cr *CrossRepoResolver) ResolveForRepo(repoPrefix string) *CrossRepoStats {
 			cr.resolveEdge(e, stats)
 		}
 	}
+	// Materialise the cross_repo_* edge layer. The pass is graph-wide
+	// (cheap relative to a resolve pass) so an edge into repoPrefix
+	// from another repo — lifted when that other repo was resolved —
+	// also picks up its parallel edge once repoPrefix's nodes exist.
+	DetectCrossRepoEdges(cr.graph)
 	return stats
 }
 
@@ -281,6 +303,79 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 	cr.lastDirIndex = nil
 }
 
+// buildReachableReposIndex walks every resolved EdgeImports edge and
+// records, per caller file, the set of repo prefixes that file imports.
+// This is the positive evidence the cross-repo name-only fallbacks
+// consult: a candidate in repo R is eligible for caller file F only
+// when F imports R. Per-repo resolution (resolver.go) runs first and
+// resolves imports — including cross-repo imports, with a precise
+// import-path match — so by the time this index is built the import
+// graph is settled enough to be trustworthy evidence.
+func (cr *CrossRepoResolver) buildReachableReposIndex() {
+	idx := make(map[string]map[string]struct{})
+	for _, e := range cr.graph.AllEdges() {
+		if e.Kind != graph.EdgeImports {
+			continue
+		}
+		// Only resolved imports carry evidence — an unresolved import
+		// target tells us nothing about which repo the caller reaches.
+		to := cr.graph.GetNode(e.To)
+		if to == nil || to.RepoPrefix == "" {
+			continue
+		}
+		set := idx[e.From]
+		if set == nil {
+			set = make(map[string]struct{})
+			idx[e.From] = set
+		}
+		set[to.RepoPrefix] = struct{}{}
+	}
+	cr.reachableReposByFile = idx
+}
+
+func (cr *CrossRepoResolver) clearReachableReposIndex() {
+	cr.reachableReposByFile = nil
+}
+
+// repoReachable reports whether the caller of edge e is allowed to
+// resolve to a candidate in targetRepo. Empty targetRepo (synthetic /
+// stdlib node) is never a repo boundary. A candidate in the caller's
+// own repo is always reachable. A candidate in a *different* repo is
+// reachable only when the caller's file has a resolved import edge into
+// that repo — the import-reachability evidence gate that stops
+// name-only matches from crossing a repo line on a coincidence.
+func (cr *CrossRepoResolver) repoReachable(e *graph.Edge, targetRepo string) bool {
+	if targetRepo == "" {
+		return true
+	}
+	if targetRepo == cr.callerRepoPrefix(e) {
+		return true
+	}
+	repos := cr.reachableReposByFile[cr.callerFileID(e)]
+	if repos == nil {
+		return false
+	}
+	_, ok := repos[targetRepo]
+	return ok
+}
+
+// callerFileID returns the graph ID of the file that owns the edge's
+// From symbol. File node IDs equal their path, and EdgeImports edges
+// are keyed From=fileID, so this is the lookup key for
+// reachableReposByFile. Falls back to the edge's own FilePath when the
+// From node can't be resolved.
+func (cr *CrossRepoResolver) callerFileID(e *graph.Edge) string {
+	if from := cr.graph.GetNode(e.From); from != nil {
+		if from.Kind == graph.KindFile {
+			return from.ID
+		}
+		if from.FilePath != "" {
+			return from.FilePath
+		}
+	}
+	return e.FilePath
+}
+
 func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats) {
 	oldTo := e.To
 	target := strings.TrimPrefix(e.To, unresolvedPrefix)
@@ -290,6 +385,15 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats) {
 		cr.resolveImport(e, strings.TrimPrefix(target, "import::"), stats)
 	case strings.HasPrefix(target, "*."):
 		cr.resolveMethodCall(e, strings.TrimPrefix(target, "*."), stats)
+	case e.Kind == graph.EdgeExtends || e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeComposes:
+		// Type-hierarchy edges never resolve to a function/method.
+		// CrossRepoResolver has no type-only resolution path, and a
+		// cross-repo supertype requires the child's file to import the
+		// parent's repo — which would have let per-repo resolution
+		// (or a precise import) land it already. Leave it unresolved
+		// rather than let resolveFunctionCall match a coincidental
+		// cross-repo function of the same name.
+		stats.Unresolved++
 	default:
 		cr.resolveFunctionCall(e, target, stats)
 	}
@@ -328,12 +432,19 @@ func (cr *CrossRepoResolver) resolveFunctionCall(e *graph.Edge, funcName string,
 		}
 	}
 
-	// 2. Cross-repo fallback: first function/method match honoring the
-	// workspace boundary. Same-workspace cross-repo is always
-	// eligible; cross-workspace requires a declared
-	// cross_workspace_deps entry covering the workspace pair.
+	// 2. Cross-repo fallback: first function/method match that clears
+	// BOTH evidence gates —
+	//   (a) import-reachability: the caller's file must actually import
+	//       the candidate's repo. Without this, a bare name like `len`
+	//       or `String` resolves to whichever repo sorts first.
+	//   (b) workspace boundary: same-workspace cross-repo is allowed;
+	//       cross-workspace requires a declared cross_workspace_deps
+	//       entry covering the workspace pair.
 	for _, c := range candidates {
 		if c.Kind != graph.KindFunction && c.Kind != graph.KindMethod {
+			continue
+		}
+		if !cr.repoReachable(e, c.RepoPrefix) {
 			continue
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
@@ -399,7 +510,12 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 			}
 			return
 		}
-		if crossRepo == nil {
+		// Cross-repo file candidate: require a precise import-path
+		// suffix match. lastDirIndex / the full-scan fallback key on the
+		// last path component only, so without this gate an import of
+		// `.../tree-sitter-c/bindings/go` resolves to whichever
+		// `*/bindings/go` directory sorts first.
+		if crossRepo == nil && dirMatchesImport(filepath.Dir(n.FilePath), importPath) {
 			crossRepo = n
 		}
 	}
@@ -491,9 +607,13 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 				return
 			}
 		}
-		// Cross-repo + exact type — bounded by workspace check.
+		// Cross-repo + exact type — bounded by the import-reachability
+		// and workspace evidence gates.
 		for _, c := range candidates {
 			if c.Kind != graph.KindMethod || nodeReceiverType(c) != receiverType {
+				continue
+			}
+			if !cr.repoReachable(e, c.RepoPrefix) {
 				continue
 			}
 			if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
@@ -521,6 +641,9 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 		if c.Kind != graph.KindMethod {
 			continue
 		}
+		if !cr.repoReachable(e, c.RepoPrefix) {
+			continue
+		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {
 			continue
 		}
@@ -540,6 +663,9 @@ func (cr *CrossRepoResolver) resolveMethodCall(e *graph.Edge, methodName string,
 	}
 	for _, c := range candidates {
 		if c.Kind != graph.KindFunction {
+			continue
+		}
+		if !cr.repoReachable(e, c.RepoPrefix) {
 			continue
 		}
 		if !cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(c), "") {

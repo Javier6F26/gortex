@@ -383,6 +383,14 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 			zap.Int("edges", cloneEdges),
 		)
 	}
+	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
+	// so cross-repo implements / extends edges pick up their parallel
+	// cross_repo_* edges. No-op on single-repo graphs (no RepoPrefix).
+	if crossRepoEdges := resolver.DetectCrossRepoEdges(idx.graph); crossRepoEdges > 0 {
+		idx.logger.Info("cross-repo edges emitted (global)",
+			zap.Int("edges", crossRepoEdges),
+		)
+	}
 }
 
 // cloneThreshold returns the configured Jaccard similarity cutoff for

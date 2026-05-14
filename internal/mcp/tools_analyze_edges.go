@@ -814,6 +814,157 @@ func (s *Server) handleAnalyzeErrorSurface(ctx context.Context, req mcp.CallTool
 }
 
 // ---------------------------------------------------------------------------
+// cross_repo — list repo-boundary-crossing call / type-hierarchy edges.
+// ---------------------------------------------------------------------------
+
+// handleAnalyzeCrossRepo walks the cross_repo_* edge layer (M3) and
+// groups edges by (source repo, target repo, base relation). Each row
+// is one directed dependency between two repos — "repo A's code calls
+// into repo B", "a type in repo A implements an interface in repo B" —
+// with a count and a capped sample of the underlying edges.
+//
+// The cross_repo_* edges are materialised by the resolver's
+// DetectCrossRepoEdges pass; this analyzer is a pure read over that
+// graph layer, so it stays correct under incremental reindex without
+// re-deriving the repo-boundary test here.
+//
+// Filters:
+//
+//   - path_prefix: scope to edges anchored in a directory subtree
+//     (matches the call/declaration site's file path).
+//   - repo: scope to dependencies that touch a repo on either side
+//     (source or target).
+//   - kind: scope to one base relation — "calls", "implements", or
+//     "extends".
+func (s *Server) handleAnalyzeCrossRepo(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	pathPrefix := strings.TrimSpace(stringArg(args, "path_prefix"))
+	repoFilter := strings.TrimSpace(stringArg(args, "repo"))
+	// The `kind` arg is consumed by the analyze dispatcher to route
+	// here; an optional base-relation filter rides on `base_kind`
+	// (one of calls / implements / extends).
+	kindFilter := strings.TrimSpace(stringArg(args, "base_kind"))
+
+	type crossRepoRow struct {
+		FromRepo string   `json:"from_repo"`
+		ToRepo   string   `json:"to_repo"`
+		Kind     string   `json:"kind"`
+		Count    int      `json:"count"`
+		Samples  []string `json:"samples,omitempty"`
+	}
+	byKey := map[string]*crossRepoRow{}
+
+	// repoOf prefers the live node's RepoPrefix and falls back to the
+	// edge Meta stamped at materialisation time — Meta is dropped by
+	// snapshot round-trips, so the node lookup is the durable path.
+	repoOf := func(id, metaKey string, e *graph.Edge) string {
+		if n := s.graph.GetNode(id); n != nil && n.RepoPrefix != "" {
+			return n.RepoPrefix
+		}
+		if e.Meta != nil {
+			if r, _ := e.Meta[metaKey].(string); r != "" {
+				return r
+			}
+		}
+		return ""
+	}
+
+	for _, e := range s.graph.AllEdges() {
+		base, ok := graph.BaseKindForCrossRepo(e.Kind)
+		if !ok {
+			continue
+		}
+		if pathPrefix != "" && !strings.HasPrefix(e.FilePath, pathPrefix) {
+			continue
+		}
+		if kindFilter != "" && string(base) != kindFilter {
+			continue
+		}
+		fromRepo := repoOf(e.From, "source_repo", e)
+		toRepo := repoOf(e.To, "target_repo", e)
+		if repoFilter != "" && fromRepo != repoFilter && toRepo != repoFilter {
+			continue
+		}
+		key := fromRepo + "\x00" + toRepo + "\x00" + string(base)
+		row, ok := byKey[key]
+		if !ok {
+			row = &crossRepoRow{FromRepo: fromRepo, ToRepo: toRepo, Kind: string(base)}
+			byKey[key] = row
+		}
+		row.Count++
+		// Cap the per-row sample list — a hot repo pair can have
+		// thousands of edges and the samples are only an orientation
+		// aid, not the payload.
+		if len(row.Samples) < 20 {
+			row.Samples = appendUnique(row.Samples, e.From+" -> "+e.To)
+		}
+	}
+
+	rows := make([]*crossRepoRow, 0, len(byKey))
+	for _, r := range byKey {
+		sort.Strings(r.Samples)
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Count != rows[j].Count {
+			return rows[i].Count > rows[j].Count
+		}
+		if rows[i].FromRepo != rows[j].FromRepo {
+			return rows[i].FromRepo < rows[j].FromRepo
+		}
+		if rows[i].ToRepo != rows[j].ToRepo {
+			return rows[i].ToRepo < rows[j].ToRepo
+		}
+		return rows[i].Kind < rows[j].Kind
+	})
+
+	limit := 200
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+	totalRows := len(rows)
+	rowsTruncated := false
+	if len(rows) > limit {
+		rows = rows[:limit]
+		rowsTruncated = true
+	}
+
+	if s.isGCX(ctx, req) {
+		items := make([]crossRepoItem, 0, len(rows))
+		for _, r := range rows {
+			items = append(items, crossRepoItem{
+				FromRepo: r.FromRepo,
+				ToRepo:   r.ToRepo,
+				Kind:     r.Kind,
+				Count:    r.Count,
+				Samples:  strings.Join(r.Samples, ","),
+			})
+		}
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("cross_repo", items))
+	}
+
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%-4d  %s -> %s  (%s)\n", r.Count, r.FromRepo, r.ToRepo, r.Kind)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no cross-repo edges\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	resp := map[string]any{
+		"dependencies": rows,
+		"total":        totalRows,
+		"truncated":    rowsTruncated,
+	}
+	if rowsTruncated {
+		resp["limit"] = limit
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
+}
+
+// ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
 
