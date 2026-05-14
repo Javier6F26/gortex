@@ -576,6 +576,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
+			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires the daemon to be built with -tags llama and a configured model; otherwise behaves as \"off\".")),
 		),
 		s.handleSearchSymbols,
 	)
@@ -825,7 +826,34 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	projectArg := req.GetString("project", "")
 	scopeWS, scopeProj := s.resolveQueryScope(ctx, workspaceArg, projectArg)
 	scope := query.QueryOptions{WorkspaceID: scopeWS, ProjectID: scopeProj}
-	nodes := s.engine.SearchSymbolsScoped(q, offset+limit+10, scope)
+
+	// LLM assist gate: decides whether the expansion + rerank passes
+	// run for this query. The service-enabled check is layered inside
+	// the helpers so a stub build is a clean bypass.
+	assist := parseAssistMode(req)
+	engage := shouldEngageAssist(assist, q) && s.llmService != nil && s.llmService.Enabled()
+
+	fetchLimit := offset + limit + 10
+	if engage {
+		// Slightly widen the BM25 over-fetch when we're going to
+		// rerank: more head candidates means a more useful reorder.
+		fetchLimit = offset + limit + rerankCap
+	}
+
+	var expandedTerms []string
+	if engage {
+		expandedTerms = expandSearchTerms(ctx, s, q)
+	}
+
+	var nodes []*graph.Node
+	var primaryCount int
+	if len(expandedTerms) > 0 {
+		nodes, primaryCount = fetchAndMergeBM25(s, q, expandedTerms, fetchLimit, scope)
+	} else {
+		nodes = s.engine.SearchSymbolsScoped(q, fetchLimit, scope)
+		primaryCount = len(nodes)
+	}
+	mergedCount := len(nodes) // pre-filter; comparable to primaryCount
 
 	// Apply repo/project/ref filter.
 	allowed, filterErr := s.resolveRepoFilter(ctx, req)
@@ -840,6 +868,24 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// preserved within the kept set.
 	if kindArg := strings.TrimSpace(req.GetString("kind", "")); kindArg != "" {
 		nodes = filterNodesByKind(nodes, kindArg)
+	}
+
+	// LLM rerank runs AFTER kind/repo filters so the model only sees
+	// the candidate pool the caller will actually receive, and BEFORE
+	// the combo/frecency boost so per-session signals can still
+	// override a stale rerank.
+	var verifyDbg verifyDebug
+	var verifyRan bool
+	if engage {
+		nodes = rerankWithLLM(ctx, s, q, nodes)
+		// `deep` mode adds a body-grounded verification pass that
+		// reads candidate code and HONESTLY drops the ones whose
+		// body isn't actually about the query. An empty kept set is
+		// preserved — it's the load-bearing "nothing genuinely matches"
+		// signal that distinguishes deep mode from plain rerank.
+		if assist == assistDeep {
+			nodes, verifyDbg, verifyRan = verifyWithLLM(ctx, s, q, nodes)
+		}
 	}
 
 	// Rerank: fold locality + combo + frecency signals over the backend's
@@ -901,6 +947,28 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	if nextCursor != "" {
 		resp["next_cursor"] = nextCursor
+	}
+	// When LLM assist engaged, expose a small debug surface so callers
+	// (and the agent itself) can see what the model contributed.
+	// Suppressed when engage was false to keep the common-path response
+	// shape unchanged.
+	if engage {
+		assistDebug := map[string]any{
+			"engaged":       true,
+			"primary_count": primaryCount, // BM25 hits on original query alone, pre-filter
+			"merged_count":  mergedCount,  // BM25 hits after merging expansion terms, pre-filter
+			"final_count":   total,        // post-filter, post-rerank — matches the top-level total
+		}
+		if len(expandedTerms) > 0 {
+			assistDebug["terms"] = expandedTerms
+		}
+		if verifyRan {
+			assistDebug["verify_considered"] = verifyDbg.Considered
+			assistDebug["verify_kept_ids"] = verifyDbg.Kept
+			assistDebug["verify_kept"] = len(verifyDbg.Kept)
+			assistDebug["verify_dropped"] = len(verifyDbg.Considered) - len(verifyDbg.Kept)
+		}
+		resp["assist"] = assistDebug
 	}
 	return s.respondJSONOrTOON(ctx, req, resp)
 }

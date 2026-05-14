@@ -39,5 +39,23 @@ func (s *Service) RunAgent(_ context.Context, _ llm.RunAgentOptions) (*llm.Agent
 	return nil, errServiceUnavailable
 }
 
+// ExpandQuery is a no-op in the stub; returns errServiceUnavailable.
+// Callers should check Enabled() first and skip the call entirely.
+func (s *Service) ExpandQuery(_ context.Context, _ string) (*llm.ExpandResult, error) {
+	return nil, errServiceUnavailable
+}
+
+// RerankSymbols is a no-op in the stub; returns errServiceUnavailable.
+// Callers should check Enabled() first and skip the call entirely.
+func (s *Service) RerankSymbols(_ context.Context, _ string, _ []llm.RerankCandidate) (*llm.RerankResult, error) {
+	return nil, errServiceUnavailable
+}
+
+// VerifyRelevance is a no-op in the stub; returns errServiceUnavailable.
+// Callers should check Enabled() first and skip the call entirely.
+func (s *Service) VerifyRelevance(_ context.Context, _ string, _ []llm.VerifyCandidate) (*llm.VerifyResult, error) {
+	return nil, errServiceUnavailable
+}
+
 // Close is a no-op in the stub.
 func (s *Service) Close() error { return nil }

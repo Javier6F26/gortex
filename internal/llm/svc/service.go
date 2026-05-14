@@ -32,6 +32,14 @@ import (
 //
 // Both go through the same model and the same inference mutex —
 // llama.cpp is single-stream on a given device.
+//
+// In addition to the full-size RunAgent / Generate contexts, Service
+// keeps a pre-warmed *assist context* — a smaller llama context used
+// for short single-shot grammar-constrained calls (ExpandQuery,
+// RerankSymbols). The assist context has its own mutex so a long
+// `ask` doesn't head-of-line block hot-path NL search calls; at the
+// llama.cpp level the two contexts share the model weights but each
+// holds its own KV cache.
 type Service struct {
 	cfg     llm.Config
 	backend llm.Backend
@@ -41,6 +49,14 @@ type Service struct {
 	loadErr  error
 
 	infer sync.Mutex
+
+	assistOnce  sync.Once
+	assistCtx   *llm.Context
+	assistErr   error
+	assistMu    sync.Mutex
+	expandCache *assistCache
+	rerankCache *assistCache
+	verifyCache *assistCache
 }
 
 // NewService is cheap — it just stores the config and backend. The
@@ -48,8 +64,11 @@ type Service struct {
 // Generate / RunAgent call, so daemon startup isn't slowed.
 func NewService(cfg llm.Config, backend llm.Backend) *Service {
 	return &Service{
-		cfg:     cfg.ApplyDefaults(),
-		backend: backend,
+		cfg:         cfg.ApplyDefaults(),
+		backend:     backend,
+		expandCache: newAssistCache(256),
+		rerankCache: newAssistCache(256),
+		verifyCache: newAssistCache(256),
 	}
 }
 
@@ -76,9 +95,19 @@ func (s *Service) ensureLoaded() error {
 	return s.loadErr
 }
 
-// Close releases the underlying model. Safe to call multiple times.
-// After Close, every operational method returns an error.
+// Close releases the underlying model and any assist context. Safe
+// to call multiple times. After Close, every operational method
+// returns an error.
 func (s *Service) Close() error {
+	// Order matters: drop the assist context first so its KV cache
+	// is freed before the model itself goes away.
+	s.assistMu.Lock()
+	if s.assistCtx != nil {
+		s.assistCtx.Close()
+		s.assistCtx = nil
+	}
+	s.assistMu.Unlock()
+
 	s.infer.Lock()
 	defer s.infer.Unlock()
 	if s.model != nil {

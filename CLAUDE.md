@@ -32,6 +32,19 @@ When the daemon is built with `-tags llama` and `llm.model` is set in `.gortex.y
 
 If `ask` isn't in `tools/list`, gortex was built without `-tags llama` or `llm.model` is unset. Fall through to direct tools.
 
+### Optional: LLM-assisted search ranking (`search_symbols` `assist:` arg)
+
+When the same `-tags llama` build + `llm.model` is in place, `search_symbols` accepts an `assist` argument that engages the local model in the search pipeline. The default `auto` is sub-100 ms on identifier lookups; the active modes add latency but materially improve precision on natural-language queries.
+
+| `assist` value | Behaviour | Cost |
+|----------------|-----------|------|
+| `auto` (default) | NL heuristic decides per-query. Identifier-shaped queries (`Server.handleAsk`, `parseToolCall`) skip the LLM. NL queries (≥3 tokens with a stop word, or ≥4 plain-word tokens) trigger query expansion + name+sig rerank. | None for identifier lookups; +200–500 ms for NL. |
+| `on` | Forces expansion + name+sig rerank regardless of shape. Use when you know the query is fuzzy. | +200–500 ms. |
+| `off` | Pure BM25 + combo/frecency. No LLM. | None. |
+| `deep` | `on` plus a body-grounded verification pass — reads each top candidate's body + callers and HONESTLY drops candidates whose code isn't about the query. May return zero results when nothing genuinely matches; that's the load-bearing honest-negative signal. | +1.5–4 s. Quality is **highly model-dependent**: Qwen2.5-Coder 3B is unreliable on disambiguation cases (e.g. "hash passwords" vs functions that hash other data); Qwen2.5-Coder 7B and above produce stable, useful results. Prefer 7B+ if you want to rely on `deep`. |
+
+The response gains an `assist` debug block when an active mode engaged: `terms` (expansion words), `primary_count` (raw BM25 hits on the original query), `merged_count` (after expansion union), `final_count` (after filter/rerank), plus `verify_kept_ids` / `verify_dropped` for `deep`.
+
 ### Navigation and Reading
 
 | Instead of...                         | You MUST use...                          |
