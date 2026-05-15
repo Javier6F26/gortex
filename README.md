@@ -162,7 +162,7 @@ Two-tier config hierarchy:
 - **Global config** (`~/.config/gortex/config.yaml`) — projects, repo lists, active project, reference tags
 - **Workspace config** (`.gortex.yaml` per repo) — guards, excludes, local overrides
 
-Excludes are layered — builtin → global → per-repo entry → workspace — with gitignore semantics. Use `!pattern` in a later layer to re-include something an earlier layer excluded.
+Excludes are layered — builtin → repo's own `.gitignore` → global → per-repo entry → workspace — with gitignore semantics. The repo's `.gitignore` is respected by default so you don't have to re-declare entries already curated for git; opt out per-workspace with `respect_gitignore: false` in `.gortex.yaml` (useful for repos that intentionally index otherwise-ignored generated code). Use `!pattern` in a later layer to re-include something an earlier layer excluded.
 
 ```yaml
 # ~/.config/gortex/config.yaml
