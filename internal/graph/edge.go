@@ -471,6 +471,29 @@ func MeetsMinTier(origin, minTier string) bool {
 	return OriginRank(origin) >= OriginRank(minTier)
 }
 
+// ResolvedBy maps an Origin tier to a coarse provenance label used by
+// agent retrieval UIs and competitor parity rows (cf. tokensave's
+// `edges.resolved_by` column). The mapping collapses the five Origin
+// tiers to three buckets:
+//
+//   - "lsp":       compiler-grade evidence (OriginLSPResolved / Dispatch)
+//   - "ast":       structurally-unambiguous AST extraction
+//   - "heuristic": name- or score-derived guess (ast_inferred / text_matched)
+//
+// Empty origin or unknown values return "heuristic" — a safe fallback
+// for back-compat with graphs produced before Origin was stamped.
+func ResolvedBy(origin string) string {
+	switch origin {
+	case OriginLSPResolved, OriginLSPDispatch:
+		return "lsp"
+	case OriginASTResolved:
+		return "ast"
+	case OriginASTInferred, OriginTextMatched:
+		return "heuristic"
+	}
+	return "heuristic"
+}
+
 // DefaultOriginFor derives an origin tier for edges that don't have Origin
 // set yet (edges from providers not updated to set Origin directly, or from
 // indexes produced before this field existed). Uses edge kind, confidence

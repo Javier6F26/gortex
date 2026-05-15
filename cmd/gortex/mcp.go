@@ -176,6 +176,14 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		idx.SetEmbedder(embedder)
 	}
 
+	// Locals carrying N5 hot-path wiring out of the optional
+	// semantic-enrichment block so the MultiIndexer below sees them
+	// whether or not the block ran.
+	var (
+		mcpResolverLSPRegistry *lsp.ResolverHelperRegistry
+		mcpResolverLSPRouter   *lsp.Router
+	)
+
 	// Set up semantic enrichment.
 	if !mcpNoSemantic && (mcpSemantic || cfg.Semantic.Enabled) {
 		semCfg := cfg.Semantic
@@ -256,6 +264,39 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		}
 
 		idx.SetSemanticManager(semMgr)
+
+		// Resolve-time LSP hot path (N5). Mirrors the daemon wiring
+		// so `gortex mcp` users get the same precision boost on
+		// TS/JS/JSX/TSX edges as daemon-tracked clients.
+		if !isFalsyEnv("GORTEX_LSP_RESOLVER") {
+			mcpResolverLSPRegistry = lsp.NewResolverHelperRegistry()
+			mcpResolverLSPRouter = lspRouter
+			idx.SetResolverLSPHelper(mcpResolverLSPRegistry)
+
+			// Single-repo standalone mode (no MultiIndexer) — register
+			// a "" prefix helper anchored at the workspace the user
+			// pointed `gortex mcp` at. Multi-repo mode (mi != nil)
+			// registers per-repo helpers via the OnRepoTracked hook
+			// further below.
+			if abs, err := filepath.Abs(lspWorkspace); err == nil && lspWorkspace != "" {
+				tsSpec := lsp.SpecByName("typescript-language-server")
+				if tsSpec != nil && lspRouter.Available(tsSpec) {
+					routerRef := lspRouter
+					absRootCapture := abs
+					helper := lsp.NewLazyResolverHelper(
+						func() (*lsp.Provider, error) {
+							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+						},
+						absRootCapture,
+						tsSpec.Extensions,
+						0,
+						logger,
+					)
+					mcpResolverLSPRegistry.Register("", helper)
+				}
+			}
+		}
+
 		fmt.Fprintf(os.Stderr, "[gortex] semantic enrichment enabled (mode: %s)\n", mcpSemanticMode)
 	}
 
@@ -296,6 +337,30 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+		}
+		if mcpResolverLSPRegistry != nil {
+			mi.SetResolverLSPHelper(mcpResolverLSPRegistry)
+			if mcpResolverLSPRouter != nil {
+				routerRef := mcpResolverLSPRouter
+				registryRef := mcpResolverLSPRegistry
+				mi.SetOnRepoTracked(func(prefix, absPath string) {
+					tsSpec := lsp.SpecByName("typescript-language-server")
+					if tsSpec == nil || !routerRef.Available(tsSpec) {
+						return
+					}
+					absRootCapture := absPath
+					helper := lsp.NewLazyResolverHelper(
+						func() (*lsp.Provider, error) {
+							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+						},
+						absRootCapture,
+						tsSpec.Extensions,
+						0,
+						logger,
+					)
+					registryRef.Register(prefix, helper)
+				})
+			}
 		}
 	}
 

@@ -75,6 +75,28 @@ type Resolver struct {
 	// edge mutations (resolveImport writes e.To while another
 	// goroutine iterates via graph.AllEdges()).
 	mu *sync.Mutex
+
+	// lspHelper, when non-nil, is consulted before falling back to
+	// AST heuristics for cross-file dispatch in languages whose
+	// helper-reported extensions match (today: TS/JS/JSX/TSX via
+	// tsserver). See lsp_helper.go for the contract. Set via
+	// SetLSPHelper before ResolveAll runs.
+	lspHelper LSPHelper
+
+	// lspIndex caches a (filePath, oneBasedLine) → *graph.Node
+	// lookup table populated lazily on first LSP hit per pass so
+	// matchNodeByLocation runs in O(1) instead of scanning every
+	// node in the file. Cleared between passes.
+	lspIndex   map[lspLocKey]*graph.Node
+	lspIndexMu sync.RWMutex
+}
+
+// lspLocKey identifies a node by (filePath, 1-based line) and is the
+// key for lspIndex. Tsserver's textDocument/definition reports the
+// declaration's start position, which graph.Node.StartLine matches.
+type lspLocKey struct {
+	filePath string
+	line     int
 }
 
 // depModuleEntry pairs a Go module path (parsed from a dep:: contract
@@ -121,6 +143,7 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	defer r.clearProvidesForIndex()
 	r.buildReachabilityIndex()
 	defer r.clearReachabilityIndex()
+	defer r.clearLSPIndex()
 
 	edges := r.graph.AllEdges()
 	// Pre-filter to the unresolved subset so workers don't burn time
@@ -323,6 +346,7 @@ func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 	defer r.clearProvidesForIndex()
 	r.buildReachabilityIndex()
 	defer r.clearReachabilityIndex()
+	defer r.clearLSPIndex()
 
 	stats := &ResolveStats{}
 
@@ -393,6 +417,17 @@ func cloneEdgeForResolve(e *graph.Edge) *graph.Edge {
 func (r *Resolver) resolveEdge(e *graph.Edge, stats *ResolveStats) (oldTo string, changed bool) {
 	oldTo = e.To
 	target := strings.TrimPrefix(e.To, unresolvedPrefix)
+
+	// Resolve-time LSP hot-path. Consulted for TS/JS/JSX/TSX files
+	// (and any other languages a future helper claims via
+	// SupportsPath). When the LSP wins, the edge is stamped with
+	// OriginLSPResolved and resolved_by=lsp; the heuristic path is
+	// skipped. When it loses (no helper, no answer, no match), we
+	// fall through to the existing heuristic cascade unchanged so
+	// the edge still gets the best best-effort target.
+	if r.tryResolveViaLSP(e, target, stats) {
+		return oldTo, e.To != oldTo
+	}
 
 	switch {
 	case strings.HasPrefix(target, "grpc::"):

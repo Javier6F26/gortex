@@ -872,6 +872,84 @@ func (p *Provider) findReferences(repoRoot, relPath string, line, col int) ([]Lo
 	return locations, nil
 }
 
+// FindDefinition queries textDocument/definition with a per-call
+// timeout so a stalled LSP can't block the resolve-time hot path.
+// Returns the locations reported by the server (typically one) or
+// an error / empty slice on timeout, no-result, or transport failure.
+//
+// repoRoot is the absolute workspace root; relPath is repo-relative.
+// (line, col) are 0-based, matching LSP convention.
+func (p *Provider) FindDefinition(repoRoot, relPath string, line, col int, timeout time.Duration) ([]Location, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("LSP client not initialised")
+	}
+	absPath := filepath.Join(repoRoot, relPath)
+	params := TextDocumentPositionParams{
+		TextDocument: TextDocumentIdentifier{URI: pathToURI(absPath)},
+		Position:     Position{Line: line, Character: col},
+	}
+
+	type result struct {
+		locations []Location
+		err       error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		// Tsserver replies with either a single Location, an array of
+		// Location, or null. The unified handling: try array first
+		// (most common), fall back to single Location on unmarshal
+		// error.
+		var raw json.RawMessage
+		if err := p.client.Call("textDocument/definition", params, &raw); err != nil {
+			ch <- result{nil, err}
+			return
+		}
+		if len(raw) == 0 || string(raw) == "null" {
+			ch <- result{nil, nil}
+			return
+		}
+		var locs []Location
+		if err := json.Unmarshal(raw, &locs); err == nil {
+			ch <- result{locs, nil}
+			return
+		}
+		var single Location
+		if err := json.Unmarshal(raw, &single); err == nil {
+			ch <- result{[]Location{single}, nil}
+			return
+		}
+		ch <- result{nil, fmt.Errorf("unexpected definition response shape")}
+	}()
+
+	if timeout <= 0 {
+		r := <-ch
+		return r.locations, r.err
+	}
+	select {
+	case r := <-ch:
+		return r.locations, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("textDocument/definition: timeout after %s", timeout)
+	}
+}
+
+// IdentifierColumn is the exported form of the package-internal
+// identifierColumn helper. Resolve-time callers (the resolver's LSP
+// hot path) need the 0-based column for a given identifier on a
+// given 1-based line to satisfy LSP servers that require the cursor
+// to sit on the identifier.
+func IdentifierColumn(src []byte, oneBasedLine int, name string) int {
+	return identifierColumn(src, oneBasedLine, name)
+}
+
+// Source returns the cached source for relPath under repoRoot, or
+// nil when the document has not been opened. Exported so the
+// resolve-time helper can compute identifier columns without
+// re-reading the file from disk.
+func (p *Provider) Source(repoRoot, relPath string) []byte {
+	return p.getSource(repoRoot, relPath)
+}
+
 // enrichCallHierarchy walks every function/method node in p.languages
 // and uses callHierarchy/{prepare, outgoingCalls} to either promote a
 // matching ast_inferred / text_matched EdgeCalls to lsp_resolved, or

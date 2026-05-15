@@ -62,6 +62,23 @@ type MultiIndexer struct {
 	// serially after the loop. Independent of deferGlobalPasses — that
 	// flag covers a separate (cheaper) set of O(global) walks.
 	deferResolve bool
+
+	// resolverLSPHelper is the resolve-time LSP helper propagated
+	// onto every per-repo Indexer and onto the global post-pass
+	// resolver in RunDeferredPassesAll. nil means no LSP hot-path
+	// (heuristic-only resolution, the pre-N5 behaviour). The
+	// daemon installs the helper via SetResolverLSPHelper after
+	// constructing the LSP router; a multi-repo composite helper
+	// dispatches per-file by repo prefix.
+	resolverLSPHelper resolver.LSPHelper
+
+	// onRepoTracked, when non-nil, is invoked after a fresh
+	// TrackRepoCtx call has resolved the repo's prefix and
+	// absolute path but before indexing starts. The daemon uses
+	// this hook to register a per-repo resolver-time LSP helper
+	// against the LSPHelper registry so dynamically-tracked repos
+	// participate in the N5 hot path without daemon restart.
+	onRepoTracked func(prefix, absPath string)
 }
 
 // SetEmbedder installs the embedding provider every per-repo indexer
@@ -87,7 +104,39 @@ func (mi *MultiIndexer) newPerRepoIndexer(cfg config.IndexConfig) *Indexer {
 	}
 	idx.SetDeferGlobalPasses(mi.deferGlobalPasses)
 	idx.SetDeferResolve(mi.deferResolve)
+	if mi.resolverLSPHelper != nil {
+		idx.SetResolverLSPHelper(mi.resolverLSPHelper)
+	}
 	return idx
+}
+
+// SetResolverLSPHelper installs the resolve-time LSP helper used by
+// every per-repo Indexer this MultiIndexer constructs from now on,
+// and by the global post-pass resolver in RunDeferredPassesAll. Pass
+// nil to detach. Safe to call zero or one times; subsequent calls
+// silently replace and propagate to every existing per-repo indexer.
+func (mi *MultiIndexer) SetResolverLSPHelper(h resolver.LSPHelper) {
+	mi.mu.Lock()
+	mi.resolverLSPHelper = h
+	live := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		live = append(live, idx)
+	}
+	mi.mu.Unlock()
+	for _, idx := range live {
+		idx.SetResolverLSPHelper(h)
+	}
+}
+
+// SetOnRepoTracked installs a callback fired once per TrackRepoCtx
+// after the repo's prefix + absolute path have been resolved but
+// before indexing starts. The daemon registers per-repo resolver-
+// time LSP helpers from this hook so runtime-added repos
+// participate in the N5 hot path. Pass nil to detach.
+func (mi *MultiIndexer) SetOnRepoTracked(fn func(prefix, absPath string)) {
+	mi.mu.Lock()
+	mi.onRepoTracked = fn
+	mi.mu.Unlock()
 }
 
 // BeginBatch enables deferred-global-passes mode for every per-repo
@@ -149,7 +198,16 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 		idx.SetSkipResolveInDeferred(false)
 	}
 	if mi.graph != nil {
-		resolver.New(mi.graph).ResolveAll()
+		master := resolver.New(mi.graph)
+		// Mirror the resolve-time LSP helper onto the master pass
+		// too — RunDeferredPassesAll is where placeholder edges
+		// added by deferred per-repo passes get resolved in batch,
+		// and TS/JS-family edges should pick up LSP-precision
+		// answers here just like the per-repo passes do.
+		if mi.resolverLSPHelper != nil {
+			master.SetLSPHelper(mi.resolverLSPHelper)
+		}
+		master.ResolveAll()
 	}
 }
 
@@ -619,7 +677,12 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 		mi.mu.RUnlock()
 		return nil, nil // already tracked
 	}
+	hook := mi.onRepoTracked
 	mi.mu.RUnlock()
+
+	if hook != nil {
+		hook(prefix, absPath)
+	}
 
 	// Determine if we need to prefix. We must consider both repos already
 	// indexed in mi.repos AND the total repos configured — at daemon warmup

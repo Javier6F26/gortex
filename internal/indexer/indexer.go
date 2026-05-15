@@ -107,6 +107,12 @@ type Indexer struct {
 	// semanticMgr is the optional semantic enrichment manager.
 	semanticMgr *semantic.Manager
 
+	// resolverLSPHelper, when non-nil, is the resolve-time LSP
+	// helper installed on idx.resolver. Held here so MultiIndexer
+	// can mirror it onto the global post-pass resolver in
+	// RunDeferredPassesAll. See SetResolverLSPHelper.
+	resolverLSPHelper resolver.LSPHelper
+
 	// Mtime tracking and parse error retention for index health diagnostics.
 	parseErrors   []IndexError
 	fileMtimes    map[string]int64
@@ -540,6 +546,27 @@ func (idx *Indexer) SetSemanticManager(m *semantic.Manager) { idx.semanticMgr = 
 
 // SemanticManager returns the semantic enrichment manager.
 func (idx *Indexer) SemanticManager() *semantic.Manager { return idx.semanticMgr }
+
+// SetResolverLSPHelper installs a resolve-time LSP helper on the
+// underlying Resolver. The helper is consulted from inside
+// resolveEdge for languages whose extensions the helper claims
+// (TS/JS/JSX/TSX today via tsserver); see internal/resolver/
+// lsp_helper.go for the contract.
+//
+// Pass nil to detach. Must be called before ResolveAll / ResolveFile;
+// the resolver caches no LSP state across passes, so mid-pass swaps
+// are racy and not supported.
+func (idx *Indexer) SetResolverLSPHelper(h resolver.LSPHelper) {
+	if idx.resolver != nil {
+		idx.resolver.SetLSPHelper(h)
+	}
+	idx.resolverLSPHelper = h
+}
+
+// ResolverLSPHelper returns the currently installed resolver-time LSP
+// helper, or nil. Exported so MultiIndexer can mirror the helper onto
+// the global post-pass resolver in RunDeferredPassesAll.
+func (idx *Indexer) ResolverLSPHelper() resolver.LSPHelper { return idx.resolverLSPHelper }
 
 // ExportVectorIndex returns the serialized vector index bytes, dims, and count.
 // Returns nil, 0, 0 if no vector index is active.

@@ -177,6 +177,12 @@ func runServer(_ *cobra.Command, _ []string) error {
 		idx.SetEmbedder(embedder)
 	}
 
+	// N5 hot-path locals — see daemon_state.go / mcp.go for context.
+	var (
+		serverResolverLSPRegistry *lsp.ResolverHelperRegistry
+		serverResolverLSPRouter   *lsp.Router
+	)
+
 	// Set up semantic enrichment.
 	if !serverNoSemantic && (serverSemantic || cfg.Semantic.Enabled) {
 		semCfg := cfg.Semantic
@@ -270,6 +276,32 @@ func runServer(_ *cobra.Command, _ []string) error {
 		}
 
 		idx.SetSemanticManager(semMgr)
+
+		// Resolve-time LSP hot path (N5). Same wiring as daemon/mcp.
+		if !isFalsyEnv("GORTEX_LSP_RESOLVER") {
+			serverResolverLSPRegistry = lsp.NewResolverHelperRegistry()
+			serverResolverLSPRouter = lspRouter
+			idx.SetResolverLSPHelper(serverResolverLSPRegistry)
+
+			if abs, err := filepath.Abs(lspWorkspace); err == nil && lspWorkspace != "" {
+				tsSpec := lsp.SpecByName("typescript-language-server")
+				if tsSpec != nil && lspRouter.Available(tsSpec) {
+					routerRef := lspRouter
+					absRootCapture := abs
+					helper := lsp.NewLazyResolverHelper(
+						func() (*lsp.Provider, error) {
+							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+						},
+						absRootCapture,
+						tsSpec.Extensions,
+						0,
+						logger,
+					)
+					serverResolverLSPRegistry.Register("", helper)
+				}
+			}
+		}
+
 		fmt.Fprintf(os.Stderr, "[gortex] server: semantic enrichment enabled (mode: %s, lsp_auto_registered: %v)\n", serverSemanticMode, autoRegistered)
 	}
 
@@ -305,6 +337,30 @@ func runServer(_ *cobra.Command, _ []string) error {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+		}
+		if serverResolverLSPRegistry != nil {
+			mi.SetResolverLSPHelper(serverResolverLSPRegistry)
+			if serverResolverLSPRouter != nil {
+				routerRef := serverResolverLSPRouter
+				registryRef := serverResolverLSPRegistry
+				mi.SetOnRepoTracked(func(prefix, absPath string) {
+					tsSpec := lsp.SpecByName("typescript-language-server")
+					if tsSpec == nil || !routerRef.Available(tsSpec) {
+						return
+					}
+					absRootCapture := absPath
+					helper := lsp.NewLazyResolverHelper(
+						func() (*lsp.Provider, error) {
+							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+						},
+						absRootCapture,
+						tsSpec.Extensions,
+						0,
+						logger,
+					)
+					registryRef.Register(prefix, helper)
+				})
+			}
 		}
 	}
 

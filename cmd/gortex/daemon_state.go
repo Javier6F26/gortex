@@ -57,6 +57,19 @@ type daemonState struct {
 	// have been re-indexed) and handed to realController via
 	// AttachWatcher — it isn't held on daemonState because no caller
 	// reads it from here.
+
+	// resolverLSPRegistry composes per-repo ResolverHelpers consulted
+	// by the cross-file resolver's hot path (N5). Populated as repos
+	// are tracked so each tsserver instance is scoped to its owning
+	// workspace. nil when the resolve-time LSP path is disabled
+	// (GORTEX_LSP_RESOLVER=0) or when semantic enrichment is off.
+	resolverLSPRegistry *lsp.ResolverHelperRegistry
+
+	// lspRouter is the daemon-shared LSP server pool. Held here so
+	// the warmup loop can register per-repo helpers via
+	// ResolverHelperRegistry without re-deriving the router from the
+	// semantic manager.
+	lspRouter *lsp.Router
 }
 
 // buildDaemonState constructs the full object graph the daemon needs:
@@ -74,6 +87,19 @@ func isTruthyEnv(name string) bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	switch v {
 	case "1", "true", "yes", "on", "y":
+		return true
+	default:
+		return false
+	}
+}
+
+// isFalsyEnv returns true when the env var is explicitly set to one
+// of the "no" spellings: "0", "false", "no", "off", "n". An unset or
+// empty env returns false (default-on semantics for opt-out flags).
+func isFalsyEnv(name string) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
+	switch v {
+	case "0", "false", "no", "off", "n":
 		return true
 	default:
 		return false
@@ -148,6 +174,14 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
+	// Locals carrying N5 hot-path wiring out of the optional
+	// semantic-enrichment block so the daemonState constructor
+	// below sees them whether or not the block ran.
+	var (
+		resolverLSPRegistry *lsp.ResolverHelperRegistry
+		lspRouterOut        *lsp.Router
+	)
+
 	// Semantic enrichment (opt-in via .gortex.yaml `semantic.enabled:
 	// true`). Mirrors the wiring in `gortex mcp` / `gortex server`: a
 	// daemon-managed LSP router owns subprocess lifecycle, SCIP and
@@ -217,6 +251,25 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		}
 
 		idx.SetSemanticManager(semMgr)
+
+		// Resolve-time LSP hot path (N5). The resolver consults this
+		// registry for TS/JS/JSX/TSX edges before falling back to AST
+		// heuristics. The registry holds per-repo ResolverHelpers
+		// (built lazily from the same router that backs the enricher
+		// path), so the daemon honours the same disable knobs and
+		// PATH-availability semantics as the enricher. Disabled when
+		// GORTEX_LSP_RESOLVER=0/false/no (env-var quick kill) or when
+		// every TS-family spec is explicitly opted out via
+		// GORTEX_LSP_DISABLE.
+		if !isFalsyEnv("GORTEX_LSP_RESOLVER") {
+			resolverLSPRegistry = lsp.NewResolverHelperRegistry()
+			lspRouterOut = lspRouter
+			idx.SetResolverLSPHelper(resolverLSPRegistry)
+			logger.Info("daemon: resolve-time LSP hot path enabled")
+		} else {
+			logger.Info("daemon: resolve-time LSP hot path disabled (GORTEX_LSP_RESOLVER=0)")
+		}
+
 		logger.Info("daemon: semantic enrichment enabled",
 			zap.Int("providers", len(semCfg.Providers)),
 			zap.Strings("lsp_auto_registered", autoRegistered))
@@ -268,6 +321,41 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		// daemon-tracked repos end up with text-only search.
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
+		}
+		// Propagate the resolve-time LSP helper so every per-repo
+		// Indexer constructed by the MultiIndexer's warmup /
+		// TrackRepoCtx / ReconcileRepoCtx paths participates in the
+		// N5 hot path (and so the global post-pass resolver in
+		// RunDeferredPassesAll picks up LSP precision too).
+		if resolverLSPRegistry != nil {
+			mi.SetResolverLSPHelper(resolverLSPRegistry)
+
+			// Install a per-track hook so runtime-tracked repos
+			// (via the track_repository MCP tool) also register
+			// a per-repo helper without requiring a daemon
+			// restart. The hook is a no-op when no tsserver is
+			// on PATH.
+			if lspRouterOut != nil {
+				routerRef := lspRouterOut
+				registryRef := resolverLSPRegistry
+				mi.SetOnRepoTracked(func(prefix, absPath string) {
+					tsSpec := lsp.SpecByName("typescript-language-server")
+					if tsSpec == nil || !routerRef.Available(tsSpec) {
+						return
+					}
+					absRootCapture := absPath
+					helper := lsp.NewLazyResolverHelper(
+						func() (*lsp.Provider, error) {
+							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+						},
+						absRootCapture,
+						tsSpec.Extensions,
+						0,
+						logger,
+					)
+					registryRef.Register(prefix, helper)
+				})
+			}
 		}
 	}
 
@@ -332,13 +420,15 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	// for the few seconds warmup takes.
 
 	return &daemonState{
-		graph:             g,
-		indexer:           idx,
-		multiIndexer:      mi,
-		configManager:     cm,
-		mcpServer:         srv,
-		snapshotRepos:     loadResult.Repos,
-		snapshotContracts: loadResult.Contracts,
+		graph:               g,
+		indexer:             idx,
+		multiIndexer:        mi,
+		configManager:       cm,
+		mcpServer:           srv,
+		snapshotRepos:       loadResult.Repos,
+		snapshotContracts:   loadResult.Contracts,
+		resolverLSPRegistry: resolverLSPRegistry,
+		lspRouter:           lspRouterOut,
 	}, nil
 }
 
@@ -366,6 +456,36 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	state.multiIndexer.BeginParallelBatch()
 
 	repos := state.configManager.Global().Repos
+
+	// Register a per-repo resolver-time LSP helper for every
+	// tracked repo BEFORE the parallel warmup loop fires. The
+	// helpers are lazy: tsserver isn't spawned until the resolver
+	// asks for a TS/JS edge resolution, so there's no startup cost
+	// for repos with no TS code.
+	if state.resolverLSPRegistry != nil && state.lspRouter != nil {
+		tsSpec := lsp.SpecByName("typescript-language-server")
+		if tsSpec != nil && state.lspRouter.Available(tsSpec) {
+			for _, entry := range repos {
+				absRoot, err := filepath.Abs(entry.Path)
+				if err != nil {
+					continue
+				}
+				prefix := strings.TrimPrefix(config.ResolvePrefix(entry), "/")
+				routerRef := state.lspRouter
+				absRootCapture := absRoot
+				helper := lsp.NewLazyResolverHelper(
+					func() (*lsp.Provider, error) {
+						return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
+					},
+					absRootCapture,
+					tsSpec.Extensions,
+					0,
+					logger,
+				)
+				state.resolverLSPRegistry.Register(prefix, helper)
+			}
+		}
+	}
 	// Bounded worker pool — disk I/O dominates parsing for most repos,
 	// but a few CPU-heavy ones overlap with disk waits on others. NumCPU
 	// gives good throughput on local SSDs without thrashing slow
