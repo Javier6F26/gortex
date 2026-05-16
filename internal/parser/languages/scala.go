@@ -40,31 +40,32 @@ func (e *ScalaExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 
 	// Walk the AST manually to extract all constructs.
-	e.extractAll(root, src, filePath, fileNode, result, seen)
+	e.extractAll(root, src, filePath, fileNode, result, seen, annotationSeen)
 
 	return result, nil
 }
 
 func (e *ScalaExtractor) extractAll(
 	root *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	walkNodes(root, func(node *sitter.Node) {
 		switch node.Type() {
 		case "trait_definition":
-			e.extractTrait(node, src, filePath, fileNode, result, seen)
+			e.extractTrait(node, src, filePath, fileNode, result, seen, annotationSeen)
 		case "class_definition":
-			e.extractClass(node, src, filePath, fileNode, result, seen)
+			e.extractClass(node, src, filePath, fileNode, result, seen, annotationSeen)
 		case "object_definition":
-			e.extractObject(node, src, filePath, fileNode, result, seen)
+			e.extractObject(node, src, filePath, fileNode, result, seen, annotationSeen)
 		case "import_declaration":
 			e.extractImport(node, src, filePath, fileNode, result)
 		case "function_definition", "function_declaration":
 			// Only extract top-level functions (direct children of compilation_unit).
 			if node.Parent() != nil && node.Parent().Type() == "compilation_unit" {
-				e.extractTopLevelFunction(node, src, filePath, fileNode, result, seen)
+				e.extractTopLevelFunction(node, src, filePath, fileNode, result, seen, annotationSeen)
 			}
 		case "call_expression":
 			e.extractCall(node, src, filePath, result)
@@ -75,7 +76,7 @@ func (e *ScalaExtractor) extractAll(
 // extractTrait extracts a trait as KindInterface with Meta["methods"].
 func (e *ScalaExtractor) extractTrait(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	name := scalaFindChildIdentifier(node, src)
 	if name == "" {
@@ -123,6 +124,7 @@ func (e *ScalaExtractor) extractTrait(
 								From: mID, To: id, Kind: graph.EdgeMemberOf,
 								FilePath: filePath, Line: mStartLine,
 							})
+							emitScalaAnnotationEdges(member, mID, filePath, src, result, annotationSeen)
 						}
 					}
 				}
@@ -143,12 +145,13 @@ func (e *ScalaExtractor) extractTrait(
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: startLine,
 	})
+	emitScalaAnnotationEdges(node, id, filePath, src, result, annotationSeen)
 }
 
 // extractClass extracts a class (including case class) as KindType.
 func (e *ScalaExtractor) extractClass(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	name := scalaFindChildIdentifier(node, src)
 	if name == "" {
@@ -172,15 +175,16 @@ func (e *ScalaExtractor) extractClass(
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: startLine,
 	})
+	emitScalaAnnotationEdges(node, id, filePath, src, result, annotationSeen)
 
 	// Extract methods inside the class template_body.
-	e.extractMembersFromBody(node, src, filePath, fileNode, id, name, result, seen)
+	e.extractMembersFromBody(node, src, filePath, fileNode, id, name, result, seen, annotationSeen)
 }
 
 // extractObject extracts an object as KindType.
 func (e *ScalaExtractor) extractObject(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	name := scalaFindChildIdentifier(node, src)
 	if name == "" {
@@ -204,9 +208,10 @@ func (e *ScalaExtractor) extractObject(
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: startLine,
 	})
+	emitScalaAnnotationEdges(node, id, filePath, src, result, annotationSeen)
 
 	// Extract methods inside the object template_body.
-	e.extractMembersFromBody(node, src, filePath, fileNode, id, name, result, seen)
+	e.extractMembersFromBody(node, src, filePath, fileNode, id, name, result, seen, annotationSeen)
 }
 
 // extractMembersFromBody extracts function_definition/function_declaration nodes
@@ -214,7 +219,7 @@ func (e *ScalaExtractor) extractObject(
 func (e *ScalaExtractor) extractMembersFromBody(
 	parent *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
 	ownerID, ownerName string,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	for i := 0; i < int(parent.ChildCount()); i++ {
 		child := parent.Child(i)
@@ -255,6 +260,7 @@ func (e *ScalaExtractor) extractMembersFromBody(
 				From: mID, To: ownerID, Kind: graph.EdgeMemberOf,
 				FilePath: filePath, Line: mStartLine,
 			})
+			emitScalaAnnotationEdges(member, mID, filePath, src, result, annotationSeen)
 		}
 	}
 }
@@ -285,7 +291,7 @@ func (e *ScalaExtractor) extractImport(
 // extractTopLevelFunction extracts a function defined at the top level (not in a class/object/trait).
 func (e *ScalaExtractor) extractTopLevelFunction(
 	node *sitter.Node, src []byte, filePath string, fileNode *graph.Node,
-	result *parser.ExtractionResult, seen map[string]bool,
+	result *parser.ExtractionResult, seen, annotationSeen map[string]bool,
 ) {
 	name := scalaFindChildIdentifier(node, src)
 	if name == "" {
@@ -314,6 +320,7 @@ func (e *ScalaExtractor) extractTopLevelFunction(
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: startLine,
 	})
+	emitScalaAnnotationEdges(node, id, filePath, src, result, annotationSeen)
 }
 
 // extractCall extracts a call_expression.

@@ -207,7 +207,7 @@ func TestNormalizeHookMode(t *testing.T) {
 func TestHookCommandWithMode(t *testing.T) {
 	base := "/usr/local/bin/gortex hook"
 	assert.Equal(t, base, hookCommandWithMode(base, HookModeDeny),
-		"deny mode must NOT append --mode flag (back-compat with pre-N3 settings)")
+		"deny mode must NOT append --mode flag (back-compat with settings written before --hook-mode existed)")
 	assert.Equal(t, base+" --mode=enrich", hookCommandWithMode(base, HookModeEnrich),
 		"enrich mode must append --mode=enrich")
 	assert.Equal(t, base, hookCommandWithMode(base, ""),

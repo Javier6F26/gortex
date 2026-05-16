@@ -93,6 +93,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	result.Nodes = append(result.Nodes, fileNode)
 
 	seen := make(map[string]bool)
+	annotationSeen := make(map[string]bool)
 	protoMethods := make(map[string][]string) // protocol name → declared method names
 	var typeRanges []swiftTypeRange
 	var calls []swiftDeferredCall
@@ -101,7 +102,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		switch {
 
 		case m.Captures["class.def"] != nil:
-			e.emitTypeContainer(m, "class", filePath, fileID, src, result, seen, &typeRanges, nil)
+			e.emitTypeContainer(m, "class", filePath, fileID, src, result, seen, annotationSeen, &typeRanges, nil)
 
 		case m.Captures["enum.def"] != nil:
 			// May fire on the same class_declaration as the prior
@@ -114,16 +115,16 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 			if body != nil {
 				bodyNode = body.Node
 			}
-			e.emitTypeContainer(m, "enum", filePath, fileID, src, result, seen, &typeRanges, bodyNode)
+			e.emitTypeContainer(m, "enum", filePath, fileID, src, result, seen, annotationSeen, &typeRanges, bodyNode)
 
 		case m.Captures["proto.def"] != nil:
-			e.emitProtocol(m, filePath, fileID, src, result, seen)
+			e.emitProtocol(m, filePath, fileID, src, result, seen, annotationSeen)
 
 		case m.Captures["protomethod.def"] != nil:
 			e.recordProtocolMethod(m, src, protoMethods)
 
 		case m.Captures["func.def"] != nil:
-			e.emitFunction(m, filePath, fileID, src, result, seen, typeRanges)
+			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen, typeRanges)
 
 		case m.Captures["import.def"] != nil:
 			e.emitImport(m, filePath, fileID, result)
@@ -175,7 +176,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 // already seen (i.e. swQClass already emitted it), stamps
 // Meta["kind"]="enum" on the existing node and walks bodyNode for
 // case entries instead of emitting a duplicate.
-func (e *SwiftExtractor) emitTypeContainer(m parser.QueryResult, prefix, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, typeRanges *[]swiftTypeRange, bodyNode *sitter.Node) {
+func (e *SwiftExtractor) emitTypeContainer(m parser.QueryResult, prefix, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, typeRanges *[]swiftTypeRange, bodyNode *sitter.Node) {
 	var nameKey, defKey string
 	switch prefix {
 	case "enum":
@@ -215,6 +216,7 @@ func (e *SwiftExtractor) emitTypeContainer(m parser.QueryResult, prefix, filePat
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 		})
+		emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
 	} else if prefix == "enum" {
 		// Backfill enum kind on the existing node.
 		for _, n := range result.Nodes {
@@ -286,7 +288,7 @@ func (e *SwiftExtractor) recordProtocolMethod(m parser.QueryResult, src []byte, 
 	protoMethods[nameNode.Content(src)] = append(protoMethods[nameNode.Content(src)], m.Captures["protomethod.name"].Text)
 }
 
-func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["proto.name"].Text
 	def := m.Captures["proto.def"]
 	id := filePath + "::" + name
@@ -307,9 +309,10 @@ func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID str
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
 }
 
-func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool, typeRanges []swiftTypeRange) {
+func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool, typeRanges []swiftTypeRange) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	startLine := def.StartLine
@@ -343,6 +346,7 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: id, To: typeID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
 		})
+		emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
 		return
 	}
 
@@ -366,6 +370,7 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
 }
 
 // swiftVisibility scans a declaration's leading modifier children for

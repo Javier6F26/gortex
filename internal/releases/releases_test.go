@@ -177,3 +177,91 @@ func TestEnrichGraph_NoTagsReturnsZero(t *testing.T) {
 		t.Errorf("no-tag repo should yield 0 enriched, got %d", count)
 	}
 }
+
+// TestEnrichGraph_MaterialisesReleaseNodes:
+// EnrichGraph creates one KindRelease node per tag so the
+// `release::<tag>` ID convention documented on graph.KindRelease is
+// queryable. Without it KindRelease would be an orphan kind —
+// declared in the schema but never instantiated.
+func TestEnrichGraph_MaterialisesReleaseNodes(t *testing.T) {
+	dir := setupTaggedRepo(t)
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "a.go", Kind: graph.KindFile, FilePath: "a.go"})
+	g.AddNode(&graph.Node{ID: "b.go", Kind: graph.KindFile, FilePath: "b.go"})
+
+	if _, err := EnrichGraph(g, dir); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	// One KindRelease node per tag, deduped by ID.
+	v01 := g.GetNode(ReleaseNodeID("", "v0.1"))
+	v02 := g.GetNode(ReleaseNodeID("", "v0.2"))
+	if v01 == nil || v02 == nil {
+		t.Fatalf("missing release node(s); have v01=%v v02=%v", v01, v02)
+	}
+	if v01.Kind != graph.KindRelease || v02.Kind != graph.KindRelease {
+		t.Errorf("release nodes have wrong Kind: v01=%s v02=%s", v01.Kind, v02.Kind)
+	}
+	if v01.Name != "v0.1" || v02.Name != "v0.2" {
+		t.Errorf("release node names: v01=%q v02=%q", v01.Name, v02.Name)
+	}
+
+	// Meta carries ordering + file count so a chart of "how big was
+	// each release?" needs only one graph query.
+	if v01.Meta["order"] != 0 {
+		t.Errorf("v0.1 order = %v, want 0 (oldest)", v01.Meta["order"])
+	}
+	if v02.Meta["order"] != 1 {
+		t.Errorf("v0.2 order = %v, want 1 (newest of two)", v02.Meta["order"])
+	}
+	if fc := v01.Meta["file_count"]; fc != 1 {
+		t.Errorf("v0.1 file_count = %v, want 1", fc)
+	}
+	if fc := v02.Meta["file_count"]; fc != 2 {
+		t.Errorf("v0.2 file_count = %v, want 2", fc)
+	}
+}
+
+// Multi-repo: tag IDs must be scoped by repo prefix so two repos that
+// both ship a "v1.0" can't collide on the same node.
+func TestEnrichGraphWithRepoPrefix_ScopesReleaseIDs(t *testing.T) {
+	dir := setupTaggedRepo(t)
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "repoA/a.go", Kind: graph.KindFile, FilePath: "repoA/a.go"})
+
+	if _, err := EnrichGraphWithRepoPrefix(g, dir, "repoA"); err != nil {
+		t.Fatalf("enrich: %v", err)
+	}
+
+	id := ReleaseNodeID("repoA", "v0.1")
+	if id != "release::repoA::v0.1" {
+		t.Errorf("ReleaseNodeID returned %q, want release::repoA::v0.1", id)
+	}
+	n := g.GetNode(id)
+	if n == nil {
+		t.Fatalf("expected release node at %s, found none", id)
+	}
+	if n.RepoPrefix != "repoA" {
+		t.Errorf("RepoPrefix = %q, want repoA", n.RepoPrefix)
+	}
+	// The unprefixed bare ID should NOT exist when a prefix is in play.
+	if g.GetNode("release::v0.1") != nil {
+		t.Errorf("bare release::v0.1 must not exist when repoA prefix is given")
+	}
+}
+
+func TestReleaseNodeID(t *testing.T) {
+	cases := []struct {
+		prefix, tag, want string
+	}{
+		{"", "v0.1", "release::v0.1"},
+		{"repoA", "v0.1", "release::repoA::v0.1"},
+		{"", "1.0.0-rc1", "release::1.0.0-rc1"},
+	}
+	for _, c := range cases {
+		got := ReleaseNodeID(c.prefix, c.tag)
+		if got != c.want {
+			t.Errorf("ReleaseNodeID(%q,%q) = %q, want %q", c.prefix, c.tag, got, c.want)
+		}
+	}
+}

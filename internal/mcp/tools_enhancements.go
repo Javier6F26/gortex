@@ -1781,7 +1781,7 @@ func (s *Server) handleAnalyzeReleases(ctx context.Context, req mcp.CallToolRequ
 	total := 0
 	perRepo := make(map[string]any, len(roots))
 	for prefix, root := range roots {
-		count, err := releases.EnrichGraph(s.graph, root)
+		count, err := releases.EnrichGraphWithRepoPrefix(s.graph, root, prefix)
 		if err != nil {
 			perRepo[prefix] = map[string]any{"root": root, "error": err.Error()}
 			continue

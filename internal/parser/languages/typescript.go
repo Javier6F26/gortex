@@ -412,6 +412,7 @@ func (e *TypeScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitTSFunctionShape(id, def.Node, src, filePath, def.StartLine+1, result)
+	emitTSThrowsEdges(def.Node, src, id, filePath, result)
 	// JSX child-component attribution — emits EdgeRendersChild for
 	// every uppercase-first-letter element rendered inside the body.
 	if body := tsFunctionBody(def.Node); body != nil {
