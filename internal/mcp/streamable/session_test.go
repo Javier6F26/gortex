@@ -203,7 +203,7 @@ func TestNewSessionID_IsRandomAndHex(t *testing.T) {
 		t.Errorf("len(id) = %d, want 32", len(a))
 	}
 	for _, c := range a {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Errorf("id contains non-hex byte %q", c)
 		}
 	}
