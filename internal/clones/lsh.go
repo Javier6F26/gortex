@@ -36,6 +36,22 @@ type Cluster struct {
 type Index struct {
 	bands [Bands]map[uint64][]string
 	sigs  map[string]Signature
+
+	// Skipped-bucket counters set by the most recent CandidatePairs
+	// call. Reads are safe only when no concurrent CandidatePairs is
+	// running on the same Index. Exposed via SkippedBuckets so callers
+	// (DetectPairs) can log how much fan-out the cap dropped without
+	// changing the exported CandidatePairs signature.
+	lastSkippedBuckets     int
+	lastSkippedBucketItems int
+}
+
+// SkippedBuckets returns (bucket_count, total_items_in_skipped_buckets)
+// for the most recent CandidatePairs call. Both values are 0 when the
+// cap never tripped — i.e. every bucket was small enough that the
+// pairwise expansion was performed in full.
+func (ix *Index) SkippedBuckets() (int, int) {
+	return ix.lastSkippedBuckets, ix.lastSkippedBucketItems
 }
 
 // NewIndex returns an empty LSH index.
@@ -78,16 +94,44 @@ func bandKey(band int, sig Signature) uint64 {
 	return h.Sum64()
 }
 
+// maxBucketSize is the per-band-bucket fan-out cap. Buckets larger
+// than this are skipped entirely: a bucket carrying N items emits
+// N·(N-1)/2 candidate pairs, which for N=2000 is 2M pairs per band ×
+// Bands = ~64M pairs from one bucket alone. At repo-set scale the
+// large buckets are dominated by template / boilerplate signatures
+// (empty getters, single-line lambdas, react component shells) whose
+// pairwise comparisons are noise rather than signal — every "real"
+// clone of practical interest still has ≥1 small-bucket band hit
+// because MinHash banding is the AND of multiple bands.
+//
+// Without this cap, the warmup phase that runs detectClonesAndEmitEdges
+// against a 200k-function multi-repo graph stalled for 20+ minutes
+// inside CandidatePairs (observed in production profile #4 stall).
+const maxBucketSize = 256
+
 // CandidatePairs returns every unordered pair of IDs that collide in at
 // least one band bucket. Each pair is returned once, in canonical
 // (A < B) form. This is the candidate set the exact Jaccard filter
 // runs over — it is a superset of the true clone pairs.
+//
+// Memory note: the dedup uses a uint64-keyed map (FNV-1a hash of the
+// canonicalised pair) instead of map[[2]string]struct{}. For 10M
+// candidates the string-pair version held ~600 MB of map state; the
+// uint64 form is ~120 MB. The 64-bit hash space has a negligible false-
+// positive rate at this candidate volume, and a missed duplicate just
+// means one redundant Jaccard estimate, which is cheap.
 func (ix *Index) CandidatePairs() []Pair {
-	seen := make(map[[2]string]struct{})
+	seen := make(map[uint64]struct{})
 	var pairs []Pair
+	var skippedBuckets, skippedBucketItems int
 	for b := range Bands {
 		for _, ids := range ix.bands[b] {
 			if len(ids) < 2 {
+				continue
+			}
+			if len(ids) > maxBucketSize {
+				skippedBuckets++
+				skippedBucketItems += len(ids)
 				continue
 			}
 			for i := range ids {
@@ -99,7 +143,7 @@ func (ix *Index) CandidatePairs() []Pair {
 					if a > c {
 						a, c = c, a
 					}
-					key := [2]string{a, c}
+					key := pairKey(a, c)
 					if _, ok := seen[key]; ok {
 						continue
 					}
@@ -109,7 +153,36 @@ func (ix *Index) CandidatePairs() []Pair {
 			}
 		}
 	}
+	// Stash the bucket-skip telemetry so callers (DetectPairs) can
+	// surface it via the logger without changing this function's
+	// signature, which is exported.
+	ix.lastSkippedBuckets = skippedBuckets
+	ix.lastSkippedBucketItems = skippedBucketItems
 	return pairs
+}
+
+// pairKey produces a 64-bit hash of a canonicalised (a < c) ID pair,
+// using FNV-1a in two passes seeded by the offset basis. Inline and
+// allocation-free so the hot-loop dedup stays fast.
+func pairKey(a, c string) uint64 {
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	h := offset
+	for i := 0; i < len(a); i++ {
+		h ^= uint64(a[i])
+		h *= prime
+	}
+	// Sentinel byte between the two halves so the hashes of ("ab","c")
+	// and ("a","bc") diverge.
+	h ^= 0x1f
+	h *= prime
+	for i := 0; i < len(c); i++ {
+		h ^= uint64(c[i])
+		h *= prime
+	}
+	return h
 }
 
 // DetectPairs runs the full LSH detection pass: it bands every item,
@@ -119,6 +192,16 @@ func (ix *Index) CandidatePairs() []Pair {
 //
 // A threshold ≤ 0 falls back to DefaultThreshold.
 func DetectPairs(items []Item, threshold float64) []Pair {
+	pairs, _, _ := DetectPairsWithStats(items, threshold)
+	return pairs
+}
+
+// DetectPairsWithStats is DetectPairs plus the per-bucket-cap
+// telemetry from the underlying Index.CandidatePairs run. Callers that
+// want to know how much fan-out the cap dropped (warmup-time
+// orchestrator logging) use this; everything else can stay on
+// DetectPairs and ignore the counters.
+func DetectPairsWithStats(items []Item, threshold float64) (pairs []Pair, skippedBuckets, skippedBucketItems int) {
 	if threshold <= 0 {
 		threshold = DefaultThreshold
 	}
@@ -127,6 +210,7 @@ func DetectPairs(items []Item, threshold float64) []Pair {
 		ix.Add(it.ID, it.Sig)
 	}
 	candidates := ix.CandidatePairs()
+	skippedBuckets, skippedBucketItems = ix.SkippedBuckets()
 	out := make([]Pair, 0, len(candidates))
 	for _, p := range candidates {
 		sa, oka := ix.sigs[p.A]
@@ -150,7 +234,7 @@ func DetectPairs(items []Item, threshold float64) []Pair {
 		}
 		return out[i].B < out[j].B
 	})
-	return out
+	return out, skippedBuckets, skippedBucketItems
 }
 
 // ClusterPairs groups detected pairs into connected components via

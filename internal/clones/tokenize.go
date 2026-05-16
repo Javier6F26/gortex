@@ -1,6 +1,9 @@
 package clones
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // universalKeywords is a deliberately broad, language-agnostic set of
 // control-flow and declaration keywords. Tokens in this set are kept
@@ -61,21 +64,37 @@ const operatorRunChars = "+-*/%=<>!&|^~?:.@"
 // the occasional divergence. The result is deterministic and depends
 // only on the input bytes.
 func Tokenize(body string) []string {
-	tokens := make([]string, 0, len(body)/4+1)
-	runes := []rune(body)
-	n := len(runes)
+	// Capacity hint sized for typical code density (~1 token per 8
+	// bytes for ordinary identifier-heavy source). Smaller estimate
+	// than the previous len/4 hint, which over-allocated by ~2× on
+	// the median function body; append will grow the slice geometrically
+	// when bodies tokenize denser than expected.
+	tokens := make([]string, 0, len(body)/8+8)
+	n := len(body)
 	i := 0
 	for i < n {
-		c := runes[i]
+		// Decode one rune in place rather than materialising the whole
+		// body as a []rune up front — that bulk conversion was the
+		// single biggest allocation in this function (590 MB / 30 s
+		// during cold-start indexing in profile #3).
+		c, size := utf8.DecodeRuneInString(body[i:])
 		switch {
 		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v':
-			i++
+			i += size
 		case isIdentStart(c):
-			j := i + 1
-			for j < n && isIdentPart(runes[j]) {
-				j++
+			j := i + size
+			for j < n {
+				rr, rsize := utf8.DecodeRuneInString(body[j:])
+				if !isIdentPart(rr) {
+					break
+				}
+				j += rsize
 			}
-			word := string(runes[i:j])
+			// body[i:j] is a zero-copy substring (shares body's
+			// underlying bytes) — no allocation here. strings.ToLower
+			// only allocates when the slice actually has uppercase
+			// content, so all-lowercase keywords stay free.
+			word := body[i:j]
 			lower := strings.ToLower(word)
 			if _, ok := universalKeywords[lower]; ok {
 				tokens = append(tokens, lower)
@@ -84,54 +103,71 @@ func Tokenize(body string) []string {
 			}
 			i = j
 		case c >= '0' && c <= '9':
-			j := i + 1
-			for j < n && isNumberPart(runes[j]) {
-				j++
+			j := i + size
+			for j < n {
+				rr, rsize := utf8.DecodeRuneInString(body[j:])
+				if !isNumberPart(rr) {
+					break
+				}
+				j += rsize
 			}
 			tokens = append(tokens, "0")
 			i = j
 		case c == '"' || c == '\'' || c == '`':
-			i = skipStringLiteral(runes, i)
+			i = skipStringLiteral(body, i)
 			tokens = append(tokens, "s")
 		case strings.ContainsRune(operatorRunChars, c):
-			j := i + 1
-			for j < n && strings.ContainsRune(operatorRunChars, runes[j]) {
-				j++
+			j := i + size
+			for j < n {
+				rr, rsize := utf8.DecodeRuneInString(body[j:])
+				if !strings.ContainsRune(operatorRunChars, rr) {
+					break
+				}
+				j += rsize
 			}
-			tokens = append(tokens, string(runes[i:j]))
+			tokens = append(tokens, body[i:j])
 			i = j
 		case c == '(' || c == ')' || c == '[' || c == ']' ||
 			c == '{' || c == '}' || c == ',' || c == ';':
-			tokens = append(tokens, string(c))
-			i++
+			tokens = append(tokens, body[i:i+size])
+			i += size
 		default:
 			// Unknown punctuation / non-ASCII symbol — keep it as a
 			// single token so it still contributes to the shape.
-			tokens = append(tokens, string(c))
-			i++
+			tokens = append(tokens, body[i:i+size])
+			i += size
 		}
 	}
 	return tokens
 }
 
-// skipStringLiteral returns the index just past a string, char, or raw
-// literal starting at runes[start]. Backslash escapes are honoured for
-// "/' quotes; backtick raw strings run to the next backtick. An
-// unterminated literal consumes to end-of-input.
-func skipStringLiteral(runes []rune, start int) int {
-	quote := runes[start]
-	i := start + 1
-	n := len(runes)
+// skipStringLiteral returns the byte index just past a string, char,
+// or raw literal starting at body[start]. Backslash escapes are
+// honoured for "/' quotes; backtick raw strings run to the next
+// backtick. An unterminated literal consumes to end-of-input.
+//
+// Operates on the source bytes directly via utf8.DecodeRuneInString so
+// no []rune intermediate is needed — mirrors Tokenize's per-rune
+// streaming approach.
+func skipStringLiteral(body string, start int) int {
+	quote, qsize := utf8.DecodeRuneInString(body[start:])
+	i := start + qsize
+	n := len(body)
 	for i < n {
-		c := runes[i]
+		c, csize := utf8.DecodeRuneInString(body[i:])
 		if c == '\\' && quote != '`' {
-			i += 2
+			// Skip the backslash and whatever rune it escapes.
+			i += csize
+			if i < n {
+				_, esize := utf8.DecodeRuneInString(body[i:])
+				i += esize
+			}
 			continue
 		}
 		if c == quote {
-			return i + 1
+			return i + csize
 		}
-		i++
+		i += csize
 	}
 	return n
 }

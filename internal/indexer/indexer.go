@@ -390,10 +390,13 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 			zap.Int("edges", emitted),
 		)
 	}
-	if clonePairs, cloneEdges := detectClonesAndEmitEdges(idx.graph, idx.cloneThreshold()); clonePairs > 0 {
+	if cs := detectClonesAndEmitEdges(idx.graph, idx.cloneThreshold()); cs.Items > 0 {
 		idx.logger.Info("clone edges emitted (global)",
-			zap.Int("clone_pairs", clonePairs),
-			zap.Int("edges", cloneEdges),
+			zap.Int("items", cs.Items),
+			zap.Int("clone_pairs", cs.Pairs),
+			zap.Int("edges", cs.Edges),
+			zap.Int("skipped_buckets", cs.SkippedBuckets),
+			zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
 		)
 	}
 	// gRPC stub-call resolution. Runs after InferImplements (the
@@ -1345,12 +1348,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 					}
 				}
 
-				for _, n := range result.Nodes {
-					idx.graph.AddNode(n)
-				}
-				for _, e := range result.Edges {
-					idx.graph.AddEdge(e)
-				}
+				// Batch the per-file insert into one shard-grouped pass
+				// so each shard's lock is acquired at most once per
+				// file instead of N + 2·E times. Profiling showed 69
+				// of 102 workers blocked on lockTwoWrite under the
+				// per-edge path during cold-start warmup.
+				idx.graph.AddBatch(result.Nodes, result.Edges)
 
 				if fileGraphPath != "" {
 					exts := contractExtractorsByLang[lang]
@@ -1493,10 +1496,13 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 				)
 			}
 			reporter.Report("clone detection pass", 0, 0)
-			if clonePairs, cloneEdges := detectClonesAndEmitEdges(idx.graph, idx.cloneThreshold()); clonePairs > 0 {
+			if cs := detectClonesAndEmitEdges(idx.graph, idx.cloneThreshold()); cs.Items > 0 {
 				idx.logger.Info("clone edges emitted",
-					zap.Int("clone_pairs", clonePairs),
-					zap.Int("edges", cloneEdges),
+					zap.Int("items", cs.Items),
+					zap.Int("clone_pairs", cs.Pairs),
+					zap.Int("edges", cs.Edges),
+					zap.Int("skipped_buckets", cs.SkippedBuckets),
+					zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
 				)
 			}
 			// gRPC stub-call resolution — runs once the call graph and
@@ -1625,12 +1631,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 
 	idx.applyRepoPrefix(result.Nodes, result.Edges)
 
-	for _, n := range result.Nodes {
-		idx.graph.AddNode(n)
-	}
-	for _, e := range result.Edges {
-		idx.graph.AddEdge(e)
-	}
+	idx.graph.AddBatch(result.Nodes, result.Edges)
 
 	// Add new symbols to search index. shouldIndexForSearch enforces
 	// the same SkipSearch filter used by the bulk and upgrade paths.
@@ -3516,12 +3517,7 @@ func (idx *Indexer) extractOneModuleManifest(relPath string, parse func([]byte) 
 	}
 	allNodes := append([]*graph.Node{manifestNode}, nodes...)
 	idx.applyRepoPrefix(allNodes, edges)
-	for _, n := range allNodes {
-		idx.graph.AddNode(n)
-	}
-	for _, e := range edges {
-		idx.graph.AddEdge(e)
-	}
+	idx.graph.AddBatch(allNodes, edges)
 
 	// Connect each KindImport node to its matching module via
 	// longest-prefix path resolution. Repo-internal imports (the

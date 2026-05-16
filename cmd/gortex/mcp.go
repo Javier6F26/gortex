@@ -280,18 +280,10 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			// further below.
 			if abs, err := filepath.Abs(lspWorkspace); err == nil && lspWorkspace != "" {
 				tsSpec := lsp.SpecByName("typescript-language-server")
-				if tsSpec != nil && lspRouter.Available(tsSpec) {
-					routerRef := lspRouter
+				if tsSpec != nil && lspRouter.Available(tsSpec) && repoLikelyHasTypeScriptIntent(abs) {
 					absRootCapture := abs
-					helper := lsp.NewLazyResolverHelper(
-						func() (*lsp.Provider, error) {
-							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
-						},
-						absRootCapture,
-						tsSpec.Extensions,
-						0,
-						logger,
-					)
+					poolSize := lsp.ResolverPoolSizeFromEnv(1)
+					helper := buildResolverLSPHelper(lspRouter, tsSpec, absRootCapture, poolSize, logger)
 					mcpResolverLSPRegistry.Register("", helper)
 				}
 			}
@@ -343,21 +335,17 @@ func runMCP(cmd *cobra.Command, args []string) error {
 			if mcpResolverLSPRouter != nil {
 				routerRef := mcpResolverLSPRouter
 				registryRef := mcpResolverLSPRegistry
+				poolSize := lsp.ResolverPoolSizeFromEnv(1)
 				mi.SetOnRepoTracked(func(prefix, absPath string) {
 					tsSpec := lsp.SpecByName("typescript-language-server")
 					if tsSpec == nil || !routerRef.Available(tsSpec) {
 						return
 					}
+					if !repoLikelyHasTypeScriptIntent(absPath) {
+						return
+					}
 					absRootCapture := absPath
-					helper := lsp.NewLazyResolverHelper(
-						func() (*lsp.Provider, error) {
-							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
-						},
-						absRootCapture,
-						tsSpec.Extensions,
-						0,
-						logger,
-					)
+					helper := buildResolverLSPHelper(routerRef, tsSpec, absRootCapture, poolSize, logger)
 					registryRef.Register(prefix, helper)
 				})
 			}

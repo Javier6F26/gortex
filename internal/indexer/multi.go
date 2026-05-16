@@ -251,10 +251,13 @@ func (mi *MultiIndexer) RunGlobalGraphPasses() {
 			zap.Int("edges", emitted),
 		)
 	}
-	if clonePairs, cloneEdges := detectClonesAndEmitEdges(mi.graph, mi.cloneThreshold()); clonePairs > 0 {
+	if cs := detectClonesAndEmitEdges(mi.graph, mi.cloneThreshold()); cs.Items > 0 {
 		mi.logger.Info("clone edges emitted (global)",
-			zap.Int("clone_pairs", clonePairs),
-			zap.Int("edges", cloneEdges),
+			zap.Int("items", cs.Items),
+			zap.Int("clone_pairs", cs.Pairs),
+			zap.Int("edges", cs.Edges),
+			zap.Int("skipped_buckets", cs.SkippedBuckets),
+			zap.Int("skipped_bucket_items", cs.SkippedBucketItems),
 		)
 	}
 	// gRPC stub-call resolution. After InferImplements (the

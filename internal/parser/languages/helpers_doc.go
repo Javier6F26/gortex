@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"bytes"
 	"strings"
 )
 
@@ -47,28 +48,45 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 	if startRow0 <= 0 || len(src) == 0 {
 		return ""
 	}
-	lines := splitLinesUpTo(src, startRow0)
-	if len(lines) == 0 {
+	// Walk lines as []byte slices into src — no per-line string copy.
+	// The old splitLinesUpTo allocated one Go string per line of the
+	// file before the declaration; for a function at line 4000 with a
+	// 5-line doc block that's 3995 wasted allocations every call.
+	// Profile #3 measured 753 MB / 30 s in splitLinesUpTo alone.
+	lineBytes := lineBytesUpTo(src, startRow0)
+	if len(lineBytes) == 0 {
 		return ""
 	}
+
+	// Single-byte byte-slice literals used by the inner loop — hoisted
+	// so the bytes.HasPrefix / HasSuffix / TrimPrefix / TrimSuffix
+	// calls don't reallocate them on every iteration. Tiny, but the
+	// loop runs in the indexer's hottest path.
+	var (
+		slashSlash  = []byte("//")
+		hash        = []byte("#")
+		tripleSlash = []byte("///")
+		blockEnd    = []byte("*/")
+		blockStart  = []byte("/**")
+	)
 
 	// Walk upward from the line just above the declaration.
 	collected := make([]string, 0, 8)
 	inBlock := false
-	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimRight(lines[i], "\r")
-		trimmed := strings.TrimSpace(line)
+	for i := len(lineBytes) - 1; i >= 0; i-- {
+		line := bytes.TrimRight(lineBytes[i], "\r")
+		trimmed := bytes.TrimSpace(line)
 
 		switch lang {
 		case DocLangSlashSlash:
-			if trimmed == "" {
+			if len(trimmed) == 0 {
 				if len(collected) == 0 {
 					continue
 				}
 				goto done
 			}
-			if strings.HasPrefix(trimmed, "//") {
-				collected = append(collected, stripLineCommentPrefix(trimmed, "//"))
+			if bytes.HasPrefix(trimmed, slashSlash) {
+				collected = append(collected, stripLineCommentPrefixBytes(trimmed, slashSlash))
 				continue
 			}
 			goto done
@@ -77,70 +95,70 @@ func ExtractDocAbove(src []byte, startRow0 int, lang docCommentLang) string {
 			// Match `*/` end → walk into block. Match `/**` start →
 			// finish block. Otherwise treat as // line comments
 			// fallback.
-			if !inBlock && strings.HasSuffix(trimmed, "*/") {
-				body := strings.TrimSuffix(trimmed, "*/")
-				body = strings.TrimSpace(body)
-				if strings.HasPrefix(trimmed, "/**") {
+			if !inBlock && bytes.HasSuffix(trimmed, blockEnd) {
+				body := bytes.TrimSuffix(trimmed, blockEnd)
+				body = bytes.TrimSpace(body)
+				if bytes.HasPrefix(trimmed, blockStart) {
 					// Single-line /** ... */ block.
-					inner := strings.TrimPrefix(body, "/**")
-					inner = strings.TrimSpace(inner)
-					if inner != "" {
-						collected = append(collected, inner)
+					inner := bytes.TrimPrefix(body, blockStart)
+					inner = bytes.TrimSpace(inner)
+					if len(inner) != 0 {
+						collected = append(collected, string(inner))
 					}
 					goto done
 				}
 				inBlock = true
-				if body != "" {
-					collected = append(collected, stripBlockStarLine(body))
+				if len(body) != 0 {
+					collected = append(collected, stripBlockStarLineBytes(body))
 				}
 				continue
 			}
 			if inBlock {
-				if strings.HasPrefix(trimmed, "/**") {
-					body := strings.TrimPrefix(trimmed, "/**")
-					body = strings.TrimSpace(body)
-					if body != "" {
-						collected = append(collected, stripBlockStarLine(body))
+				if bytes.HasPrefix(trimmed, blockStart) {
+					body := bytes.TrimPrefix(trimmed, blockStart)
+					body = bytes.TrimSpace(body)
+					if len(body) != 0 {
+						collected = append(collected, stripBlockStarLineBytes(body))
 					}
 					goto done
 				}
-				collected = append(collected, stripBlockStarLine(trimmed))
+				collected = append(collected, stripBlockStarLineBytes(trimmed))
 				continue
 			}
-			if trimmed == "" {
+			if len(trimmed) == 0 {
 				if len(collected) == 0 {
 					continue
 				}
 				goto done
 			}
-			if strings.HasPrefix(trimmed, "//") {
-				collected = append(collected, stripLineCommentPrefix(trimmed, "//"))
+			if bytes.HasPrefix(trimmed, slashSlash) {
+				collected = append(collected, stripLineCommentPrefixBytes(trimmed, slashSlash))
 				continue
 			}
 			goto done
 
 		case DocLangHash:
-			if trimmed == "" {
+			if len(trimmed) == 0 {
 				if len(collected) == 0 {
 					continue
 				}
 				goto done
 			}
-			if strings.HasPrefix(trimmed, "#") {
-				collected = append(collected, stripLineCommentPrefix(trimmed, "#"))
+			if bytes.HasPrefix(trimmed, hash) {
+				collected = append(collected, stripLineCommentPrefixBytes(trimmed, hash))
 				continue
 			}
 			goto done
 
 		case DocLangCSharpXML:
-			if trimmed == "" {
+			if len(trimmed) == 0 {
 				if len(collected) == 0 {
 					continue
 				}
 				goto done
 			}
-			if strings.HasPrefix(trimmed, "///") {
-				collected = append(collected, stripCSharpXMLLine(trimmed))
+			if bytes.HasPrefix(trimmed, tripleSlash) {
+				collected = append(collected, stripCSharpXMLLineBytes(trimmed))
 				continue
 			}
 			goto done
@@ -222,52 +240,66 @@ func firstPyParagraph(s string) string {
 	return truncateDoc(b.String())
 }
 
-// splitLinesUpTo returns lines[0..upToRow] (0-based, exclusive of the
-// declaration's own row). Does not allocate the full file split when
-// upToRow is small.
-func splitLinesUpTo(src []byte, upToRow int) []string {
+// lineBytesUpTo returns lines[0..upToRow] as []byte slices into src.
+// Each slice excludes the trailing '\n'. No string copy is performed —
+// callers materialise strings on-demand only for the few lines they
+// actually consume. The returned outer slice owns no source bytes, so
+// callers should not retain it past the lifetime of src.
+func lineBytesUpTo(src []byte, upToRow int) [][]byte {
 	if upToRow <= 0 {
 		return nil
 	}
-	lines := make([]string, 0, upToRow)
+	lines := make([][]byte, 0, upToRow)
 	start := 0
 	row := 0
 	for i := 0; i < len(src) && row < upToRow; i++ {
 		if src[i] != '\n' {
 			continue
 		}
-		lines = append(lines, string(src[start:i]))
+		lines = append(lines, src[start:i])
 		start = i + 1
 		row++
 	}
 	return lines
 }
 
-func stripLineCommentPrefix(line, prefix string) string {
-	s := strings.TrimPrefix(line, prefix)
-	// Rust /// and //! both fall through after the // strip.
-	s = strings.TrimPrefix(s, "/")
-	s = strings.TrimPrefix(s, "!")
-	s = strings.TrimPrefix(s, " ")
-	return s
+// stripLineCommentPrefixBytes strips a leading comment-opener prefix
+// (// or #) plus optional Rust-style /// // ! decorations and a
+// trailing space, returning the result as a freshly allocated string.
+// Operates on []byte input so callers (ExtractDocAbove) can defer the
+// string allocation until they've decided the line is actually part of
+// the doc block.
+func stripLineCommentPrefixBytes(line, prefix []byte) string {
+	s := bytes.TrimPrefix(line, prefix)
+	s = bytes.TrimPrefix(s, []byte("/"))
+	s = bytes.TrimPrefix(s, []byte("!"))
+	s = bytes.TrimPrefix(s, []byte(" "))
+	return string(s)
 }
 
-func stripBlockStarLine(line string) string {
-	s := strings.TrimSpace(line)
-	s = strings.TrimPrefix(s, "*")
-	s = strings.TrimPrefix(s, " ")
-	return s
+// stripBlockStarLineBytes strips a leading "*" plus optional leading
+// space from a continuation line inside a /** ... */ doc block. See
+// stripLineCommentPrefixBytes for the alloc-deferral rationale.
+func stripBlockStarLineBytes(line []byte) string {
+	s := bytes.TrimSpace(line)
+	s = bytes.TrimPrefix(s, []byte("*"))
+	s = bytes.TrimPrefix(s, []byte(" "))
+	return string(s)
 }
 
-func stripCSharpXMLLine(line string) string {
-	s := strings.TrimPrefix(line, "///")
-	s = strings.TrimPrefix(s, " ")
-	// Drop XML tags (very rough — keeps text content). The spec calls
-	// for <summary> contents only; we don't parse XML here, just strip
-	// angle-bracketed tokens.
+// stripCSharpXMLLineBytes strips leading "///" plus optional space
+// from a C# XML doc line and drops any angle-bracketed XML tags,
+// keeping only the inner text. Rough — the spec calls for <summary>
+// contents only; we don't parse XML here, just remove tag wrappers.
+func stripCSharpXMLLineBytes(line []byte) string {
+	s := bytes.TrimPrefix(line, []byte("///"))
+	s = bytes.TrimPrefix(s, []byte(" "))
 	var b strings.Builder
+	b.Grow(len(s))
 	depth := 0
-	for _, r := range s {
+	// Ranging over string(s) decodes UTF-8 in place without copying
+	// when s is the only reference — the compiler elides the alloc.
+	for _, r := range string(s) {
 		switch r {
 		case '<':
 			depth++

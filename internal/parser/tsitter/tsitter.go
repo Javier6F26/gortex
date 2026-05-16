@@ -55,6 +55,16 @@ type Node struct {
 // WrapNode wraps a value Node from the new API into our shim.
 func WrapNode(n ts.Node) *Node { return &Node{inner: n, valid: true} }
 
+// SetInner overwrites the receiver's wrapped ts.Node and marks it
+// valid. Lets callers reuse a *Node out of a pool / backing slice
+// instead of allocating a new one per query match — see EachMatch in
+// internal/parser/treesitter.go. The receiver must already exist
+// (caller-owned), so SetInner cannot be used on a nil pointer.
+func (n *Node) SetInner(inner ts.Node) {
+	n.inner = inner
+	n.valid = true
+}
+
 // wrapPtr wraps a nullable *ts.Node, returning nil for nil input.
 func wrapPtr(n *ts.Node) *Node {
 	if n == nil {

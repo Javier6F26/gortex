@@ -591,6 +591,13 @@ func (c *realController) MarkReady(d time.Duration) {
 	c.ready.Store(true)
 }
 
+// IsReady reports whether warmup has completed. Used by background
+// timers (snapshotter, janitor, savings flush, etc.) to skip work
+// that would fight the warmup pipeline for shard locks and GC budget.
+func (c *realController) IsReady() bool {
+	return c.ready.Load()
+}
+
 // Shutdown gives the caller (the daemon main) a chance to flush any
 // per-instance stores. The actual socket teardown is the Server's job.
 func (c *realController) Shutdown(_ context.Context) error {

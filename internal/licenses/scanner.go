@@ -18,9 +18,20 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 )
+
+// scanBufPool holds reusable 64 KB scratch buffers for bufio.Scanner.
+// See internal/codegen/scanner.go for the same rationale — license
+// header detection runs on every indexed file too.
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
 
 // spdxRe matches the canonical SPDX header line. The standard form
 // is:
@@ -48,8 +59,10 @@ func Scan(source []byte) string {
 	if len(source) == 0 {
 		return ""
 	}
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer scanBufPool.Put(bufPtr)
 	scanner := bufio.NewScanner(bytes.NewReader(source))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(*bufPtr, 1024*1024)
 	for i := 0; i < maxScanLines && scanner.Scan(); i++ {
 		line := scanner.Text()
 		if !strings.Contains(line, "SPDX-License-Identifier") {

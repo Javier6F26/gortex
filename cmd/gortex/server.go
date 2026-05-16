@@ -286,18 +286,10 @@ func runServer(_ *cobra.Command, _ []string) error {
 
 			if abs, err := filepath.Abs(lspWorkspace); err == nil && lspWorkspace != "" {
 				tsSpec := lsp.SpecByName("typescript-language-server")
-				if tsSpec != nil && lspRouter.Available(tsSpec) {
-					routerRef := lspRouter
+				if tsSpec != nil && lspRouter.Available(tsSpec) && repoLikelyHasTypeScriptIntent(abs) {
 					absRootCapture := abs
-					helper := lsp.NewLazyResolverHelper(
-						func() (*lsp.Provider, error) {
-							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
-						},
-						absRootCapture,
-						tsSpec.Extensions,
-						0,
-						logger,
-					)
+					poolSize := lsp.ResolverPoolSizeFromEnv(1)
+					helper := buildResolverLSPHelper(lspRouter, tsSpec, absRootCapture, poolSize, logger)
 					serverResolverLSPRegistry.Register("", helper)
 				}
 			}

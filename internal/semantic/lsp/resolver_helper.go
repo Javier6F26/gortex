@@ -1,8 +1,11 @@
 package lsp
 
 import (
+	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -10,37 +13,65 @@ import (
 	"go.uber.org/zap"
 )
 
-// ResolverHelper adapts a *Provider for resolve-time use by the
-// cross-file resolver. The resolver consults this helper as part of
-// the hot path for every TS/JS/JSX/TSX edge (see
+// ResolverHelper adapts one or more *Provider instances for resolve-
+// time use by the cross-file resolver. The resolver consults this
+// helper as part of the hot path for every TS/JS/JSX/TSX edge (see
 // internal/resolver/lsp_resolve.go). Compared to the enricher path
 // (Provider.Enrich), the helper holds the language server warm
-// across the whole resolve pass, serialises calls so tsserver's
-// finicky concurrency model can't deadlock, and applies a per-call
-// timeout so a stalled server never gates the resolve.
+// across the whole resolve pass and applies a per-call timeout so a
+// stalled server never gates the resolve.
+//
+// Concurrency model: the helper owns a pool of N independent
+// providers (= N tsserver processes for the TS spec). Each Definition
+// call borrows one provider from the pool, runs FindDefinition, and
+// returns it. Within a single provider tsserver is single-threaded,
+// but across providers calls are parallel. Pool size 1 collapses to
+// the original "one provider, fully serialised" model.
 //
 // Lifecycle:
 //   - Constructed once per (workspace, language family) at index time.
-//   - Lazy-spawns the underlying LSP subprocess on first call.
-//   - Caches no answers across passes — the resolver owns dedup
-//     via its lspIndex.
+//   - Lazy-spawns N underlying LSP subprocesses on the first Definition
+//     call.
+//   - Caches no answers across passes — the resolver owns dedup via
+//     its lspIndex.
 //
-// Safe for concurrent calls; Definition serialises against the
-// underlying client so tsserver sees one definition request at a
-// time. Callers (the resolver's parallel workers) block on the
-// helper mutex; the trade-off is precision over throughput in TS
-// families, which is the N5 contract.
+// Memory note: each pooled provider opens files independently via
+// EnsureFileOpen. For workspaces with thousands of hot source files
+// the per-provider state can add up; the pool size knob trades
+// throughput for tsserver memory.
 type ResolverHelper struct {
-	// providerOnce gates lazy spawn so the underlying LSP server
-	// isn't started until the first Definition call lands.
-	providerOnce sync.Once
-	providerErr  error
+	// spawnOnce gates the lazy creation of the provider pool so the
+	// underlying LSP processes aren't started until the first
+	// Definition call lands.
+	spawnOnce sync.Once
+	spawnErr  error
 
-	// provider may be set at construction (eager) or resolved
-	// lazily via providerFn (router-backed). Reads after
-	// providerOnce.Do are race-free.
-	provider   *Provider
-	providerFn func() (*Provider, error)
+	// poolSize is the number of providers to spawn. Zero is treated
+	// as 1 (single-provider, mu-serialised) for back-compat with the
+	// pre-pool ResolverHelper API.
+	poolSize int
+
+	// pool is a buffered channel of borrowable providers. Capacity =
+	// poolSize. Definition takes a provider off the channel, uses it,
+	// and puts it back. Allocated inside spawnPool under spawnOnce.
+	pool chan *Provider
+
+	// providers is the master slice of pooled providers, retained so
+	// Close can shut them down without draining the pool channel
+	// (which may have providers in flight).
+	providers []*Provider
+
+	// spawnFn produces a fresh, initialised *Provider each call. Pool
+	// mode calls it poolSize times; legacy single-provider mode uses
+	// it as a lookup that returns a cached singleton (called once).
+	// At most one of spawnFn and provider is set at construction.
+	spawnFn func() (*Provider, error)
+
+	// provider is the pre-supplied provider in eager-construction
+	// mode (NewResolverHelper). When set, the pool collapses to size
+	// 1 and the channel holds this one entry. Mutually exclusive
+	// with spawnFn.
+	provider *Provider
 
 	workspaceRoot string
 
@@ -58,11 +89,6 @@ type ResolverHelper struct {
 	// genuinely-broken server.
 	timeout time.Duration
 
-	// mu serialises Definition calls. tsserver / typescript-
-	// language-server tolerate concurrent requests poorly on cold
-	// buffers; serialising trades throughput for correctness.
-	mu sync.Mutex
-
 	logger *zap.Logger
 }
 
@@ -75,6 +101,9 @@ type ResolverHelper struct {
 // workspaceRoot is the absolute path the LSP server is initialised
 // against. timeout caps each definition call; pass 0 to apply the
 // default (1500 ms).
+//
+// The pool collapses to size 1 — call NewPooledResolverHelper to get
+// the multi-provider parallel mode.
 func NewResolverHelper(provider *Provider, workspaceRoot string, timeout time.Duration, logger *zap.Logger) *ResolverHelper {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -101,13 +130,22 @@ func NewResolverHelper(provider *Provider, workspaceRoot string, timeout time.Du
 
 	h := &ResolverHelper{
 		provider:      provider,
+		poolSize:      1,
 		workspaceRoot: workspaceRoot,
 		extensions:    exts,
 		timeout:       timeout,
 		logger:        logger,
 	}
-	// Pre-fire providerOnce since the provider is already concrete.
-	h.providerOnce.Do(func() {})
+	// Pre-fire spawnOnce since the provider is already concrete: seed
+	// the pool channel with the single supplied provider so the first
+	// Definition call doesn't try to spawn.
+	h.spawnOnce.Do(func() {
+		h.pool = make(chan *Provider, 1)
+		if provider != nil {
+			h.providers = []*Provider{provider}
+			h.pool <- provider
+		}
+	})
 	return h
 }
 
@@ -122,11 +160,45 @@ func NewResolverHelper(provider *Provider, workspaceRoot string, timeout time.Du
 // before lookup() fires. Pass nil to use the default TS-family set
 // (matching N5 scope).
 func NewLazyResolverHelper(lookup func() (*Provider, error), workspaceRoot string, extensions []string, timeout time.Duration, logger *zap.Logger) *ResolverHelper {
+	return NewPooledResolverHelper(lookup, workspaceRoot, extensions, timeout, 1, logger)
+}
+
+// NewPooledResolverHelper builds a helper backed by `poolSize`
+// independent providers. Each Definition call borrows one provider
+// from the pool, so up to poolSize concurrent tsserver Definition
+// requests run in parallel — eliminating the single-mutex throughput
+// ceiling that dominated multi-repo resolve-time profiles (29 min
+// `deferred_passes_all` on a 488-repo TS-heavy workspace).
+//
+// spawn must produce a fresh, fully-initialised provider each call.
+// For the typical router-backed wiring the closure is something like:
+//
+//	func() (*Provider, error) {
+//	    p := lsp.NewProviderFromSpec(spec, logger)
+//	    if err := p.EnsureClient(absRoot); err != nil { return nil, err }
+//	    return p, nil
+//	}
+//
+// poolSize ≤ 0 falls back to the default (4) — large enough to
+// saturate the resolver's worker pool on commodity CPU counts, small
+// enough that the per-workspace tsserver memory footprint stays
+// bounded.
+func NewPooledResolverHelper(
+	spawn func() (*Provider, error),
+	workspaceRoot string,
+	extensions []string,
+	timeout time.Duration,
+	poolSize int,
+	logger *zap.Logger,
+) *ResolverHelper {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
 	if timeout <= 0 {
 		timeout = 1500 * time.Millisecond
+	}
+	if poolSize <= 0 {
+		poolSize = 4
 	}
 	if abs, err := filepath.Abs(workspaceRoot); err == nil {
 		workspaceRoot = abs
@@ -143,7 +215,8 @@ func NewLazyResolverHelper(lookup func() (*Provider, error), workspaceRoot strin
 	}
 
 	return &ResolverHelper{
-		providerFn:    lookup,
+		spawnFn:       spawn,
+		poolSize:      poolSize,
 		workspaceRoot: workspaceRoot,
 		extensions:    exts,
 		timeout:       timeout,
@@ -151,25 +224,59 @@ func NewLazyResolverHelper(lookup func() (*Provider, error), workspaceRoot strin
 	}
 }
 
-// ensureProvider resolves the underlying *Provider, running the
-// lazy lookup at most once. Returns the cached error on every
-// subsequent call.
-func (h *ResolverHelper) ensureProvider() (*Provider, error) {
-	h.providerOnce.Do(func() {
-		if h.provider != nil || h.providerFn == nil {
+// ensurePool spawns the pool's providers on first call, populating
+// the borrow channel. Subsequent calls are a no-op. Returns the
+// cached error when spawn failed — Definition then short-circuits.
+func (h *ResolverHelper) ensurePool() error {
+	h.spawnOnce.Do(func() {
+		// Eager-construction path (NewResolverHelper): the pool was
+		// pre-seeded with the supplied provider when the helper was
+		// constructed. Nothing more to do.
+		if h.spawnFn == nil {
 			return
 		}
-		p, err := h.providerFn()
-		if err != nil {
-			h.providerErr = err
-			return
+		size := h.poolSize
+		if size <= 0 {
+			size = 1
 		}
-		h.provider = p
+		pool := make(chan *Provider, size)
+		providers := make([]*Provider, 0, size)
+		for i := 0; i < size; i++ {
+			p, err := h.spawnFn()
+			if err != nil {
+				// Spawn failed mid-way — close anything we already
+				// got and surface the error. The helper is poisoned
+				// for the rest of its lifetime so we don't keep
+				// retrying a broken tsserver in the resolver hot path.
+				for _, prov := range providers {
+					go func(prov *Provider) { _ = prov.Close() }(prov)
+				}
+				h.spawnErr = err
+				return
+			}
+			providers = append(providers, p)
+			pool <- p
+		}
+		h.providers = providers
+		h.pool = pool
+		if size > 1 {
+			h.logger.Info("resolve-time LSP: provider pool spawned",
+				zap.String("workspace", h.workspaceRoot),
+				zap.Int("pool_size", size))
+		}
 	})
-	if h.providerErr != nil {
-		return nil, h.providerErr
-	}
-	return h.provider, nil
+	return h.spawnErr
+}
+
+// borrow takes a provider out of the pool (blocking until one is
+// available) and returns a release closure the caller defers. The
+// pool guarantees mutual exclusion per provider — within tsserver
+// each provider's stdio is single-threaded — while allowing up to
+// poolSize Definition calls to run in parallel across distinct
+// providers.
+func (h *ResolverHelper) borrow() (*Provider, func()) {
+	p := <-h.pool
+	return p, func() { h.pool <- p }
 }
 
 // SupportsPath implements resolver.LSPHelper.
@@ -184,7 +291,7 @@ func (h *ResolverHelper) SupportsPath(relPath string) bool {
 	if h == nil || relPath == "" {
 		return false
 	}
-	if h.provider == nil && h.providerFn == nil {
+	if h.provider == nil && h.spawnFn == nil {
 		return false
 	}
 	ext := strings.ToLower(filepath.Ext(relPath))
@@ -214,17 +321,19 @@ func (h *ResolverHelper) Definition(relPath string, oneBasedLine int, name strin
 		return "", 0, false
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	provider, err := h.ensureProvider()
-	if err != nil || provider == nil {
-		if err != nil {
-			h.logger.Debug("resolve-time LSP: provider lookup failed",
-				zap.String("path", relPath), zap.Error(err))
-		}
+	if err := h.ensurePool(); err != nil {
+		h.logger.Debug("resolve-time LSP: pool spawn failed",
+			zap.String("path", relPath), zap.Error(err))
 		return "", 0, false
 	}
+	if h.pool == nil {
+		// Eager-construction path was given a nil provider — short-
+		// circuit instead of deadlocking on a never-fed channel.
+		return "", 0, false
+	}
+
+	provider, release := h.borrow()
+	defer release()
 
 	if err := provider.EnsureClient(h.workspaceRoot); err != nil {
 		h.logger.Debug("resolve-time LSP: ensure client failed",
@@ -299,19 +408,77 @@ func uriToAbsLocalPath(uri string) string {
 	return ""
 }
 
-// Close shuts down the underlying provider. Called by the indexer
-// at shutdown when the helper owns a dedicated provider; helpers
-// borrowing a router-managed provider can skip Close — the router
-// owns the lifecycle.
+// SpawnProviderForResolver creates a fresh, fully-initialised
+// *Provider against the given workspace root for use as one slot in a
+// ResolverHelper pool. Unlike Router.ForSpecWorkspace this does NOT
+// cache — every call spawns a new tsserver process. Use it as the
+// spawnFn argument to NewPooledResolverHelper. The returned provider
+// is owned by the helper; helper.Close shuts it down.
+func SpawnProviderForResolver(spec *ServerSpec, workspaceRoot string, logger *zap.Logger) (*Provider, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("nil spec")
+	}
+	p := NewProviderFromSpec(spec, logger)
+	if err := p.EnsureClient(workspaceRoot); err != nil {
+		_ = p.Close()
+		return nil, err
+	}
+	return p, nil
+}
+
+// ResolverPoolSizeFromEnv returns the pool size for the resolve-time
+// LSP hot path, honouring GORTEX_LSP_POOL_SIZE. Falls back to the
+// caller's defaultSize when the env var is unset or unparseable.
+// Clamped to [1, 32] to keep tsserver memory bounded.
 //
-// Safe to call when the lazy lookup has not yet fired — Close is a
+// Default is intentionally 1: at one provider per workspace the
+// caller's daemon-side wiring can route through Router.ForSpecWorkspace
+// (which idle-reaps unused providers via the LSP router's existing
+// reaper), keeping the multi-workspace memory footprint at "one
+// long-lived tsserver per workspace" — matching the pre-pool design.
+// Values >1 spawn N FRESH tsservers per workspace via
+// SpawnProviderForResolver, which have NO idle reaping; opt in only
+// when the tracked-workspace count is small (rough rule of thumb:
+// total_workspaces * pool_size * 150 MB < available RAM).
+func ResolverPoolSizeFromEnv(defaultSize int) int {
+	if defaultSize <= 0 {
+		defaultSize = 1
+	}
+	raw := os.Getenv("GORTEX_LSP_POOL_SIZE")
+	if raw == "" {
+		return defaultSize
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n <= 0 {
+		return defaultSize
+	}
+	if n > 32 {
+		n = 32
+	}
+	return n
+}
+
+// Close shuts down every provider in the pool. Called by the indexer
+// at shutdown when the helper owns its providers; helpers built
+// around router-managed providers (NewLazyResolverHelper /
+// NewPooledResolverHelper that close over Router.ForSpecWorkspace)
+// can still call Close — the underlying Provider.Close is idempotent
+// and routers re-spawn on next demand.
+//
+// Safe to call when the lazy spawn has not yet fired — Close is a
 // no-op in that case.
 func (h *ResolverHelper) Close() error {
 	if h == nil {
 		return nil
 	}
-	if h.provider == nil {
-		return nil
+	var firstErr error
+	for _, p := range h.providers {
+		if p == nil {
+			continue
+		}
+		if err := p.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	return h.provider.Close()
+	return firstErr
 }

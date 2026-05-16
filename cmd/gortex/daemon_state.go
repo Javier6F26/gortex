@@ -338,21 +338,17 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 			if lspRouterOut != nil {
 				routerRef := lspRouterOut
 				registryRef := resolverLSPRegistry
+				poolSize := lsp.ResolverPoolSizeFromEnv(1)
 				mi.SetOnRepoTracked(func(prefix, absPath string) {
 					tsSpec := lsp.SpecByName("typescript-language-server")
 					if tsSpec == nil || !routerRef.Available(tsSpec) {
 						return
 					}
+					if !repoLikelyHasTypeScriptIntent(absPath) {
+						return
+					}
 					absRootCapture := absPath
-					helper := lsp.NewLazyResolverHelper(
-						func() (*lsp.Provider, error) {
-							return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
-						},
-						absRootCapture,
-						tsSpec.Extensions,
-						0,
-						logger,
-					)
+					helper := buildResolverLSPHelper(routerRef, tsSpec, absRootCapture, poolSize, logger)
 					registryRef.Register(prefix, helper)
 				})
 			}
@@ -432,6 +428,65 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	}, nil
 }
 
+// repoLikelyHasTypeScriptIntent returns true when the repo root
+// carries one of the canonical TS / JS project markers: tsconfig.json,
+// jsconfig.json, or package.json. Used as a registration-time gate
+// so a Go-only repo with a stray .ts file (a Playwright config, a
+// vendored test fixture) doesn't trigger a full tsserver spawn the
+// first time the resolver hits that file. Repos that fail the check
+// fall through to AST-only resolution for TS/JS edges — degraded
+// gracefully rather than booting a per-workspace tsserver process
+// that scans the whole tree.
+//
+// Cheap: three stat calls per repo at warmup time. Misses are biased
+// safe — a workspace with TS code but none of these markers is rare,
+// and even then the cost is "no LSP precision" rather than incorrect
+// behaviour.
+func repoLikelyHasTypeScriptIntent(absRoot string) bool {
+	for _, marker := range []string{"tsconfig.json", "jsconfig.json", "package.json"} {
+		if _, err := os.Stat(filepath.Join(absRoot, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// buildResolverLSPHelper constructs the resolve-time LSP helper for a
+// workspace, choosing between the router-cached lazy path (poolSize
+// ≤ 1) and the fresh-spawn pool path (poolSize > 1).
+//
+// Why the branch matters: the router-cached path reuses Router's
+// existing idle reaper — workspaces that go quiet release their
+// tsserver. A naive multi-provider pool keeps every spawn alive for
+// the process lifetime; multiplied across 400+ tracked workspaces
+// that's hundreds of GB of resident tsserver state. Until we have
+// reaping in the pool itself, multi-provider mode is opt-in
+// (GORTEX_LSP_POOL_SIZE > 1) and the recommendation is to use it only
+// when the tracked-workspace count is small.
+func buildResolverLSPHelper(router *lsp.Router, spec *lsp.ServerSpec, absRoot string, poolSize int, logger *zap.Logger) *lsp.ResolverHelper {
+	if poolSize <= 1 {
+		return lsp.NewLazyResolverHelper(
+			func() (*lsp.Provider, error) {
+				return router.ForSpecWorkspace(spec, absRoot)
+			},
+			absRoot,
+			spec.Extensions,
+			0,
+			logger,
+		)
+	}
+	return lsp.NewPooledResolverHelper(
+		func() (*lsp.Provider, error) {
+			return lsp.SpawnProviderForResolver(spec, absRoot, logger)
+		},
+		absRoot,
+		spec.Extensions,
+		0,
+		poolSize,
+		logger,
+	)
+}
+
 // warmupDaemonState performs the per-repo TrackRepoCtx loop and brings
 // up the MultiWatcher. Split out from buildDaemonState so the daemon can
 // open its socket and accept connections before this work finishes —
@@ -465,25 +520,27 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	if state.resolverLSPRegistry != nil && state.lspRouter != nil {
 		tsSpec := lsp.SpecByName("typescript-language-server")
 		if tsSpec != nil && state.lspRouter.Available(tsSpec) {
+			poolSize := lsp.ResolverPoolSizeFromEnv(1)
+			registered, skipped := 0, 0
 			for _, entry := range repos {
 				absRoot, err := filepath.Abs(entry.Path)
 				if err != nil {
 					continue
 				}
+				if !repoLikelyHasTypeScriptIntent(absRoot) {
+					skipped++
+					continue
+				}
 				prefix := strings.TrimPrefix(config.ResolvePrefix(entry), "/")
-				routerRef := state.lspRouter
 				absRootCapture := absRoot
-				helper := lsp.NewLazyResolverHelper(
-					func() (*lsp.Provider, error) {
-						return routerRef.ForSpecWorkspace(tsSpec, absRootCapture)
-					},
-					absRootCapture,
-					tsSpec.Extensions,
-					0,
-					logger,
-				)
+				helper := buildResolverLSPHelper(state.lspRouter, tsSpec, absRootCapture, poolSize, logger)
 				state.resolverLSPRegistry.Register(prefix, helper)
+				registered++
 			}
+			logger.Info("daemon: resolve-time LSP helpers registered",
+				zap.Int("ts_repos", registered),
+				zap.Int("non_ts_repos_skipped", skipped),
+				zap.Int("pool_size", poolSize))
 		}
 	}
 	// Bounded worker pool — disk I/O dominates parsing for most repos,

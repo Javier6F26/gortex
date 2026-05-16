@@ -169,9 +169,9 @@ func TestDetectClonesAndEmitEdges(t *testing.T) {
 		FilePath: "c.go", StartLine: 1, Language: "go",
 	})
 
-	pairs, edges := detectClonesAndEmitEdges(g, 0)
-	assert.Equal(t, 1, pairs)
-	assert.Equal(t, 2, edges)
+	stats := detectClonesAndEmitEdges(g, 0)
+	assert.Equal(t, 1, stats.Pairs)
+	assert.Equal(t, 2, stats.Edges)
 
 	// Idempotent: a second run dedupes via graph.AddEdge.
 	detectClonesAndEmitEdges(g, 0)

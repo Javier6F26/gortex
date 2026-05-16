@@ -1,6 +1,8 @@
 package indexer
 
 import (
+	"strings"
+
 	"github.com/zzet/gortex/internal/clones"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
@@ -20,11 +22,24 @@ const cloneSigMetaKey = "clone_sig"
 // clones.MinTokens normalised tokens produce no signature and are
 // silently skipped — they are dominated by boilerplate and would only
 // add noise to the LSH buckets.
+//
+// Allocation note: the body slicing path computes one []int of line
+// offsets per file and one string per emitted body. The previous
+// implementation went through splitLines (which materialises the
+// whole source as N per-line Go strings) and a quadratic concat in
+// bodyText (each iteration grew the output via "out += ..."). Profile
+// showed bodyText + splitLinesUpTo at 3+ GiB per 30 s window — both
+// are now O(file_bytes) one-shot allocations.
 func applyCloneSignatures(src []byte, result *parser.ExtractionResult) {
 	if result == nil || len(result.Nodes) == 0 {
 		return
 	}
-	lines := splitLines(src)
+	// Compute newline offsets once per file rather than splitting the
+	// source into N Go strings. offsets[i] is the byte index where
+	// line i+1 (1-indexed) starts; the sentinel offsets[len(offsets)-1]
+	// is len(src) so the slice math doesn't need a special case for
+	// the last line.
+	offsets := lineOffsets(src)
 	for _, n := range result.Nodes {
 		if n == nil {
 			continue
@@ -32,7 +47,7 @@ func applyCloneSignatures(src []byte, result *parser.ExtractionResult) {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
 		}
-		body := bodyText(lines, n.StartLine, n.EndLine)
+		body := bodyTextFromOffsets(src, offsets, n.StartLine, n.EndLine)
 		if body == "" {
 			continue
 		}
@@ -47,9 +62,64 @@ func applyCloneSignatures(src []byte, result *parser.ExtractionResult) {
 	}
 }
 
+// lineOffsets returns the byte offsets of each line in src. For a file
+// with N lines the result has length N+1: the first entry is 0, each
+// subsequent entry is the byte index immediately after a '\n', and the
+// final sentinel is len(src) so callers can slice the last line as
+// src[offsets[N-1]:offsets[N]] without special-casing EOF.
+//
+// One allocation (the []int) instead of N (one string per line via
+// strings.Split). Lifetime is per-file: the caller drops the slice
+// when the file's worker batch finishes.
+func lineOffsets(src []byte) []int {
+	// Reserve a generous initial capacity to avoid repeated slice
+	// growth on typical source files (~ 200 lines). The slice grows
+	// from here for larger files; small files waste a bit of headroom
+	// that goes back to the GC immediately.
+	offsets := make([]int, 1, 256)
+	for i := 0; i < len(src); i++ {
+		if src[i] == '\n' {
+			offsets = append(offsets, i+1)
+		}
+	}
+	offsets = append(offsets, len(src))
+	return offsets
+}
+
+// bodyTextFromOffsets returns src[startLine..endLine] (both 1-indexed,
+// inclusive) as one Go string. The trailing newline of the last
+// included line is stripped so output matches the old line-join
+// semantics ("a\nb" not "a\nb\n"). Returns "" for degenerate or
+// out-of-bounds ranges, matching bodyText.
+func bodyTextFromOffsets(src []byte, offsets []int, startLine, endLine int) string {
+	if startLine <= 0 || endLine < startLine {
+		return ""
+	}
+	lo := startLine - 1
+	hi := endLine
+	// len(offsets) = lineCount + 1 (sentinel). lineCount = len(offsets) - 1.
+	lineCount := len(offsets) - 1
+	if lo >= lineCount {
+		return ""
+	}
+	if hi > lineCount {
+		hi = lineCount
+	}
+	startOff := offsets[lo]
+	endOff := offsets[hi]
+	// Strip the trailing '\n' that bounds the last included line so the
+	// output matches the line-join semantics callers and tests expect.
+	if endOff > startOff && endOff <= len(src) && endOff-1 >= 0 && src[endOff-1] == '\n' {
+		endOff--
+	}
+	return string(src[startOff:endOff])
+}
+
 // bodyText returns the source spanning [startLine, endLine] (both
-// 1-indexed, inclusive) joined by newlines. Returns "" when the range
-// is degenerate or out of bounds — the caller then skips the node.
+// 1-indexed, inclusive) joined by newlines. Kept as a legacy helper
+// for the unit-test surface; production callers go through
+// applyCloneSignatures → bodyTextFromOffsets, which avoids both the
+// whole-source string copy in splitLines and the O(N²) concat below.
 func bodyText(lines []string, startLine, endLine int) string {
 	if startLine <= 0 || endLine < startLine {
 		return ""
@@ -62,11 +132,37 @@ func bodyText(lines []string, startLine, endLine int) string {
 	if hi > len(lines) {
 		hi = len(lines)
 	}
-	out := lines[lo]
-	for i := lo + 1; i < hi; i++ {
-		out += "\n" + lines[i]
+	// Precompute the joined size so the strings.Builder grows once,
+	// turning the previous O(N²) "out += ..." into O(total_bytes).
+	total := 0
+	for i := lo; i < hi; i++ {
+		total += len(lines[i])
+		if i > lo {
+			total++ // separating '\n'
+		}
 	}
-	return out
+	var b strings.Builder
+	b.Grow(total)
+	for i := lo; i < hi; i++ {
+		if i > lo {
+			b.WriteByte('\n')
+		}
+		b.WriteString(lines[i])
+	}
+	return b.String()
+}
+
+// CloneDetectionStats summarises one detectClonesAndEmitEdges run for
+// the caller's logger. Exposed so the orchestrator can surface what the
+// per-bucket cap dropped — a high skippedBucketItems means the
+// workspace has a lot of templated boilerplate that LSH would have
+// over-fanned-out on.
+type CloneDetectionStats struct {
+	Items                 int // function/method nodes with a signature
+	Pairs                 int // detected clone pairs (after Jaccard filter)
+	Edges                 int // EdgeSimilarTo emitted (≈ 2·Pairs, modulo dedup)
+	SkippedBuckets        int // LSH buckets dropped for exceeding maxBucketSize
+	SkippedBucketItems    int // total items inside the dropped buckets
 }
 
 // detectClonesAndEmitEdges is the graph-wide half of clone detection.
@@ -75,17 +171,19 @@ func bodyText(lines []string, startLine, endLine int) string {
 // symmetric pair of EdgeSimilarTo edges for each detected clone pair.
 //
 // threshold is the Jaccard similarity cutoff; pass 0 to use the
-// clones package default. Returns the number of clone pairs found and
-// the number of edges emitted (two per pair, modulo graph dedup).
+// clones package default. Returns clone stats including the per-bucket
+// cap telemetry — the orchestrator logs that so a high skip count is
+// visible during warmup.
 //
 // The pass is a full recompute and is idempotent: graph.AddEdge dedupes
 // by edgeKey so re-emitting an unchanged pair is a no-op, and stale
 // edges cannot survive — when either endpoint's file is reindexed,
 // EvictFile removes that node's edges in both directions before this
 // pass re-runs.
-func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) (pairs int, edges int) {
+func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) CloneDetectionStats {
+	var stats CloneDetectionStats
 	if g == nil {
-		return 0, 0
+		return stats
 	}
 	var items []clones.Item
 	for _, n := range g.AllNodes() {
@@ -105,11 +203,15 @@ func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) (pairs int, edg
 		}
 		items = append(items, clones.Item{ID: n.ID, Sig: sig})
 	}
+	stats.Items = len(items)
 	if len(items) < 2 {
-		return 0, 0
+		return stats
 	}
 
-	detected := clones.DetectPairs(items, threshold)
+	detected, sb, sbi := clones.DetectPairsWithStats(items, threshold)
+	stats.SkippedBuckets = sb
+	stats.SkippedBucketItems = sbi
+	stats.Pairs = len(detected)
 	for _, p := range detected {
 		from := g.GetNode(p.A)
 		to := g.GetNode(p.B)
@@ -118,9 +220,9 @@ func detectClonesAndEmitEdges(g *graph.Graph, threshold float64) (pairs int, edg
 		}
 		emitSimilarEdge(g, from, to, p.Similarity)
 		emitSimilarEdge(g, to, from, p.Similarity)
-		edges += 2
+		stats.Edges += 2
 	}
-	return len(detected), edges
+	return stats
 }
 
 // emitSimilarEdge adds one directed EdgeSimilarTo edge carrying the

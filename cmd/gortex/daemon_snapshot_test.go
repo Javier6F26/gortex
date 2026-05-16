@@ -298,7 +298,8 @@ func TestStartPeriodicSnapshots_WritesOnTick(t *testing.T) {
 
 	// 30ms interval — fast enough to observe two or three ticks within
 	// a reasonable test budget, slow enough to survive scheduler jitter.
-	stop := startPeriodicSnapshots(g, nil, "t", 30*time.Millisecond, zap.NewNop())
+	// nil isReady → always-ready (test wants ticks to fire immediately).
+	stop := startPeriodicSnapshots(g, nil, "t", 30*time.Millisecond, nil, zap.NewNop())
 	t.Cleanup(stop)
 
 	require.Eventually(t, func() bool {

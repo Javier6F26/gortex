@@ -18,9 +18,20 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 )
+
+// scanBufPool holds reusable 64 KB scratch buffers for bufio.Scanner.
+// See internal/codegen/scanner.go for the same rationale — TODO
+// scanning runs on every indexed file.
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
 
 // Finding is one matched marker. Line is 1-based.
 type Finding struct {
@@ -68,8 +79,10 @@ func Scan(source []byte, tags []string, maxText int) []Finding {
 	}
 
 	var findings []Finding
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer scanBufPool.Put(bufPtr)
 	scanner := bufio.NewScanner(bytes.NewReader(source))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(*bufPtr, 1024*1024)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++

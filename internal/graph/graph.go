@@ -1,7 +1,6 @@
 package graph
 
 import (
-	"hash/fnv"
 	"sync"
 )
 
@@ -361,12 +360,18 @@ func (g *Graph) ResolveMutex() *sync.Mutex {
 	return &g.resolveMu
 }
 
-// shardIdx picks the shard index for an ID using FNV-1a. Stable across
-// restarts but that doesn't matter — the hash is recomputed every call.
+// shardIdx picks the shard index for an ID using FNV-1a. Inlined to
+// avoid the per-call hash-object allocation that the stdlib's
+// fnv.New32a() incurs — shardIdx is on the hottest path in the graph
+// (every AddNode / AddEdge / GetNode call), and the heap profile shows
+// 690 MB/30 s of fnv state allocations during cold-start indexing.
 func shardIdx(id string) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(id))
-	return int(h.Sum32() % numShards)
+	var h uint32 = 2166136261
+	for i := 0; i < len(id); i++ {
+		h ^= uint32(id[i])
+		h *= 16777619
+	}
+	return int(h % numShards)
 }
 
 // shardFor returns the shard that owns the given ID.
@@ -475,8 +480,14 @@ func (g *Graph) unlockAllRead() {
 func (g *Graph) AddNode(n *Node) {
 	s := g.shardFor(n.ID)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	g.addNodeLocked(s, n)
+	s.mu.Unlock()
+}
 
+// addNodeLocked is AddNode's body, expecting the caller to already hold
+// the shard's write lock. Used by AddBatch to amortise lock acquisition
+// across many node inserts targeting the same shard.
+func (g *Graph) addNodeLocked(s *shard, n *Node) {
 	prev, hadPrev := s.nodes[n.ID]
 	// Subtract the previous size/count before overwriting; the new
 	// node's contribution is re-added after the RepoPrefix-preservation
@@ -532,6 +543,75 @@ func (g *Graph) AddNode(n *Node) {
 		addNodeToBucket(s.byRepo, s.byRepoIdx, n.RepoPrefix, n.ID, n)
 	}
 	s.repoNodeAdd(n)
+}
+
+// AddBatch inserts a set of nodes and edges in shard-grouped passes,
+// acquiring each involved shard's write lock at most once across the
+// whole batch. Replaces the O(N + 2E) per-item lock acquisitions of
+// AddNode / AddEdge with O(distinct_shards) — typically ~16 instead of
+// ~450 per per-file worker batch. The contention profile measured 69
+// of 102 goroutines blocked on lockTwoWrite during cold-start parsing;
+// batching is the throughput fix.
+//
+// Observable semantics differ slightly from a sequence of AddNode /
+// AddEdge calls: for cross-shard edges, the From shard's outEdges
+// receives the edge before the To shard's inEdges does. Readers that
+// query one side only see the change atomically per shard; readers
+// that join both sides may briefly see an outgoing edge whose
+// reciprocal in-edge hasn't landed yet. The parser worker path that
+// drives this is followed by ResolveAll / global derivation passes
+// that take the resolver mutex graph-wide, so no concurrent reader is
+// expected to depend on cross-side atomicity during warmup.
+func (g *Graph) AddBatch(nodes []*Node, edges []*Edge) {
+	if len(nodes) == 0 && len(edges) == 0 {
+		return
+	}
+	var nodesByShard [numShards][]*Node
+	var outEdgesByShard [numShards][]*Edge
+	var inEdgesByShard [numShards][]*Edge
+	for _, n := range nodes {
+		if n == nil || n.ID == "" {
+			continue
+		}
+		i := shardIdx(n.ID)
+		nodesByShard[i] = append(nodesByShard[i], n)
+	}
+	for _, e := range edges {
+		if e == nil {
+			continue
+		}
+		outEdgesByShard[shardIdx(e.From)] = append(outEdgesByShard[shardIdx(e.From)], e)
+		inEdgesByShard[shardIdx(e.To)] = append(inEdgesByShard[shardIdx(e.To)], e)
+	}
+
+	for i := 0; i < numShards; i++ {
+		if len(nodesByShard[i]) == 0 && len(outEdgesByShard[i]) == 0 && len(inEdgesByShard[i]) == 0 {
+			continue
+		}
+		s := g.shards[i]
+		s.mu.Lock()
+		for _, n := range nodesByShard[i] {
+			g.addNodeLocked(s, n)
+		}
+		// Out-side writes own the "was this a new insert?" signal that
+		// drives the per-repo edge counter — the in-side write is
+		// bookkeeping only and never charges the counter (mirrors
+		// AddEdge's existing behaviour).
+		for _, e := range outEdgesByShard[i] {
+			inserted := addEdgeToBucket(s.outEdges, s.outEdgeKeys, s.outEdgeIdx, e.From, e)
+			if inserted {
+				var srcRepo string
+				if src, ok := s.nodes[e.From]; ok && src != nil {
+					srcRepo = src.RepoPrefix
+				}
+				s.repoEdgeAdd(srcRepo, e)
+			}
+		}
+		for _, e := range inEdgesByShard[i] {
+			addEdgeToBucket(s.inEdges, s.inEdgeKeys, s.inEdgeIdx, e.To, e)
+		}
+		s.mu.Unlock()
+	}
 }
 
 // AddEdge inserts or updates a directed edge in the graph. Locks both

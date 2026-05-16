@@ -19,9 +19,22 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/zzet/gortex/internal/graph"
 )
+
+// scanBufPool holds reusable 64 KB scratch buffers for bufio.Scanner.
+// Allocating a fresh buffer per call shows up as the top allocator in
+// the indexer's GC-bound warmup phase (Scan runs on every file across
+// every tracked repo). Pooling keeps the per-call footprint at the
+// pointer header.
+var scanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
 
 // Marker is the parsed result of scanning a file. Generated is true
 // iff a recognised marker was found in the header window.
@@ -84,8 +97,10 @@ func Scan(source []byte) Marker {
 	if len(source) == 0 {
 		return m
 	}
+	bufPtr := scanBufPool.Get().(*[]byte)
+	defer scanBufPool.Put(bufPtr)
 	scanner := bufio.NewScanner(bytes.NewReader(source))
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	scanner.Buffer(*bufPtr, 1024*1024)
 	lineNum := 0
 	for scanner.Scan() && lineNum < headerWindowLines {
 		lineNum++

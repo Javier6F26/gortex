@@ -229,11 +229,21 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// its heap to anything on localhost.
 	startPProfIfEnabled(logger)
 
-	// Periodic snapshots — 10 minute interval. On a crash we lose at
-	// most one interval's worth of work, which is acceptable given
-	// snapshot writes are atomic (tmp → rename) and can never leave a
-	// truncated file on disk.
-	stopSnapshotter := startPeriodicSnapshots(state.graph, state.multiIndexer, version, 10*time.Minute, logger)
+	// Periodic snapshots — 10 minute interval, gated on warmup-complete.
+	// On a crash we lose at most one interval's worth of work, which is
+	// acceptable given snapshot writes are atomic (tmp → rename) and can
+	// never leave a truncated file on disk.
+	//
+	// Gating: a snapshot walks the whole graph (AllNodes + AllEdges) and
+	// holds shard RLocks for the duration. While the daemon is still
+	// warming up the parser worker pool is concurrently writing those
+	// shards via AddBatch, so an unsynchronised snapshot tick steals
+	// graph-lock budget from the work that needs to finish first and
+	// pulls millions of node/edge pointers into a live allocation set
+	// the GC then has to clean up. Skipping snapshots until ready cleared
+	// a stall observed in profile #5 where saveSnapshotTo was the only
+	// runnable goroutine on a daemon mid-warmup.
+	stopSnapshotter := startPeriodicSnapshots(state.graph, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
 	defer stopSnapshotter()
 
 	// Periodic savings flush — 5 minute interval. Bounds on-crash data
@@ -338,7 +348,7 @@ func startReconcileJanitor(mi *indexer.MultiIndexer, interval time.Duration, log
 	return func() { close(stop) }
 }
 
-func startPeriodicSnapshots(g *graph.Graph, mi *indexer.MultiIndexer, version string, interval time.Duration, logger *zap.Logger) func() {
+func startPeriodicSnapshots(g *graph.Graph, mi *indexer.MultiIndexer, version string, interval time.Duration, isReady func() bool, logger *zap.Logger) func() {
 	stop := make(chan struct{})
 	go func() {
 		t := time.NewTicker(interval)
@@ -346,6 +356,15 @@ func startPeriodicSnapshots(g *graph.Graph, mi *indexer.MultiIndexer, version st
 		for {
 			select {
 			case <-t.C:
+				// Skip while the daemon is still warming up — the
+				// graph walk inside saveSnapshot would fight the
+				// parser worker pool for shard locks and pin a
+				// transient allocation set the GC then has to drain.
+				// The next tick after warmup completes catches up.
+				if isReady != nil && !isReady() {
+					logger.Debug("snapshot: skipped tick — daemon still warming up")
+					continue
+				}
 				saveSnapshot(g, collectSnapshotRepos(mi), collectSnapshotContracts(mi), version, logger)
 			case <-stop:
 				return
