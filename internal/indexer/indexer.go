@@ -30,6 +30,7 @@ import (
 	"github.com/zzet/gortex/internal/modules"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/reach"
 	"github.com/zzet/gortex/internal/resolver"
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic"
@@ -414,6 +415,19 @@ func (idx *Indexer) RunGlobalGraphPasses() {
 	if crossRepoEdges := resolver.DetectCrossRepoEdges(idx.graph); crossRepoEdges > 0 {
 		idx.logger.Info("cross-repo edges emitted (global)",
 			zap.Int("edges", crossRepoEdges),
+		)
+	}
+	// Reachability index — runs last in the global pass so every
+	// preceding pass's edges are baked into the precomputed depth-1/2/3
+	// sets. Mirrors the per-repo IndexCtx tail so daemon warm-starts
+	// have the same fast path multi-repo orchestrators get.
+	if reachStats := reach.BuildIndex(idx.graph); reachStats.NodesIndexed > 0 {
+		idx.logger.Info("reachability index built (global)",
+			zap.Int("nodes", reachStats.NodesIndexed),
+			zap.Int("d1_entries", reachStats.EntriesD1),
+			zap.Int("d2_entries", reachStats.EntriesD2),
+			zap.Int("d3_entries", reachStats.EntriesD3),
+			zap.Uint64("build", reachStats.Build),
 		)
 	}
 }
@@ -1512,6 +1526,21 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (*IndexResult, er
 			if grpcResolved := resolver.ResolveGRPCStubCalls(idx.graph); grpcResolved > 0 {
 				idx.logger.Info("gRPC stub calls resolved",
 					zap.Int("edges", grpcResolved),
+				)
+			}
+			// Reachability index — depth-1/2/3 incoming-reach sets on
+			// every impact seed, stamped into Node.Meta so AnalyzeImpact
+			// answers in O(seeds × reach) map lookups instead of a live
+			// BFS. Runs last so every preceding pass's edges (resolver,
+			// semantic enrichment, gRPC stubs) are folded in.
+			if reachStats := reach.BuildIndex(idx.graph); reachStats.NodesIndexed > 0 {
+				reporter.Report("reachability index", 0, 0)
+				idx.logger.Info("reachability index built",
+					zap.Int("nodes", reachStats.NodesIndexed),
+					zap.Int("d1_entries", reachStats.EntriesD1),
+					zap.Int("d2_entries", reachStats.EntriesD2),
+					zap.Int("d3_entries", reachStats.EntriesD3),
+					zap.Uint64("build", reachStats.Build),
 				)
 			}
 		}

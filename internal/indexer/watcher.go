@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/excludes"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/reach"
 )
 
 // ChangeKind describes the type of filesystem change.
@@ -57,6 +58,13 @@ type Watcher struct {
 	historyMu        sync.Mutex
 	pending          map[string]*time.Timer
 	mu               sync.Mutex
+	// patchMu serialises per-path patchGraph invocations so the
+	// post-patch reach rebuild (which scans every Node.Meta) cannot
+	// race with another debounced patch's IndexFile / EvictFile /
+	// detectClonesAndEmitEdges, all of which mutate the same Meta
+	// maps unprotected. Storm-mode uses patchGraphNoResolve (driven
+	// from a single goroutine in drainStorm) and bypasses this lock.
+	patchMu sync.Mutex
 	logger           *zap.Logger
 	done             chan struct{}
 	stopped          chan struct{}
@@ -535,6 +543,8 @@ func (w *Watcher) patchGraphNoResolve(path string, kind ChangeKind) {
 }
 
 func (w *Watcher) patchGraph(path string, kind ChangeKind) {
+	w.patchMu.Lock()
+	defer w.patchMu.Unlock()
 	start := time.Now()
 	var nodesAdded, nodesRemoved, edgesAdded, edgesRemoved int
 
@@ -616,6 +626,15 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		EdgesRemoved: edgesRemoved,
 		Timestamp:    time.Now(),
 		DurationMs:   time.Since(start).Milliseconds(),
+	}
+
+	// Rebuild the reachability index so AnalyzeImpact /
+	// explain_change_impact stay correct against the patched topology.
+	// Runs post-patch (final state, not a half-applied delta) and
+	// only when the patch actually changed nodes or edges — a no-op
+	// patch leaves the existing stamps valid.
+	if nodesAdded+nodesRemoved+edgesAdded+edgesRemoved > 0 {
+		reach.BuildIndex(w.indexer.graph)
 	}
 
 	w.historyMu.Lock()
