@@ -33,7 +33,9 @@ inclusion: always
 
 Gortex is running as an MCP server. It indexes this repository into an in-memory knowledge graph and exposes tools for code navigation, impact analysis, and refactoring.
 
-## Use Gortex tools instead of file reads whenever possible
+## MANDATORY: Use Gortex tools instead of file reads
+
+You **MUST** prefer Gortex graph queries over file reads on every task in this repo. These are not suggestions — the tools below replace the corresponding read/grep flows.
 
 ### Navigation and Reading
 

@@ -68,26 +68,19 @@ func Generate(engine *query.Engine, _ int) string {
 		fmt.Fprintf(&b, "- **Breakdown:** %s\n", strings.Join(parts, ", "))
 	}
 
-	b.WriteString("\n## Working with this codebase (Gortex tools available)\n\n")
-	b.WriteString("Gortex is running as an MCP server. Prefer graph queries over file reads:\n\n")
-	b.WriteString("| Instead of... | Use... |\n")
-	b.WriteString("|---|---|\n")
-	b.WriteString("| Reading a file to find a function | `get_symbol` or `get_editing_context` |\n")
-	b.WriteString("| Grep for all references | `find_usages` |\n")
-	b.WriteString("| Reading multiple files to trace a call | `get_call_chain` / `get_callers` |\n")
-	b.WriteString("| Guessing an import path | `find_import_path` |\n")
-	b.WriteString("| Assessing change scope | `explain_change_impact` |\n")
-	b.WriteString("| Scoping queries to a repo or project | Pass `repo`, `project`, or `ref` param to query tools |\n")
-	b.WriteString("| Managing repos at runtime | `track_repository` / `untrack_repository` |\n\n")
+	b.WriteString("\n## MANDATORY: Use Gortex MCP tools instead of Read/Grep/Glob\n\n")
+	b.WriteString("Gortex is running as an MCP server. You **MUST** prefer graph queries over file reads on every task in this repo — `search_symbols`, `find_usages`, `get_symbol_source`, `get_editing_context`, `smart_context`, `edit_symbol` / `edit_file` / `rename_symbol` / `batch_edit`. PreToolUse hooks deny `Read` / `Grep` / `Glob` against indexed source; the deny message names the right tool. The full per-tool catalog loads via `tools/list` — not restated here.\n\n")
 
-	b.WriteString("**Workflow:** Before editing any file, call `get_editing_context(\"<file>\")` first.\n")
-	b.WriteString("Before any refactor affecting a shared type or function, call `explain_change_impact`.\n\n")
-
-	b.WriteString("## Session start (Gortex)\n")
-	b.WriteString("1. Call `graph_stats` to confirm Gortex is running and get repo orientation.\n")
-	b.WriteString("2. If `total_nodes` is 0, call `index_repository` with path \".\".\n")
-	b.WriteString("3. In multi-repo mode, call `get_active_project` to check scope.\n")
-	b.WriteString("4. For every file you are about to edit, call `get_editing_context` first.\n")
+	b.WriteString("## Required workflow (every task on this repo)\n\n")
+	b.WriteString("These are not suggestions — run each step at the trigger.\n\n")
+	b.WriteString("1. **Always call** `graph_stats` first to confirm the daemon is up and orient (check `per_repo` in multi-repo mode).\n")
+	b.WriteString("2. If `total_nodes` is 0, **call** `index_repository` with `\".\"` before anything else.\n")
+	b.WriteString("3. In multi-repo mode, **call** `get_active_project` to check scope; use `set_active_project` to switch.\n")
+	b.WriteString("4. For every new task, **call** `smart_context` with the task description before reading any file.\n")
+	b.WriteString("5. Before editing a file, **call** `get_editing_context` on it first.\n")
+	b.WriteString("6. Before changing any function signature, **call** `verify_change` to catch broken callers and interface implementors (cross-repo).\n")
+	b.WriteString("7. For any refactor, **call** `get_edit_plan` then `batch_edit` to apply atomically.\n")
+	b.WriteString("8. After every edit, **call** `check_guards` then `get_test_targets`.\n")
 
 	return b.String()
 }
