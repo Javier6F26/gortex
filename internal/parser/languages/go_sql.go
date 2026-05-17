@@ -1,6 +1,7 @@
 package languages
 
 import (
+	"maps"
 	"strings"
 
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
@@ -49,27 +50,36 @@ var goSQLExecMethods = map[string]struct{}{
 // goSQLEvent is a deferred record of one detected SQL call site.
 // Mirrors the goObservabilityEvent / goFlagEvent shape so the
 // post-pass emit step can match the same patterns.
+//
+// query holds the raw string-literal SQL that produced the tables /
+// columns slices, used to anchor a KindString node under context="sql"
+// so the SQL extractor can be re-run from the string registry alone
+// (short-circuit, without re-parsing source).
 type goSQLEvent struct {
 	method  string
 	tables  []sql.TableRef
 	columns []sql.ColumnRef
+	query   string
 	line    int
 }
 
-// detectGoSQLCall returns the table refs extracted from a callm.expr
-// capture when the method name matches the SQL exec set and the
-// call's first argument is a string literal. ok=false on any other
-// shape — non-SQL methods, dynamic queries, no string argument.
-func detectGoSQLCall(callExpr *sitter.Node, method string, src []byte) ([]sql.TableRef, []sql.ColumnRef, bool) {
+// detectGoSQLCall returns the table refs and the raw query extracted
+// from a callm.expr capture when the method name matches the SQL exec
+// set and the call's first argument is a string literal. ok=false on
+// any other shape — non-SQL methods, dynamic queries, no string
+// argument. The query is returned alongside the refs so the caller
+// can seed a KindString context="sql" registry node for downstream
+// short-circuit rebuilds without re-parsing source.
+func detectGoSQLCall(callExpr *sitter.Node, method string, src []byte) ([]sql.TableRef, []sql.ColumnRef, string, bool) {
 	if callExpr == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	if _, hit := goSQLExecMethods[method]; !hit {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	args := callExpr.ChildByFieldName("arguments")
 	if args == nil {
-		return nil, nil, false
+		return nil, nil, "", false
 	}
 	for i := 0; i < int(args.NamedChildCount()); i++ {
 		c := args.NamedChild(i)
@@ -83,12 +93,12 @@ func detectGoSQLCall(callExpr *sitter.Node, method string, src []byte) ([]sql.Ta
 		query := strings.Trim(c.Content(src), "\"`")
 		refs := sql.ExtractTables(query)
 		if len(refs) == 0 {
-			return nil, nil, false
+			return nil, nil, "", false
 		}
 		cols := sql.ExtractColumns(query)
-		return refs, cols, true
+		return refs, cols, query, true
 	}
-	return nil, nil, false
+	return nil, nil, "", false
 }
 
 // goSQLDriverDialects maps Go SQL driver import paths to the
@@ -177,10 +187,75 @@ func emitGoSQLEvents(events []goSQLEvent, dialect string, callerLookup func(line
 		dialect = "generic"
 	}
 	seenNodes := make(map[string]struct{})
+	seenStringEdges := make(map[string]struct{})
 	for _, e := range events {
 		callerID := callerLookup(e.line)
 		if callerID == "" {
 			continue
+		}
+		// Anchor a KindString context="sql" registry node for this
+		// query alongside the table edges. The node ID hashes the raw
+		// query so two call sites issuing the same SQL share a single
+		// registry entry, and downstream sql_rebuild can walk these
+		// nodes to rederive KindTable / KindColumn without re-parsing
+		// source. Empty queries (defensive — should not happen since
+		// detectGoSQLCall returns ok=false) are skipped.
+		if e.query != "" {
+			tableIDs := make([]string, 0, len(e.tables))
+			ops := make([]string, 0, len(e.tables))
+			seenOp := make(map[string]struct{}, len(e.tables))
+			for _, ref := range e.tables {
+				tableIDs = append(tableIDs, sql.TableNodeID(dialect, ref.Schema, ref.Table))
+				if _, dup := seenOp[ref.Op]; !dup && ref.Op != "" {
+					seenOp[ref.Op] = struct{}{}
+					ops = append(ops, ref.Op)
+				}
+			}
+			nodeMeta := map[string]any{
+				"dialect": dialect,
+				"tables":  tableIDs,
+			}
+			if len(ops) > 0 {
+				nodeMeta["ops"] = ops
+			}
+			edgeMeta := map[string]any{
+				"dialect": dialect,
+			}
+			strID := goStringNodeID(stringCtxSQL, e.query)
+			if _, dup := seenNodes[strID]; !dup {
+				seenNodes[strID] = struct{}{}
+				meta := map[string]any{
+					"context": string(stringCtxSQL),
+					"value":   e.query,
+				}
+				maps.Copy(meta, nodeMeta)
+				result.Nodes = append(result.Nodes, &graph.Node{
+					ID:       strID,
+					Kind:     graph.KindString,
+					Name:     e.query,
+					FilePath: filePath, // first sighting; not authoritative
+					Language: "go",
+					Meta:     meta,
+				})
+			}
+			edgeKey := callerID + "->" + strID
+			if _, dup := seenStringEdges[edgeKey]; !dup {
+				seenStringEdges[edgeKey] = struct{}{}
+				em := map[string]any{
+					"context": string(stringCtxSQL),
+					"method":  e.method,
+				}
+				maps.Copy(em, edgeMeta)
+				result.Edges = append(result.Edges, &graph.Edge{
+					From:     callerID,
+					To:       strID,
+					Kind:     graph.EdgeEmits,
+					FilePath: filePath,
+					Line:     e.line,
+					Origin:   graph.OriginASTInferred,
+					Meta:     em,
+				})
+			}
 		}
 		for _, ref := range e.tables {
 			tableID := sql.TableNodeID(dialect, ref.Schema, ref.Table)

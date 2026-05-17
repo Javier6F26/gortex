@@ -94,6 +94,8 @@ func emitGoObservabilityEvents(events []goObservabilityEvent, callerLookup func(
 		return
 	}
 	seen := make(map[string]struct{}, len(events))
+	seenStringNodes := make(map[string]struct{}, len(events))
+	seenStringEdges := make(map[string]struct{}, len(events))
 	for _, e := range events {
 		callerID := callerLookup(e.line)
 		if callerID == "" {
@@ -125,6 +127,49 @@ func emitGoObservabilityEvents(events []goObservabilityEvent, callerLookup func(
 				"method": e.method,
 			},
 		})
+		// Anchor a KindString context="log_message" registry node so
+		// the log_events analyzer can aggregate emitters by raw
+		// literal (richer than the canonical KindEvent ID).
+		// Meta["level"] is the matched method's severity bucket
+		// (every entry in goLogMethods today resolves to "log", but
+		// the explicit field future-proofs a per-severity split —
+		// Debug→debug, Error→error). Meta["event"] back-links to the
+		// KindEvent ID so the registry view and the event view stay
+		// round-trippable.
+		strID := goStringNodeID(stringCtxLogMessage, e.name)
+		if _, dup := seenStringNodes[strID]; !dup {
+			seenStringNodes[strID] = struct{}{}
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID:       strID,
+				Kind:     graph.KindString,
+				Name:     e.name,
+				FilePath: filePath,
+				Language: "go",
+				Meta: map[string]any{
+					"context": string(stringCtxLogMessage),
+					"value":   e.name,
+					"level":   goLogMethods[e.method],
+					"event":   eventID,
+				},
+			})
+		}
+		edgeKey := callerID + "->" + strID
+		if _, dup := seenStringEdges[edgeKey]; !dup {
+			seenStringEdges[edgeKey] = struct{}{}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     callerID,
+				To:       strID,
+				Kind:     graph.EdgeEmits,
+				FilePath: filePath,
+				Line:     e.line,
+				Origin:   graph.OriginASTInferred,
+				Meta: map[string]any{
+					"context": string(stringCtxLogMessage),
+					"method":  e.method,
+					"level":   goLogMethods[e.method],
+				},
+			})
+		}
 	}
 }
 

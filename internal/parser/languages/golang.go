@@ -359,11 +359,12 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					line:   expr.StartLine + 1,
 				})
 			}
-			if tables, cols, ok := detectGoSQLCall(expr.Node, method, src); ok {
+			if tables, cols, query, ok := detectGoSQLCall(expr.Node, method, src); ok {
 				sqlEvents = append(sqlEvents, goSQLEvent{
 					method:  method,
 					tables:  tables,
 					columns: cols,
+					query:   query,
 					line:    expr.StartLine + 1,
 				})
 			}

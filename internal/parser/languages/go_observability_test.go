@@ -37,8 +37,30 @@ func Run() {
 	}
 
 	emits := fix.edgesByKind[graph.EdgeEmits]
-	if len(emits) != 2 {
-		t.Errorf("expected 2 EdgeEmits, got %d", len(emits))
+	// emitGoObservabilityEvents now mirrors every event into a
+	// KindString context="log_message" registry node, so each log
+	// call emits two edges: one to the KindEvent, one to the
+	// KindString. Scope the count by target kind to keep the
+	// original assertion's intent (one event-side edge per call).
+	eventEmits := 0
+	stringEmits := 0
+	for _, e := range emits {
+		n := fix.nodesByID[e.To]
+		if n == nil {
+			continue
+		}
+		switch n.Kind {
+		case graph.KindEvent:
+			eventEmits++
+		case graph.KindString:
+			stringEmits++
+		}
+	}
+	if eventEmits != 2 {
+		t.Errorf("expected 2 EdgeEmits to KindEvent, got %d", eventEmits)
+	}
+	if stringEmits != 2 {
+		t.Errorf("expected 2 EdgeEmits to KindString log_message, got %d", stringEmits)
 	}
 	for _, e := range emits {
 		if e.From != "pkg/foo.go::Run" {
@@ -105,8 +127,28 @@ func B() { slog.Info("user.signup") }
 	if len(events) != 1 {
 		t.Errorf("expected 1 deduped event node, got %d", len(events))
 	}
-	if got := len(fix.edgesByKind[graph.EdgeEmits]); got != 2 {
-		t.Errorf("expected 2 emit edges (one per call site), got %d", got)
+	// Each call site now emits two EdgeEmits — one to the KindEvent,
+	// one to the KindString log_message registry shadow. The dedup
+	// intent of the test is per-target-kind, so scope by kind.
+	eventEmits := 0
+	stringEmits := 0
+	for _, e := range fix.edgesByKind[graph.EdgeEmits] {
+		n := fix.nodesByID[e.To]
+		if n == nil {
+			continue
+		}
+		switch n.Kind {
+		case graph.KindEvent:
+			eventEmits++
+		case graph.KindString:
+			stringEmits++
+		}
+	}
+	if eventEmits != 2 {
+		t.Errorf("expected 2 emit edges to KindEvent (one per call site), got %d", eventEmits)
+	}
+	if stringEmits != 2 {
+		t.Errorf("expected 2 emit edges to KindString log_message (one per call site), got %d", stringEmits)
 	}
 }
 

@@ -855,6 +855,16 @@ func stripSQLArtifacts(result *parser.ExtractionResult) {
 			stripped[n.ID] = struct{}{}
 			continue
 		}
+		// SQL-context KindString registry nodes are the short-circuit
+		// input for the SQL extractor; gated off alongside the rest
+		// of the SQL domain so a disabled gate leaves no SQL-related
+		// residue in the graph.
+		if n.Kind == graph.KindString {
+			if ctx, _ := n.Meta["context"].(string); ctx == "sql" {
+				stripped[n.ID] = struct{}{}
+				continue
+			}
+		}
 		keptNodes = append(keptNodes, n)
 	}
 	result.Nodes = keptNodes
@@ -976,6 +986,16 @@ func stripObservabilityArtifacts(result *parser.ExtractionResult) {
 		if n.Kind == graph.KindEvent {
 			stripped[n.ID] = struct{}{}
 			continue
+		}
+		// log_message-context KindString registry nodes are the
+		// string-side shadow of log KindEvent emissions. They gate
+		// alongside the rest of the observability domain so a
+		// disabled gate leaves no log residue in the graph.
+		if n.Kind == graph.KindString {
+			if ctx, _ := n.Meta["context"].(string); ctx == "log_message" {
+				stripped[n.ID] = struct{}{}
+				continue
+			}
 		}
 		keptNodes = append(keptNodes, n)
 	}

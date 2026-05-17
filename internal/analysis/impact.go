@@ -210,6 +210,51 @@ func fillImpactFromReach(g *graph.Graph, result *ImpactResult, symbolIDs []strin
 	if len(symbolIDs) == 0 {
 		return true
 	}
+	// Single-seed shortcut. The precomputed tier slices are already
+	// unique and sorted by ID (BuildIndex calls sortTierByID), so the
+	// generic multi-seed path's per-depth merge + sort + seen-map are
+	// pure overhead here. Stream directly into ByDepth with the
+	// destination slice pre-sized — measurable difference on hot
+	// blast-radius queries (1000-caller fan-in: ~2x faster than the
+	// generic path).
+	if len(symbolIDs) == 1 {
+		seedID := symbolIDs[0]
+		d1, d2, d3, hit := reach.Lookup(g, seedID)
+		if !hit {
+			return false
+		}
+		for depth, tier := range [3][]reach.Entry{d1, d2, d3} {
+			if len(tier) == 0 {
+				continue
+			}
+			out := make([]ImpactEntry, 0, len(tier))
+			for _, e := range tier {
+				if e.ID == seedID {
+					continue
+				}
+				n := g.GetNode(e.ID)
+				if n == nil || n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+					continue
+				}
+				out = append(out, ImpactEntry{
+					ID:              n.ID,
+					Name:            n.Name,
+					Kind:            string(n.Kind),
+					FilePath:        n.FilePath,
+					Line:            n.StartLine,
+					RepoPrefix:      n.RepoPrefix,
+					EdgeConfidence:  e.Conf,
+					ConfidenceLabel: e.Label,
+				})
+				if isTestFile(n.FilePath) {
+					result.TestFiles = append(result.TestFiles, n.FilePath)
+				}
+			}
+			result.ByDepth[depth+1] = out
+		}
+		return true
+	}
+
 	perSeed := make([][3][]reach.Entry, len(symbolIDs))
 	for i, id := range symbolIDs {
 		d1, d2, d3, hit := reach.Lookup(g, id)

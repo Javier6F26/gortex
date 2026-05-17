@@ -3,6 +3,7 @@ package languages
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"maps"
 	"strings"
 
 	sitter "github.com/zzet/gortex/internal/parser/tsitter"
@@ -17,9 +18,11 @@ import (
 type goStringContext string
 
 const (
-	stringCtxMetric   goStringContext = "metric"
-	stringCtxErrorMsg goStringContext = "error_msg"
-	stringCtxRoute    goStringContext = "route"
+	stringCtxMetric     goStringContext = "metric"
+	stringCtxErrorMsg   goStringContext = "error_msg"
+	stringCtxRoute      goStringContext = "route"
+	stringCtxSQL        goStringContext = "sql"
+	stringCtxLogMessage goStringContext = "log_message"
 )
 
 // goMetricMethods is the whitelist of method names where the first
@@ -85,11 +88,20 @@ var goRouteMethods = map[string]bool{
 
 // goStringEvent is one deferred string-literal observation, queued
 // during AST traversal and flushed at end-of-file by emitGoStringEvents.
+//
+// nodeMeta / edgeMeta are optional; when non-empty their entries are
+// merged into the KindString node's Meta and the EdgeEmits' Meta
+// respectively. Used to carry domain hints — `dialect` and `tables`
+// for SQL strings, `level` for log messages — that downstream
+// analyzers (sql_rebuild, log_events, error_surface registry) read
+// without re-parsing the value.
 type goStringEvent struct {
-	context goStringContext
-	method  string
-	value   string
-	line    int
+	context  goStringContext
+	method   string
+	value    string
+	line     int
+	nodeMeta map[string]any
+	edgeMeta map[string]any
 }
 
 // detectGoMetric checks a method call against the metric whitelist;
@@ -200,18 +212,25 @@ func emitGoStringEvents(events []goStringEvent, callerLookup func(line int) stri
 		strID := goStringNodeID(e.context, e.value)
 		if _, ok := seen[strID]; !ok {
 			seen[strID] = struct{}{}
+			nodeMeta := map[string]any{
+				"context": string(e.context),
+				"value":   e.value,
+			}
+			maps.Copy(nodeMeta, e.nodeMeta)
 			result.Nodes = append(result.Nodes, &graph.Node{
 				ID:       strID,
 				Kind:     graph.KindString,
 				Name:     e.value,
 				FilePath: filePath, // first sighting; not authoritative
 				Language: "go",
-				Meta: map[string]any{
-					"context": string(e.context),
-					"value":   e.value,
-				},
+				Meta:     nodeMeta,
 			})
 		}
+		edgeMeta := map[string]any{
+			"context": string(e.context),
+			"method":  e.method,
+		}
+		maps.Copy(edgeMeta, e.edgeMeta)
 		result.Edges = append(result.Edges, &graph.Edge{
 			From:     callerID,
 			To:       strID,
@@ -219,10 +238,7 @@ func emitGoStringEvents(events []goStringEvent, callerLookup func(line int) stri
 			FilePath: filePath,
 			Line:     e.line,
 			Origin:   graph.OriginASTInferred,
-			Meta: map[string]any{
-				"context": string(e.context),
-				"method":  e.method,
-			},
+			Meta:     edgeMeta,
 		})
 	}
 }

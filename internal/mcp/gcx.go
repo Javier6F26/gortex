@@ -585,11 +585,35 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 	case "error_surface":
 		items, _ := payload.([]errorSurfaceItem)
 		enc := newGCX(&buf, "analyze.error_surface",
-			[]string{"symbol", "file", "line", "throws", "errors"},
+			[]string{"symbol", "file", "line", "throws", "errors", "error_msgs"},
 			"count", fmt.Sprintf("%d", len(items)),
 		)
 		for _, it := range items {
-			if err := enc.WriteRow(it.Symbol, it.File, it.Line, it.Throws, it.Errors); err != nil {
+			if err := enc.WriteRow(it.Symbol, it.File, it.Line, it.Throws, it.Errors, it.ErrorMsgs); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "log_events":
+		items, _ := payload.([]logEventItem)
+		enc := newGCX(&buf, "analyze.log_events",
+			[]string{"id", "value", "level", "emits", "emitters"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.ID, it.Value, it.Level, it.Emits, it.Emitters); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "sql_rebuild":
+		items, _ := payload.([]sqlRebuildItem)
+		enc := newGCX(&buf, "analyze.sql_rebuild",
+			[]string{"strings_visited", "tables_created", "columns_created", "query_edges", "reads_col_edges", "writes_col_edges", "emitters_linked", "skipped"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.StringsVisited, it.TablesCreated, it.ColumnsCreated, it.QueryEdges, it.ReadColEdges, it.WriteColEdges, it.EmittersLinked, it.Skipped); err != nil {
 				return nil, err
 			}
 		}
@@ -726,11 +750,31 @@ type pubsubItem struct {
 }
 
 type errorSurfaceItem struct {
-	Symbol string
-	File   string
-	Line   int
-	Throws int
-	Errors string
+	Symbol    string
+	File      string
+	Line      int
+	Throws    int
+	Errors    string
+	ErrorMsgs string
+}
+
+type logEventItem struct {
+	ID       string
+	Value    string
+	Level    string
+	Emits    int
+	Emitters string
+}
+
+type sqlRebuildItem struct {
+	StringsVisited int
+	TablesCreated  int
+	ColumnsCreated int
+	QueryEdges     int
+	ReadColEdges   int
+	WriteColEdges  int
+	EmittersLinked int
+	Skipped        int
 }
 
 type crossRepoItem struct {

@@ -119,7 +119,7 @@ func (s *Server) registerEnhancementTools() {
 	s.addTool(
 		mcp.NewTool("analyze",
 			mcp.WithDescription("Unified graph analysis. kind=dead_code: symbols with zero incoming edges. kind=hotspots: high-complexity symbols by fan-in/out. kind=cycles: circular dependency chains. kind=would_create_cycle: check if a new edge would form a cycle (requires from_id, to_id). kind=todos: list KindTodo nodes with optional tag/assignee/ticket/has_assignee filters. kind=blame: run `git blame` against the indexed repo and stamp meta.last_authored on every symbol-level node. kind=coverage: parse a Go cover.out profile (path via `profile` arg) and stamp meta.coverage_pct on every executable symbol. kind=stale_code: list symbols whose meta.last_authored is older than the threshold (requires blame-enriched graph). kind=ownership: group blame metadata by author email — symbol count, files touched, oldest/newest timestamps; supports path_prefix scoping (requires blame-enriched graph). kind=coverage_gaps: list symbols whose meta.coverage_pct falls in [min_pct, max_pct) — sorted ascending so the most undertested code surfaces first (requires coverage-enriched graph)."),
-			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases | cgo_users | wasm_users | orphan_tables | unreferenced_tables | coverage_summary | channel_ops | goroutine_spawns | field_writers | annotation_users | config_readers | event_emitters | pubsub | string_emitters | error_surface | external_calls | routes | models | components | k8s_resources | images | kustomize | cross_repo | dbt_models")),
+			mcp.WithString("kind", mcp.Required(), mcp.Description("Analysis kind: dead_code | hotspots | cycles | would_create_cycle | todos | blame | coverage | stale_code | ownership | coverage_gaps | stale_flags | releases | cgo_users | wasm_users | orphan_tables | unreferenced_tables | coverage_summary | channel_ops | goroutine_spawns | field_writers | annotation_users | config_readers | event_emitters | pubsub | string_emitters | error_surface | log_events | sql_rebuild | external_calls | routes | models | components | k8s_resources | images | kustomize | cross_repo | dbt_models")),
 			mcp.WithString("framework", mcp.Description("(dbt_models) Filter to one transformation framework — dbt or sqlmesh")),
 			mcp.WithString("materialized", mcp.Description("(dbt_models) Substring match on the model materialization — table, view, incremental, …")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-result text output")),
@@ -674,7 +674,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind, err := req.RequireString("kind")
 	if err != nil {
-		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo)"), nil
+		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo)"), nil
 	}
 	switch kind {
 	case "dead_code":
@@ -733,6 +733,10 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeStringEmitters(ctx, req)
 	case "error_surface":
 		return s.handleAnalyzeErrorSurface(ctx, req)
+	case "log_events":
+		return s.handleAnalyzeLogEvents(ctx, req)
+	case "sql_rebuild":
+		return s.handleAnalyzeSQLRebuild(ctx, req)
 	case "external_calls":
 		return s.handleAnalyzeExternalCalls(ctx, req)
 	case "routes":
@@ -752,7 +756,7 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 	case "dbt_models":
 		return s.handleAnalyzeDbtModels(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models)"), nil
 	}
 }
 
