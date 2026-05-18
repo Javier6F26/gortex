@@ -315,7 +315,17 @@ func EmitPluginBundle(spec PluginBundleSpec) ([]string, error) {
 		}
 	}
 
-	// 7. hooks/hooks.json + hooks-handlers/gortex-hook.sh
+	// 7. agents/<name> — sub-agent definitions, sorted for
+	// deterministic output. Mirrors the on-disk path Claude Code
+	// expects under .claude/agents/ when the plugin is installed.
+	for _, name := range sortedKeys(SubAgents) {
+		body := SubAgents[name]
+		if err := write(filepath.Join("agents", name), []byte(body), 0o644); err != nil {
+			return nil, err
+		}
+	}
+
+	// 8. hooks/hooks.json + hooks-handlers/gortex-hook.sh
 	if err := write("hooks/hooks.json", []byte(pluginHooksJSON), 0o644); err != nil {
 		return nil, err
 	}
@@ -373,6 +383,16 @@ func PluginSkillPaths() []string {
 	out := make([]string, 0, len(GlobalSkills))
 	for _, name := range sortedKeys(GlobalSkills) {
 		out = append(out, filepath.Join("skills", name, "SKILL.md"))
+	}
+	return out
+}
+
+// PluginSubAgentPaths returns the in-bundle paths of all sub-agent
+// files in stable order.
+func PluginSubAgentPaths() []string {
+	out := make([]string, 0, len(SubAgents))
+	for _, name := range sortedKeys(SubAgents) {
+		out = append(out, filepath.Join("agents", name))
 	}
 	return out
 }

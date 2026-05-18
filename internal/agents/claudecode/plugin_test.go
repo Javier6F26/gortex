@@ -38,6 +38,9 @@ func TestEmitPluginBundle_Layout(t *testing.T) {
 	for _, name := range sortedKeys(GlobalSkills) {
 		wantPaths = append(wantPaths, filepath.Join("skills", name, "SKILL.md"))
 	}
+	for _, name := range sortedKeys(SubAgents) {
+		wantPaths = append(wantPaths, filepath.Join("agents", name))
+	}
 	sort.Strings(wantPaths)
 
 	got := append([]string(nil), written...)
@@ -344,6 +347,31 @@ func TestPluginPathHelpers(t *testing.T) {
 	skills := PluginSkillPaths()
 	if len(skills) != len(GlobalSkills) {
 		t.Errorf("PluginSkillPaths count: got %d, want %d", len(skills), len(GlobalSkills))
+	}
+	subagents := PluginSubAgentPaths()
+	if len(subagents) != len(SubAgents) {
+		t.Errorf("PluginSubAgentPaths count: got %d, want %d", len(subagents), len(SubAgents))
+	}
+}
+
+func TestEmitPluginBundle_SubAgentBodiesMatchSource(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := EmitPluginBundle(PluginBundleSpec{
+		TargetDir: dir,
+		Version:   "0.18.2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, want := range SubAgents {
+		got, err := os.ReadFile(filepath.Join(dir, "agents", name))
+		if err != nil {
+			t.Errorf("read sub-agent %s: %v", name, err)
+			continue
+		}
+		if string(got) != want {
+			t.Errorf("sub-agent %s body drift: bytes do not match SubAgents[%q]", name, name)
+		}
 	}
 }
 

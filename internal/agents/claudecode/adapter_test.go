@@ -69,6 +69,14 @@ func TestClaudeCodeProjectModeCreatesCanonicalArtifacts(t *testing.T) {
 			t.Errorf("project mode unexpectedly wrote user-level skill %s", name)
 		}
 	}
+	for name := range SubAgents {
+		if _, err := os.Stat(filepath.Join(env.Home, ".claude", "agents", name)); err == nil {
+			t.Errorf("project mode unexpectedly wrote user-level sub-agent %s", name)
+		}
+		if _, err := os.Stat(filepath.Join(env.Root, ".claude", "agents", name)); err == nil {
+			t.Errorf("project mode unexpectedly wrote project-level sub-agent %s", name)
+		}
+	}
 
 	// CLAUDE.md must contain the communities-block markers (since
 	// the stub SkillsRouting routes through UpsertMarkedBlock).
@@ -124,6 +132,9 @@ func TestClaudeCodeGlobalModeWritesUserFiles(t *testing.T) {
 	}
 	for name := range GlobalSkills {
 		expected = append(expected, filepath.Join(env.Home, ".claude", "skills", name, "SKILL.md"))
+	}
+	for name := range SubAgents {
+		expected = append(expected, filepath.Join(env.Home, ".claude", "agents", name))
 	}
 	for _, p := range expected {
 		if _, err := os.Stat(p); err != nil {

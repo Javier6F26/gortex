@@ -64,6 +64,9 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 			for name := range SlashCommands {
 				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "commands", name), Action: agents.ActionWouldCreate})
 			}
+			for name := range SubAgents {
+				p.Files = append(p.Files, agents.FileAction{Path: filepath.Join(env.Home, ".claude", "agents", name), Action: agents.ActionWouldCreate})
+			}
 		}
 		return p, nil
 	}
@@ -257,6 +260,18 @@ func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents
 	}
 	res.Files = append(res.Files, cmdActions...)
 
+	// 5. ~/.claude/agents/gortex-*.md — sub-agent definitions. Claude
+	// Code auto-routes user prompts to sub-agents based on their
+	// frontmatter description, so shipping these gives gortex a
+	// delegation surface beyond skills + slash commands. The tool
+	// allowlist in each file pins sub-agents to gortex graph tools
+	// only — Bash / Grep / Glob are unavailable by construction.
+	agentActions, err := installGlobalSubAgents(w, env.Home, opts)
+	if err != nil {
+		logWarn(w, "could not install user-level sub-agents: %v", err)
+	}
+	res.Files = append(res.Files, agentActions...)
+
 	return nil
 }
 
@@ -316,6 +331,24 @@ func installGlobalSlashCommands(w io.Writer, home string, opts agents.ApplyOpts)
 	out := make([]agents.FileAction, 0, len(SlashCommands))
 	dir := filepath.Join(home, ".claude", "commands")
 	for name, content := range SlashCommands {
+		path := filepath.Join(dir, name)
+		action, err := agents.WriteIfNotExists(w, path, content, opts)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, action)
+	}
+	return out, nil
+}
+
+// installGlobalSubAgents writes ~/.claude/agents/gortex-*.md for each
+// entry in SubAgents. Skips existing files so user tweaks to the
+// frontmatter (description tuning, tool allowlist edits) survive
+// re-installs. Mirrors installGlobalSkills / installGlobalSlashCommands.
+func installGlobalSubAgents(w io.Writer, home string, opts agents.ApplyOpts) ([]agents.FileAction, error) {
+	out := make([]agents.FileAction, 0, len(SubAgents))
+	dir := filepath.Join(home, ".claude", "agents")
+	for name, content := range SubAgents {
 		path := filepath.Join(dir, name)
 		action, err := agents.WriteIfNotExists(w, path, content, opts)
 		if err != nil {
