@@ -35,6 +35,14 @@ var (
 	benchRecallIndex     string
 	benchRecallRankers   string
 	benchAllResponsesDay int
+
+	benchPerfRepos        string
+	benchPerfIncludeLinux bool
+	benchPerfImpactBudget float64
+	benchPerfSearchBudget float64
+	benchPerfStrict       bool
+	benchPerfQueries      string
+	benchPerfCacheDir     string
 )
 
 var benchCmd = &cobra.Command{
@@ -70,6 +78,7 @@ func init() {
 	benchCmd.AddCommand(benchTokensCmd)
 	benchCmd.AddCommand(benchEmbeddersCmd)
 	benchCmd.AddCommand(benchSWECmd)
+	benchCmd.AddCommand(benchPerfCmd)
 	benchCmd.AddCommand(benchAllCmd)
 
 	benchRecallCmd.Flags().StringVar(&benchRecallFixture, "fixture", "bench/fixtures/retrieval.yaml", "fixture YAML path")
@@ -78,6 +87,14 @@ func init() {
 
 	benchTokensCmd.Flags().StringVar(&benchTokensCases, "cases", "bench/wire-format/cases", "directory of fixture YAML files")
 	benchTokensCmd.Flags().StringVar(&benchTokensTokenizer, "tokenizer", "both", "cl100k | opus47 | both")
+
+	benchPerfCmd.Flags().StringVar(&benchPerfRepos, "repos", "gin,nestjs,react", "comma-separated repo set (preset slug, owner/repo, https URL, or local:/path)")
+	benchPerfCmd.Flags().BoolVar(&benchPerfIncludeLinux, "include-linux", false, "include the linux kernel preset (multi-GB clone; off by default)")
+	benchPerfCmd.Flags().Float64Var(&benchPerfImpactBudget, "budget-impact-p95-ms", 1.0, "fail when impact p95 exceeds this (0 disables)")
+	benchPerfCmd.Flags().Float64Var(&benchPerfSearchBudget, "budget-search-p95-ms", 50.0, "fail when search p95 exceeds this (0 disables)")
+	benchPerfCmd.Flags().BoolVar(&benchPerfStrict, "strict", false, "exit 1 when any repo trips a budget gate")
+	benchPerfCmd.Flags().StringVar(&benchPerfQueries, "queries", "bench/perf/queries.json", "JSON query set")
+	benchPerfCmd.Flags().StringVar(&benchPerfCacheDir, "perf-cache-dir", "", "override perf-bench clone cache (default $XDG_CACHE_HOME/gortex/bench)")
 
 	benchAllCmd.Flags().IntVar(&benchAllResponsesDay, "responses-per-day", 1000, "responses/day used to scale the USD-per-model card")
 	benchTokensCmd.Flags().IntVar(&benchAllResponsesDay, "responses-per-day", 1000, "responses/day used to scale the USD-per-model card (alias of the value used by `bench all`)")
@@ -218,6 +235,72 @@ var benchEmbeddersCmd = &cobra.Command{
 			args = append(args, "--out", outPath)
 		}
 		return runGortexSubcommand(args...)
+	},
+}
+
+// --- subcommand: perf -----------------------------------------------
+
+var benchPerfCmd = &cobra.Command{
+	Use:   "perf",
+	Short: "Reference-repo perf benchmark (cold-index + search p95 + impact p95/p99 + incremental + DB size)",
+	Long: `Runs the reference-repo perf table across gin / nestjs / react
+(+ optional linux). Validates the sub-millisecond impact-analysis
+claim as a budget gate; --strict turns gate violations into a
+non-zero exit so CI catches regressions.
+
+Default behavior:
+  - Clones each repo to ~/.cache/gortex/bench/<slug>/ on first run
+  - Reuses the clone on subsequent runs (rm -rf <slug> to refresh)
+  - Honors --out-dir (artifacts land at <dir>/perf.{md,json,csv})
+
+Examples:
+  gortex bench perf
+  gortex bench perf --include-linux --strict --out-dir bench/results
+  gortex bench perf --repos local:./my-repo --strict`,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		mdOut, err := outputPathFor("perf", "markdown")
+		if err != nil {
+			return err
+		}
+		jsonOut, err := outputPathFor("perf", "json")
+		if err != nil {
+			return err
+		}
+
+		args := []string{
+			"run", "./bench/perf",
+			"-repos", benchPerfRepos,
+			"-queries", benchPerfQueries,
+			"-budget-impact-p95-ms", fmt.Sprintf("%g", benchPerfImpactBudget),
+			"-budget-search-p95-ms", fmt.Sprintf("%g", benchPerfSearchBudget),
+		}
+		if benchPerfIncludeLinux {
+			args = append(args, "-include-linux")
+		}
+		if benchPerfStrict {
+			args = append(args, "-strict")
+		}
+		if benchPerfCacheDir != "" {
+			args = append(args, "-cache-dir", benchPerfCacheDir)
+		}
+		if mdOut != "" {
+			args = append(args, "-out", mdOut)
+		}
+		if jsonOut != "" {
+			args = append(args, "-json", jsonOut)
+		}
+		// Honour --format on the parent: when JSON is requested, emit
+		// the JSON on stdout and discard markdown (no --out target
+		// would otherwise route stdout to markdown).
+		if benchFormat == "json" && jsonOut == "" {
+			args = append(args, "-format", "json")
+		}
+
+		subproc := exec.Command("go", args...)
+		subproc.Stdin = os.Stdin
+		subproc.Stdout = cmd.OutOrStdout()
+		subproc.Stderr = cmd.ErrOrStderr()
+		return subproc.Run()
 	},
 }
 
