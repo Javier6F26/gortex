@@ -1,0 +1,37 @@
+{
+  "comment": "Per-query expected file paths (relative to the indexed repo root). A pipeline scores recall@k as |intersection(expected, returned_within_budget)| / |expected|. Curated against the gortex repo at the time the benchmark first ran; extending the bench means adding rows here. Multiple expected paths per query means any subset is a partial hit.",
+  "queries": {
+    "AddObservation": [
+      "internal/savings/store.go"
+    ],
+    "IsSymbolQuery": [
+      "internal/search/rerank/query_kind.go"
+    ],
+    "FileCoherenceSignal": [
+      "internal/search/rerank/signals_file_coherence.go"
+    ],
+    "alphaFuse": [
+      "internal/search/hybrid.go"
+    ],
+    "savings dashboard rendering": [
+      "cmd/gortex/savings.go",
+      "internal/savings/events.go"
+    ],
+    "rerank pipeline default signals": [
+      "internal/search/rerank/pipeline.go"
+    ],
+    "Indexer Index method": [
+      "internal/indexer/indexer.go"
+    ],
+    "graph build edges": [
+      "internal/graph/graph.go"
+    ],
+    "MCP server start": [
+      "internal/mcp/server.go",
+      "cmd/gortex/mcp.go"
+    ],
+    "token counting tiktoken": [
+      "internal/tokens/tokens.go"
+    ]
+  }
+}

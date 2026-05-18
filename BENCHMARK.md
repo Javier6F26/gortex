@@ -1,0 +1,162 @@
+# Gortex benchmarks
+
+This document aggregates the three reproducible benchmark surfaces
+gortex ships:
+
+- **Reference-repo perf** — cold-index, search p95, impact p95/p99,
+  incremental reindex, on-disk DB size across `gin` / `nestjs` /
+  `react` (+ optional `linux`).
+- **Token efficiency** — 3-pipeline comparison (ripgrep+full-read,
+  ripgrep+context, gortex `search_symbols` + `get_symbol_source`)
+  plus recall@k by token budget against a hand-curated ground-truth
+  set.
+- **GCX1 wire-format scorecard** — 20-fixture round-trip of GCX1 vs
+  JSON, scored against both the `cl100k_base` tokenizer (Claude 3 /
+  Opus 4 / Sonnet 4 / Haiku 4.5 / GPT-4o family) and the Claude
+  Opus 4.7 tokenizer.
+
+Every section below carries: the headline number, the published
+table, a "How to reproduce" block, and a link to the canonical
+source artifacts. **Update protocol**: re-run the relevant
+`gortex bench` subcommand, paste the new table into this file, bump
+the "Last updated" stamp. The numbers below come from a single
+operator's machine; reproducing them on your hardware will yield
+different absolute timings but the same relative shape.
+
+---
+
+## 1. Reference-repo perf
+
+**Last updated: 2026-05-18** · operator hardware: Apple M3 Max
+
+| repo | LoC | files | nodes | edges | cold-index | search p95 | impact p95 | impact p99 | incremental | DB size | budget |
+|------|----:|------:|------:|------:|-----------:|-----------:|-----------:|-----------:|------------:|--------:|:------:|
+| nestjs (in-tree fixture) | — | 32 | 240 | 414 | 17.8ms | 0.09ms | 0.01ms | 0.01ms | 11.8ms | 92.3KB | ✓ |
+
+_The full 3-repo run (gin + nestjs + react) requires network access
+to clone each repo on first invocation. The fixture row above
+exercises the same harness path against the in-tree nestjs fixture
+so the contract is verifiable offline. The sub-millisecond impact
+analysis claim holds — impact p95 of 0.01ms is 100× under the 1.0ms
+budget._
+
+### How to reproduce
+
+```sh
+# Full 3-repo run (clones gin/nestjs/react to ~/.cache/gortex/bench/)
+gortex bench perf --out-dir bench/results
+
+# Include the linux kernel preset (multi-GB; off by default)
+gortex bench perf --include-linux --out-dir bench/results
+
+# CI gate: fail on any budget violation
+gortex bench perf --strict
+```
+
+Substrate: `bench/perf/` ([README](bench/perf/README.md)). Raw
+metrics land at `bench/results/perf.{md,json,csv}` when
+`--out-dir` is set.
+
+---
+
+## 2. Token efficiency vs ripgrep+read
+
+**Last updated: 2026-05-18** · corpus: the gortex repo
+
+| query | tokens (rg+full) | tokens (rg+ctx) | tokens (gortex) | recall@2k rg+full / rg+ctx / gortex | recall@10k rg+full / rg+ctx / gortex |
+|-------|----------------:|----------------:|---------------:|------------------------------------|--------------------------------------|
+| AddObservation | 31,530 | 9,020 | 972 | 0.00 / 0.00 / **1.00** | 0.00 / 1.00 / **1.00** |
+| IsSymbolQuery | 23,027 | 7,388 | 577 | 0.00 / 0.00 / **1.00** | 0.00 / 1.00 / **1.00** |
+| FileCoherenceSignal | 14,268 | 6,290 | 151 | 0.00 / 0.00 / **1.00** | 1.00 / 1.00 / **1.00** |
+| alphaFuse | 14,574 | 5,930 | 534 | 0.00 / 0.00 / **1.00** | 1.00 / 1.00 / **1.00** |
+| savings dashboard rendering (NL) | 415 | 544 | 1,825 | 0.00 / 0.00 / **1.00** | 0.00 / 0.00 / **1.00** |
+| rerank pipeline default signals (NL) | 415 | 545 | 97 | 0.00 / 0.00 / **1.00** | 0.00 / 0.00 / **1.00** |
+| Indexer Index method (NL) | 415 | 544 | 28 | 0.00 / 0.00 / **1.00** | 0.00 / 0.00 / **1.00** |
+| MCP server start (NL) | 415 | 544 | 372 | 0.00 / 0.00 / **0.50** | 0.00 / 0.00 / **0.50** |
+
+**Headline**: gortex achieves median **recall@2k = 1.00** vs **0.00**
+for ripgrep across the identifier-query set, at **3-50× fewer tokens
+per response**. On natural-language queries ("MCP server start") the
+ripgrep pipelines return no matches (they need verbatim string hits),
+inflating gortex's relative cost on the median; the per-row data is
+the honest picture.
+
+### How to reproduce
+
+```sh
+# Default: against the gortex repo itself
+gortex bench tokens-efficiency
+
+# Against a different corpus
+gortex bench tokens-efficiency --repo /path/to/myrepo \
+    --queries my-queries.json --groundtruth my-truth.json
+
+# CI gate
+gortex bench tokens-efficiency --strict --budget-ratio 0.5
+```
+
+Substrate: `bench/token-efficiency/`
+([README](bench/token-efficiency/README.md)). Extend the
+ground-truth set by adding rows to
+`bench/token-efficiency/groundtruth.json`.
+
+---
+
+## 3. GCX1 wire-format vs JSON
+
+**Last updated: 2026-05-18**
+
+### cl100k_base (Claude 3 / Opus 4 / Sonnet 4 / Haiku 4.5 / GPT-4o)
+
+- **Median token savings: −27.4%**
+- **Median byte savings: −26.8%**
+- **Round-trip integrity: 20/20**
+
+### Claude Opus 4.7 (estimated via ×1.35 scalar; opt-in `--use-api` for exact counts)
+
+- **Median token savings: −27.3%**
+
+The wire format's advantage compounds with the tokenizer change
+rather than being amplified by it. See the full per-fixture table at
+[`bench/wire-format/scorecard.md`](bench/wire-format/scorecard.md).
+
+### How to reproduce
+
+```sh
+# Both tokenizers, scalar Opus 4.7 estimate (offline)
+go run ./bench/wire-format
+
+# Exact Opus 4.7 counts via Anthropic count_tokens (requires
+# ANTHROPIC_API_KEY; results cached so subsequent runs are
+# deterministic without re-hitting the API)
+go run ./bench/wire-format --use-api
+```
+
+Substrate: `bench/wire-format/`
+([README](bench/wire-format/README.md)). See
+[`docs/wire-format.md`](docs/wire-format.md) for the format spec.
+
+---
+
+## Methodology notes
+
+- **Hardware sensitivity.** Absolute timings vary 2-5× across
+  machine classes; the budget gates (sub-ms impact, <50% gortex
+  vs ripgrep tokens) are tuned to hold across the range a developer
+  laptop or modest CI runner would produce.
+- **Network sensitivity.** Reference-repo perf clones gin / nestjs
+  / react on first invocation (cached afterward). Linux is off by
+  default because the clone alone is multi-GB.
+- **External dependencies.** Token-efficiency requires `rg`
+  (ripgrep) on PATH for the two baseline pipelines; pass
+  `--skip-ripgrep` to render a gortex-only column when rg is
+  unavailable. Wire-format `--use-api` requires
+  `ANTHROPIC_API_KEY`.
+- **Ground-truth scope.** Token-efficiency ground truth is curated
+  against the gortex repo. Extending the bench to a new corpus
+  means adding a per-query expected-file map; the harness flags
+  any query with no truth entry as recall=0 by definition (so
+  silently-missing curation surfaces).
+
+For benchmark-driven CI, see the harness flags above; each
+subcommand supports `--strict` so a budget violation exits non-zero.

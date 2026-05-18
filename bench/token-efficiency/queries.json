@@ -1,0 +1,15 @@
+{
+  "comment": "Query set for the token-efficiency benchmark. Each query is paired with expected target file paths in groundtruth.json. Mix of identifier-shape and natural-language queries so the headline median reflects realistic agent traffic, not just one shape.",
+  "queries": [
+    "AddObservation",
+    "IsSymbolQuery",
+    "FileCoherenceSignal",
+    "alphaFuse",
+    "savings dashboard rendering",
+    "rerank pipeline default signals",
+    "Indexer Index method",
+    "graph build edges",
+    "MCP server start",
+    "token counting tiktoken"
+  ]
+}

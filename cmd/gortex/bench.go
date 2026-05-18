@@ -43,6 +43,14 @@ var (
 	benchPerfStrict       bool
 	benchPerfQueries      string
 	benchPerfCacheDir     string
+
+	benchTEffRepo        string
+	benchTEffQueries     string
+	benchTEffGroundtruth string
+	benchTEffTopK        int
+	benchTEffBudgetRatio float64
+	benchTEffStrict      bool
+	benchTEffSkipRipgrep bool
 )
 
 var benchCmd = &cobra.Command{
@@ -76,6 +84,7 @@ func init() {
 
 	benchCmd.AddCommand(benchRecallCmd)
 	benchCmd.AddCommand(benchTokensCmd)
+	benchCmd.AddCommand(benchTokensEfficiencyCmd)
 	benchCmd.AddCommand(benchEmbeddersCmd)
 	benchCmd.AddCommand(benchSWECmd)
 	benchCmd.AddCommand(benchPerfCmd)
@@ -87,6 +96,14 @@ func init() {
 
 	benchTokensCmd.Flags().StringVar(&benchTokensCases, "cases", "bench/wire-format/cases", "directory of fixture YAML files")
 	benchTokensCmd.Flags().StringVar(&benchTokensTokenizer, "tokenizer", "both", "cl100k | opus47 | both")
+
+	benchTokensEfficiencyCmd.Flags().StringVar(&benchTEffRepo, "repo", ".", "indexed corpus path")
+	benchTokensEfficiencyCmd.Flags().StringVar(&benchTEffQueries, "queries", "bench/token-efficiency/queries.json", "JSON query set")
+	benchTokensEfficiencyCmd.Flags().StringVar(&benchTEffGroundtruth, "groundtruth", "bench/token-efficiency/groundtruth.json", "JSON per-query expected file paths")
+	benchTokensEfficiencyCmd.Flags().IntVar(&benchTEffTopK, "top-k", 5, "gortex pipeline candidate count")
+	benchTokensEfficiencyCmd.Flags().Float64Var(&benchTEffBudgetRatio, "budget-ratio", 0.5, "fail when gortex median tokens > ratio × ripgrep+full-read median (0 disables)")
+	benchTokensEfficiencyCmd.Flags().BoolVar(&benchTEffStrict, "strict", false, "exit 1 when budget gate trips")
+	benchTokensEfficiencyCmd.Flags().BoolVar(&benchTEffSkipRipgrep, "skip-ripgrep", false, "skip ripgrep pipelines (gortex-only output)")
 
 	benchPerfCmd.Flags().StringVar(&benchPerfRepos, "repos", "gin,nestjs,react", "comma-separated repo set (preset slug, owner/repo, https URL, or local:/path)")
 	benchPerfCmd.Flags().BoolVar(&benchPerfIncludeLinux, "include-linux", false, "include the linux kernel preset (multi-GB clone; off by default)")
@@ -235,6 +252,69 @@ var benchEmbeddersCmd = &cobra.Command{
 			args = append(args, "--out", outPath)
 		}
 		return runGortexSubcommand(args...)
+	},
+}
+
+// --- subcommand: tokens-efficiency ----------------------------------
+
+var benchTokensEfficiencyCmd = &cobra.Command{
+	Use:   "tokens-efficiency",
+	Short: "Token efficiency vs ripgrep+read (3-pipeline comparison + recall@k by token budget)",
+	Long: `Runs the 3-pipeline token-economy comparison against an indexed
+corpus: ripgrep+full-read (naive baseline), ripgrep+context (±50
+lines per hit), and gortex (search_symbols + get_symbol_source).
+Reports median tokens per pipeline + recall@2k / recall@10k against
+a hand-curated ground-truth set.
+
+Default behavior:
+  - Indexes --repo (default ".") for the gortex pipeline
+  - Loads queries from bench/token-efficiency/queries.json
+  - Loads ground truth from bench/token-efficiency/groundtruth.json
+  - Honors --out-dir (artifacts at <dir>/tokens-efficiency.{md,json})
+
+Examples:
+  gortex bench tokens-efficiency
+  gortex bench tokens-efficiency --repo ~/code/myrepo --strict
+  gortex bench tokens-efficiency --skip-ripgrep --json`,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		mdOut, err := outputPathFor("tokens-efficiency", "markdown")
+		if err != nil {
+			return err
+		}
+		jsonOut, err := outputPathFor("tokens-efficiency", "json")
+		if err != nil {
+			return err
+		}
+
+		args := []string{
+			"run", "./bench/token-efficiency",
+			"-repo", benchTEffRepo,
+			"-queries", benchTEffQueries,
+			"-groundtruth", benchTEffGroundtruth,
+			"-top-k", fmt.Sprintf("%d", benchTEffTopK),
+			"-budget-ratio", fmt.Sprintf("%g", benchTEffBudgetRatio),
+		}
+		if benchTEffStrict {
+			args = append(args, "-strict")
+		}
+		if benchTEffSkipRipgrep {
+			args = append(args, "-skip-ripgrep")
+		}
+		if mdOut != "" {
+			args = append(args, "-out", mdOut)
+		}
+		if jsonOut != "" {
+			args = append(args, "-json", jsonOut)
+		}
+		if benchFormat == "json" && jsonOut == "" {
+			args = append(args, "-format", "json")
+		}
+
+		subproc := exec.Command("go", args...)
+		subproc.Stdin = os.Stdin
+		subproc.Stdout = cmd.OutOrStdout()
+		subproc.Stderr = cmd.ErrOrStderr()
+		return subproc.Run()
 	},
 }
 
