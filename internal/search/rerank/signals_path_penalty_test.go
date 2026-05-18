@@ -29,6 +29,18 @@ func TestClassifyPathPenalty_Tiers(t *testing.T) {
 		{"e2e dir", "e2e/login.ts", PathPenaltyTest},
 		{"fixtures dir", "fixtures/seed.go", PathPenaltyTest},
 		{"testdata dir", "internal/foo/testdata/x.json", PathPenaltyTest},
+		// Additional language coverage (16-lang rubric):
+		{"php PascalCase Test", "src/AuthTest.php", PathPenaltyTest},
+		{"php snake_case _test", "src/auth_test.php", PathPenaltyTest},
+		{"elixir _test.exs (mix)", "lib/auth_test.exs", PathPenaltyTest},
+		{"rust inline _test.rs", "src/auth_test.rs", PathPenaltyTest},
+		{"dart _test.dart", "lib/auth_test.dart", PathPenaltyTest},
+		{"c gtest test_ prefix", "tests/test_auth.c", PathPenaltyTest},
+		{"cpp gtest test_ prefix", "tests/test_auth.cpp", PathPenaltyTest},
+		{"cpp Catch2 _test suffix", "src/auth_test.cpp", PathPenaltyTest},
+		{"erlang eunit _test.erl", "src/auth_test.erl", PathPenaltyTest},
+		{"erlang eunit _tests.erl", "src/auth_tests.erl", PathPenaltyTest},
+		{"erlang Common Test _SUITE.erl", "test/auth_SUITE.erl", PathPenaltyTest},
 
 		// --- Compatibility tier (×0.5) ---
 		{"compat dir", "compat/old_api.go", PathPenaltyCompat},

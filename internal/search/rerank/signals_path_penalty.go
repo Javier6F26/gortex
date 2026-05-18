@@ -83,14 +83,49 @@ const (
 // Pre-compiled patterns. Built at package init so the rubric stays
 // allocation-free on the hot path.
 var (
-	// Test paths across 15+ language ecosystems. Matches any path
-	// segment that looks like a test file: Go's _test.go, Python's
-	// test_*.py / *_test.py, JS/TS *.spec.{js,ts,tsx,jsx} and
-	// *.test.{js,ts,tsx,jsx}, Ruby's *_spec.rb / *_test.rb, Rust's
-	// tests/ tree, Swift's *Tests.swift, Java/Kotlin's *Test.{java,kt}.
-	// Also any directory literally called test / tests / __tests__ /
-	// spec / specs / e2e / fixtures.
-	pathRETest = regexp.MustCompile(`(?i)(^|/)((__tests__|tests?|specs?|e2e|fixtures?|testdata)(/|$)|.*(_test|_spec)\.(go|py|rb)$|.*\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$|test_[^/]+\.py$|.*Tests?\.swift$|.*Test\.(java|kt|scala|cs)$)`)
+	// Test paths across 16 language ecosystems. Matches any path
+	// segment that looks like a test file across the conventions
+	// listed below. Also any directory literally called test / tests
+	// / __tests__ / spec / specs / e2e / fixtures / testdata covers
+	// every language uniformly.
+	//
+	// File-suffix conventions:
+	//   - Go        _test.go
+	//   - Python    test_*.py, *_test.py
+	//   - Ruby      *_test.rb, *_spec.rb
+	//   - JS / TS   *.test.{js,jsx,ts,tsx,mjs,cjs}, *.spec.{...}
+	//   - Swift     *Tests.swift, *Test.swift
+	//   - Java      *Test.java
+	//   - Kotlin    *Test.kt
+	//   - Scala     *Test.scala
+	//   - C#        *Test.cs
+	//   - PHP       *Test.php, *_test.php
+	//   - Elixir    *_test.exs
+	//   - Rust      *_test.rs (the tests/ tree falls under the dir
+	//               pattern; this catches inline test modules)
+	//   - Dart      *_test.dart
+	//   - C / C++   test_*.{c,cc,cpp,cxx}, *_test.{c,cc,cpp,cxx}
+	//   - Erlang    *_test.erl, *_tests.erl, *_SUITE.erl (Common Test)
+	pathRETest = regexp.MustCompile(`(?i)(^|/)(` +
+		// Generic test directories — lang-agnostic.
+		`(__tests__|tests?|specs?|e2e|fixtures?|testdata)(/|$)` +
+		// Go / Python / Ruby / Rust / Elixir / Dart (suffix _test or _spec).
+		`|.*(_test|_spec)\.(go|py|rb|rs|exs|dart)$` +
+		// JS / TS family.
+		`|.*\.(test|spec)\.(js|jsx|ts|tsx|mjs|cjs)$` +
+		// Python prefix style.
+		`|test_[^/]+\.py$` +
+		// Swift.
+		`|.*Tests?\.swift$` +
+		// JVM family + C#.
+		`|.*Test\.(java|kt|scala|cs)$` +
+		// PHP — both PascalCase and snake_case conventions.
+		`|.*Test\.php$|.*_test\.php$` +
+		// C / C++ — both gtest "test_X.cpp" and Catch2 "X_test.cpp".
+		`|test_[^/]+\.(c|cc|cpp|cxx)$|.*_test\.(c|cc|cpp|cxx)$` +
+		// Erlang — EUnit (_test, _tests) + Common Test (_SUITE).
+		`|.*_(tests?|SUITE)\.erl$` +
+		`)`)
 
 	// Compatibility / shim directories. The heuristic only fires on
 	// the directory itself — `compat.go` (single file) is not enough,
