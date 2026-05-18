@@ -165,7 +165,8 @@ gortex mcp --no-daemon --watch          # explicit embedded mode
 ```bash
 gortex server --index .                  # HTTP/JSON API on :4747 (/v1/*). UI lives at github.com/gortexhq/web.
 gortex savings [--verbose] [--json]      # Today / Last 7 days / All time bar-chart dashboard + $ avoided
-gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / tokens-efficiency / perf / embedders / swebench / all)
+gortex bench <sub>                       # user-facing benchmark suite (recall / tokens / tokens-efficiency / perf / daemon-latency / embedders / swebench / all)
+gortex audit [--badge|--format svg|json|text]  # A-F repo health grade + README-ready SVG shield
 gortex gain [--since 7d]                 # forward-looking per-call USD savings + optional history slice
 gortex version
 ```
@@ -329,7 +330,8 @@ gortex server [flags]         Start the HTTP/JSON API under /v1/* (--bind, --aut
 gortex daemon <subcommand>   start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
 gortex eval <subcommand>     Retrieval + token benchmarks — recall / embedders / swebench / tokens / baselines / quality (substrate; prefer `gortex bench` for the user-facing surface). `eval embedders list` shows the next-gen model registry; `eval quality {drift|confidence|replay|tune}` runs the measurement-infra analyzers; `eval baselines --against ripgrep,...` runs the NDCG@10 adapter harness
 gortex eval-server [flags]   HTTP server used by the swebench harness
-gortex bench <subcommand>    User-facing benchmark suite — recall / tokens / tokens-efficiency / embedders / perf / swebench / all; `bench tokens` adds a USD-per-model card (per-day + per-month projections); `bench perf` runs the reference-repo perf table with budget gates; `bench tokens-efficiency` runs the 3-pipeline vs-ripgrep comparison with recall@k; `--out-dir DIR` writes per-run artifacts
+gortex bench <subcommand>    User-facing benchmark suite — recall / tokens / tokens-efficiency / embedders / perf / daemon-latency / swebench / all; `bench tokens` adds a USD-per-model card (per-day + per-month projections); `bench perf` runs the reference-repo perf table with budget gates; `bench tokens-efficiency` runs the 3-pipeline vs-ripgrep comparison with recall@k; `bench daemon-latency` measures per-MCP-tool dispatch latency (p50/p95/p99); `--out-dir DIR` writes per-run artifacts
+gortex audit [flags]         A-F repo health grade derived from per-symbol complexity-axis health score; emits a shields.io-style SVG (default `.gortex/badge.svg`) for the README, JSON with per-grade counts + worst-5 symbols, or a one-line `<grade> · <score>` text form
 gortex gain [flags]          Forward-looking per-call USD savings projection from the latest bench tokens output; optional `--since DURATION` cumulative-history slice
 gortex context [flags]       Generate portable context briefing for a task
 gortex savings [flags]       Token-savings dashboard (Today / Last 7 days / All time bars + USD avoided; --verbose, --json, --model, --utc, --reset)
