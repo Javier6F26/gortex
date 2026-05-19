@@ -575,6 +575,101 @@ func (s *Server) handleAnalyzeConfigReaders(ctx context.Context, req mcp.CallToo
 	})
 }
 
+// isEnvConfigKey reports whether a config-key node represents an
+// environment variable (as opposed to a viper key, a K8s ConfigMap
+// entry, a struct-tag default, …).
+func isEnvConfigKey(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindConfigKey {
+		return false
+	}
+	if src, _ := n.Meta["source"].(string); src == "env" {
+		return true
+	}
+	return strings.HasPrefix(n.ID, "env::") || strings.HasPrefix(n.ID, "cfg::env::")
+}
+
+// handleAnalyzeEnvVarUsers walks EdgeReadsConfig edges restricted to
+// environment-variable config keys and groups by the variable. Each
+// row carries the env var name and the symbols that read it — the
+// answer to "which functions depend on DATABASE_URL?" and which env
+// vars are the most load-bearing.
+//
+// Filters: name (env var, case-insensitive), limit.
+func (s *Server) handleAnalyzeEnvVarUsers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
+	limit := 20
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type envRow struct {
+		ID      string   `json:"id"`
+		Name    string   `json:"name"`
+		Readers []string `json:"readers,omitempty"`
+		Reads   int      `json:"reads"`
+	}
+	byKey := map[string]*envRow{}
+	for _, e := range s.graph.AllEdges() {
+		if e.Kind != graph.EdgeReadsConfig {
+			continue
+		}
+		row, ok := byKey[e.To]
+		if !ok {
+			n := s.graph.GetNode(e.To)
+			if !isEnvConfigKey(n) {
+				continue
+			}
+			if nameFilter != "" && strings.ToLower(n.Name) != nameFilter {
+				continue
+			}
+			row = &envRow{ID: e.To, Name: n.Name}
+			byKey[e.To] = row
+		}
+		row.Reads++
+		row.Readers = appendUnique(row.Readers, e.From)
+	}
+
+	rows := make([]*envRow, 0, len(byKey))
+	for _, r := range byKey {
+		sort.Strings(r.Readers)
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Reads != rows[j].Reads {
+			return rows[i].Reads > rows[j].Reads
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	truncated := false
+	if nameFilter == "" && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	if s.isGCX(ctx, req) {
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("env_var_users", rows))
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%-3d %s\n", r.Reads, r.Name)
+		}
+		if truncated {
+			fmt.Fprintf(&b, "... truncated to %d\n", limit)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no env var users\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"env_vars":  rows,
+		"total":     len(rows),
+		"truncated": truncated,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // event_emitters — list event nodes with their emitters.
 // ---------------------------------------------------------------------------

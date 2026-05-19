@@ -196,3 +196,98 @@ func (s *Server) handleAnalyzeSQLRebuild(ctx context.Context, req mcp.CallToolRe
 		"skipped":              stats.Skipped,
 	})
 }
+
+// handleAnalyzeSQLCallSites lists the call sites that execute SQL,
+// grouped by the calling symbol, with the tables each one touches and
+// a read / write split. It re-derives the table / EdgeQueries layer
+// from the string registry first (idempotent), so the view works even
+// when sql_rebuild was not run explicitly.
+//
+// Filters: name (call-site symbol name, case-insensitive), limit.
+func (s *Server) handleAnalyzeSQLCallSites(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	gortexsql.RebuildTablesFromStringRegistry(s.graph)
+
+	args := req.GetArguments()
+	nameFilter := strings.ToLower(strings.TrimSpace(stringArg(args, "name")))
+	limit := 20
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type sqlCallSite struct {
+		Symbol  string   `json:"symbol"`
+		Name    string   `json:"name"`
+		File    string   `json:"file,omitempty"`
+		Tables  []string `json:"tables,omitempty"`
+		Queries int      `json:"queries"`
+		Reads   int      `json:"reads"`
+		Writes  int      `json:"writes"`
+	}
+	bySite := map[string]*sqlCallSite{}
+	for _, e := range s.graph.AllEdges() {
+		if e.Kind != graph.EdgeQueries {
+			continue
+		}
+		row, ok := bySite[e.From]
+		if !ok {
+			name, file := e.From, ""
+			if n := s.graph.GetNode(e.From); n != nil {
+				name, file = n.Name, n.FilePath
+			}
+			if nameFilter != "" && strings.ToLower(name) != nameFilter {
+				continue
+			}
+			row = &sqlCallSite{Symbol: e.From, Name: name, File: file}
+			bySite[e.From] = row
+		}
+		row.Queries++
+		if op, _ := e.Meta["op"].(string); op == "write" {
+			row.Writes++
+		} else {
+			row.Reads++
+		}
+		if t := s.graph.GetNode(e.To); t != nil && t.Name != "" {
+			row.Tables = appendUnique(row.Tables, t.Name)
+		}
+	}
+
+	rows := make([]*sqlCallSite, 0, len(bySite))
+	for _, r := range bySite {
+		sort.Strings(r.Tables)
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Queries != rows[j].Queries {
+			return rows[i].Queries > rows[j].Queries
+		}
+		return rows[i].Symbol < rows[j].Symbol
+	})
+	truncated := false
+	if nameFilter == "" && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	if s.isGCX(ctx, req) {
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("sql_call_sites", rows))
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		for _, r := range rows {
+			fmt.Fprintf(&b, "%-3d r%d/w%d %s [%s]\n",
+				r.Queries, r.Reads, r.Writes, r.Name, strings.Join(r.Tables, ","))
+		}
+		if truncated {
+			fmt.Fprintf(&b, "... truncated to %d\n", limit)
+		}
+		if len(rows) == 0 {
+			b.WriteString("no SQL call sites\n")
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"call_sites": rows,
+		"total":      len(rows),
+		"truncated":  truncated,
+	})
+}
