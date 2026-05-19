@@ -643,6 +643,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerGenerateSkillTool()
 	s.registerInspectionsTools()
 	s.registerChurnRateTool()
+	s.registerCouplingMetricsTool()
 	s.registerWikiTools()
 	s.registerResources()
 	s.registerPrompts()
