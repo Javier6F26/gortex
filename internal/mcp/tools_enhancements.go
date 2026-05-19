@@ -2006,6 +2006,24 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 
 	entries := analysis.FindHotspots(s.graph, s.getCommunities(), threshold)
 
+	// K17: optional novelty / directional reranking modes. Default
+	// "complexity" preserves the legacy ranking.
+	mode := strings.TrimSpace(stringArg(req.GetArguments(), "mode"))
+	if mode == "" {
+		mode = "complexity"
+	}
+	if mode != "complexity" {
+		windowDays := 30
+		if v, ok := req.GetArguments()["window_days"].(float64); ok && v > 0 {
+			windowDays = int(v)
+		}
+		direction := strings.TrimSpace(stringArg(req.GetArguments(), "direction"))
+		if direction == "" {
+			direction = "adds"
+		}
+		entries = rerankHotspots(entries, s.graph, mode, direction, windowDays)
+	}
+
 	// Truncate to top 20
 	totalCount := len(entries)
 	truncated := false
