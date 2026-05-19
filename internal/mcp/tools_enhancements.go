@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -3423,8 +3424,20 @@ func splitCSV(s string) []string {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleExportContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	// Delegate to smart_context to get the raw data.
-	smartResult, err := s.handleSmartContext(ctx, req)
+	// Delegate to smart_context for the raw data. Force `format: json`
+	// on the inner call so the unmarshal below always sees JSON,
+	// regardless of the caller's outer format preference or the
+	// server's client-aware default (which auto-selects GCX1 for
+	// known clients and would otherwise blow up our json.Unmarshal
+	// with "invalid character 'G'").
+	smartReq := req
+	args, _ := smartReq.Params.Arguments.(map[string]any)
+	innerArgs := make(map[string]any, len(args)+1)
+	maps.Copy(innerArgs, args)
+	innerArgs["format"] = "json"
+	smartReq.Params.Arguments = innerArgs
+
+	smartResult, err := s.handleSmartContext(ctx, smartReq)
 	if err != nil {
 		return nil, err
 	}
