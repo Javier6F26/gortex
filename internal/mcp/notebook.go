@@ -328,7 +328,7 @@ func notebookUnmarshal(s string) (notebookEntry, error) {
 			}
 		case "used_count":
 			var n uint64
-			fmt.Sscanf(v, "%d", &n)
+			_, _ = fmt.Sscanf(v, "%d", &n)
 			entry.UsedCount = n
 		}
 	}

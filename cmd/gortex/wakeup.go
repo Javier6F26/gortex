@@ -72,7 +72,7 @@ func runWakeup(cmd *cobra.Command, _ []string) error {
 	languages.RegisterAll(reg)
 	cfg := config.Config{}
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
-	fmt.Fprintf(cmd.ErrOrStderr(), "[wakeup] indexing %s...\n", abs)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[wakeup] indexing %s...\n", abs)
 	if _, err := idx.Index(abs); err != nil {
 		return fmt.Errorf("index: %w", err)
 	}
