@@ -4,8 +4,78 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/zzet/gortex/internal/parser/tsalias"
 )
+
+func TestTSFileCandidates(t *testing.T) {
+	got := tsFileCandidates("src/components/Widget.ts")
+	for _, want := range []string{
+		"src/components/Widget.ts",
+		"src/components/Widget.tsx",
+		"src/components/Widget/index.ts",
+		"src/components/Widget/index.tsx",
+	} {
+		require.Contains(t, got, want)
+	}
+	require.Nil(t, tsFileCandidates(""))
+}
+
+func TestParseTSReExports_StarNamedAndType(t *testing.T) {
+	src := `
+export * from './widgets';
+export { Button, Icon as Glyph } from './ui';
+export type { Theme } from './theme';
+export * as utils from './util';
+export const local = 1;
+`
+	res := parseTSReExports(src, "src/index.ts", nil, "")
+	// star + named + type re-exports — the `* as utils` namespace
+	// re-export and the local const are not forwarding statements.
+	require.Len(t, res, 3)
+
+	byFile := map[string]tsReExport{}
+	for _, re := range res {
+		byFile[re.fromFile] = re
+	}
+	require.True(t, byFile["src/widgets.ts"].star)
+	require.Equal(t, "Button", byFile["src/ui.ts"].names["Button"])
+	require.Equal(t, "Icon", byFile["src/ui.ts"].names["Glyph"]) // `as` rebind
+	require.Equal(t, "Theme", byFile["src/theme.ts"].names["Theme"])
+}
+
+func TestFollowReExportChain_BarrelToTerminal(t *testing.T) {
+	mi := &MultiIndexer{}
+	srcCache := map[string][]byte{
+		"src/index.ts":             []byte(`export { Widget } from './components';`),
+		"src/components/index.ts":  []byte(`export * from './Widget';`),
+		"src/components/Widget.ts": []byte(`export interface Widget { id: string }`),
+	}
+	reachable := mi.followReExportChain("src/index.ts", "Widget", srcCache)
+	require.True(t, reachable["src/components/Widget.ts"],
+		"re-export chain must reach the terminal module")
+}
+
+func TestFollowReExportChain_RenamedExport(t *testing.T) {
+	mi := &MultiIndexer{}
+	srcCache := map[string][]byte{
+		"pkg/index.ts": []byte(`export { Internal as Public } from './impl';`),
+		"pkg/impl.ts":  []byte(`export class Internal {}`),
+	}
+	reachable := mi.followReExportChain("pkg/index.ts", "Public", srcCache)
+	require.True(t, reachable["pkg/impl.ts"], "must follow the `as` rename to the source module")
+}
+
+func TestFollowReExportChain_CircularTerminates(t *testing.T) {
+	mi := &MultiIndexer{}
+	srcCache := map[string][]byte{
+		"a.ts": []byte(`export * from './b';`),
+		"b.ts": []byte(`export * from './a';`),
+	}
+	reachable := mi.followReExportChain("a.ts", "X", srcCache)
+	require.True(t, reachable["a.ts"])
+	require.True(t, reachable["b.ts"])
+}
 
 // TestResolveTSModulePath_AliasResolvesWithPrefix wires an alias map
 // (matching what tsalias.Load would produce for a Next.js-style

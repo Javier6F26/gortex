@@ -97,17 +97,7 @@ func (mi *MultiIndexer) resolveBareTypeViaImports(
 
 	imports, ok := importCache[srcFile]
 	if !ok {
-		src, hit := srcCache[srcFile]
-		if !hit {
-			data, found := mi.readFileFromAnyRepo(srcFile)
-			if !found {
-				srcCache[srcFile] = nil
-				importCache[srcFile] = nil
-				return ""
-			}
-			src = data
-			srcCache[srcFile] = src
-		}
+		src := mi.cachedSource(srcFile, srcCache)
 		if len(src) == 0 {
 			importCache[srcFile] = nil
 			return ""
@@ -123,8 +113,12 @@ func (mi *MultiIndexer) resolveBareTypeViaImports(
 	if !ok {
 		return ""
 	}
+	// Follow barrel re-export chains: a symbol imported from an
+	// index.ts that only `export { X } from './x'`s is defined in the
+	// terminal module, not the barrel itself.
+	reachable := mi.followReExportChain(wantFile, name, srcCache)
 	for _, n := range typed {
-		if n.FilePath == wantFile {
+		if reachable[n.FilePath] {
 			return n.ID
 		}
 	}
@@ -362,6 +356,173 @@ func resolveTSModulePath(modulePath, srcDir string, aliasMap *tsalias.Map, repoP
 		return full
 	}
 	return full + ".ts"
+}
+
+// maxReExportDepth bounds barrel re-export chain following so a
+// pathological circular `export * from` set can't loop forever.
+const maxReExportDepth = 8
+
+// tsReExportRe matches `export ... from '...'` re-export statements:
+//
+//	export * from './x'
+//	export * as ns from './x'   (namespace — ignored for name-following)
+//	export { A, B as C } from './x'
+//	export type { T } from './x'
+var tsReExportRe = regexp.MustCompile(
+	`export\s+(?:type\s+)?(?:(\*(?:\s+as\s+\w+)?)|\{([^}]*)\})\s*from\s*['"]([^'"]+)['"]`)
+
+// tsReExport is one parsed `export ... from` re-export statement.
+type tsReExport struct {
+	star bool
+	// names maps an exported name to its name in the source module
+	// (they differ under `export { Real as Public }`).
+	names    map[string]string
+	fromFile string
+}
+
+// tsFileCandidates expands a resolved TS/JS module path into the
+// concrete files it might be on disk. resolveTSModulePath always
+// guesses `.ts`, but the real file is often `.tsx`, or the specifier
+// pointed at a directory whose entry point is `index.ts` (the barrel).
+func tsFileCandidates(resolved string) []string {
+	if resolved == "" {
+		return nil
+	}
+	stem := resolved
+	switch path.Ext(resolved) {
+	case ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs":
+		stem = strings.TrimSuffix(resolved, path.Ext(resolved))
+	}
+	out := []string{resolved}
+	for _, ext := range []string{".ts", ".tsx", ".js", ".jsx", ".d.ts", ".mts", ".cts"} {
+		out = append(out, stem+ext, stem+"/index"+ext)
+	}
+	seen := make(map[string]bool, len(out))
+	uniq := out[:0]
+	for _, c := range out {
+		if !seen[c] {
+			seen[c] = true
+			uniq = append(uniq, c)
+		}
+	}
+	return uniq
+}
+
+// parseTSReExports extracts barrel re-export statements from a TS/JS
+// source file, resolving each `from` specifier the same way
+// parseTSImports resolves an import.
+func parseTSReExports(src, srcFile string, aliasMap *tsalias.Map, repoPrefix string) []tsReExport {
+	matches := tsReExportRe.FindAllStringSubmatch(src, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	srcDir := path.Dir(srcFile)
+	var out []tsReExport
+	for _, m := range matches {
+		resolved := resolveTSModulePath(m[3], srcDir, aliasMap, repoPrefix)
+		if resolved == "" {
+			continue
+		}
+		re := tsReExport{fromFile: resolved}
+		if strings.TrimSpace(m[1]) == "*" {
+			re.star = true
+			out = append(out, re)
+			continue
+		}
+		if m[1] != "" {
+			// `export * as ns` — a namespace re-export; it does not
+			// transparently forward individual names.
+			continue
+		}
+		re.names = map[string]string{}
+		for _, raw := range strings.Split(m[2], ",") {
+			entry := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(raw), "type "))
+			if entry == "" {
+				continue
+			}
+			orig, exported := entry, entry
+			if i := strings.Index(entry, " as "); i >= 0 {
+				orig = strings.TrimSpace(entry[:i])
+				exported = strings.TrimSpace(entry[i+4:])
+			}
+			if orig != "" && exported != "" {
+				re.names[exported] = orig
+			}
+		}
+		if len(re.names) > 0 {
+			out = append(out, re)
+		}
+	}
+	return out
+}
+
+// cachedSource reads file's bytes through the per-pass cache, using
+// readFileFromAnyRepo for misses. A nil cache entry records "absent".
+func (mi *MultiIndexer) cachedSource(file string, srcCache map[string][]byte) []byte {
+	if src, hit := srcCache[file]; hit {
+		return src
+	}
+	data, found := mi.readFileFromAnyRepo(file)
+	if !found {
+		srcCache[file] = nil
+		return nil
+	}
+	srcCache[file] = data
+	return data
+}
+
+// followReExportChain returns the set of concrete file paths reachable
+// from startFile by following barrel re-exports of `name` — startFile
+// itself plus every module a transparent `export *` / `export { name }`
+// chain forwards through, up to maxReExportDepth. A symbol's real
+// definition is in one of the returned files, so a caller matching an
+// import target against graph nodes resolves through the barrel.
+func (mi *MultiIndexer) followReExportChain(startFile, name string, srcCache map[string][]byte) map[string]bool {
+	reachable := map[string]bool{}
+	for _, c := range tsFileCandidates(startFile) {
+		reachable[c] = true
+	}
+	type step struct{ file, name string }
+	seen := map[step]bool{{startFile, name}: true}
+	queue := []step{{startFile, name}}
+	for depth := 0; depth < maxReExportDepth && len(queue) > 0; depth++ {
+		var next []step
+		for _, s := range queue {
+			var src []byte
+			var srcPath string
+			for _, c := range tsFileCandidates(s.file) {
+				if data := mi.cachedSource(c, srcCache); len(data) > 0 {
+					src, srcPath = data, c
+					break
+				}
+			}
+			if len(src) == 0 {
+				continue
+			}
+			aliasMap, aliasPrefix := mi.tsAliasMapFor(srcPath)
+			for _, re := range parseTSReExports(string(src), srcPath, aliasMap, aliasPrefix) {
+				var want string
+				if re.star {
+					want = s.name
+				} else if orig, ok := re.names[s.name]; ok {
+					want = orig
+				}
+				if want == "" {
+					continue
+				}
+				for _, c := range tsFileCandidates(re.fromFile) {
+					reachable[c] = true
+				}
+				st := step{file: re.fromFile, name: want}
+				if !seen[st] {
+					seen[st] = true
+					next = append(next, st)
+				}
+			}
+		}
+		queue = next
+	}
+	return reachable
 }
 
 // isImportResolvableLang reports whether the contract source file
