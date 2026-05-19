@@ -201,6 +201,14 @@ type Server struct {
 	// overlay_delete / overlay_drop / compare_with_overlay) so a
 	// second SetOverlayManager call doesn't double-register them.
 	registerOverlayToolsOnce sync.Once
+
+	// lazy owns the deferred-tool catalog backing the tools_search
+	// discovery tool. Tools whose names are not in hotEagerTools land
+	// here instead of in the live MCP server; tools_search returns
+	// their schemas on demand and promotes them via lazy.promote (a
+	// closure wired in attachLazyRegistry). Nil only when the registry
+	// is explicitly disabled — see lazyEnabledFromEnv.
+	lazy *lazyToolRegistry
 }
 
 // sessionFor returns the session-scoped state for the current request.
@@ -579,7 +587,13 @@ type MultiRepoOptions struct {
 func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
 	s := &Server{
 		mcpServer: server.NewMCPServer("gortex", Version,
-			server.WithToolCapabilities(false),
+			// listChanged=true: tools_search promotes deferred tools
+			// into the live MCP server on demand, which fires
+			// notifications/tools/list_changed. Lazy-aware clients
+			// re-pull tools/list when they see the notification;
+			// clients that don't subscribe still get the schemas via
+			// the discovery tool's response payload. See lazy_tools.go.
+			server.WithToolCapabilities(true),
 			// subscribe=true lets clients call `resources/subscribe`
 			// for bootstrap URIs and receive
 			// `notifications/resources/updated` after each graph
@@ -630,6 +644,15 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.readinessBroadcaster = newReadinessBroadcaster(s.mcpServer, logger)
 	s.healthBroadcaster = newHealthBroadcaster(s.mcpServer, nil, logger)
 	s.staleRefsBroadcaster = newStaleRefsBroadcaster(s.mcpServer, s.sessions, s.session, logger)
+
+	// Lazy-tool registry MUST be installed before any addTool calls so
+	// non-hot tools land in the deferred catalog instead of the live
+	// MCP server. attachLazyRegistry wires the promotion closure that
+	// tools_search uses to migrate a tool from deferred → live on
+	// first use. See lazy_tools.go for the hot-set selection rules.
+	s.lazy = newLazyToolRegistry(lazyEnabledFromEnv())
+	s.attachLazyRegistry()
+	s.registerToolsSearch()
 
 	s.registerCoreTools()
 	s.registerCodingTools()
@@ -1285,8 +1308,36 @@ func (s *Server) MCPServer() *server.MCPServer {
 // path (Handler.CallToolStrict) get identical overlay semantics — the
 // latter bypasses mcp-go's Hooks, so handler-level wrapping is the
 // only place that covers both transports.
+//
+// Lazy-tool routing (N50): when the registry is enabled and the tool
+// name is not in hotEagerTools, the (tool, handler) pair is stashed
+// in s.lazy instead of registered with the live MCP server. The
+// tools_search discovery tool returns the schema on demand and calls
+// lazy.Promote(name), which lands the tool in mcpServer via the
+// closure wired in attachLazyRegistry. Net effect: the initial
+// tools/list payload drops from ~88 tools to ~25, reducing per-
+// session context burn for token-economical clients while keeping
+// the full surface reachable through a one-call discovery hop.
 func (s *Server) addTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	if s.lazy != nil && s.lazy.IsDeferred(tool.Name) {
+		s.lazy.Register(tool, handler)
+		return
+	}
 	s.mcpServer.AddTool(tool, s.wrapToolHandler(handler))
+}
+
+// attachLazyRegistry wires the deferred catalog to the live MCP
+// server so a tools_search-driven promotion lands the tool in
+// mcpServer (which then fires notifications/tools/list_changed for
+// subscribed clients). Safe to call multiple times; the latest
+// closure wins.
+func (s *Server) attachLazyRegistry() {
+	if s.lazy == nil {
+		return
+	}
+	s.lazy.promote = func(dt *deferredTool) {
+		s.mcpServer.AddTool(dt.tool, s.wrapToolHandler(dt.handler))
+	}
 }
 
 // SetContractRegistry sets an explicit contract registry override for the MCP
