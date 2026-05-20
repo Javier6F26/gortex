@@ -2115,9 +2115,11 @@ func (idx *Indexer) buildSearchIndex() {
 }
 
 // dirIgnoreFiles are the per-directory ignore-file basenames honored by
-// the index walk, sibling to .gitignore. Patterns in each file are
-// scoped to the directory that contains it.
-var dirIgnoreFiles = []string{".gortexignore"}
+// the index walk, siblings to .gitignore: Gortex's own .gortexignore
+// plus ripgrep's .ignore and .rgignore. Patterns in each file are
+// scoped to the directory that contains it; later filenames win, so a
+// directory's .rgignore overrides its .ignore on a conflicting path.
+var dirIgnoreFiles = []string{".gortexignore", ".ignore", ".rgignore"}
 
 // shouldExclude reports whether a path is excluded by the effective
 // ignore list. The flat matcher is built lazily from idx.config.Exclude,

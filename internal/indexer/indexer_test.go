@@ -114,6 +114,31 @@ func TestIndex_ExcludePatterns(t *testing.T) {
 	assert.Empty(t, nodes)
 }
 
+func TestIndex_RipgrepIgnoreFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "main.go"), "package main\n\nfunc Kept() {}\n")
+	writeFile(t, filepath.Join(dir, "gen.go"), "package main\n\nfunc FromGen() {}\n")
+	writeFile(t, filepath.Join(dir, ".ignore"), "gen.go\n")
+
+	// A nested directory carries its own ripgrep ignore file; it must
+	// scope to that subtree only.
+	sub := filepath.Join(dir, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	writeFile(t, filepath.Join(sub, "keep.go"), "package sub\n\nfunc SubKept() {}\n")
+	writeFile(t, filepath.Join(sub, "drop.go"), "package sub\n\nfunc SubDropped() {}\n")
+	writeFile(t, filepath.Join(sub, ".rgignore"), "drop.go\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, g.FindNodesByName("Kept"), "main.go should be indexed")
+	assert.NotEmpty(t, g.FindNodesByName("SubKept"), "sub/keep.go should be indexed")
+	assert.Empty(t, g.FindNodesByName("FromGen"), ".ignore should exclude gen.go")
+	assert.Empty(t, g.FindNodesByName("SubDropped"), "sub/.rgignore should exclude sub/drop.go")
+}
+
 func TestIndex_UnsupportedFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "readme.txt"), "hello world")
