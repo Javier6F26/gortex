@@ -149,7 +149,7 @@ func (b *BleveBackend) Add(id string, fields ...string) {
 	// unicode tokenizer can split them.
 	var parts []string
 	for _, f := range fields {
-		tokens := Tokenize(f)
+		tokens := NormalizeFTSTokens(Tokenize(f))
 		parts = append(parts, strings.Join(tokens, " "))
 	}
 
@@ -179,7 +179,7 @@ func (b *BleveBackend) Remove(id string) {
 
 func (b *BleveBackend) Search(query string, limit int) []SearchResult {
 	// Pre-tokenize the query for camelCase splitting.
-	tokens := TokenizeQuery(query)
+	tokens := NormalizeFTSTokens(TokenizeQuery(query))
 	if len(tokens) == 0 {
 		return nil
 	}

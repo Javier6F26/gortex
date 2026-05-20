@@ -216,6 +216,7 @@ require (
 	github.com/alexaandru/go-sitter-forest/ziggy v1.9.1
 	github.com/alexaandru/go-sitter-forest/ziggy_schema v1.9.1
 	github.com/blevesearch/bleve/v2 v2.6.0
+	github.com/blevesearch/go-porterstemmer v1.0.3
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -282,7 +283,6 @@ require (
 	github.com/blevesearch/bleve_index_api v1.3.11 // indirect
 	github.com/blevesearch/geo v0.2.5 // indirect
 	github.com/blevesearch/go-faiss v1.1.1 // indirect
-	github.com/blevesearch/go-porterstemmer v1.0.3 // indirect
 	github.com/blevesearch/gtreap v0.1.1 // indirect
 	github.com/blevesearch/mmap-go v1.2.0 // indirect
 	github.com/blevesearch/scorch_segment_api/v2 v2.4.7 // indirect

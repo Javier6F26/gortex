@@ -81,8 +81,15 @@ func (b *BM25Backend) Add(id string, fields ...string) {
 		allTokens = append(allTokens, Tokenize(f)...)
 	}
 
+	// Stopword-filter + Porter-stem the posting tokens. Search()
+	// runs the same normalization, so stemmed postings are always probed
+	// with stemmed query terms. The bigram side index keeps the raw
+	// tokens — its typo rescue bigramizes the raw query string, so
+	// raw-against-raw stays consistent there.
+	ftsTokens := NormalizeFTSTokens(allTokens)
+
 	termFreq := make(map[string]int)
-	for _, t := range allTokens {
+	for _, t := range ftsTokens {
 		termFreq[t]++
 	}
 
@@ -94,7 +101,7 @@ func (b *BM25Backend) Add(id string, fields ...string) {
 
 	d := &doc{
 		id:    id,
-		len:   len(allTokens),
+		len:   len(ftsTokens),
 		terms: termFreq,
 	}
 	b.docs[id] = d
@@ -141,7 +148,7 @@ func (b *BM25Backend) removeLocked(id string) {
 }
 
 func (b *BM25Backend) Search(query string, limit int) []SearchResult {
-	queryTokens := TokenizeQuery(query)
+	queryTokens := NormalizeFTSTokens(TokenizeQuery(query))
 	if len(queryTokens) == 0 {
 		return nil
 	}
