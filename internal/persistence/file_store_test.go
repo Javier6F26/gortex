@@ -1,6 +1,8 @@
 package persistence
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -162,4 +164,99 @@ func TestNopStore(t *testing.T) {
 	assert.False(t, s.Validate("x", "y"))
 	assert.NoError(t, s.Evict("x", "y"))
 	assert.NoError(t, s.Close())
+}
+
+// TestFileStore_ConcurrentSave exercises the cross-process advisory lock:
+// every writer targets the same cache key, so without serialization
+// one writer's os.RemoveAll would race another's MkdirAll/write sequence
+// and leave a torn entry. flock(2) contends across file descriptors even
+// within one process, so concurrent goroutines reproduce the cross-process
+// hazard. After all writers complete, the entry must load as exactly one
+// writer's complete payload.
+func TestFileStore_ConcurrentSave(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFileStore(dir, "0.1.0-test")
+	require.NoError(t, err)
+
+	const writers = 12
+	markers := make(map[string]bool, writers)
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := range writers {
+		marker := fmt.Sprintf("writer-%d", i)
+		markers[marker] = true
+		wg.Add(1)
+		go func(m string) {
+			defer wg.Done()
+			snap := testSnapshot()
+			snap.Nodes[0].Meta["writer"] = m
+			errs <- fs.Save(snap)
+		}(marker)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		require.NoError(t, e)
+	}
+
+	loaded, err := fs.Load("/tmp/test-repo", "abc123def456")
+	require.NoError(t, err)
+	require.Len(t, loaded.Nodes, 2)
+	got, _ := loaded.Nodes[0].Meta["writer"].(string)
+	assert.True(t, markers[got], "loaded snapshot must be one writer's complete payload, got %q", got)
+}
+
+// TestFileStore_ConcurrentReadWrite runs readers against a writer churning
+// the same entry. The shared read lock must hand every reader either a
+// fully decodable snapshot or a clean ErrNotFound — never a gob/gzip
+// decode error from a half-written file.
+func TestFileStore_ConcurrentReadWrite(t *testing.T) {
+	dir := t.TempDir()
+	fs, err := NewFileStore(dir, "0.1.0-test")
+	require.NoError(t, err)
+
+	snap := testSnapshot()
+	require.NoError(t, fs.Save(snap))
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 64)
+	stop := make(chan struct{})
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				errs <- fs.Save(snap)
+			} else {
+				errs <- fs.Evict(snap.RepoPath, snap.CommitHash)
+			}
+		}
+	}()
+
+	for r := 0; r < 6; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 40; i++ {
+				_, err := fs.Load(snap.RepoPath, snap.CommitHash)
+				if err != nil && err != ErrNotFound {
+					errs <- err
+				}
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		require.NoError(t, e, "no reader may observe a torn snapshot")
+	}
 }

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/gofrs/flock"
 )
 
 func init() {
@@ -48,6 +50,43 @@ func (fs *FileStore) entryDir(repoPath, commitHash string) string {
 	return filepath.Join(fs.dir, CacheKey(repoPath, commitHash))
 }
 
+// lockPath is the advisory-lock file for one snapshot entry. It is a
+// sibling of the entry directory ({dir}/{cacheKey}.lock), deliberately
+// outside it so the lock survives the os.RemoveAll a writer runs against
+// the entry directory on Save/Evict.
+func (fs *FileStore) lockPath(repoPath, commitHash string) string {
+	return fs.entryDir(repoPath, commitHash) + ".lock"
+}
+
+// acquireWrite takes an exclusive cross-process advisory lock for one
+// snapshot entry. A second gortex process writing the same snapshot
+// blocks here instead of racing the RemoveAll/MkdirAll/write sequence,
+// which would otherwise leave a torn or empty index on disk.
+func (fs *FileStore) acquireWrite(repoPath, commitHash string) (*flock.Flock, error) {
+	if err := os.MkdirAll(fs.dir, 0o755); err != nil {
+		return nil, fmt.Errorf("persistence: mkdir cache dir: %w", err)
+	}
+	fl := flock.New(fs.lockPath(repoPath, commitHash))
+	if err := fl.Lock(); err != nil {
+		return nil, fmt.Errorf("persistence: acquire index write lock: %w", err)
+	}
+	return fl, nil
+}
+
+// acquireRead takes a shared cross-process advisory lock for one snapshot
+// entry, so a reader waits out an in-progress write instead of decoding a
+// half-written snapshot.
+func (fs *FileStore) acquireRead(repoPath, commitHash string) (*flock.Flock, error) {
+	if err := os.MkdirAll(fs.dir, 0o755); err != nil {
+		return nil, fmt.Errorf("persistence: mkdir cache dir: %w", err)
+	}
+	fl := flock.New(fs.lockPath(repoPath, commitHash))
+	if err := fl.RLock(); err != nil {
+		return nil, fmt.Errorf("persistence: acquire index read lock: %w", err)
+	}
+	return fl, nil
+}
+
 func (fs *FileStore) Check(repoPath, commitHash string) bool {
 	dir := fs.entryDir(repoPath, commitHash)
 	info, err := os.Stat(dir)
@@ -68,6 +107,12 @@ func (fs *FileStore) Validate(repoPath, commitHash string) bool {
 }
 
 func (fs *FileStore) Load(repoPath, commitHash string) (*Snapshot, error) {
+	fl, err := fs.acquireRead(repoPath, commitHash)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = fl.Unlock() }()
+
 	dir := fs.entryDir(repoPath, commitHash)
 	f, err := os.Open(filepath.Join(dir, snapshotFile))
 	if err != nil {
@@ -93,6 +138,12 @@ func (fs *FileStore) Load(repoPath, commitHash string) (*Snapshot, error) {
 }
 
 func (fs *FileStore) Save(snap *Snapshot) error {
+	fl, err := fs.acquireWrite(snap.RepoPath, snap.CommitHash)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = fl.Unlock() }()
+
 	dir := fs.entryDir(snap.RepoPath, snap.CommitHash)
 
 	// Remove old entry if it exists.
@@ -135,6 +186,11 @@ func (fs *FileStore) Save(snap *Snapshot) error {
 }
 
 func (fs *FileStore) Evict(repoPath, commitHash string) error {
+	fl, err := fs.acquireWrite(repoPath, commitHash)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = fl.Unlock() }()
 	return os.RemoveAll(fs.entryDir(repoPath, commitHash))
 }
 
