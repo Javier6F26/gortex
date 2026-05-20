@@ -1,10 +1,14 @@
 package indexer
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,4 +81,87 @@ func Gone() {}
 
 	assert.NotEmpty(t, g.FindNodesByName("Kept"))
 	assert.Empty(t, g.FindNodesByName("Gone"), "gone.go was deleted from disk; nodes must be evicted")
+}
+
+// canonicalGraph renders a graph as a deterministic, sorted projection
+// of its structural identity (node identities + edge triples). Two
+// graphs with an equal projection are byte-identical for every query
+// the engine can answer.
+func canonicalGraph(g *graph.Graph) string {
+	var lines []string
+	for _, n := range g.AllNodes() {
+		if n == nil {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("N|%s|%s|%s|%s|%d|%d|%s",
+			n.ID, n.Kind, n.Name, n.FilePath, n.StartLine, n.EndLine, n.Language))
+	}
+	for _, e := range g.AllEdges() {
+		if e == nil {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("E|%s|%s|%s", e.From, e.To, e.Kind))
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
+}
+
+// bumpMtime rewrites a file and pushes its mtime forward so the
+// mtime-keyed staleness check always classifies it as changed,
+// regardless of filesystem timestamp resolution.
+func bumpMtime(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	future := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(path, future, future))
+}
+
+// TestIncrementalReindex_ConvergesToFullIndex is the consistency
+// invariant: a graph built incrementally — a cold index followed by
+// per-file edits each reconciled with IncrementalReindex — must equal
+// a single cold index of the same final disk state. Incremental
+// reindex that drifted from a full index would silently serve a stale
+// or wrong graph.
+func TestIncrementalReindex_ConvergesToFullIndex(t *testing.T) {
+	build := func(dir string) {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "pkg"), 0o755))
+		writeFile(t, filepath.Join(dir, "main.go"),
+			"package main\n\nfunc main() { helper() }\n\nfunc helper() {}\n")
+		writeFile(t, filepath.Join(dir, "pkg", "util.go"),
+			"package pkg\n\ntype Config struct{ Port int }\n\nfunc New() *Config { return &Config{} }\n")
+		writeFile(t, filepath.Join(dir, "extra.go"),
+			"package main\n\nfunc Extra() {}\n")
+	}
+
+	// Path A: incremental — a cold index, then a sequence of edits
+	// each reconciled with IncrementalReindex.
+	dir := t.TempDir()
+	build(dir)
+	gA := graph.New()
+	idxA := newTestIndexer(gA)
+	_, err := idxA.Index(dir)
+	require.NoError(t, err)
+
+	bumpMtime(t, filepath.Join(dir, "main.go"),
+		"package main\n\nfunc main() { helper(); helper() }\n\nfunc helper() {}\n")
+	_, err = idxA.IncrementalReindex(dir)
+	require.NoError(t, err)
+
+	bumpMtime(t, filepath.Join(dir, "pkg", "util.go"),
+		"package pkg\n\ntype Config struct{ Port int }\n\nfunc New() *Config { return &Config{} }\n\nfunc Reset(c *Config) {}\n")
+	_, err = idxA.IncrementalReindex(dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(filepath.Join(dir, "extra.go")))
+	_, err = idxA.IncrementalReindex(dir)
+	require.NoError(t, err)
+
+	// Path B: a single cold index of the same final disk state.
+	gB := graph.New()
+	idxB := newTestIndexer(gB)
+	_, err = idxB.Index(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, canonicalGraph(gB), canonicalGraph(gA),
+		"incremental reindex must converge to the same graph as a full index")
 }
