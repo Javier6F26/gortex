@@ -29,7 +29,12 @@ type HotspotEntry struct {
 	FanIn              int     `json:"fan_in"`
 	FanOut             int     `json:"fan_out"`
 	CommunityCrossings int     `json:"community_crossings"`
-	ComplexityScore    float64 `json:"complexity_score"`
+	// Betweenness is the node's betweenness-centrality score
+	// normalized to 0-100 — how often it sits on a shortest path
+	// between other symbols. A bottleneck the call graph routes
+	// through scores high here even when its fan-in/out look modest.
+	Betweenness     float64 `json:"betweenness"`
+	ComplexityScore float64 `json:"complexity_score"`
 }
 
 // FindDeadCodeOptions controls filtering behavior for dead code analysis.
@@ -468,8 +473,20 @@ func buildIfaceRequiredMethods(g *graph.Graph, nodes []*graph.Node, edges []*gra
 	return result
 }
 
+// hotspotBetweennessWeight scales the betweenness component of a
+// hotspot's raw score. Betweenness arrives normalized to 0-100 (same
+// range as the fan-in/out/crossing terms after their own
+// normalization is implicit), so a weight of 0.4 lets a pure
+// bottleneck — a symbol every call path routes through — register as
+// a hotspot without overpowering the fan-in/out signals that still
+// dominate the ranking.
+const hotspotBetweennessWeight = 0.4
+
 // FindHotspots returns symbols whose ComplexityScore exceeds the given threshold.
-// ComplexityScore = (fan_in * 2) + (fan_out * 1.5) + (community_crossings * 3), normalized to 0-100.
+// ComplexityScore = (fan_in * 2) + (fan_out * 1.5) + (community_crossings * 3) +
+// (betweenness * hotspotBetweennessWeight), normalized to 0-100. Betweenness is a
+// centrality component — how often the symbol lies on a shortest path between
+// other symbols — that augments the fan-in/out signals rather than replacing them.
 // If threshold <= 0, the default threshold is mean + 2*stddev.
 func FindHotspots(g *graph.Graph, communities *CommunityResult, threshold float64) []HotspotEntry {
 	nodes := g.AllNodes()
@@ -508,13 +525,25 @@ func FindHotspots(g *graph.Graph, communities *CommunityResult, threshold float6
 		}
 	}
 
+	// Betweenness centrality — exact on small graphs, sampled on
+	// large ones. Normalized to 0-100 against the graph's own max so
+	// it sits on the same scale as the other score terms.
+	bc := ComputeBetweenness(g)
+	betweenness := make(map[string]float64, len(bc.Scores))
+	if bc.Max > 0 {
+		for id, v := range bc.Scores {
+			betweenness[id] = (v / bc.Max) * 100.0
+		}
+	}
+
 	// Compute raw scores for function/method nodes only
 	type rawEntry struct {
-		node     *graph.Node
-		fanIn    int
-		fanOut   int
-		crossing int
-		rawScore float64
+		node        *graph.Node
+		fanIn       int
+		fanOut      int
+		crossing    int
+		betweenness float64
+		rawScore    float64
 	}
 
 	var entries []rawEntry
@@ -526,14 +555,16 @@ func FindHotspots(g *graph.Graph, communities *CommunityResult, threshold float6
 		fi := fanIn[n.ID]
 		fo := fanOut[n.ID]
 		cc := crossings[n.ID]
-		raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0
+		bw := betweenness[n.ID]
+		raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0 + bw*hotspotBetweennessWeight
 
 		entries = append(entries, rawEntry{
-			node:     n,
-			fanIn:    fi,
-			fanOut:   fo,
-			crossing: cc,
-			rawScore: raw,
+			node:        n,
+			fanIn:       fi,
+			fanOut:      fo,
+			crossing:    cc,
+			betweenness: bw,
+			rawScore:    raw,
 		})
 	}
 
@@ -593,6 +624,7 @@ func FindHotspots(g *graph.Graph, communities *CommunityResult, threshold float6
 			FanIn:              e.fanIn,
 			FanOut:             e.fanOut,
 			CommunityCrossings: e.crossing,
+			Betweenness:        math.Round(e.betweenness*100) / 100,
 			ComplexityScore:    score,
 		})
 	}

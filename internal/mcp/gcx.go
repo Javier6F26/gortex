@@ -485,11 +485,11 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 	case "hotspots":
 		items, _ := payload.([]hotspotItem)
 		enc := newGCX(&buf, "analyze.hotspots",
-			[]string{"id", "name", "path", "line", "fan_in", "fan_out", "cross_cut", "score"},
+			[]string{"id", "name", "path", "line", "fan_in", "fan_out", "cross_cut", "betweenness", "score"},
 			"count", fmt.Sprintf("%d", len(items)),
 		)
 		for _, it := range items {
-			if err := enc.WriteRow(it.ID, it.Name, it.Path, it.Line, it.FanIn, it.FanOut, it.CrossCommunity, it.Score); err != nil {
+			if err := enc.WriteRow(it.ID, it.Name, it.Path, it.Line, it.FanIn, it.FanOut, it.CrossCommunity, it.Betweenness, it.Score); err != nil {
 				return nil, err
 			}
 		}
@@ -766,6 +766,7 @@ type hotspotItem struct {
 	Line, FanIn    int
 	FanOut         int
 	CrossCommunity int
+	Betweenness    float64
 	Score          float64
 }
 

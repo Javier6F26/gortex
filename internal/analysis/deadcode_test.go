@@ -463,16 +463,34 @@ func genHotspotGraph() *rapid.Generator[hotspotGraphResult] {
 
 // --- Property Tests ---
 
+// hotspotBetweennessComponent recomputes the 0-100 normalized
+// betweenness term FindHotspots folds into a node's raw score. The
+// generated hotspot graphs are tiny, so ComputeBetweenness runs the
+// exact path here — the expected score stays faithful to the
+// implementation without re-deriving Brandes' in the test.
+func hotspotBetweennessComponent(g *graph.Graph) map[string]float64 {
+	bc := ComputeBetweenness(g)
+	out := make(map[string]float64, len(bc.Scores))
+	if bc.Max > 0 {
+		for id, v := range bc.Scores {
+			out[id] = (v / bc.Max) * 100.0
+		}
+	}
+	return out
+}
+
 // TestPropertyHotspot_ComplexityScoreFormula verifies that for every hotspot entry,
-// ComplexityScore equals (fan_in * 2) + (fan_out * 1.5) + (community_crossings * 3)
-// normalized to [0, 100], and that FindHotspots returns exactly those symbols
-// whose score exceeds the threshold.
+// ComplexityScore equals (fan_in * 2) + (fan_out * 1.5) + (community_crossings * 3) +
+// (betweenness * hotspotBetweennessWeight) normalized to [0, 100], and that
+// FindHotspots returns exactly those symbols whose score exceeds the threshold.
 func TestPropertyHotspot_ComplexityScoreFormula(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		tc := genHotspotGraph().Draw(rt, "hotspotGraph")
 
 		// Use threshold=0 to get ALL function nodes with any score
 		result := FindHotspots(tc.Graph, tc.Communities, 0)
+
+		betweenness := hotspotBetweennessComponent(tc.Graph)
 
 		// Compute the max raw score across all function nodes to verify normalization
 		maxRaw := 0.0
@@ -483,7 +501,7 @@ func TestPropertyHotspot_ComplexityScoreFormula(t *testing.T) {
 			fi := tc.ExpectedFanIn[id.ID]
 			fo := tc.ExpectedFanOut[id.ID]
 			cc := tc.ExpectedCrossing[id.ID]
-			raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0
+			raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0 + betweenness[id.ID]*hotspotBetweennessWeight
 			if raw > maxRaw {
 				maxRaw = raw
 			}
@@ -505,8 +523,14 @@ func TestPropertyHotspot_ComplexityScoreFormula(t *testing.T) {
 				rt.Errorf("hotspot %s: CommunityCrossings = %d, expected %d", entry.ID, entry.CommunityCrossings, cc)
 			}
 
+			// Verify the reported betweenness matches the 0-100 normalized value.
+			expectedBw := math.Round(betweenness[entry.ID]*100) / 100
+			if math.Abs(entry.Betweenness-expectedBw) > 0.01 {
+				rt.Errorf("hotspot %s: Betweenness = %.2f, expected %.2f", entry.ID, entry.Betweenness, expectedBw)
+			}
+
 			// Verify complexity score matches formula
-			rawScore := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0
+			rawScore := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0 + betweenness[entry.ID]*hotspotBetweennessWeight
 			var expectedNormalized float64
 			if maxRaw > 0 {
 				expectedNormalized = (rawScore / maxRaw) * 100.0
@@ -546,6 +570,7 @@ func TestPropertyHotspot_ThresholdFiltering(t *testing.T) {
 		}
 
 		// Compute all scores to verify no symbol above threshold is missing
+		betweenness := hotspotBetweennessComponent(tc.Graph)
 		maxRaw := 0.0
 		type nodeScore struct {
 			id  string
@@ -559,7 +584,7 @@ func TestPropertyHotspot_ThresholdFiltering(t *testing.T) {
 			fi := tc.ExpectedFanIn[n.ID]
 			fo := tc.ExpectedFanOut[n.ID]
 			cc := tc.ExpectedCrossing[n.ID]
-			raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0
+			raw := float64(fi)*2.0 + float64(fo)*1.5 + float64(cc)*3.0 + betweenness[n.ID]*hotspotBetweennessWeight
 			allScores = append(allScores, nodeScore{n.ID, raw})
 			if raw > maxRaw {
 				maxRaw = raw

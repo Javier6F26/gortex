@@ -2078,6 +2078,7 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 				FanIn:          e.FanIn,
 				FanOut:         e.FanOut,
 				CrossCommunity: e.CommunityCrossings,
+				Betweenness:    e.Betweenness,
 				Score:          e.ComplexityScore,
 			})
 		}
@@ -2087,8 +2088,8 @@ func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest
 	if isCompact(req) {
 		var b strings.Builder
 		for _, e := range entries {
-			fmt.Fprintf(&b, "%s %s %s:%d score=%.1f fan_in=%d fan_out=%d crossings=%d\n",
-				e.Kind, e.ID, e.FilePath, e.Line, e.ComplexityScore, e.FanIn, e.FanOut, e.CommunityCrossings)
+			fmt.Fprintf(&b, "%s %s %s:%d score=%.1f fan_in=%d fan_out=%d crossings=%d betweenness=%.1f\n",
+				e.Kind, e.ID, e.FilePath, e.Line, e.ComplexityScore, e.FanIn, e.FanOut, e.CommunityCrossings, e.Betweenness)
 		}
 		if truncated {
 			fmt.Fprintf(&b, "... truncated (%d total)\n", totalCount)

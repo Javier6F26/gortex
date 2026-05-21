@@ -277,6 +277,7 @@ func architectureHotspots(g *graph.Graph, cr *analysis.CommunityResult, inScope 
 			"file_path":        h.FilePath,
 			"fan_in":           h.FanIn,
 			"fan_out":          h.FanOut,
+			"betweenness":      h.Betweenness,
 			"complexity_score": h.ComplexityScore,
 		})
 	}
