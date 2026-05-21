@@ -19,6 +19,13 @@ type SubGraph struct {
 	// empty result reflects genuinely unused code or an extraction gap.
 	// Nil — and omitted from the response — for any non-empty result.
 	Caveat *graph.ZeroEdgeCaveat `json:"caveat,omitempty"`
+	// CallerNotes carries concurrency-safety annotations keyed by node
+	// ID. Populated only by get_callers (which classifies each caller);
+	// other traversal tools share this struct and leave it nil, so it
+	// is omitted from their responses. A node appears here only when at
+	// least one concurrency flag is set, so an absent entry means
+	// "neither sync_guarded nor cross_concurrent".
+	CallerNotes map[string]*graph.ConcurrencyAnnotation `json:"caller_notes,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.

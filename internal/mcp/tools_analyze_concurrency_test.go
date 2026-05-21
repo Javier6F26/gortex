@@ -324,3 +324,227 @@ func TestAnalyzeRaceWrites_GCXEncodesRow(t *testing.T) {
 	assert.Contains(t, text, "writer")
 	assert.Contains(t, text, "reason")
 }
+
+// addMethod / addType / addTypedField build the node shapes the
+// concurrency classifier reads: a method linked to its receiver type
+// via EdgeMemberOf, and a typed field linked to its owning type.
+func addMethod(g *graph.Graph, id, name, path string) {
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindMethod, Name: name, FilePath: path, Language: "go"})
+}
+
+func addType(g *graph.Graph, id, name, path string) {
+	g.AddNode(&graph.Node{ID: id, Kind: graph.KindType, Name: name, FilePath: path, Language: "go"})
+}
+
+func addTypedField(g *graph.Graph, id, name, fieldType, path string) {
+	g.AddNode(&graph.Node{
+		ID: id, Kind: graph.KindField, Name: name, FilePath: path, Language: "go",
+		Meta: map[string]any{"field_type": fieldType},
+	})
+}
+
+// callerNote is the JSON shape of one get_callers caller_notes entry.
+type callerNote struct {
+	SyncGuarded        bool   `json:"sync_guarded"`
+	SyncGuardedWhy     string `json:"sync_guarded_why"`
+	CrossConcurrent    bool   `json:"cross_concurrent"`
+	CrossConcurrentWhy string `json:"cross_concurrent_why"`
+}
+
+// getCallersWithConcurrency builds a graph with two callers of a target
+// function — one a method on a mutex-holding type, one a method on a
+// lock-free type — plus a goroutine-launched caller, then returns the
+// caller_notes map from a get_callers call.
+//
+// Graph:
+//
+//	Guarded.Do  --calls-->  Target   (Guarded holds a sync.Mutex)
+//	Free.Do     --calls-->  Target   (Free holds only an int)
+//	Spawned     --calls-->  Target   (Spawned is itself spawned)
+//	someEntry   --spawns--> Spawned
+func getCallersWithConcurrency(t *testing.T) map[string]callerNote {
+	t.Helper()
+	srv := concurrencyServer(t)
+	g := srv.graph
+
+	addFn(g, "main.go::Target", "Target", "main.go")
+
+	// Mutex-holding type with a method that calls Target.
+	addType(g, "main.go::Guarded", "Guarded", "main.go")
+	addTypedField(g, "main.go::Guarded.mu", "mu", "sync.Mutex", "main.go")
+	addEdge(g, "main.go::Guarded.mu", "main.go::Guarded", graph.EdgeMemberOf, "main.go", 2)
+	addMethod(g, "main.go::Guarded.Do", "Do", "main.go")
+	addEdge(g, "main.go::Guarded.Do", "main.go::Guarded", graph.EdgeMemberOf, "main.go", 5)
+	addEdge(g, "main.go::Guarded.Do", "main.go::Target", graph.EdgeCalls, "main.go", 6)
+
+	// Lock-free type with a method that calls Target.
+	addType(g, "main.go::Free", "Free", "main.go")
+	addTypedField(g, "main.go::Free.n", "n", "int", "main.go")
+	addEdge(g, "main.go::Free.n", "main.go::Free", graph.EdgeMemberOf, "main.go", 12)
+	addMethod(g, "main.go::Free.Do", "Do", "main.go")
+	addEdge(g, "main.go::Free.Do", "main.go::Free", graph.EdgeMemberOf, "main.go", 15)
+	addEdge(g, "main.go::Free.Do", "main.go::Target", graph.EdgeCalls, "main.go", 16)
+
+	// A caller that is itself launched as a goroutine.
+	addFn(g, "main.go::Spawned", "Spawned", "main.go")
+	addFn(g, "main.go::someEntry", "someEntry", "main.go")
+	g.AddEdge(&graph.Edge{
+		From: "main.go::someEntry", To: "main.go::Spawned", Kind: graph.EdgeSpawns,
+		FilePath: "main.go", Line: 20, Confidence: 1, Meta: map[string]any{"mode": "goroutine"},
+	})
+	addEdge(g, "main.go::Spawned", "main.go::Target", graph.EdgeCalls, "main.go", 22)
+
+	res := callTool(t, srv, "get_callers", map[string]any{"id": "main.go::Target"})
+	require.False(t, res.IsError)
+	var sg struct {
+		CallerNotes map[string]callerNote `json:"caller_notes"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcplib.TextContent).Text), &sg))
+	return sg.CallerNotes
+}
+
+// TestGetCallers_SyncGuardedAnnotation: a caller method on a
+// mutex-holding type is flagged sync_guarded; a caller method on a
+// lock-free type is not.
+func TestGetCallers_SyncGuardedAnnotation(t *testing.T) {
+	notes := getCallersWithConcurrency(t)
+
+	guarded, ok := notes["main.go::Guarded.Do"]
+	require.True(t, ok, "caller on a mutex-holding type must carry a caller_notes entry")
+	assert.True(t, guarded.SyncGuarded, "method on a sync.Mutex-holding type must be sync_guarded")
+	assert.NotEmpty(t, guarded.SyncGuardedWhy, "sync_guarded must carry an explanation")
+
+	// A caller on a lock-free type carries no flag, so it is absent
+	// from caller_notes entirely.
+	free, present := notes["main.go::Free.Do"]
+	if present {
+		assert.False(t, free.SyncGuarded, "method on a lock-free type must not be sync_guarded")
+	}
+}
+
+// TestGetCallers_CrossConcurrentAnnotation: a caller that is itself
+// spawned as a goroutine is flagged cross_concurrent; a plainly-called
+// caller is not.
+func TestGetCallers_CrossConcurrentAnnotation(t *testing.T) {
+	notes := getCallersWithConcurrency(t)
+
+	spawned, ok := notes["main.go::Spawned"]
+	require.True(t, ok, "goroutine-launched caller must carry a caller_notes entry")
+	assert.True(t, spawned.CrossConcurrent, "goroutine-launched caller must be cross_concurrent")
+	assert.NotEmpty(t, spawned.CrossConcurrentWhy, "cross_concurrent must carry an explanation")
+
+	// Guarded.Do is called plainly (not spawned) — must not be flagged
+	// cross_concurrent even though it does carry sync_guarded.
+	guarded := notes["main.go::Guarded.Do"]
+	assert.False(t, guarded.CrossConcurrent,
+		"a plainly-called caller must not be cross_concurrent")
+}
+
+// TestGetCallers_GCXEncodesCallerNotes asserts the GCX1 wire output
+// carries the caller_notes section header and its columns so
+// wire-format clients can decode the annotation.
+func TestGetCallers_GCXEncodesCallerNotes(t *testing.T) {
+	srv := concurrencyServer(t)
+	g := srv.graph
+	addFn(g, "main.go::Target", "Target", "main.go")
+	addType(g, "main.go::Guarded", "Guarded", "main.go")
+	addTypedField(g, "main.go::Guarded.mu", "mu", "sync.RWMutex", "main.go")
+	addEdge(g, "main.go::Guarded.mu", "main.go::Guarded", graph.EdgeMemberOf, "main.go", 2)
+	addMethod(g, "main.go::Guarded.Do", "Do", "main.go")
+	addEdge(g, "main.go::Guarded.Do", "main.go::Guarded", graph.EdgeMemberOf, "main.go", 5)
+	addEdge(g, "main.go::Guarded.Do", "main.go::Target", graph.EdgeCalls, "main.go", 6)
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "get_callers"
+	req.Params.Arguments = map[string]any{"id": "main.go::Target", "format": "gcx"}
+	res, err := srv.handleGetCallers(context.Background(), req)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	text := res.Content[0].(mcplib.TextContent).Text
+	assert.Contains(t, text, "get_callers.caller_notes")
+	assert.Contains(t, text, "sync_guarded")
+	assert.Contains(t, text, "cross_concurrent")
+}
+
+// TestGetCallers_NoConcurrencyOmitsCallerNotes: when no caller carries
+// a concurrency flag, the caller_notes field is absent from the
+// response — the annotation is opt-in, not noise on every result.
+func TestGetCallers_NoConcurrencyOmitsCallerNotes(t *testing.T) {
+	srv := concurrencyServer(t)
+	g := srv.graph
+	addFn(g, "main.go::Target", "Target", "main.go")
+	addFn(g, "main.go::Plain", "Plain", "main.go")
+	addEdge(g, "main.go::Plain", "main.go::Target", graph.EdgeCalls, "main.go", 6)
+
+	res := callTool(t, srv, "get_callers", map[string]any{"id": "main.go::Target"})
+	require.False(t, res.IsError)
+	text := res.Content[0].(mcplib.TextContent).Text
+	assert.NotContains(t, text, "caller_notes",
+		"caller_notes must be omitted when no caller carries a concurrency flag")
+}
+
+// TestAnalyzeGoroutineSpawns_ConcurrencyAnnotation: the goroutine_spawns
+// analyzer surface carries the shared classification on each spawn
+// target — sync_guarded when the goroutine body is a method on a
+// lock-holding type, cross_concurrent because it is a spawn target.
+func TestAnalyzeGoroutineSpawns_ConcurrencyAnnotation(t *testing.T) {
+	srv := concurrencyServer(t)
+	g := srv.graph
+
+	// A goroutine body that is a method on a mutex-holding type.
+	addType(g, "main.go::Worker", "Worker", "main.go")
+	addTypedField(g, "main.go::Worker.mu", "mu", "sync.Mutex", "main.go")
+	addEdge(g, "main.go::Worker.mu", "main.go::Worker", graph.EdgeMemberOf, "main.go", 2)
+	addMethod(g, "main.go::Worker.Run", "Run", "main.go")
+	addEdge(g, "main.go::Worker.Run", "main.go::Worker", graph.EdgeMemberOf, "main.go", 5)
+	addFn(g, "main.go::Main", "Main", "main.go")
+	g.AddEdge(&graph.Edge{
+		From: "main.go::Main", To: "main.go::Worker.Run", Kind: graph.EdgeSpawns,
+		FilePath: "main.go", Line: 9, Confidence: 1, Meta: map[string]any{"mode": "goroutine"},
+	})
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "analyze"
+	req.Params.Arguments = map[string]any{"kind": "goroutine_spawns"}
+	res, err := srv.handleAnalyzeGoroutineSpawns(context.Background(), req)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+
+	var payload struct {
+		Spawns []struct {
+			Target      string      `json:"target"`
+			Concurrency *callerNote `json:"concurrency"`
+		} `json:"spawns"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcplib.TextContent).Text), &payload))
+	require.Len(t, payload.Spawns, 1)
+	row := payload.Spawns[0]
+	assert.Equal(t, "main.go::Worker.Run", row.Target)
+	require.NotNil(t, row.Concurrency, "spawn target on a mutex type must carry a concurrency block")
+	assert.True(t, row.Concurrency.SyncGuarded, "goroutine body on a mutex type must be sync_guarded")
+	assert.True(t, row.Concurrency.CrossConcurrent, "a spawn target must be cross_concurrent")
+}
+
+// TestAnalyzeGoroutineSpawns_GCXEncodesConcurrency asserts the GCX1
+// wire output for goroutine_spawns carries the concurrency columns.
+func TestAnalyzeGoroutineSpawns_GCXEncodesConcurrency(t *testing.T) {
+	srv := concurrencyServer(t)
+	g := srv.graph
+	addFn(g, "main.go::Main", "Main", "main.go")
+	addFn(g, "main.go::bg", "bg", "main.go")
+	g.AddEdge(&graph.Edge{
+		From: "main.go::Main", To: "main.go::bg", Kind: graph.EdgeSpawns,
+		FilePath: "main.go", Line: 9, Confidence: 1, Meta: map[string]any{"mode": "goroutine"},
+	})
+
+	req := mcplib.CallToolRequest{}
+	req.Params.Name = "analyze"
+	req.Params.Arguments = map[string]any{"format": "gcx"}
+	res, err := srv.handleAnalyzeGoroutineSpawns(context.Background(), req)
+	require.NoError(t, err)
+	require.False(t, res.IsError)
+	text := res.Content[0].(mcplib.TextContent).Text
+	assert.Contains(t, text, "analyze.goroutine_spawns")
+	assert.Contains(t, text, "sync_guarded")
+	assert.Contains(t, text, "cross_concurrent")
+}

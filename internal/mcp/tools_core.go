@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -78,13 +79,24 @@ type toonEdgeRow struct {
 	Label      string  `toon:"label"`
 }
 
+// toonCallerNoteRow is a TOON-optimized flat representation of one
+// caller's concurrency annotation (get_callers only).
+type toonCallerNoteRow struct {
+	ID                 string `toon:"id"`
+	SyncGuarded        bool   `toon:"sync_guarded"`
+	SyncGuardedWhy     string `toon:"sync_guarded_why,omitempty"`
+	CrossConcurrent    bool   `toon:"cross_concurrent"`
+	CrossConcurrentWhy string `toon:"cross_concurrent_why,omitempty"`
+}
+
 // toonSubGraphResult wraps nodes and edges for TOON tabular output.
 type toonSubGraphResult struct {
-	Nodes     []toonNodeRow         `toon:"nodes"`
-	Edges     []toonEdgeRow         `toon:"edges"`
-	Total     int                   `toon:"total"`
-	Truncated bool                  `toon:"truncated"`
-	Caveat    *graph.ZeroEdgeCaveat `toon:"caveat,omitempty"`
+	Nodes       []toonNodeRow         `toon:"nodes"`
+	Edges       []toonEdgeRow         `toon:"edges"`
+	Total       int                   `toon:"total"`
+	Truncated   bool                  `toon:"truncated"`
+	Caveat      *graph.ZeroEdgeCaveat `toon:"caveat,omitempty"`
+	CallerNotes []toonCallerNoteRow   `toon:"caller_notes,omitempty"`
 }
 
 // toonSearchResult wraps search results for TOON tabular output.
@@ -113,6 +125,32 @@ func nodesToTOONRows(nodes []*graph.Node) []toonNodeRow {
 			IsTest:     isTest,
 			TestRole:   testRole,
 			TestRunner: testRunner,
+		})
+	}
+	return rows
+}
+
+// callerNotesToTOONRows flattens the get_callers concurrency-annotation
+// map into TOON rows, sorted by node ID for deterministic output.
+// Returns nil for an empty map so the `caller_notes` field is omitted.
+func callerNotesToTOONRows(notes map[string]*graph.ConcurrencyAnnotation) []toonCallerNoteRow {
+	if len(notes) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(notes))
+	for id := range notes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	rows := make([]toonCallerNoteRow, 0, len(ids))
+	for _, id := range ids {
+		a := notes[id]
+		rows = append(rows, toonCallerNoteRow{
+			ID:                 id,
+			SyncGuarded:        a.SyncGuarded,
+			SyncGuardedWhy:     a.SyncGuardedWhy,
+			CrossConcurrent:    a.CrossConcurrent,
+			CrossConcurrentWhy: a.CrossConcurrentWhy,
 		})
 	}
 	return rows
@@ -255,11 +293,12 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		})
 	}
 	result := toonSubGraphResult{
-		Nodes:     nodesToTOONRows(sg.Nodes),
-		Edges:     edgeRows,
-		Total:     sg.TotalNodes,
-		Truncated: sg.Truncated,
-		Caveat:    sg.Caveat,
+		Nodes:       nodesToTOONRows(sg.Nodes),
+		Edges:       edgeRows,
+		Total:       sg.TotalNodes,
+		Truncated:   sg.Truncated,
+		Caveat:      sg.Caveat,
+		CallerNotes: callerNotesToTOONRows(sg.CallerNotes),
 	}
 	data, err := toon.Marshal(result)
 	if err != nil {
@@ -557,6 +596,26 @@ func compactSubGraph(sg *query.SubGraph) string {
 			}
 		}
 		b.WriteByte('\n')
+	}
+	// Append concurrency annotations for callers that carry one. Sorted
+	// by node ID so the compact output is deterministic.
+	if len(sg.CallerNotes) > 0 {
+		ids := make([]string, 0, len(sg.CallerNotes))
+		for id := range sg.CallerNotes {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			a := sg.CallerNotes[id]
+			fmt.Fprintf(&b, "concurrency %s:", id)
+			if a.SyncGuarded {
+				b.WriteString(" sync_guarded")
+			}
+			if a.CrossConcurrent {
+				b.WriteString(" cross_concurrent")
+			}
+			b.WriteByte('\n')
+		}
 	}
 	return b.String()
 }
@@ -1280,10 +1339,41 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	sg := s.engineFor(ctx).GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
+	annotateCallerConcurrency(s.engineFor(ctx).Reader(), sg, id)
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
 	return s.returnSubGraph(ctx, req, sg)
+}
+
+// annotateCallerConcurrency attaches a ConcurrencyAnnotation to every
+// caller node in a get_callers result that carries at least one
+// concurrency flag. The seed node itself is skipped — it is the
+// queried symbol, not one of its callers. File / import nodes are
+// skipped because no concurrency fact applies to them. A node with no
+// flag set is left out of the map, so an absent entry reads as
+// "neither sync_guarded nor cross_concurrent".
+func annotateCallerConcurrency(r graph.Reader, sg *query.SubGraph, seedID string) {
+	if r == nil || sg == nil {
+		return
+	}
+	for _, n := range sg.Nodes {
+		if n == nil || n.ID == seedID {
+			continue
+		}
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
+			continue
+		}
+		ann := graph.ClassifyConcurrency(r, n.ID)
+		if !ann.Any() {
+			continue
+		}
+		if sg.CallerNotes == nil {
+			sg.CallerNotes = make(map[string]*graph.ConcurrencyAnnotation)
+		}
+		annCopy := ann
+		sg.CallerNotes[n.ID] = &annCopy
+	}
 }
 
 func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

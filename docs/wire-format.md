@@ -210,6 +210,12 @@ Two sections: `<tool>.nodes` then `<tool>.edges`.
 - `.nodes` fields: `id`, `kind`, `name`, `path`, `line`.
 - `.edges` fields: `from`, `to`, `kind`, `origin`, `confidence`, `label`.
 
+`get_callers` emits a third section, `get_callers.caller_notes`, only
+when at least one caller carries a concurrency-safety annotation —
+fields `id`, `sync_guarded`, `sync_guarded_why`, `cross_concurrent`,
+`cross_concurrent_why`. The section is absent entirely when no caller
+is flagged, so the other traversal tools' output is unchanged.
+
 ### `get_editing_context`
 
 Four sections. Fields:

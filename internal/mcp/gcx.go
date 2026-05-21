@@ -371,7 +371,10 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 
 // encodeSubGraph is a shared encoder for the edge-returning traversal
 // tools (get_callers, get_call_chain, get_dependencies, get_dependents,
-// find_implementations). Emits two sections: nodes then edges.
+// find_implementations). Emits two sections — nodes then edges — plus a
+// third caller_notes section when get_callers attached concurrency
+// annotations. The third section is omitted entirely when empty so the
+// other traversal tools' wire output is byte-identical to before.
 func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	var buf bytes.Buffer
 	nodes := make([]*graph.Node, 0, len(sg.Nodes))
@@ -413,7 +416,30 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return buf.Bytes(), edgeEnc.Close()
+	if err := edgeEnc.Close(); err != nil {
+		return nil, err
+	}
+	if len(sg.CallerNotes) == 0 {
+		return buf.Bytes(), nil
+	}
+	// caller_notes — one row per caller carrying a concurrency flag.
+	// Rows are sorted by node ID so the wire output is deterministic.
+	noteIDs := make([]string, 0, len(sg.CallerNotes))
+	for id := range sg.CallerNotes {
+		noteIDs = append(noteIDs, id)
+	}
+	sort.Strings(noteIDs)
+	noteEnc := newGCX(&buf, tool+".caller_notes",
+		[]string{"id", "sync_guarded", "sync_guarded_why", "cross_concurrent", "cross_concurrent_why"},
+		"count", fmt.Sprintf("%d", len(noteIDs)),
+	)
+	for _, id := range noteIDs {
+		a := sg.CallerNotes[id]
+		if err := noteEnc.WriteRow(id, a.SyncGuarded, a.SyncGuardedWhy, a.CrossConcurrent, a.CrossConcurrentWhy); err != nil {
+			return nil, err
+		}
+	}
+	return buf.Bytes(), noteEnc.Close()
 }
 
 // encodeFileSummary emits one row per symbol in a file plus a trailing
@@ -495,11 +521,11 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 	case "goroutine_spawns":
 		items, _ := payload.([]spawnItem)
 		enc := newGCX(&buf, "analyze.goroutine_spawns",
-			[]string{"target", "mode", "spawns", "spawners"},
+			[]string{"target", "mode", "spawns", "spawners", "sync_guarded", "sync_guarded_why", "cross_concurrent", "cross_concurrent_why"},
 			"count", fmt.Sprintf("%d", len(items)),
 		)
 		for _, it := range items {
-			if err := enc.WriteRow(it.Target, it.Mode, it.Spawns, it.Spawners); err != nil {
+			if err := enc.WriteRow(it.Target, it.Mode, it.Spawns, it.Spawners, it.SyncGuarded, it.SyncGuardedWhy, it.CrossConcurrent, it.CrossConcurrentWhy); err != nil {
 				return nil, err
 			}
 		}
@@ -761,10 +787,19 @@ type channelOpItem struct {
 }
 
 type spawnItem struct {
-	Target   string
-	Mode     string
-	Spawns   int
+	Target string
+	Mode   string
+	Spawns int
+	// Spawners is a comma-joined list of caller node IDs.
 	Spawners string
+	// Concurrency columns carry the shared classification of the
+	// spawned target — sync_guarded (goroutine body on a lock-holding
+	// type) and cross_concurrent (reached across a concurrency
+	// boundary). Empty when the target carries neither flag.
+	SyncGuarded        bool
+	SyncGuardedWhy     string
+	CrossConcurrent    bool
+	CrossConcurrentWhy string
 }
 
 type fieldWriterItem struct {

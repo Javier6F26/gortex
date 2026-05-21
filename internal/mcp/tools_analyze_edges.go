@@ -142,11 +142,17 @@ func (s *Server) handleAnalyzeChannelOps(ctx context.Context, req mcp.CallToolRe
 // (a single function with many spawn sites), unowned background
 // work, and codebase-wide concurrency hygiene reviews.
 func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// Concurrency carries the shared sync_guarded / cross_concurrent
+	// classification of the spawned target: sync_guarded reports
+	// whether the goroutine body is a method on a lock-holding type,
+	// and cross_concurrent confirms the target is reached across a
+	// concurrency boundary. Omitted (nil) when neither flag is set.
 	type spawnRow struct {
-		Target    string   `json:"target"`
-		Mode      string   `json:"mode,omitempty"`
-		Spawns    int      `json:"spawns"`
-		Spawners  []string `json:"spawners,omitempty"`
+		Target      string                       `json:"target"`
+		Mode        string                       `json:"mode,omitempty"`
+		Spawns      int                          `json:"spawns"`
+		Spawners    []string                     `json:"spawners,omitempty"`
+		Concurrency *graph.ConcurrencyAnnotation `json:"concurrency,omitempty"`
 	}
 	byTarget := map[string]*spawnRow{}
 
@@ -168,6 +174,10 @@ func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallT
 	rows := make([]*spawnRow, 0, len(byTarget))
 	for _, r := range byTarget {
 		sort.Strings(r.Spawners)
+		if ann := graph.ClassifyConcurrency(s.graph, r.Target); ann.Any() {
+			a := ann
+			r.Concurrency = &a
+		}
 		rows = append(rows, r)
 	}
 	sort.Slice(rows, func(i, j int) bool {
@@ -183,12 +193,19 @@ func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallT
 	if s.isGCX(ctx, req) {
 		items := make([]spawnItem, 0, len(rows))
 		for _, r := range rows {
-			items = append(items, spawnItem{
+			it := spawnItem{
 				Target:   r.Target,
 				Mode:     r.Mode,
 				Spawns:   r.Spawns,
 				Spawners: strings.Join(r.Spawners, ","),
-			})
+			}
+			if r.Concurrency != nil {
+				it.SyncGuarded = r.Concurrency.SyncGuarded
+				it.SyncGuardedWhy = r.Concurrency.SyncGuardedWhy
+				it.CrossConcurrent = r.Concurrency.CrossConcurrent
+				it.CrossConcurrentWhy = r.Concurrency.CrossConcurrentWhy
+			}
+			items = append(items, it)
 		}
 		return s.gcxResponseWithBudget(req)(encodeAnalyze("goroutine_spawns", items))
 	}
@@ -200,7 +217,16 @@ func (s *Server) handleAnalyzeGoroutineSpawns(ctx context.Context, req mcp.CallT
 			if mode == "" {
 				mode = "?"
 			}
-			fmt.Fprintf(&b, "%-3d [%s] %s\n", r.Spawns, mode, r.Target)
+			fmt.Fprintf(&b, "%-3d [%s] %s", r.Spawns, mode, r.Target)
+			if r.Concurrency != nil {
+				if r.Concurrency.SyncGuarded {
+					b.WriteString(" sync_guarded")
+				}
+				if r.Concurrency.CrossConcurrent {
+					b.WriteString(" cross_concurrent")
+				}
+			}
+			b.WriteByte('\n')
 		}
 		if len(rows) == 0 {
 			b.WriteString("no spawn sites\n")
