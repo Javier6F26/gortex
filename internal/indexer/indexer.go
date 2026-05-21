@@ -168,6 +168,13 @@ type Indexer struct {
 	// RunDeferredPassesAll. See SetResolverLSPHelper.
 	resolverLSPHelper resolver.LSPHelper
 
+	// npmAliasOnce builds npmAlias lazily on the first resolve-time
+	// import-rewrite request. Lazy because the repo root and prefix
+	// are set after New(); by the time the resolver runs they are
+	// final.
+	npmAliasOnce sync.Once
+	npmAlias     *npmAliasIndex
+
 	// Mtime tracking and parse error retention for index health diagnostics.
 	parseErrors   []IndexError
 	fileMtimes    map[string]int64
@@ -243,7 +250,7 @@ type contractCacheEntry struct {
 
 // New creates an Indexer.
 func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *zap.Logger) *Indexer {
-	return &Indexer{
+	idx := &Indexer{
 		graph:    g,
 		registry: reg,
 		resolver: resolver.New(g),
@@ -258,6 +265,23 @@ func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *z
 		fileMtimes:    make(map[string]int64),
 		contractCache: make(map[string]*contractCacheEntry),
 	}
+	// Resolve JS/TS imports declared through an npm alias against the
+	// local index. The index is built lazily on first use — the repo
+	// root and prefix are not final until after New().
+	idx.resolver.SetNpmAliasResolver(idx.resolveNpmAliasImport)
+	return idx
+}
+
+// resolveNpmAliasImport is the resolver.NpmAliasResolver installed on
+// this Indexer's resolver. It rewrites a JS/TS import specifier that
+// matches an npm-alias dependency key in the importing file's
+// nearest-ancestor package.json. Returns "" (no rewrite) when no
+// alias applies. The backing npmAliasIndex is built once, lazily.
+func (idx *Indexer) resolveNpmAliasImport(callerFile, specifier string) string {
+	idx.npmAliasOnce.Do(func() {
+		idx.npmAlias = newNpmAliasIndex(map[string]string{idx.repoPrefix: idx.rootPath})
+	})
+	return idx.npmAlias.Resolve(callerFile, specifier)
 }
 
 // swappable returns the search backend cast to *search.Swappable. Panics

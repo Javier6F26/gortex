@@ -84,6 +84,11 @@ type CrossRepoResolver struct {
 	depModuleIndex       map[string][]depModuleEntry
 	mu                   *sync.Mutex
 	crossWorkspaceLookup CrossWorkspaceDepLookup
+	// npmAlias rewrites a JS/TS import specifier that matches an
+	// npm-alias dependency key in the importing file's nearest-
+	// ancestor package.json. Same contract as the field of the
+	// same name on Resolver — see npm_alias.go.
+	npmAlias NpmAliasResolver
 }
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
@@ -465,6 +470,12 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	callerRepo := cr.callerRepoPrefix(e)
 	callerWS := cr.callerWorkspaceID(e)
 
+	// npm-alias rewrite: see Resolver.resolveImport. Applied here too
+	// so a JS/TS import of an alias key resolves cross-repo to a
+	// locally-vendored real package when the per-repo pass left it
+	// unresolved.
+	importPath, npmAliased := rewriteNpmAliasImport(cr.npmAlias, e.FilePath, importPath)
+
 	// Look for a package node with matching qualified name.
 	node := cr.graph.GetNodeByQualName(importPath)
 	if node != nil {
@@ -576,6 +587,25 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		e.To = depNode.ID
 		stats.Resolved++
 		return
+	}
+
+	// npm-alias sub-path: a rewritten import like `@acme/shared-lib/util`
+	// addresses a path inside the real package — fall back to the
+	// package node itself. See Resolver.resolveImport.
+	if npmAliased {
+		if pkg := npmPackagePrefix(importPath); pkg != "" {
+			if node := cr.graph.GetNodeByQualName(pkg); node != nil &&
+				cr.crossWorkspaceEligible(callerWS, candidateWorkspaceID(node), pkg) {
+				e.To = node.ID
+				if node.RepoPrefix != callerRepo {
+					e.CrossRepo = true
+					stats.CrossRepoEdges++
+					stats.ByRepo[node.RepoPrefix]++
+				}
+				stats.Resolved++
+				return
+			}
+		}
 	}
 
 	// External/unresolvable import.

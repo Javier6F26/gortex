@@ -279,6 +279,7 @@ func (mi *MultiIndexer) RunGlobalResolve() {
 	}
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
+	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 }

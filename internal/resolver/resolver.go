@@ -89,6 +89,12 @@ type Resolver struct {
 	// node in the file. Cleared between passes.
 	lspIndex   map[lspLocKey]*graph.Node
 	lspIndexMu sync.RWMutex
+
+	// npmAlias, when non-nil, rewrites a JS/TS import specifier that
+	// matches an npm-alias dependency key in the importing file's
+	// nearest-ancestor package.json. See npm_alias.go for the
+	// contract. Set via SetNpmAliasResolver before ResolveAll runs.
+	npmAlias NpmAliasResolver
 }
 
 // lspLocKey identifies a node by (filePath, 1-based line) and is the
@@ -677,6 +683,14 @@ func isStdlibLike(importPath string) bool {
 func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *ResolveStats) {
 	callerRepo := r.callerRepoPrefix(e)
 
+	// npm-alias rewrite: a JS/TS import of a package.json alias key
+	// (`"shared": "npm:@acme/shared-lib@1.4.0"`) actually targets the
+	// real package. Rewrite the specifier before any lookup so a
+	// locally-vendored `@acme/shared-lib` resolves to its real node
+	// instead of falling through to an external stub. A no-op for
+	// non-aliased specifiers and non-JS/TS callers.
+	importPath, npmAliased := rewriteNpmAliasImport(r.npmAlias, e.FilePath, importPath)
+
 	// Look for a package node with matching qualified name.
 	node := r.graph.GetNodeByQualName(importPath)
 	if node != nil {
@@ -767,6 +781,24 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 		e.To = depNode.ID
 		stats.Resolved++
 		return
+	}
+
+	// npm-alias sub-path: a rewritten import like `@acme/shared-lib/util`
+	// addresses a path inside the real package. Nothing matched the
+	// full path, so fall back to the package node itself — the
+	// cross-package edge belongs on the package regardless of which
+	// sub-module the importer reached for.
+	if npmAliased {
+		if pkg := npmPackagePrefix(importPath); pkg != "" {
+			if node := r.graph.GetNodeByQualName(pkg); node != nil {
+				e.To = node.ID
+				if callerRepo != "" && node.RepoPrefix != "" && node.RepoPrefix != callerRepo {
+					e.CrossRepo = true
+				}
+				stats.Resolved++
+				return
+			}
+		}
 	}
 
 	// External/unresolvable import — create a stub target ID.

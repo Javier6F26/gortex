@@ -55,6 +55,9 @@ func NewMultiWatcher(
 	// cross-repo edges are only resolved when the source workspace
 	// declared the target via `cross_workspace_deps`.
 	mw.resolver.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
+	// Resolve JS/TS imports declared through an npm alias to their
+	// locally-vendored real package.
+	mw.resolver.SetNpmAliasResolver(mi.npmAliasResolver())
 
 	for prefix, cfg := range configs {
 		if err := mw.createWatcher(prefix, cfg); err != nil {

@@ -92,6 +92,26 @@ func (mi *MultiIndexer) SetEmbedder(e embedding.Provider) {
 	mi.embedder = e
 }
 
+// npmAliasResolver builds a resolver.NpmAliasResolver covering every
+// tracked repo's on-disk root. Installed on the global post-pass
+// resolver and the cross-repo resolver so a JS/TS import declared
+// through an npm alias resolves to a locally-vendored real package
+// anywhere in the workspace. Returns nil when no repo has a usable
+// root — callers treat that as "no alias rewriting".
+func (mi *MultiIndexer) npmAliasResolver() resolver.NpmAliasResolver {
+	roots := map[string]string{}
+	for prefix, meta := range mi.AllMetadata() {
+		if meta != nil && meta.RootPath != "" {
+			roots[prefix] = meta.RootPath
+		}
+	}
+	idx := newNpmAliasIndex(roots)
+	if idx == nil {
+		return nil
+	}
+	return idx.Resolve
+}
+
 // newPerRepoIndexer constructs a per-repo Indexer with the standard
 // MultiIndexer wiring (shared search backend, embedder if configured,
 // deferred-global-passes flag propagated). Centralised so the flag
@@ -207,6 +227,7 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 		if mi.resolverLSPHelper != nil {
 			master.SetLSPHelper(mi.resolverLSPHelper)
 		}
+		master.SetNpmAliasResolver(mi.npmAliasResolver())
 		master.ResolveAll()
 	}
 }
@@ -582,6 +603,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	// them.
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
+	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 

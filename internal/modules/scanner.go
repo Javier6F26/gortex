@@ -35,6 +35,11 @@ type Spec struct {
 	Indirect  bool
 	Replace   string // replacement path when go.mod has a `replace` directive, "" otherwise
 	Line      int    // 1-based line in the manifest where the spec was found
+	// Alias holds the real package name when an npm dependency is
+	// declared as an alias — `"shared": "npm:@acme/shared-lib@1.4.0"`
+	// makes Path="shared", Version the verbatim `npm:` string, and
+	// Alias="@acme/shared-lib". Empty for every non-aliased entry.
+	Alias string
 }
 
 // ParseGoMod walks go.mod source and returns one Spec per
@@ -167,19 +172,56 @@ func ParsePackageJSON(source []byte) []Spec {
 	return specs
 }
 
+// ParseNpmAlias extracts the real package name from an npm-alias
+// dependency value. npm lets a dependency be re-pointed at a
+// different package by giving its version range the `npm:` prefix:
+//
+//	"shared":  "npm:@acme/shared-lib@1.4.0" → "@acme/shared-lib"
+//	"lodash4": "npm:lodash@4.17.21"         → "lodash"
+//	"left":    "npm:left-pad"               → "left-pad"  (no version)
+//
+// The real name may itself be `@scope/name` (one slash) or a plain
+// `name`. ok is false for any value without the `npm:` prefix or
+// with an empty real name.
+func ParseNpmAlias(value string) (realName string, ok bool) {
+	const prefix = "npm:"
+	if !strings.HasPrefix(value, prefix) {
+		return "", false
+	}
+	rest := value[len(prefix):]
+	if rest == "" {
+		return "", false
+	}
+	// Strip the trailing `@version`. A leading `@` belongs to the
+	// scope (`@acme/shared-lib`), so search for the version `@` from
+	// the second byte onward — index 0 is never a version separator.
+	name := rest
+	if at := strings.Index(rest[1:], "@"); at >= 0 {
+		name = rest[:at+1]
+	}
+	if name == "" {
+		return "", false
+	}
+	return name, true
+}
+
 func packageJSONBlock(deps map[string]string, kind string) []Spec {
 	if len(deps) == 0 {
 		return nil
 	}
 	out := make([]Spec, 0, len(deps))
 	for name, version := range deps {
-		out = append(out, Spec{
+		spec := Spec{
 			Ecosystem: "npm",
 			Path:      name,
 			Version:   version,
 			Indirect:  kind != "",
 			Replace:   kind, // dev/peer/optional, "" for production
-		})
+		}
+		if alias, ok := ParseNpmAlias(version); ok {
+			spec.Alias = alias
+		}
+		out = append(out, spec)
 	}
 	// Stable order per block — JSON map iteration is randomised, and
 	// downstream consumers (BuildGraphArtifacts dedup, prefix-sort
@@ -219,9 +261,9 @@ func ParsePackageLockJSON(source []byte) []Spec {
 	var manifest struct {
 		LockfileVersion int `json:"lockfileVersion"`
 		Packages        map[string]struct {
-			Version string `json:"version"`
-			Dev     bool   `json:"dev"`
-			Optional bool  `json:"optional"`
+			Version  string `json:"version"`
+			Dev      bool   `json:"dev"`
+			Optional bool   `json:"optional"`
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(source, &manifest); err != nil {
@@ -399,9 +441,9 @@ func ParsePnpmLock(source []byte) []Spec {
 	scanner := bufio.NewScanner(bytes.NewReader(source))
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	var (
-		specs       []Spec
-		inPackages  bool
-		seen        = make(map[string]struct{})
+		specs      []Spec
+		inPackages bool
+		seen       = make(map[string]struct{})
 	)
 	for scanner.Scan() {
 		raw := scanner.Text()

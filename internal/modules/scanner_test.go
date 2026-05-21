@@ -188,6 +188,73 @@ func TestParsePackageJSON_Malformed(t *testing.T) {
 	}
 }
 
+func TestParseNpmAlias(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantName string
+		wantOK   bool
+	}{
+		{"npm:@acme/shared-lib@1.4.0", "@acme/shared-lib", true},
+		{"npm:lodash@4.17.21", "lodash", true},
+		{"npm:left-pad", "left-pad", true},     // no version
+		{"npm:@scope/pkg", "@scope/pkg", true}, // scoped, no version
+		{"npm:@scope/pkg@^2.0.0", "@scope/pkg", true},
+		{"^18.2.0", "", false},          // ordinary semver range
+		{"4.17.21", "", false},          // bare version
+		{"github:user/repo", "", false}, // git shorthand, not npm:
+		{"npm:", "", false},             // prefix only
+		{"", "", false},
+	}
+	for _, c := range cases {
+		name, ok := ParseNpmAlias(c.in)
+		if name != c.wantName || ok != c.wantOK {
+			t.Errorf("ParseNpmAlias(%q) = (%q, %t), want (%q, %t)",
+				c.in, name, ok, c.wantName, c.wantOK)
+		}
+	}
+}
+
+func TestParsePackageJSON_NpmAlias(t *testing.T) {
+	src := []byte(`{
+  "name": "my-app",
+  "dependencies": {
+    "shared": "npm:@acme/shared-lib@1.4.0",
+    "lodash4": "npm:lodash@4.17.21",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "test-utils": "npm:@acme/test-utils"
+  }
+}`)
+	specs := ParsePackageJSON(src)
+	got := map[string]Spec{}
+	for _, s := range specs {
+		got[s.Path] = s
+	}
+
+	// Aliased production dep: Path is the alias key, Alias the real name.
+	if got["shared"].Alias != "@acme/shared-lib" {
+		t.Errorf("shared.Alias = %q, want @acme/shared-lib", got["shared"].Alias)
+	}
+	if got["shared"].Version != "npm:@acme/shared-lib@1.4.0" {
+		t.Errorf("shared.Version should keep the verbatim npm: string, got %q", got["shared"].Version)
+	}
+	if got["lodash4"].Alias != "lodash" {
+		t.Errorf("lodash4.Alias = %q, want lodash", got["lodash4"].Alias)
+	}
+	// Aliased dev dep — alias is captured in devDependencies too.
+	if got["test-utils"].Alias != "@acme/test-utils" {
+		t.Errorf("test-utils.Alias = %q, want @acme/test-utils", got["test-utils"].Alias)
+	}
+	if got["test-utils"].Replace != "dev" {
+		t.Errorf("test-utils should be a dev dep, got Replace=%q", got["test-utils"].Replace)
+	}
+	// Ordinary dep — no alias.
+	if got["react"].Alias != "" {
+		t.Errorf("react.Alias should be empty, got %q", got["react"].Alias)
+	}
+}
+
 func TestParsePackageJSON_StableOrder(t *testing.T) {
 	// JSON map iteration is randomised — our packageJSONBlock
 	// helper sorts within each block to keep tests deterministic.
