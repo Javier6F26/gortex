@@ -11,6 +11,12 @@ type AgentAnswer struct {
 	Scope      Scope            `json:"scope"`
 	Error      string           `json:"error,omitempty"`
 	Transcript []TranscriptStep `json:"transcript,omitempty"`
+	// Model is the model the agent ran on. With llm.routing enabled
+	// this is the routed pick; otherwise the configured provider model.
+	Model string `json:"model,omitempty"`
+	// Complexity is the routed task-complexity class ("simple" /
+	// "complex"). Set only when llm.routing is enabled.
+	Complexity string `json:"complexity,omitempty"`
 }
 
 // TranscriptStep is one entry in the agent's per-call transcript.

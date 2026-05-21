@@ -190,6 +190,71 @@ func TestConfig_MergedWith_Codex(t *testing.T) {
 	}
 }
 
+func TestConfig_ActiveModelAndWithModel(t *testing.T) {
+	cases := []struct {
+		provider string
+		cfg      Config
+	}{
+		{"anthropic", Config{Provider: "anthropic"}},
+		{"openai", Config{Provider: "openai"}},
+		{"ollama", Config{Provider: "ollama"}},
+		{"claudecli", Config{Provider: "claudecli"}},
+		{"codex", Config{Provider: "codex"}},
+		{"gemini", Config{Provider: "gemini"}},
+		{"bedrock", Config{Provider: "bedrock"}},
+		{"deepseek", Config{Provider: "deepseek"}},
+		{"local", Config{Provider: "local"}},
+	}
+	for _, c := range cases {
+		t.Run(c.provider, func(t *testing.T) {
+			got := c.cfg.WithModel("routed-model-x")
+			if got.ActiveModel() != "routed-model-x" {
+				t.Errorf("WithModel/ActiveModel round-trip failed for %s: %q", c.provider, got.ActiveModel())
+			}
+		})
+	}
+}
+
+func TestConfig_WithModel_EmptyIsNoOp(t *testing.T) {
+	c := Config{Provider: "anthropic", Anthropic: RemoteConfig{Model: "claude-sonnet-4-6"}}
+	if got := c.WithModel("").ActiveModel(); got != "claude-sonnet-4-6" {
+		t.Errorf("WithModel(\"\") must be a no-op, got %q", got)
+	}
+}
+
+func TestConfig_WithModel_DoesNotTouchOtherProviders(t *testing.T) {
+	c := Config{
+		Provider:  "anthropic",
+		Anthropic: RemoteConfig{Model: "claude-sonnet-4-6"},
+		OpenAI:    RemoteConfig{Model: "gpt-4o"},
+	}
+	got := c.WithModel("claude-haiku-4-5")
+	if got.OpenAI.Model != "gpt-4o" {
+		t.Errorf("WithModel must not disturb the openai sub-block, got %q", got.OpenAI.Model)
+	}
+	if got.Anthropic.Model != "claude-haiku-4-5" {
+		t.Errorf("WithModel = %q, want claude-haiku-4-5", got.Anthropic.Model)
+	}
+}
+
+func TestConfig_MergedWith_Routing(t *testing.T) {
+	global := Config{
+		Provider: "anthropic",
+		Routing:  RoutingConfig{Enabled: true, SimpleModel: "claude-haiku-4-5", ComplexModel: "claude-opus-4-7"},
+	}
+	local := Config{Routing: RoutingConfig{ComplexModel: "claude-opus-4-custom"}}
+	got := local.MergedWith(global)
+	if !got.Routing.Enabled {
+		t.Error("routing enabled should be filled from global")
+	}
+	if got.Routing.SimpleModel != "claude-haiku-4-5" {
+		t.Errorf("simple_model=%q — global should fill", got.Routing.SimpleModel)
+	}
+	if got.Routing.ComplexModel != "claude-opus-4-custom" {
+		t.Errorf("complex_model=%q — local should win", got.Routing.ComplexModel)
+	}
+}
+
 func TestConfig_MergedWith_ClaudeCLI(t *testing.T) {
 	global := Config{
 		Provider:  "claudecli",

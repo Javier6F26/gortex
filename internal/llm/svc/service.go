@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zzet/gortex/internal/llm"
@@ -52,6 +53,12 @@ type Service struct {
 	expandCache *assistCache
 	rerankCache *assistCache
 	verifyCache *assistCache
+
+	// routedProviders caches one provider per distinct model id when
+	// llm.routing is enabled — see providerForModel. Guarded by
+	// routedMu; closed by Close.
+	routedMu        sync.Mutex
+	routedProviders map[string]llm.Provider
 }
 
 // NewService constructs the service and its provider. Provider
@@ -63,11 +70,12 @@ type Service struct {
 func NewService(cfg llm.Config, backend llm.Backend) *Service {
 	cfg = cfg.ApplyDefaults()
 	s := &Service{
-		cfg:         cfg,
-		backend:     backend,
-		expandCache: newAssistCache(256),
-		rerankCache: newAssistCache(256),
-		verifyCache: newAssistCache(256),
+		cfg:             cfg,
+		backend:         backend,
+		expandCache:     newAssistCache(256),
+		rerankCache:     newAssistCache(256),
+		verifyCache:     newAssistCache(256),
+		routedProviders: map[string]llm.Provider{},
 	}
 	if cfg.IsEnabled() && backend != nil {
 		p, err := provider.New(cfg)
@@ -109,12 +117,59 @@ func (s *Service) ProviderName() string {
 }
 
 // Close releases the provider's resources (model weights, idle HTTP
-// connections). Safe to call multiple times and on a disabled service.
+// connections), including any providers constructed for model routing.
+// Safe to call multiple times and on a disabled service.
 func (s *Service) Close() error {
-	if s == nil || s.provider == nil {
+	if s == nil {
+		return nil
+	}
+	s.routedMu.Lock()
+	for _, p := range s.routedProviders {
+		_ = p.Close()
+	}
+	s.routedProviders = map[string]llm.Provider{}
+	s.routedMu.Unlock()
+	if s.provider == nil {
 		return nil
 	}
 	return s.provider.Close()
+}
+
+// providerForModel returns the llm.Provider for the given model id,
+// constructing and caching one provider per distinct model. An empty
+// model id — or one equal to the active provider's configured model —
+// returns the base provider untouched. Routed providers are closed by
+// Close. Used by model routing (see RunAgent).
+func (s *Service) providerForModel(model string) (llm.Provider, error) {
+	model = strings.TrimSpace(model)
+	if model == "" || model == strings.TrimSpace(s.cfg.ActiveModel()) {
+		return s.provider, nil
+	}
+	s.routedMu.Lock()
+	defer s.routedMu.Unlock()
+	if p, ok := s.routedProviders[model]; ok {
+		return p, nil
+	}
+	p, err := provider.New(s.cfg.WithModel(model))
+	if err != nil {
+		return nil, err
+	}
+	s.routedProviders[model] = p
+	return p, nil
+}
+
+// repoCount reports how many repos the backend currently exposes — the
+// graph-breadth signal Classify uses for routing. Returns 0 when the
+// backend is unavailable or the lookup fails.
+func (s *Service) repoCount(ctx context.Context) int {
+	if s.backend == nil {
+		return 0
+	}
+	repos, err := s.backend.ListRepos(ctx)
+	if err != nil {
+		return 0
+	}
+	return len(repos)
 }
 
 // Generate runs one-shot freeform inference: prompt in, generated text
@@ -172,7 +227,33 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 		tools = agent.GortexTools(s.backend, opts.Scope)
 	}
 
-	ag, err := agent.New(s.provider, tools)
+	// Model routing: when enabled, classify the run by graph-derived
+	// task complexity and dispatch it to the cheaper or the more
+	// capable model. A routing failure (a tier model that won't
+	// construct) degrades cleanly to the base provider.
+	activeProvider := s.provider
+	answer.Model = s.cfg.ActiveModel()
+	if s.cfg.Routing.Enabled {
+		complexity := llm.Classify(llm.ComplexitySignals{
+			Question:  opts.Question,
+			Chain:     opts.Chain,
+			Scoped:    opts.Scope.Repo != "" || opts.Scope.Project != "" || opts.Scope.Ref != "",
+			RepoCount: s.repoCount(ctx),
+		})
+		answer.Complexity = complexity.String()
+		routedModel := s.cfg.Routing.SimpleModel
+		if complexity == llm.ComplexityComplex {
+			routedModel = s.cfg.Routing.ComplexModel
+		}
+		if p, perr := s.providerForModel(routedModel); perr == nil && p != nil {
+			activeProvider = p
+			if m := strings.TrimSpace(routedModel); m != "" {
+				answer.Model = m
+			}
+		}
+	}
+
+	ag, err := agent.New(activeProvider, tools)
 	if err != nil {
 		answer.Error = err.Error()
 		return answer, err

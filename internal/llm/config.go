@@ -58,6 +58,32 @@ type Config struct {
 	DeepSeek RemoteConfig `mapstructure:"deepseek" yaml:"deepseek,omitempty"`
 	// Codex configures the OpenAI Codex CLI subprocess provider.
 	Codex CodexConfig `mapstructure:"codex" yaml:"codex,omitempty"`
+
+	// Routing configures graph-aware model routing for the `ask`
+	// research agent — see RoutingConfig. Disabled by default: every
+	// request runs on the active provider's configured model.
+	Routing RoutingConfig `mapstructure:"routing" yaml:"routing,omitempty"`
+}
+
+// RoutingConfig is the `llm.routing:` sub-block — model routing for
+// the `ask` agent. When Enabled, each agent run is classified by
+// graph-derived task complexity (chain mode, multi-hop keywords,
+// cross-repo scope breadth — see Classify) and dispatched to a
+// cheaper or more capable model *within the active provider*: a
+// trivial single-hop lookup to SimpleModel, a cross-system trace or
+// refactor to ComplexModel. An empty tier model means "use the
+// provider's configured model for that tier" — so routing can be set
+// up to only upgrade hard tasks, or only downgrade easy ones.
+type RoutingConfig struct {
+	// Enabled turns model routing on. Off by default.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// SimpleModel is the model id for low-complexity agent runs (e.g.
+	// "claude-haiku-4-5"). Empty falls back to the configured model.
+	SimpleModel string `mapstructure:"simple_model" yaml:"simple_model,omitempty"`
+	// ComplexModel is the model id for high-complexity agent runs
+	// (e.g. "claude-opus-4-7"). Empty falls back to the configured
+	// model.
+	ComplexModel string `mapstructure:"complex_model" yaml:"complex_model,omitempty"`
 }
 
 // LocalConfig is the `llm.local:` sub-block — settings for the
@@ -204,6 +230,63 @@ func (c Config) ProviderName() string {
 		return "local"
 	}
 	return strings.ToLower(strings.TrimSpace(c.Provider))
+}
+
+// ActiveModel returns the model id of the active provider — the field
+// the GORTEX_LLM_MODEL env var and Config.WithModel target. For the
+// local provider this is the .gguf path; for bedrock the model_id.
+func (c Config) ActiveModel() string {
+	switch c.ProviderName() {
+	case "anthropic":
+		return c.Anthropic.Model
+	case "openai":
+		return c.OpenAI.Model
+	case "ollama":
+		return c.Ollama.Model
+	case "claudecli":
+		return c.ClaudeCLI.Model
+	case "codex":
+		return c.Codex.Model
+	case "gemini":
+		return c.Gemini.Model
+	case "bedrock":
+		return c.Bedrock.ModelID
+	case "deepseek":
+		return c.DeepSeek.Model
+	default:
+		return c.Local.Model
+	}
+}
+
+// WithModel returns a copy of c with the active provider's model field
+// set to model. An empty model is a no-op (returns c unchanged). Used
+// by model routing to derive a per-request provider config without
+// disturbing any other provider's sub-block.
+func (c Config) WithModel(model string) Config {
+	if strings.TrimSpace(model) == "" {
+		return c
+	}
+	switch c.ProviderName() {
+	case "anthropic":
+		c.Anthropic.Model = model
+	case "openai":
+		c.OpenAI.Model = model
+	case "ollama":
+		c.Ollama.Model = model
+	case "claudecli":
+		c.ClaudeCLI.Model = model
+	case "codex":
+		c.Codex.Model = model
+	case "gemini":
+		c.Gemini.Model = model
+	case "bedrock":
+		c.Bedrock.ModelID = model
+	case "deepseek":
+		c.DeepSeek.Model = model
+	default:
+		c.Local.Model = model
+	}
+	return c
 }
 
 // IsEnabled reports whether the config carries enough to start the
@@ -419,7 +502,21 @@ func (c Config) MergedWith(fb Config) Config {
 	c.Bedrock = c.Bedrock.mergedWith(fb.Bedrock)
 	c.DeepSeek = c.DeepSeek.mergedWith(fb.DeepSeek)
 	c.Codex = c.Codex.mergedWith(fb.Codex)
+	c.Routing = c.Routing.mergedWith(fb.Routing)
 	return c
+}
+
+func (r RoutingConfig) mergedWith(fb RoutingConfig) RoutingConfig {
+	if !r.Enabled {
+		r.Enabled = fb.Enabled
+	}
+	if r.SimpleModel == "" {
+		r.SimpleModel = fb.SimpleModel
+	}
+	if r.ComplexModel == "" {
+		r.ComplexModel = fb.ComplexModel
+	}
+	return r
 }
 
 func (l LocalConfig) mergedWith(fb LocalConfig) LocalConfig {
