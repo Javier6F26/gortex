@@ -230,6 +230,20 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 		}
 	}
 
+	// Cross-package name-match guard. The heuristic fallbacks above can
+	// resolve a call by name alone to a candidate in a package the
+	// caller never imports. Now that every EdgeImports edge in this pass
+	// is resolved, re-check each weak-tier call edge against the import
+	// closure and revert the ones whose target is unreachable. The
+	// closure is built once and shared; each job still carries its
+	// pre-resolution target so a reverted edge is restored exactly.
+	guarded := 0
+	if closure := r.buildImportClosure(); len(closure) > 0 {
+		for i := range perWorkerJobs {
+			guarded += r.guardCrossPackageCallEdges(perWorkerJobs[i], closure)
+		}
+	}
+
 	// Relative-import resolution for Python and Dart files. Runs
 	// before module attribution so internal-target stems never get
 	// mis-mapped to a phantom pypi/pub package.
@@ -246,6 +260,16 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 		total.Resolved += perWorkerStats[i].Resolved
 		total.Unresolved += perWorkerStats[i].Unresolved
 		total.External += perWorkerStats[i].External
+	}
+	// A guarded edge was counted as resolved by the fallback that
+	// produced it; reverting it moves the tally back to unresolved.
+	if guarded > 0 {
+		if total.Resolved >= guarded {
+			total.Resolved -= guarded
+		} else {
+			total.Resolved = 0
+		}
+		total.Unresolved += guarded
 	}
 	return total
 }
@@ -354,6 +378,9 @@ func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 
 	// Get all nodes in the file, then check their outgoing edges.
 	// Single-threaded path — apply ReindexEdge inline as before.
+	// Resolved edges are also recorded as jobs so the cross-package
+	// guard can re-check (and, if needed, revert) the weak-tier ones.
+	var jobs []reindexJob
 	nodes := r.graph.GetFileNodes(filePath)
 	for _, n := range nodes {
 		edges := r.graph.GetOutEdges(n.ID)
@@ -364,6 +391,28 @@ func (r *Resolver) ResolveFile(filePath string) *ResolveStats {
 			oldTo, changed := r.resolveEdge(e, stats)
 			if changed {
 				r.graph.ReindexEdge(e, oldTo)
+				jobs = append(jobs, reindexJob{
+					edge:       e,
+					oldTo:      oldTo,
+					newTo:      e.To,
+					kind:       e.Kind,
+					confidence: e.Confidence,
+					origin:     e.Origin,
+				})
+			}
+		}
+	}
+
+	// Cross-package name-match guard — same contract as in ResolveAll.
+	if len(jobs) > 0 {
+		if closure := r.buildImportClosure(); len(closure) > 0 {
+			if guarded := r.guardCrossPackageCallEdges(jobs, closure); guarded > 0 {
+				if stats.Resolved >= guarded {
+					stats.Resolved -= guarded
+				} else {
+					stats.Resolved = 0
+				}
+				stats.Unresolved += guarded
 			}
 		}
 	}

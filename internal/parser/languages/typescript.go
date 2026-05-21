@@ -175,6 +175,25 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 
 	var calls []deferredCall
 	var vars []deferredVar
+	// objLiteralMembers maps a top-level object-literal owner name to the
+	// member-function node IDs declared inside it — both method shorthand
+	// (`{ process() {...} }`) and arrow fields (`{ health: () => ... }`).
+	// A later `owner.method()` member call resolves directly to the
+	// registered node instead of falling through to name-only resolution,
+	// which would otherwise mis-bind to an unrelated free function of the
+	// same name elsewhere in the repo.
+	objLiteralMembers := map[string]map[string]string{}
+	registerObjMember := func(owner, member, id string) {
+		if owner == "" || member == "" || id == "" {
+			return
+		}
+		set := objLiteralMembers[owner]
+		if set == nil {
+			set = map[string]string{}
+			objLiteralMembers[owner] = set
+		}
+		set[member] = id
+	}
 	// importPaths collects every imported module path — including named
 	// imports, which emitImport's alias map intentionally skips — so the
 	// post-pass can disambiguate generic pub/sub method names and infer
@@ -200,7 +219,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			}
 
 		case m.Captures["objfn.def"] != nil:
-			e.emitArrowField(m, filePath, fileID, src, result)
+			registerObjMember(e.emitArrowField(m, filePath, fileID, src, result))
 
 		case m.Captures["class.def"] != nil:
 			classID := e.emitClass(m, filePath, fileID, src, result)
@@ -226,7 +245,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 			}
 
 		case m.Captures["method.def"] != nil:
-			e.emitMethod(m, filePath, src, result, annotationSeen)
+			registerObjMember(e.emitMethod(m, filePath, src, result, annotationSeen))
 
 		case m.Captures["prop.def"] != nil:
 			e.emitClassProperty(m, filePath, src, result, annotationSeen)
@@ -317,6 +336,22 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			})
 			continue
+		}
+		// Object-literal member call (`api.process()` where
+		// `const api = { process() {...} }` is in this file): bind
+		// straight to the member-function node. Resolved at extraction —
+		// the resolver never sees an `unresolved::` target, so a free
+		// function also named `process` in another package can't capture
+		// this edge in the name-only fallback.
+		if members, ok := objLiteralMembers[c.receiver]; ok {
+			if memberID, ok := members[c.method]; ok {
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: callerID, To: memberID,
+					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+					Origin: graph.OriginASTResolved, Confidence: 0.92,
+				})
+				continue
+			}
 		}
 		// Namespace/default import receiver (e.g. `fs.readFile`): attach
 		// the module path so the resolver can classify externally.
@@ -490,11 +525,11 @@ func (e *TypeScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID s
 // argument or return value) we fall back to the bare property name.
 // The graph ID always includes the start line so two same-named
 // fields in different objects in the same file don't collide.
-func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
+func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) (ownerName, member, nodeID string) {
 	prop := m.Captures["objfn.name"].Text
 	def := m.Captures["objfn.def"]
 	if prop == "" || def.Node == nil {
-		return
+		return "", "", ""
 	}
 	// Walk up: pair → object → ... look for the nearest variable_declarator
 	// or assignment whose name we can borrow.
@@ -531,6 +566,10 @@ func (e *TypeScriptExtractor) emitArrowField(m parser.QueryResult, filePath, fil
 	} else {
 		emitTSFunctionShape(id, def.Node, src, filePath, def.StartLine+1, result)
 	}
+	if owner == "" {
+		return "", "", ""
+	}
+	return owner, prop, id
 }
 
 // tsArrowFieldOwner walks from a `pair` node up the AST looking for
@@ -799,30 +838,33 @@ func (e *TypeScriptExtractor) emitImport(m parser.QueryResult, filePath, fileID 
 
 // emitMethod is called once per method_definition captured at root
 // scope. The enclosing class is found by walking up the parent chain
-// to the nearest class_declaration; methods that don't live inside a
-// class (defensively: object literal method shorthand would parse as
-// a `method_definition` in some grammar variants, but tree-sitter's
-// TS grammar classifies those as `pair` — in practice this branch
-// skips nothing that the legacy per-class scan caught).
-func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult, annotationSeen map[string]bool) {
+// to the nearest class_declaration. Method shorthand inside an object
+// literal — `const api = { process() {...} }` — also parses as a
+// `method_definition` (its container is an `object`, not a
+// `class_declaration`); those are routed to emitObjectLiteralMethod so
+// they get a real KindFunction node instead of being silently dropped.
+// The returned (owner, member, id) triple is non-empty only for an
+// object-literal shorthand and lets Extract register the member so a
+// later `owner.method()` call resolves to it directly.
+func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult, annotationSeen map[string]bool) (owner, member, id string) {
 	def := m.Captures["method.def"]
 	if def.Node == nil {
-		return
+		return "", "", ""
 	}
 	classNode := findEnclosingClass(def.Node)
 	if classNode == nil {
-		return
+		return e.emitObjectLiteralMethod(m, filePath, src, result)
 	}
 	classNameNode := classNode.ChildByFieldName("name")
 	if classNameNode == nil {
-		return
+		return "", "", ""
 	}
 	className := classNameNode.Content(src)
 	classID := filePath + "::" + className
 	name := m.Captures["method.name"].Text
-	id := classID + "." + name
+	methodID := classID + "." + name
 	node := &graph.Node{
-		ID: id, Kind: graph.KindMethod, Name: name,
+		ID: methodID, Kind: graph.KindMethod, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "typescript",
 		Meta:     map[string]any{"receiver": className},
@@ -841,15 +883,15 @@ func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, 
 	}
 	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
-		From: id, To: classID, Kind: graph.EdgeMemberOf,
+		From: methodID, To: classID, Kind: graph.EdgeMemberOf,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
 	// Function shape (params, return type, generics) for the method.
-	emitTSFunctionShape(id, def.Node, src, filePath, def.StartLine+1, result)
+	emitTSFunctionShape(methodID, def.Node, src, filePath, def.StartLine+1, result)
 	// JSX child rendering inside the method body (covers React class
 	// components' render() methods).
 	if body := tsFunctionBody(def.Node); body != nil {
-		emitJSXRenderEdges(id, body, src, filePath, result)
+		emitJSXRenderEdges(methodID, body, src, filePath, result)
 	}
 	// NestJS-style dispatch decorators (@UseGuards/@UseInterceptors/...)
 	// are SIBLINGS of method_definition inside class_body — walk backward.
@@ -857,9 +899,71 @@ func (e *TypeScriptExtractor) emitMethod(m parser.QueryResult, filePath string, 
 	// agents can query "find all @<X>" without re-deriving the dispatch
 	// rules every time.
 	for sib := def.Node.PrevSibling(); sib != nil && sib.Type() == "decorator"; sib = sib.PrevSibling() {
-		emitDispatchFromDecorator(sib, src, id, filePath, result)
-		emitTSAnnotationEdges([]*sitter.Node{sib}, id, filePath, src, result, annotationSeen)
+		emitDispatchFromDecorator(sib, src, methodID, filePath, result)
+		emitTSAnnotationEdges([]*sitter.Node{sib}, methodID, filePath, src, result, annotationSeen)
 	}
+	return "", "", ""
+}
+
+// emitObjectLiteralMethod handles method shorthand inside an object
+// literal — `export const api = { process() {...} }`. tree-sitter
+// parses `process()` as a `method_definition` whose container is an
+// `object`, so emitMethod's class walk finds nothing; without this the
+// shorthand method has no graph node at all and a call `api.process()`
+// either resolves to nothing or — worse — to an unrelated free
+// `process` function elsewhere in the repo.
+//
+// The node is named `<owner>.<method>` (e.g. `api.process`), matching
+// emitArrowField's owner-qualified convention, and its ID carries the
+// start line so two same-named shorthand methods in one file don't
+// collide. Returns (owner, member, id) when the owner is a top-level
+// `const owner = { ... }` binding so Extract can register the member
+// for direct call resolution; returns empty strings for an inline /
+// anonymous object whose calls can't be attributed to an owner name.
+func (e *TypeScriptExtractor) emitObjectLiteralMethod(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult) (owner, member, id string) {
+	def := m.Captures["method.def"]
+	if def.Node == nil {
+		return "", "", ""
+	}
+	parent := def.Node.Parent()
+	if parent == nil || parent.Type() != "object" {
+		return "", "", ""
+	}
+	member = m.Captures["method.name"].Text
+	if member == "" {
+		return "", "", ""
+	}
+	owner = tsArrowFieldOwner(def.Node, src)
+	name := member
+	if owner != "" {
+		name = owner + "." + member
+	}
+	id = fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
+	meta := map[string]any{"signature": fmt.Sprintf("%s()", name)}
+	if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
+		meta["doc"] = doc
+	}
+	if rt := extractTSMethodReturnType(def.Node, src); rt != "" {
+		meta["return_type"] = rt
+	}
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID: id, Kind: graph.KindFunction, Name: name,
+		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
+		Language: "typescript",
+		Meta:     meta,
+	})
+	result.Edges = append(result.Edges, &graph.Edge{
+		From: filePath, To: id, Kind: graph.EdgeDefines,
+		FilePath: filePath, Line: def.StartLine + 1,
+	})
+	emitTSFunctionShape(id, def.Node, src, filePath, def.StartLine+1, result)
+	if body := tsFunctionBody(def.Node); body != nil {
+		emitJSXRenderEdges(id, body, src, filePath, result)
+	}
+	if owner == "" {
+		return "", "", ""
+	}
+	return owner, member, id
 }
 
 func (e *TypeScriptExtractor) emitClassProperty(m parser.QueryResult, filePath string, src []byte, result *parser.ExtractionResult, annotationSeen map[string]bool) {
