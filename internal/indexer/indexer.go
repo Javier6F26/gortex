@@ -175,6 +175,13 @@ type Indexer struct {
 	npmAliasOnce sync.Once
 	npmAlias     *npmAliasIndex
 
+	// workspaceMembersOnce builds workspaceMembers lazily on the first
+	// resolve-time package-manager-workspace lookup. Lazy for the same
+	// reason as npmAliasOnce — the repo root and prefix are final only
+	// after New().
+	workspaceMembersOnce sync.Once
+	workspaceMembers     *workspaceMembershipIndex
+
 	// Mtime tracking and parse error retention for index health diagnostics.
 	parseErrors   []IndexError
 	fileMtimes    map[string]int64
@@ -269,6 +276,9 @@ func New(g *graph.Graph, reg *parser.Registry, cfg config.IndexConfig, logger *z
 	// local index. The index is built lazily on first use — the repo
 	// root and prefix are not final until after New().
 	idx.resolver.SetNpmAliasResolver(idx.resolveNpmAliasImport)
+	// Break same-named import collisions in favour of the importer's
+	// own package-manager workspace member. Same lazy-build rationale.
+	idx.resolver.SetWorkspaceMembership(idx.indexerWorkspaceMembership)
 	return idx
 }
 
@@ -3875,6 +3885,11 @@ func (idx *Indexer) extractExternalModules() {
 	for _, m := range manifests {
 		idx.extractOneModuleManifest(m.path, m.parse, m.ownPathFromSrc)
 	}
+
+	// After per-manifest module extraction, detect whether this repo's
+	// root is a package-manager workspace and materialise its
+	// root→member edges.
+	idx.extractPackageWorkspace()
 }
 
 // extractOneModuleManifest reads a single manifest file from the

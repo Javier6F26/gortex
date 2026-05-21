@@ -89,6 +89,12 @@ type CrossRepoResolver struct {
 	// ancestor package.json. Same contract as the field of the
 	// same name on Resolver — see npm_alias.go.
 	npmAlias NpmAliasResolver
+	// workspaceMembers maps a file path to the package-manager
+	// workspace it belongs to, used to prefer a same-workspace
+	// candidate on a same-named import collision. Same contract as
+	// the field of the same name on Resolver — see
+	// workspace_membership.go.
+	workspaceMembers WorkspaceMembership
 }
 
 // NewCrossRepo creates a CrossRepoResolver for the given graph.
@@ -510,7 +516,14 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	//
 	// Falls back to a full graph scan if the indexes are unset (defensive
 	// — only happens when resolveImport is called outside a Resolve* pass).
+	// When a package-manager workspace lookup is installed every
+	// same-repo candidate is collected so a same-named collision
+	// across two workspace members can be resolved to the importer's
+	// own workspace; otherwise the first same-repo hit short-circuits
+	// the scan as before.
+	collectAll := cr.workspaceMembers != nil
 	var sameRepo, crossRepo *graph.Node
+	var sameRepoAll []*graph.Node
 	consider := func(n *graph.Node) {
 		if n.Kind != graph.KindFile {
 			return
@@ -518,6 +531,9 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 		if n.RepoPrefix == callerRepo {
 			if sameRepo == nil {
 				sameRepo = n
+			}
+			if collectAll {
+				sameRepoAll = append(sameRepoAll, n)
 			}
 			return
 		}
@@ -530,17 +546,18 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 			crossRepo = n
 		}
 	}
+	stop := func() bool { return sameRepo != nil && !collectAll }
 	if cr.dirIndex != nil {
 		for _, n := range cr.dirIndex[importPath] {
 			consider(n)
-			if sameRepo != nil {
+			if stop() {
 				break
 			}
 		}
-		if sameRepo == nil {
+		if sameRepo == nil || collectAll {
 			for _, n := range cr.lastDirIndex[lastPathComponent(importPath)] {
 				consider(n)
-				if sameRepo != nil {
+				if stop() {
 					break
 				}
 			}
@@ -553,7 +570,7 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 			dir := filepath.Dir(n.FilePath)
 			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
 				consider(n)
-				if sameRepo != nil {
+				if stop() {
 					break
 				}
 			}
@@ -561,6 +578,11 @@ func (cr *CrossRepoResolver) resolveImport(e *graph.Edge, importPath string, sta
 	}
 
 	if sameRepo != nil {
+		// Name-collision tie-break: prefer the same-repo file in the
+		// importing file's own package-manager workspace.
+		if ws := cr.preferSameWorkspaceFile(e.FilePath, sameRepoAll); ws != nil {
+			sameRepo = ws
+		}
 		e.To = sameRepo.ID
 		stats.Resolved++
 		return

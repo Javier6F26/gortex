@@ -163,6 +163,23 @@ const (
 	// EdgeDependsOnModule links a file/package/import to a KindModule
 	// node. One edge per import statement; aggregable to package-level.
 	EdgeDependsOnModule EdgeKind = "depends_on_module"
+	// EdgePackageWorkspaceMember links a package-manager workspace root
+	// to one of its member packages. A package-manager workspace is a
+	// root manifest that owns a set of member packages — an npm/yarn
+	// root package.json with a "workspaces" array, a pnpm
+	// pnpm-workspace.yaml with a `packages:` list, or a Cargo root
+	// Cargo.toml with `[workspace] members`. The From endpoint is the
+	// synthetic workspace-root node (`pkgws::<ecosystem>:<root-dir>`);
+	// the To endpoint is the member package's manifest file node.
+	// Glob member patterns (`packages/*`) are expanded against the
+	// filesystem at index time, so one edge is emitted per resolved
+	// member directory.
+	//
+	// This is the package-manager's notion of a workspace and is
+	// unrelated to Node.WorkspaceID, which is Gortex's hard graph
+	// boundary for grouping whole repositories. Origin: ast_resolved —
+	// membership is read structurally from the manifest text.
+	EdgePackageWorkspaceMember EdgeKind = "package_workspace_member"
 	// EdgeOwns links a team to a file or directory. Sourced from
 	// CODEOWNERS. Directory entries materialize per-file.
 	EdgeOwns EdgeKind = "owns"
@@ -553,6 +570,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 		// the AST-resolved tier.
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
+		EdgePackageWorkspaceMember,
 		EdgeCaptures,
 		// Framework-layer edges. Each is materialised by an extractor
 		// that already proved the relationship (handler → route via
@@ -599,6 +617,7 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 		EdgeProvides, EdgeConsumes, EdgeMatches,
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
+		EdgePackageWorkspaceMember,
 		EdgeCaptures,
 		// Framework-layer edges. Each is materialised by an extractor
 		// that already proved the relationship (handler → route via

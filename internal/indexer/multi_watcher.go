@@ -58,6 +58,9 @@ func NewMultiWatcher(
 	// Resolve JS/TS imports declared through an npm alias to their
 	// locally-vendored real package.
 	mw.resolver.SetNpmAliasResolver(mi.npmAliasResolver())
+	// Break same-named import collisions in favour of the importer's
+	// own package-manager workspace member.
+	mw.resolver.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 
 	for prefix, cfg := range configs {
 		if err := mw.createWatcher(prefix, cfg); err != nil {

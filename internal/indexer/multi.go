@@ -112,6 +112,26 @@ func (mi *MultiIndexer) npmAliasResolver() resolver.NpmAliasResolver {
 	return idx.Resolve
 }
 
+// workspaceMembershipResolver builds a resolver.WorkspaceMembership
+// covering every tracked repo's on-disk root. Installed on the global
+// post-pass resolver and the cross-repo resolver so a same-named import
+// collision is broken in favour of the importer's own package-manager
+// workspace member. Returns nil when no repo is a workspace root —
+// callers treat that as "no workspace signal".
+func (mi *MultiIndexer) workspaceMembershipResolver() resolver.WorkspaceMembership {
+	roots := map[string]string{}
+	for prefix, meta := range mi.AllMetadata() {
+		if meta != nil && meta.RootPath != "" {
+			roots[prefix] = meta.RootPath
+		}
+	}
+	idx := newWorkspaceMembershipIndex(roots)
+	if idx == nil {
+		return nil
+	}
+	return idx.Lookup
+}
+
 // newPerRepoIndexer constructs a per-repo Indexer with the standard
 // MultiIndexer wiring (shared search backend, embedder if configured,
 // deferred-global-passes flag propagated). Centralised so the flag
@@ -228,6 +248,7 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 			master.SetLSPHelper(mi.resolverLSPHelper)
 		}
 		master.SetNpmAliasResolver(mi.npmAliasResolver())
+		master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 		master.ResolveAll()
 	}
 }
@@ -628,6 +649,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	cr := resolver.NewCrossRepo(mi.graph)
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
+	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 

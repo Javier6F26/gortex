@@ -95,6 +95,14 @@ type Resolver struct {
 	// nearest-ancestor package.json. See npm_alias.go for the
 	// contract. Set via SetNpmAliasResolver before ResolveAll runs.
 	npmAlias NpmAliasResolver
+
+	// workspaceMembers, when non-nil, maps a file path to the
+	// package-manager workspace it belongs to. Used to break a
+	// same-named import collision in favour of the candidate that
+	// shares the importing file's workspace. See
+	// workspace_membership.go for the contract. Set via
+	// SetWorkspaceMembership before ResolveAll runs.
+	workspaceMembers WorkspaceMembership
 }
 
 // lspLocKey identifies a node by (filePath, 1-based line) and is the
@@ -708,7 +716,16 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// = 750M comparisons per cold index). Falls back to a scan only
 	// when the indexes aren't populated (ResolveEdge invoked outside
 	// of ResolveAll/ResolveFile).
+	//
+	// When a package-manager workspace lookup is installed, all
+	// same-repo candidates are collected (not just the first) so a
+	// same-named collision across two workspace members can be broken
+	// in favour of the importer's own workspace. Without the lookup
+	// the first same-repo hit short-circuits the scan, preserving the
+	// pre-feature cost.
+	collectAll := r.workspaceMembers != nil
 	var sameRepo, crossRepoNode *graph.Node
+	var sameRepoAll []*graph.Node
 	consider := func(n *graph.Node) {
 		if n.Kind != graph.KindFile {
 			return
@@ -716,6 +733,9 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 		if callerRepo == "" || n.RepoPrefix == callerRepo {
 			if sameRepo == nil {
 				sameRepo = n
+			}
+			if collectAll {
+				sameRepoAll = append(sameRepoAll, n)
 			}
 			return
 		}
@@ -728,17 +748,21 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 			crossRepoNode = n
 		}
 	}
+	// stop reports whether the candidate scan can short-circuit: once a
+	// same-repo hit is found and we are not collecting every candidate
+	// for workspace disambiguation.
+	stop := func() bool { return sameRepo != nil && !collectAll }
 	if r.dirIndex != nil {
 		for _, n := range r.dirIndex[importPath] {
 			consider(n)
-			if sameRepo != nil {
+			if stop() {
 				break
 			}
 		}
-		if sameRepo == nil {
+		if sameRepo == nil || collectAll {
 			for _, n := range r.lastDirIndex[lastPathComponent(importPath)] {
 				consider(n)
-				if sameRepo != nil {
+				if stop() {
 					break
 				}
 			}
@@ -751,7 +775,7 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 			dir := filepath.Dir(n.FilePath)
 			if strings.HasSuffix(dir, lastPathComponent(importPath)) || dir == importPath {
 				consider(n)
-				if sameRepo != nil {
+				if stop() {
 					break
 				}
 			}
@@ -759,6 +783,12 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	}
 
 	if sameRepo != nil {
+		// Name-collision tie-break: when several same-repo files match
+		// a bare import name, prefer the one in the importing file's
+		// own package-manager workspace.
+		if ws := r.preferSameWorkspaceFile(e.FilePath, sameRepoAll); ws != nil {
+			sameRepo = ws
+		}
 		e.To = sameRepo.ID
 		stats.Resolved++
 		return
