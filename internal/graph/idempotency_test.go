@@ -516,3 +516,146 @@ func TestEvictFile_AfterReindex(t *testing.T) {
 	// All edges removed — bucket should be empty.
 	assert.Empty(t, g.GetOutEdges("src/a.go::A"), "outEdges bucket must drain after every target was evicted")
 }
+
+// edgeIdentityGraph builds a two-node graph with one A→B calls edge at
+// the given Origin, returning the graph and the live in-graph edge.
+func edgeIdentityGraph(t *testing.T, origin string) (*Graph, *Edge) {
+	t.Helper()
+	g := New()
+	g.AddNode(&Node{ID: "p/a.go::A", Name: "A", Kind: KindFunction, FilePath: "p/a.go"})
+	g.AddNode(&Node{ID: "p/b.go::B", Name: "B", Kind: KindFunction, FilePath: "p/b.go"})
+	g.AddEdge(&Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 7, Origin: origin})
+	out := g.GetOutEdges("p/a.go::A")
+	require.Len(t, out, 1)
+	return g, out[0]
+}
+
+// TestSetEdgeProvenance_ChangesIdentityAndCounts proves SetEdgeProvenance
+// is a delete-then-insert of the edge's identity: a real Origin change
+// flips the IdentityHash and bumps the revision counter by exactly one,
+// while the logical adjacency-list slot is untouched.
+func TestSetEdgeProvenance_ChangesIdentityAndCounts(t *testing.T) {
+	g, e := edgeIdentityGraph(t, OriginTextMatched)
+	require.Equal(t, 0, g.EdgeIdentityRevisions(), "fresh graph has no provenance churn")
+
+	before := e.IdentityHash()
+	changed := g.SetEdgeProvenance(e, OriginLSPResolved)
+
+	assert.True(t, changed, "upgrading Origin must report an identity change")
+	assert.Equal(t, OriginLSPResolved, e.Origin, "Origin must be applied")
+	assert.NotEqual(t, before, e.IdentityHash(), "identity hash must change with Origin")
+	assert.Equal(t, 1, g.EdgeIdentityRevisions(), "exactly one revision recorded")
+
+	// The logical edge is unchanged — same single adjacency entry.
+	assert.Len(t, g.GetOutEdges("p/a.go::A"), 1, "outEdges count must not change")
+	assert.Len(t, g.GetInEdges("p/b.go::B"), 1, "inEdges count must not change")
+}
+
+// TestSetEdgeProvenance_NoOpWhenOriginUnchanged proves a SetEdgeProvenance
+// call that does not actually change Origin is a no-op: identity stable,
+// counter untouched, return value false.
+func TestSetEdgeProvenance_NoOpWhenOriginUnchanged(t *testing.T) {
+	g, e := edgeIdentityGraph(t, OriginASTResolved)
+	before := e.IdentityHash()
+
+	changed := g.SetEdgeProvenance(e, OriginASTResolved)
+
+	assert.False(t, changed, "setting Origin to its current value is a no-op")
+	assert.Equal(t, before, e.IdentityHash(), "identity hash must be stable on a no-op")
+	assert.Equal(t, 0, g.EdgeIdentityRevisions(), "a no-op must not bump the counter")
+}
+
+// TestSetEdgeProvenance_RederivesTierWhenSet confirms Tier — the sole
+// Origin-derived label on an edge — is recomputed when it was already
+// populated, and left empty (the in-memory default) when it was not.
+func TestSetEdgeProvenance_RederivesTierWhenSet(t *testing.T) {
+	// Tier already set: must be re-derived from the new Origin.
+	g, e := edgeIdentityGraph(t, OriginTextMatched)
+	e.Tier = ResolvedBy(OriginTextMatched)
+	g.SetEdgeProvenance(e, OriginLSPResolved)
+	assert.Equal(t, ResolvedBy(OriginLSPResolved), e.Tier, "populated Tier must track the new Origin")
+
+	// Tier left empty: must stay empty rather than start being stamped.
+	g2, e2 := edgeIdentityGraph(t, OriginTextMatched)
+	g2.SetEdgeProvenance(e2, OriginLSPResolved)
+	assert.Equal(t, "", e2.Tier, "an unset Tier must remain unset")
+}
+
+// TestAddEdge_ReaddWithUpgradedOriginCounts proves the second mutation
+// path: re-adding an edge with the same logical key but an upgraded
+// Origin (the resolver's AddEdge-based upgrade path) replaces the slot
+// in place AND is counted as an identity revision — without creating a
+// duplicate parallel edge.
+func TestAddEdge_ReaddWithUpgradedOriginCounts(t *testing.T) {
+	g, _ := edgeIdentityGraph(t, OriginTextMatched)
+	require.Equal(t, 0, g.EdgeIdentityRevisions())
+
+	// Re-add the same logical edge with a stronger Origin.
+	g.AddEdge(&Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 7, Origin: OriginLSPResolved})
+
+	assert.Equal(t, 1, g.EdgeCount(), "re-add must not create a parallel edge")
+	assert.Len(t, g.GetOutEdges("p/a.go::A"), 1, "still one outEdge")
+	assert.Len(t, g.GetInEdges("p/b.go::B"), 1, "still one inEdge")
+	assert.Equal(t, 1, g.EdgeIdentityRevisions(), "the Origin upgrade on re-add must be counted once")
+	assert.Equal(t, OriginLSPResolved, g.GetOutEdges("p/a.go::A")[0].Origin, "newer Origin wins")
+}
+
+// TestAddEdge_ReaddWithSameOriginDoesNotCount proves an idempotent
+// re-add carrying the SAME Origin is not mistaken for provenance churn.
+func TestAddEdge_ReaddWithSameOriginDoesNotCount(t *testing.T) {
+	g, _ := edgeIdentityGraph(t, OriginASTResolved)
+	for i := 0; i < 5; i++ {
+		g.AddEdge(&Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 7, Origin: OriginASTResolved})
+	}
+	assert.Equal(t, 1, g.EdgeCount(), "idempotent re-add must not grow the edge count")
+	assert.Equal(t, 0, g.EdgeIdentityRevisions(), "re-add with an unchanged Origin is not a revision")
+}
+
+// TestVerifyEdgeIdentities_PassesOnNormalGraph proves a graph built
+// only through the sanctioned mutation paths (AddEdge, SetEdgeProvenance)
+// is internally consistent — the out-edge and in-edge views agree on
+// every edge's provenance-bearing identity.
+func TestVerifyEdgeIdentities_PassesOnNormalGraph(t *testing.T) {
+	g := New()
+	for _, id := range []string{"p/a.go::A", "p/b.go::B", "p/c.go::C"} {
+		g.AddNode(&Node{ID: id, Name: id, Kind: KindFunction, FilePath: id})
+	}
+	g.AddEdge(&Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 3, Origin: OriginTextMatched})
+	g.AddEdge(&Edge{From: "p/a.go::A", To: "p/c.go::C", Kind: EdgeCalls, FilePath: "p/a.go", Line: 4, Origin: OriginASTResolved})
+	g.AddEdge(&Edge{From: "p/b.go::B", To: "p/c.go::C", Kind: EdgeReferences, FilePath: "p/b.go", Line: 9})
+
+	require.NoError(t, g.VerifyEdgeIdentities(), "freshly built graph must be identity-consistent")
+
+	// A sanctioned provenance change keeps the graph consistent.
+	out := g.GetOutEdges("p/a.go::A")
+	require.NotEmpty(t, out)
+	g.SetEdgeProvenance(out[0], OriginLSPResolved)
+	require.NoError(t, g.VerifyEdgeIdentities(), "SetEdgeProvenance must preserve identity consistency")
+}
+
+// TestVerifyEdgeIdentities_CatchesDivergentOrigin proves the verifier
+// is not vacuous: when an edge's Origin is changed on only one
+// adjacency view (the failure mode of mutating a copied edge instead
+// of routing through SetEdgeProvenance), VerifyEdgeIdentities reports
+// the inconsistency.
+func TestVerifyEdgeIdentities_CatchesDivergentOrigin(t *testing.T) {
+	g := New()
+	g.AddNode(&Node{ID: "p/a.go::A", Name: "A", Kind: KindFunction, FilePath: "p/a.go"})
+	g.AddNode(&Node{ID: "p/b.go::B", Name: "B", Kind: KindFunction, FilePath: "p/b.go"})
+	g.AddEdge(&Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 7, Origin: OriginTextMatched})
+	require.NoError(t, g.VerifyEdgeIdentities())
+
+	// Simulate the bug: the in-edge bucket gets a *different* edge
+	// object whose Origin diverges from the out-edge view. addEdgeToBucket
+	// keys on the Origin-free logical key, so this overwrites the slot
+	// with a copy rather than appending.
+	sTo := g.shardFor("p/b.go::B")
+	sTo.mu.Lock()
+	divergent := &Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 7, Origin: OriginLSPResolved}
+	addEdgeToBucket(sTo.inEdges, sTo.inEdgeKeys, sTo.inEdgeIdx, "p/b.go::B", divergent)
+	sTo.mu.Unlock()
+
+	err := g.VerifyEdgeIdentities()
+	require.Error(t, err, "a divergent-Origin edge across adjacency views must be caught")
+	assert.Contains(t, err.Error(), "p/a.go::A", "the error must name the offending edge")
+}

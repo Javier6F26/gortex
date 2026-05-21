@@ -1735,8 +1735,12 @@ func (r *Resolver) InferOverrides() int {
 		for _, existing := range r.graph.GetOutEdges(p.from.ID) {
 			if existing.Kind == graph.EdgeOverrides && existing.To == p.to.ID {
 				dup = true
+				// Upgrade the provenance of the existing override edge
+				// through SetEdgeProvenance so the identity change is
+				// counted — a bare existing.Origin write would bypass
+				// the revision counter.
 				if graph.OriginRank(existing.Origin) < graph.OriginRank(p.origin) {
-					existing.Origin = p.origin
+					r.graph.SetEdgeProvenance(existing, p.origin)
 				}
 				break
 			}

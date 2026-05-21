@@ -1468,6 +1468,12 @@ func (s *Server) buildGraphStatsPayload(ctx context.Context) map[string]any {
 		"by_language": stats.ByLanguage,
 	}
 
+	// Provenance churn: how many times an in-graph edge's identity
+	// changed because its Origin was upgraded or reverted. Surfaced
+	// as the tamper-evidence signal — a non-zero value means edge
+	// provenance moved since the graph was built.
+	result["edge_identity_revisions"] = s.readerFor(ctx).EdgeIdentityRevisions()
+
 	if s.multiIndexer != nil && s.multiIndexer.IsMultiRepo() {
 		result["per_repo"] = s.readerFor(ctx).RepoStats()
 	}

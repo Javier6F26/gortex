@@ -203,6 +203,12 @@ func TestIndex_EdgeSanityHolds(t *testing.T) {
 	assert.False(t, result.EdgeSanityViolated(),
 		"a normal index must not trip the edge-sanity check (files=%d nodes=%d edges=%d)",
 		result.FileCount, result.NodeCount, result.EdgeCount)
+
+	// A graph built only through the indexer's sanctioned mutation
+	// paths is provenance-consistent: every edge's out- and in-edge
+	// adjacency views agree on its identity hash.
+	require.NoError(t, g.VerifyEdgeIdentities(),
+		"a normally-indexed graph must have internally consistent edge identities")
 }
 
 func TestIndex_UnsupportedFile(t *testing.T) {

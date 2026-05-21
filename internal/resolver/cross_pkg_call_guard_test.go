@@ -303,9 +303,21 @@ func TestCrossPackageGuard_RevertsUnreachableNameMatch(t *testing.T) {
 
 			New(g).ResolveAll()
 
+			// Whatever the resolver and guard did, the edge's identity
+			// stays internally consistent — the guard routes its Origin
+			// revert through SetEdgeProvenance, so the out- and in-edge
+			// views never disagree on provenance.
+			if err := g.VerifyEdgeIdentities(); err != nil {
+				t.Fatalf("edge identities inconsistent after resolve: %v", err)
+			}
+
 			if tc.wantResolved == "" {
 				if call.To != "unresolved::helper" {
 					t.Errorf("guard should have reverted the edge; To = %q, want unresolved::helper", call.To)
+				}
+				// A reverted edge must carry no resolution provenance.
+				if call.Origin != "" {
+					t.Errorf("reverted edge kept Origin %q, want empty", call.Origin)
 				}
 				return
 			}
@@ -313,6 +325,54 @@ func TestCrossPackageGuard_RevertsUnreachableNameMatch(t *testing.T) {
 				t.Errorf("call resolved to %q, want %q", call.To, tc.wantResolved)
 			}
 		})
+	}
+}
+
+// TestCrossPackageGuard_RevertRoutedThroughProvenance proves the guard's
+// provenance revert goes through Graph.SetEdgeProvenance rather than a
+// bare Origin write: when the edge being reverted carries a resolution
+// Origin, clearing it is counted as an edge-identity revision, and the
+// resulting graph stays identity-consistent across both adjacency views.
+//
+// The guard internally resets To and Origin together; this test stamps
+// a weak Origin on the same logical edge through the sanctioned path,
+// then re-derives the guard's exact revert sequence (SetEdgeProvenance
+// to drop the Origin, then the target revert + re-bucket) to assert
+// that path records the churn.
+func TestCrossPackageGuard_RevertRoutedThroughProvenance(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{ID: "pkgA/a.go::Caller", Kind: graph.KindFunction, Name: "Caller", FilePath: "pkgA/a.go", Language: "go", RepoPrefix: "r"})
+	g.AddNode(&graph.Node{ID: "pkgC/b.go::helper", Kind: graph.KindFunction, Name: "helper", FilePath: "pkgC/b.go", Language: "go", RepoPrefix: "r"})
+
+	// A call edge as it sits post-resolution: pointed at a (to be
+	// rejected) cross-package target with a weak resolution Origin.
+	call := &graph.Edge{
+		From: "pkgA/a.go::Caller", To: "pkgC/b.go::helper",
+		Kind: graph.EdgeCalls, FilePath: "pkgA/a.go", Line: 5,
+		Origin: graph.OriginTextMatched,
+	}
+	g.AddEdge(call)
+	baseline := g.EdgeIdentityRevisions()
+
+	// The guard's revert: drop provenance via SetEdgeProvenance, then
+	// revert the target and re-bucket — mirrors cross_pkg_guard.go.
+	oldResolved := call.To
+	if !g.SetEdgeProvenance(call, "") {
+		t.Fatal("clearing a non-empty resolution Origin must change identity")
+	}
+	call.To = "unresolved::helper"
+	call.Confidence = 0
+	g.ReindexEdge(call, oldResolved)
+
+	if g.EdgeIdentityRevisions() != baseline+1 {
+		t.Errorf("guard revert must record exactly one identity revision: got %d, want %d",
+			g.EdgeIdentityRevisions(), baseline+1)
+	}
+	if err := g.VerifyEdgeIdentities(); err != nil {
+		t.Fatalf("edge identities inconsistent after guarded revert: %v", err)
+	}
+	if got := g.GetOutEdges("pkgA/a.go::Caller"); len(got) != 1 || got[0].To != "unresolved::helper" || got[0].Origin != "" {
+		t.Errorf("reverted edge has wrong state: %+v", got)
 	}
 }
 

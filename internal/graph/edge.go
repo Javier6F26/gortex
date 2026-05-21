@@ -441,6 +441,22 @@ type Edge struct {
 	Meta map[string]any `json:"-"`
 }
 
+// IdentityHash returns the edge's provenance-bearing identity: a stable
+// 128-bit hash over (From, To, Kind, FilePath, Line, Origin). It is
+// deliberately broader than the logical edgeKey the adjacency-list
+// dedup index uses — that key omits Origin so a provenance upgrade
+// replaces an edge in place instead of creating a parallel one. The
+// identity hash, by contrast, treats Origin as load-bearing: two edges
+// that differ only in Origin have different identities, so a silent
+// provenance change is observable as an identity change.
+//
+// Changing an in-graph edge's Origin should therefore be modeled as a
+// retirement of the old identity and creation of a new one — see
+// Graph.SetEdgeProvenance, the only sanctioned mutation path.
+func (e *Edge) IdentityHash() edgeHash {
+	return hashEdgeIdentity(keyOf(e), e.Origin)
+}
+
 // Edge.Origin values — call-graph confidence tiers, highest → lowest. Use
 // MeetsMinTier / OriginRank to compare.
 //

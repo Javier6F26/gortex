@@ -80,9 +80,14 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 		}
 		// Not reachable — revert to the unresolved placeholder and
 		// re-index against the resolved target we are abandoning.
+		// Drop the resolution provenance through SetEdgeProvenance so
+		// the reverted edge's identity change is counted; the logical
+		// key still carries the resolved target at this point, which
+		// is fine — SetEdgeProvenance keys the revision on Origin
+		// alone. The target revert + re-bucket follows.
 		oldResolved := j.edge.To
+		r.graph.SetEdgeProvenance(j.edge, "")
 		j.edge.To = j.oldTo
-		j.edge.Origin = ""
 		j.edge.Confidence = 0
 		r.graph.ReindexEdge(j.edge, oldResolved)
 		reverted++

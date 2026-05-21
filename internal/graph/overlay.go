@@ -571,6 +571,16 @@ func (v *OverlaidView) EdgeCount() int {
 	return len(v.AllEdges())
 }
 
+// EdgeIdentityRevisions delegates to the base graph: provenance churn
+// is a property of the persistent graph, and an overlay layer is a
+// non-mutating per-session shadow that never upgrades edge provenance.
+func (v *OverlaidView) EdgeIdentityRevisions() int {
+	if v.base == nil {
+		return 0
+	}
+	return v.base.EdgeIdentityRevisions()
+}
+
 // Stats is best-effort under overlay: we report base's stats (the
 // analyzer-shaped GraphStats requires per-kind / per-language
 // breakdowns that the overlay layer doesn't expose cheaply). Caching

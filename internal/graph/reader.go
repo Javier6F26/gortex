@@ -39,6 +39,9 @@ type Reader interface {
 	// Counters & stats.
 	NodeCount() int
 	EdgeCount() int
+	// EdgeIdentityRevisions is the running count of provenance-bearing
+	// edge-identity changes — see Graph.EdgeIdentityRevisions.
+	EdgeIdentityRevisions() int
 	Stats() GraphStats
 	RepoStats() map[string]GraphStats
 }

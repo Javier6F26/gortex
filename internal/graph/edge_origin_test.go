@@ -101,3 +101,68 @@ func TestDefaultOriginFor_ConfidenceBuckets(t *testing.T) {
 		}
 	}
 }
+
+// TestEdgeIdentityHash_StableForFixedOrigin proves IdentityHash is a
+// pure function of (From, To, Kind, FilePath, Line, Origin): two
+// separately-constructed edges with identical fields hash equal.
+func TestEdgeIdentityHash_StableForFixedOrigin(t *testing.T) {
+	a := &Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved}
+	b := &Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved}
+
+	if a.IdentityHash() != b.IdentityHash() {
+		t.Fatal("edges with identical fields must share an identity hash")
+	}
+}
+
+// TestEdgeIdentityHash_DiffersOnlyByOrigin proves the deliverable: the
+// identity hash changes iff Origin changes when every other field is
+// held fixed. Each distinct tier yields a distinct identity, and the
+// logical key alone (Origin-free) is NOT enough to pin the identity.
+func TestEdgeIdentityHash_DiffersOnlyByOrigin(t *testing.T) {
+	base := func(origin string) *Edge {
+		return &Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: origin}
+	}
+	origins := []string{
+		OriginLSPResolved, OriginLSPDispatch, OriginASTResolved,
+		OriginASTInferred, OriginTextMatched, "",
+	}
+	seen := make(map[edgeHash]string, len(origins))
+	for _, o := range origins {
+		h := base(o).IdentityHash()
+		if prev, dup := seen[h]; dup {
+			t.Fatalf("origins %q and %q collided to the same identity hash", prev, o)
+		}
+		seen[h] = o
+	}
+
+	// The Origin-free logical key must NOT determine the identity:
+	// two edges with the same keyOf but different Origin differ.
+	lsp := base(OriginLSPResolved)
+	txt := base(OriginTextMatched)
+	if keyOf(lsp) != keyOf(txt) {
+		t.Fatal("test setup: edges should share the logical key")
+	}
+	if lsp.IdentityHash() == txt.IdentityHash() {
+		t.Fatal("identity hash must include Origin — same logical key, different Origin must differ")
+	}
+}
+
+// TestEdgeIdentityHash_DiffersOnLogicalFields confirms IdentityHash
+// still discriminates on the logical-key fields, so it is a strict
+// superset of edgeKey's discrimination, not a replacement that only
+// looks at Origin.
+func TestEdgeIdentityHash_DiffersOnLogicalFields(t *testing.T) {
+	ref := &Edge{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved}
+	variants := []*Edge{
+		{From: "p/a.go::X", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved},
+		{From: "p/a.go::A", To: "p/b.go::X", Kind: EdgeCalls, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved},
+		{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeReferences, FilePath: "p/a.go", Line: 12, Origin: OriginASTResolved},
+		{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/c.go", Line: 12, Origin: OriginASTResolved},
+		{From: "p/a.go::A", To: "p/b.go::B", Kind: EdgeCalls, FilePath: "p/a.go", Line: 99, Origin: OriginASTResolved},
+	}
+	for i, v := range variants {
+		if ref.IdentityHash() == v.IdentityHash() {
+			t.Errorf("variant %d: identity hash must differ when a logical-key field differs", i)
+		}
+	}
+}

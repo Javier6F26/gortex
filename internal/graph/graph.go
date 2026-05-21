@@ -2,6 +2,7 @@ package graph
 
 import (
 	"sync"
+	"sync/atomic"
 )
 
 // GraphStats holds summary counts of the graph contents.
@@ -100,6 +101,39 @@ func fnv1aEdge(seed uint64, k edgeKey, reversed bool) uint64 {
 		mix(k.FilePath)
 	}
 	h ^= uint64(k.Line)
+	h *= fnvPrime64
+	return h
+}
+
+// hashEdgeIdentity computes the provenance-bearing identity hash of an
+// edge: the logical key folded together with Origin. It reuses the
+// edgeKey FNV machinery — each 64-bit half is hashEdgeKey's
+// corresponding half with the Origin string mixed in as a sixth field
+// (same 0xff-separated FNV-1a fold, same reversed-order decorrelation).
+//
+// This is deliberately distinct from hashEdgeKey: the dedup index
+// (outEdgeIdx / inEdgeIdx) stays keyed on the Origin-free logical key
+// so an Origin upgrade replaces the slot in place rather than creating
+// a parallel edge. The identity hash is the separate value Edge.
+// IdentityHash exposes so a provenance change is observable as a
+// distinct identity.
+func hashEdgeIdentity(k edgeKey, origin string) edgeHash {
+	return edgeHash{
+		lo: mixOriginInto(fnv1aEdge(fnvOffset64, k, false), origin),
+		hi: mixOriginInto(fnv1aEdge(0x9e3779b97f4a7c15, k, true), origin),
+	}
+}
+
+// mixOriginInto folds the Origin string into an already-computed
+// fnv1aEdge hash with the same 0xff-separated FNV-1a step the key
+// fields use, so Origin is a first-class sixth field of the identity
+// rather than a bolt-on.
+func mixOriginInto(h uint64, origin string) uint64 {
+	for i := 0; i < len(origin); i++ {
+		h ^= uint64(origin[i])
+		h *= fnvPrime64
+	}
+	h ^= 0xff
 	h *= fnvPrime64
 	return h
 }
@@ -315,18 +349,29 @@ func removeNodeFromBucket(bucket map[string][]*Node, idx map[string]map[string]i
 
 // addEdgeToBucket appends e to bucket[key] unless an entry with the
 // same logical identity (edgeKey) is already there, in which case the
-// existing slot is overwritten. Returns whether this was a new insert.
+// existing slot is overwritten. Reports whether this was a new insert
+// and, on an in-place replace, whether the replacement carried a
+// different Origin than the edge it displaced.
 //
 // keys is the parallel slice that remembers each slot's insertion-time
 // edgeKey so removeEdgeFromBucket can update sidecars without
 // recomputing keyOf on a possibly-mutated swapped Edge.
-func addEdgeToBucket(bucket map[string][]*Edge, keys map[string][]edgeHash, idx map[string]map[edgeHash]int, key string, e *Edge) bool {
+//
+// originChanged surfaces the resolver path where an edge is re-added
+// (via AddEdge) with upgraded provenance rather than mutated in place:
+// the logical key still matches, so the slot is replaced, but the
+// edge's identity has changed. AddEdge funnels this into the
+// graph-level identity-revision counter so that re-add path is as
+// observable as an explicit SetEdgeProvenance call.
+func addEdgeToBucket(bucket map[string][]*Edge, keys map[string][]edgeHash, idx map[string]map[edgeHash]int, key string, e *Edge) (inserted, originChanged bool) {
 	h := hashEdgeKey(keyOf(e))
 	if inner, ok := idx[key]; ok {
 		if pos, exists := inner[h]; exists {
+			old := bucket[key][pos]
+			originChanged = old != nil && old != e && old.Origin != e.Origin
 			bucket[key][pos] = e
 			// keys[key][pos] already equals h — same logical identity.
-			return false
+			return false, originChanged
 		}
 	}
 	pos := len(bucket[key])
@@ -338,7 +383,7 @@ func addEdgeToBucket(bucket map[string][]*Edge, keys map[string][]edgeHash, idx 
 		idx[key] = inner
 	}
 	inner[h] = pos
-	return true
+	return true, false
 }
 
 // removeEdgeFromBucket removes the entry with key k from bucket[key]
@@ -396,6 +441,17 @@ func removeEdgeFromBucket(bucket map[string][]*Edge, keys map[string][]edgeHash,
 type Graph struct {
 	shards    [numShards]*shard
 	resolveMu sync.Mutex
+	// edgeIdentityRevisions counts how many times an in-graph edge's
+	// provenance-bearing identity changed — i.e. its Origin was
+	// upgraded or reverted while its logical (From,To,Kind,FilePath,
+	// Line) key stayed fixed. Each such change is conceptually a
+	// retirement of the old identity and creation of a new one. Both
+	// sanctioned mutation paths feed this counter: SetEdgeProvenance
+	// (an explicit in-place change) and addEdgeToBucket's in-place
+	// replace branch (a re-add of the same logical edge carrying an
+	// upgraded Origin). The count is the tamper-evidence surface:
+	// provenance cannot churn without it moving.
+	edgeIdentityRevisions atomic.Int64
 }
 
 // New creates an empty graph.
@@ -649,11 +705,15 @@ func (g *Graph) AddBatch(nodes []*Node, edges []*Edge) {
 			g.addNodeLocked(s, n)
 		}
 		// Out-side writes own the "was this a new insert?" signal that
-		// drives the per-repo edge counter — the in-side write is
-		// bookkeeping only and never charges the counter (mirrors
-		// AddEdge's existing behaviour).
+		// drives the per-repo edge counter and the "did Origin change?"
+		// signal that drives the identity-revision counter — the in-side
+		// write is bookkeeping only and charges neither (mirrors
+		// AddEdge's behaviour).
 		for _, e := range outEdgesByShard[i] {
-			inserted := addEdgeToBucket(s.outEdges, s.outEdgeKeys, s.outEdgeIdx, e.From, e)
+			inserted, originChanged := addEdgeToBucket(s.outEdges, s.outEdgeKeys, s.outEdgeIdx, e.From, e)
+			if originChanged {
+				g.edgeIdentityRevisions.Add(1)
+			}
 			if inserted {
 				var srcRepo string
 				if src, ok := s.nodes[e.From]; ok && src != nil {
@@ -683,10 +743,18 @@ func (g *Graph) AddEdge(e *Edge) {
 	sTo := g.shardFor(e.To)
 	// Only charge the source-repo counter on a brand-new insert.
 	// Idempotent re-adds (same edgeKey) replace the slot in place and
-	// would otherwise double-count. addEdgeToBucket returns true when
-	// it actually appended.
-	inserted := addEdgeToBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, e)
+	// would otherwise double-count. addEdgeToBucket reports inserted ==
+	// true only when it actually appended. The out-side write owns both
+	// signals: the new-insert flag (per-repo counter) and the origin-
+	// changed flag (identity-revision counter). The in-side write is
+	// bookkeeping only — charging either counter there would double it.
+	inserted, originChanged := addEdgeToBucket(sFrom.outEdges, sFrom.outEdgeKeys, sFrom.outEdgeIdx, e.From, e)
 	addEdgeToBucket(sTo.inEdges, sTo.inEdgeKeys, sTo.inEdgeIdx, e.To, e)
+	if originChanged {
+		// A re-add with the same logical key but an upgraded Origin:
+		// the old identity is retired, a new one created.
+		g.edgeIdentityRevisions.Add(1)
+	}
 	if inserted {
 		var srcRepo string
 		if src, ok := sFrom.nodes[e.From]; ok && src != nil {
@@ -694,6 +762,113 @@ func (g *Graph) AddEdge(e *Edge) {
 		}
 		sFrom.repoEdgeAdd(srcRepo, e)
 	}
+}
+
+// SetEdgeProvenance changes the Origin of an edge already in the graph
+// and is the only sanctioned way to do so. Conceptually it is a
+// delete-then-insert of the edge's identity: because Origin is part of
+// IdentityHash, the old provenance-bearing identity is retired and a
+// new one created — even though the logical (From,To,Kind,FilePath,
+// Line) key, and therefore the adjacency-list slot, is unchanged.
+//
+// It computes the edge's old and new IdentityHash. When they are equal
+// (newOrigin matches the current Origin) nothing changes and it returns
+// false. When they differ it applies e.Origin = newOrigin, re-derives
+// the Origin-derived Tier label when one was set (Confidence and
+// ConfidenceLabel are score-derived, not Origin-derived, so they are
+// left intact), increments the graph-level identity-revision counter,
+// and returns true.
+//
+// Mutating Edge.Origin directly on an in-graph edge bypasses the
+// counter and is a provenance-tampering bug — route every such change
+// here so the churn stays observable via EdgeIdentityRevisions.
+func (g *Graph) SetEdgeProvenance(e *Edge, newOrigin string) bool {
+	if e == nil {
+		return false
+	}
+	unlock := g.lockTwoWrite(e.From, e.To)
+	defer unlock()
+	oldIdentity := e.IdentityHash()
+	newIdentity := hashEdgeIdentity(keyOf(e), newOrigin)
+	if oldIdentity == newIdentity {
+		return false
+	}
+	e.Origin = newOrigin
+	// Tier is a pure projection of Origin (graph.ResolvedBy). Re-derive
+	// it only when it was already populated — an empty Tier is the
+	// in-memory default and re-deriving would silently start stamping
+	// it. The same *Edge pointer lives in both the out- and in-edge
+	// buckets, so this write is visible from every adjacency view.
+	if e.Tier != "" {
+		e.Tier = ResolvedBy(newOrigin)
+	}
+	g.edgeIdentityRevisions.Add(1)
+	return true
+}
+
+// EdgeIdentityRevisions returns how many times an in-graph edge's
+// provenance-bearing identity has changed over this graph's lifetime —
+// the running total fed by SetEdgeProvenance and by AddEdge's in-place
+// re-add path. It is monotonic and never decremented; a reindex that
+// retires and recreates edges does not roll it back. Surfaced through
+// graph_stats as the tamper-evidence signal for provenance churn.
+func (g *Graph) EdgeIdentityRevisions() int {
+	return int(g.edgeIdentityRevisions.Load())
+}
+
+// VerifyEdgeIdentities walks every edge and confirms its provenance-
+// bearing identity is internally consistent: the edge stored in a
+// source node's outEdges bucket and the edge stored in the target
+// node's inEdges bucket are the same *Edge pointer and therefore agree
+// on IdentityHash. addEdgeToBucket stores one shared pointer in both
+// buckets, so a consistent graph always passes; a divergence means
+// some code mutated Origin on a copied edge (e.g. a resolver clone)
+// and wrote it into only one adjacency view, leaving the two sides
+// disagreeing about provenance. Returns nil when every edge is
+// consistent, or an error naming the first divergent edge.
+//
+// This is the assertion a test uses to prove provenance cannot be
+// silently changed outside SetEdgeProvenance.
+func (g *Graph) VerifyEdgeIdentities() error {
+	g.lockAllRead()
+	defer g.unlockAllRead()
+	for _, s := range g.shards {
+		for _, edges := range s.outEdges {
+			for _, e := range edges {
+				if e == nil {
+					continue
+				}
+				want := e.IdentityHash()
+				sTo := g.shardFor(e.To)
+				found := false
+				for _, in := range sTo.inEdges[e.To] {
+					if in == e {
+						if in.IdentityHash() != want {
+							return &edgeIdentityError{edge: e, reason: "inEdges pointer disagrees on identity hash"}
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					return &edgeIdentityError{edge: e, reason: "outEdges edge missing from target inEdges bucket"}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// edgeIdentityError reports the first edge VerifyEdgeIdentities found
+// to be inconsistent across the out- and in-edge adjacency views.
+type edgeIdentityError struct {
+	edge   *Edge
+	reason string
+}
+
+func (e *edgeIdentityError) Error() string {
+	return "edge identity inconsistent (" + e.reason + "): " +
+		e.edge.From + " -" + string(e.edge.Kind) + "-> " + e.edge.To
 }
 
 // ReindexEdge updates the inEdges index after an edge's To field has

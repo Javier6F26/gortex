@@ -122,6 +122,14 @@ func TestGraphStats(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(text), &stats))
 	assert.Greater(t, stats.TotalNodes, 0)
 	assert.Greater(t, stats.TotalEdges, 0)
+
+	// The provenance-churn counter is surfaced on the payload. A
+	// freshly indexed graph reports a numeric (>= 0) value.
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal([]byte(text), &raw))
+	rev, ok := raw["edge_identity_revisions"]
+	require.True(t, ok, "graph_stats must surface edge_identity_revisions")
+	assert.GreaterOrEqual(t, rev.(float64), float64(0))
 }
 
 func TestTokenSavings_GetSymbolSource(t *testing.T) {
