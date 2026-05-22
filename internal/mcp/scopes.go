@@ -18,6 +18,13 @@ type SavedScope struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
 	Repos       []string `json:"repos"`
+	// Paths narrows a scope below the repository grain to a set of
+	// sub-paths -- the monorepo-service slice (services/billing,
+	// libs/auth). Anchored, slash-segment-normalised prefixes
+	// relative to each repo root. Empty (the back-compatible default)
+	// means the scope is repo-level only -- an existing scopes.json
+	// without this field decodes cleanly.
+	Paths []string `json:"paths,omitempty"`
 }
 
 // scopeStore is a small JSON-file-backed registry of SavedScopes. It

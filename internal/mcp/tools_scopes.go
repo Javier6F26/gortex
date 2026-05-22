@@ -19,6 +19,7 @@ func (s *Server) registerScopeTools() {
 		mcp.WithString("repos", mcp.Required(),
 			mcp.Description("Comma-separated repository prefixes the scope covers")),
 		mcp.WithString("description", mcp.Description("Optional human-readable description")),
+		mcp.WithString("paths", mcp.Description("Optional comma-separated sub-paths that narrow the scope below the repository grain -- the monorepo-service slice (e.g. \"services/billing,libs/auth\"). Anchored, slash-segment prefixes relative to each repo root. Omit for a repo-level scope.")),
 	), s.handleSaveScope)
 
 	s.addTool(mcp.NewTool("list_scopes",
@@ -50,10 +51,18 @@ func (s *Server) handleSaveScope(ctx context.Context, req mcp.CallToolRequest) (
 		return mcp.NewToolResultError("repos must name at least one repository prefix"), nil
 	}
 	sort.Strings(repos)
+	var paths []string
+	for _, p := range strings.Split(req.GetString("paths", ""), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	sort.Strings(paths)
 	sc := SavedScope{
 		Name:        name,
 		Description: strings.TrimSpace(req.GetString("description", "")),
 		Repos:       repos,
+		Paths:       paths,
 	}
 	if err := s.scopeStoreOrInit().put(sc); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to persist scope: %v", err)), nil

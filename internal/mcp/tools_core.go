@@ -721,6 +721,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("ref", mcp.Description("Filter results to repositories with a specific reference tag")),
 			mcp.WithString("scope", mcp.Description("Name of a saved scope (see save_scope) — restricts results to that scope's repositories. Ignored when an explicit repo / project / ref is also given.")),
+			mcp.WithString("path", mcp.Description("Restrict results to one or more sub-paths (comma-separated) -- the monorepo-service slice (e.g. \"services/billing,libs/auth\"). Anchored, slash-segment-boundary prefixes relative to the repo root: \"services/billing\" matches services/billing/x.go, not other/services/billingX. Unions with any inline path: clause and a scope's saved paths.")),
 			mcp.WithString("kind", mcp.Description("Filter to one or more node kinds (comma-separated). Standard kinds: function, method, type, interface, variable, constant, field, file, package, import, contract. Coverage kinds: param, closure, enum_member, generic_param, module, table, column, config_key, flag, event, migration, fixture, todo, team, license, release.")),
 			mcp.WithString("assist", mcp.Description("LLM assist mode: \"auto\" (default — engages on natural-language queries, skips identifier lookups), \"on\" (force engage), \"off\" (bypass), \"deep\" (on + a body-grounded verification pass that reads candidate code and HONESTLY drops irrelevant matches — slower, may return empty results when nothing genuinely matches). Requires an LLM provider configured via `llm.provider` (local / anthropic / openai / ollama / claudecli / gemini / bedrock / deepseek); behaves as \"off\" when none is available.")),
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, hits, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
@@ -1191,6 +1192,16 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	// lang: / path: / repo: clauses from the field-qualified syntax.
 	nodes = applyFieldFilters(nodes, fq)
+
+	// Sub-path scoping: anchored, slash-segment prefix narrowing
+	// below the repository grain. The filter set unions the `path`
+	// argument, the inline `path:` clause, and any `scope:`-named
+	// saved scope's Paths. Distinct from the loose `path:` substring
+	// match in applyFieldFilters -- this is a directory-boundary
+	// anchored prefix test.
+	if pathFilter := s.resolvePathFilter(req, fq); len(pathFilter) > 0 {
+		nodes = applyPathFilter(nodes, pathFilter)
+	}
 
 	// Fuzzy fallback: a field-qualified query that filtered down to
 	// nothing retries on the free text alone (still inside the

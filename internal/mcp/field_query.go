@@ -3,6 +3,8 @@ package mcp
 import (
 	"strings"
 
+	"github.com/mark3labs/mcp-go/mcp"
+
 	"github.com/zzet/gortex/internal/graph"
 )
 
@@ -193,4 +195,36 @@ func pathMatchesAnyPrefix(path string, prefixes []string) bool {
 		}
 	}
 	return false
+}
+
+// resolvePathFilter collects the sub-path filters that apply to a
+// search request, from three additive sources:
+//
+//   - the explicit `path` request argument (comma-separated),
+//   - the inline `path:` clause already lifted into fq.Path,
+//   - the Paths of any `scope:`-named SavedScope.
+//
+// It is the path-scoping sibling of resolveRepoFilter -- a separate
+// function rather than a signature change, so resolveRepoFilter's
+// existing callers are untouched. The returned slice is the union of
+// all three sources (deduplication happens downstream in
+// applyPathFilter); an empty slice means "no sub-path filter".
+//
+// fq may be the zero fieldQuery when the caller has no inline clause.
+func (s *Server) resolvePathFilter(req mcp.CallToolRequest, fq fieldQuery) []string {
+	var paths []string
+	for _, p := range strings.Split(req.GetString("path", ""), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			paths = append(paths, p)
+		}
+	}
+	if p := strings.TrimSpace(fq.Path); p != "" {
+		paths = append(paths, p)
+	}
+	if scopeArg := strings.TrimSpace(req.GetString("scope", "")); scopeArg != "" {
+		if sc, ok := s.lookupScope(scopeArg); ok {
+			paths = append(paths, sc.Paths...)
+		}
+	}
+	return paths
 }

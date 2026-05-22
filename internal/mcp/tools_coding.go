@@ -174,6 +174,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("repo", mcp.Description("Filter results to a specific repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter results to repositories in a specific project")),
 			mcp.WithString("scope", mcp.Description("Name of a saved scope (see save_scope) — restricts results to that scope's repositories.")),
+			mcp.WithString("path", mcp.Description("Restrict the assembled context to one or more sub-paths (comma-separated) -- a monorepo-service slice. Anchored, slash-segment-boundary prefixes relative to the repo root. Unions with an inline path: clause in the task and a scope's saved paths.")),
 		),
 		s.handleSmartContext,
 	)
@@ -1359,6 +1360,14 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return mcp.NewToolResultError("task is required"), nil
 	}
+	// Lift any inline path: clause out of the task text so a
+	// caller can scope smart_context to a monorepo sub-path the
+	// same way search_symbols does. The residual text drives
+	// keyword extraction.
+	taskFQ := parseFieldQuery(task)
+	if taskFQ.Text != "" {
+		task = taskFQ.Text
+	}
 
 	entryPoint := req.GetString("entry_point", "")
 	maxSymbols := req.GetInt("max_symbols", 5)
@@ -1424,6 +1433,12 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError(filterErr.Error()), nil
 	}
 	relevantSymbols = filterNodes(relevantSymbols, allowed)
+	// Sub-path scoping: a `path` argument, an inline path: clause, or
+	// a scope's saved paths narrow smart_context to a monorepo
+	// service slice.
+	if pathFilter := s.resolvePathFilter(req, taskFQ); len(pathFilter) > 0 {
+		relevantSymbols = applyPathFilter(relevantSymbols, pathFilter)
+	}
 
 	// 3c. Feedback-aware reranking (when feedback data exists).
 	if s.feedback != nil && s.feedback.HasData() && len(relevantSymbols) > 0 {

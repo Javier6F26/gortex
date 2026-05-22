@@ -47,12 +47,37 @@ func (s *Server) handleSearchText(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	matches := s.indexer.GrepText(query, limit)
+
+	// Sub-path scoping: a `path` argument or a `scope:`-named saved
+	// scope's paths narrow the literal hits to a monorepo service
+	// slice. trigram match paths are already repo-root-relative, so
+	// the anchored prefix test applies directly.
+	if pathFilter := s.resolvePathFilter(req, fieldQuery{}); len(pathFilter) > 0 {
+		matches = filterTextMatchesByPath(matches, pathFilter)
+	}
+
 	enriched := s.enrichTextMatches(matches)
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"query":   query,
 		"matches": enriched,
 		"count":   len(enriched),
 	})
+}
+
+// filterTextMatchesByPath keeps only the trigram matches whose file
+// path sits under one of the anchored sub-path prefixes.
+func filterTextMatchesByPath(matches []trigram.Match, paths []string) []trigram.Match {
+	norm := normalizePathPrefixes(paths)
+	if len(norm) == 0 {
+		return matches
+	}
+	out := make([]trigram.Match, 0, len(matches))
+	for _, m := range matches {
+		if pathMatchesAnyPrefix(m.Path, norm) {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // enrichTextMatches decorates every trigram match with its enclosing

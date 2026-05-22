@@ -107,3 +107,49 @@ func TestSearchText_EnclosingSymbol(t *testing.T) {
 		"the literal lands inside func Alpha -- search_text should report it as the enclosing symbol")
 	require.NotEmpty(t, out.Matches[0].SymbolID)
 }
+
+// TestSearchText_PathScoping confirms the path argument confines the
+// literal-search hits to the named sub-path.
+func TestSearchText_PathScoping(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "services", "billing"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "services", "auth"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "billing", "b.go"),
+		[]byte("package billing\n\n// shared_marker here\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services", "auth", "a.go"),
+		[]byte("package auth\n\n// shared_marker here\n"), 0o644))
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	cfg := config.Default()
+	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+	eng := query.NewEngine(g)
+	srv := NewServer(eng, g, idx, nil, zap.NewNop(), nil)
+
+	// Without a path filter both files match.
+	all := callTool(t, srv, "search_text", map[string]any{"query": "shared_marker"})
+	require.False(t, all.IsError)
+	var allOut struct {
+		Matches []struct {
+			Path string `json:"path"`
+		} `json:"matches"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(all.Content[0].(mcplib.TextContent).Text), &allOut))
+	require.Len(t, allOut.Matches, 2)
+
+	// With a path filter only the billing file matches.
+	scoped := callTool(t, srv, "search_text",
+		map[string]any{"query": "shared_marker", "path": "services/billing"})
+	require.False(t, scoped.IsError)
+	var scopedOut struct {
+		Matches []struct {
+			Path string `json:"path"`
+		} `json:"matches"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(scoped.Content[0].(mcplib.TextContent).Text), &scopedOut))
+	require.Len(t, scopedOut.Matches, 1)
+	require.Contains(t, scopedOut.Matches[0].Path, "services/billing")
+}
