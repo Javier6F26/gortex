@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -603,6 +604,23 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		// Snapshot old symbols before eviction.
 		oldSymbols := w.snapshotSymbols(relPath)
 
+		// Content-aware skip: if the saved file's structural symbols
+		// are byte-for-byte identical to the ones already in the
+		// graph, the change touched no Function / Type / Method /
+		// etc. — a comment-only edit, a whitespace reflow, a doc
+		// change, or a config / JSON value save. Re-indexing it would
+		// evict and rebuild every node for no graph-level effect, so
+		// skip the structural reindex entirely. The probe is
+		// read-only; only on a proven match do we take the cheap
+		// path. A probe that can't run (unknown language, over-cap
+		// file, parser quarantine) returns ok == false and falls
+		// through to the normal reindex.
+		if newSymbols, ok := w.indexer.StructuralSymbols(path); ok &&
+			structuralFingerprint(newSymbols) == structuralFingerprint(oldSymbols) {
+			w.recordInertModify(path, relPath, oldSymbols, start)
+			return
+		}
+
 		nr, er := w.indexer.EvictFile(path)
 		nodesRemoved = nr
 		edgesRemoved = er
@@ -683,6 +701,60 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 	)
 }
 
+// recordInertModify finishes a ChangeModified patch that the
+// content-aware skip proved structurally inert. The graph already
+// holds the correct symbols, so the destructive evict + reindex is
+// skipped; this records the bookkeeping the skipped path would
+// otherwise have produced:
+//
+//   - the indexer's recorded mtime is restamped so the adaptive
+//     poller's mtime sweep does not keep re-flagging the file;
+//   - a zero-delta GraphChangeEvent is appended to history and
+//     published, so get_recent_changes still shows the save (with
+//     all node/edge counts zero — nothing structural moved);
+//   - the symbol-change callback fires with the unchanged symbol set
+//     on both sides, mirroring the no-op so consumers see a
+//     consistent before == after.
+//
+// The reachability index is intentionally not rebuilt — the topology
+// did not change, so the existing reach stamps stay valid.
+func (w *Watcher) recordInertModify(path, relPath string, symbols []*graph.Node, start time.Time) {
+	// Advance the recorded mtime past this save so the poller does
+	// not treat the (untouched) file as perpetually stale.
+	w.indexer.RefreshFileMtime(path)
+
+	ev := GraphChangeEvent{
+		FilePath:   path,
+		Kind:       ChangeModified,
+		Timestamp:  time.Now(),
+		DurationMs: time.Since(start).Milliseconds(),
+	}
+
+	w.historyMu.Lock()
+	w.history = append(w.history, ev)
+	if len(w.history) > maxHistory {
+		w.history = w.history[len(w.history)-maxHistory:]
+	}
+	w.historyMu.Unlock()
+
+	select {
+	case w.events <- ev:
+	default:
+	}
+
+	w.symbolChangeCbMu.RLock()
+	cb := w.symbolChangeCb
+	w.symbolChangeCbMu.RUnlock()
+	if cb != nil {
+		cb(relPath, symbols, symbols)
+	}
+
+	w.logger.Info("graph patch skipped: structurally inert change",
+		zap.String("file", path),
+		zap.Int64("ms", ev.DurationMs),
+	)
+}
+
 // snapshotSymbols returns a deep copy of the symbols for a file, preserving
 // their signatures in Meta so they can be compared after re-indexing.
 func (w *Watcher) snapshotSymbols(relPath string) []*graph.Node {
@@ -706,6 +778,34 @@ func (w *Watcher) snapshotSymbols(relPath string) []*graph.Node {
 		snapshot = append(snapshot, cp)
 	}
 	return snapshot
+}
+
+// structuralFingerprint reduces a set of symbols to an order-independent
+// string identity built only from each structural symbol's kind, name,
+// qualified name, and signature — never its line range. Two snapshots
+// of the same file taken before and after an edit produce an equal
+// fingerprint exactly when the edit changed no structural symbol: a
+// comment-only change, a whitespace reflow, or a doc / config-value
+// edit shifts line numbers but leaves every (kind, name, sig) tuple
+// intact, while renaming a function, changing a signature, or
+// adding / removing a declaration changes the fingerprint.
+//
+// Non-structural nodes (file, import, params, closures, coverage-domain
+// kinds) are skipped so a change confined to them is still treated as
+// inert — they carry no structural graph shape.
+func structuralFingerprint(symbols []*graph.Node) string {
+	lines := make([]string, 0, len(symbols))
+	for _, n := range symbols {
+		if !isStructuralKind(n.Kind) {
+			continue
+		}
+		sig, _ := n.Meta["signature"].(string)
+		// NUL separates fields so a value containing the field
+		// delimiter can't forge a collision across two symbols.
+		lines = append(lines, string(n.Kind)+"\x00"+n.Name+"\x00"+n.QualName+"\x00"+sig)
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
 }
 
 // normalizeEventPath aligns an event path emitted by the OS-level

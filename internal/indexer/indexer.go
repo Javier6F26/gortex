@@ -2014,6 +2014,96 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 	return nil
 }
 
+// StructuralSymbols parses a file from its current on-disk content and
+// returns the structural symbols it defines — functions, methods,
+// types, interfaces, constants, variables, fields, enum members — and
+// nothing else. It is a read-only probe: the graph and the search
+// index are left completely untouched, no mtime is stamped, and no
+// resolver runs. The watcher uses it to decide whether a save is
+// structurally inert (a comment / whitespace / config-value edit that
+// changes no symbol) and can skip the destructive evict + reindex.
+//
+// The second return reports whether the file was parseable at all: a
+// file with no detectable language, an over-cap file, or a read error
+// yields (nil, false). A genuinely empty source file yields
+// (empty-slice, true).
+func (idx *Indexer) StructuralSymbols(filePath string) ([]*graph.Node, bool) {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return nil, false
+	}
+	relPath, err := filepath.Rel(idx.rootPath, absPath)
+	if err != nil {
+		relPath = filePath
+	}
+
+	src, err := os.ReadFile(absPath)
+	if err != nil {
+		return nil, false
+	}
+
+	lang, ok := idx.effectiveLanguage(absPath)
+	if !ok {
+		return nil, false
+	}
+	ext, _ := idx.registry.GetByLanguage(lang)
+	if ext == nil {
+		return nil, false
+	}
+
+	// An over-cap file is never structurally parsed on the indexing
+	// path either (it gets a synthetic skip node), so the watcher
+	// cannot prove inertness for it — fall through to a real reindex.
+	if maxSize := idx.config.MaxFileSize; maxSize > 0 && int64(len(src)) > maxSize {
+		return nil, false
+	}
+
+	// Same pre-ingestion transforms as indexFile so the probe parses
+	// exactly the bytes the real index pass would.
+	src = idx.transforms.run(relPath, src)
+
+	var pool *crashpool.Pool
+	var quarantine *crashpool.Quarantine
+	if idx.crashIsolationEnabled() {
+		pool, quarantine = idx.sharedParsePool()
+	}
+	result, skipped, err := idx.extractFile(pool, quarantine, absPath, relPath, lang, ext, src)
+	if quarantine != nil && quarantine.Len() > 0 {
+		_ = quarantine.Save()
+	}
+	// A skipped (quarantined / timed-out) file produces only a
+	// synthetic node — not the real symbol set — so inertness cannot
+	// be proven and the caller must reindex normally.
+	if result == nil || skipped || err != nil {
+		return nil, false
+	}
+
+	out := make([]*graph.Node, 0, len(result.Nodes))
+	for _, n := range result.Nodes {
+		if isStructuralKind(n.Kind) {
+			out = append(out, n)
+		}
+	}
+	return out, true
+}
+
+// isStructuralKind reports whether a node kind represents a structural
+// code symbol — the kinds whose presence, name, or signature define a
+// file's graph shape. File and import nodes (graph bookkeeping),
+// params, closures, and the coverage-domain kinds (todos, licenses,
+// strings, …) are deliberately excluded: a change confined to those
+// does not alter the structural graph the watcher cares about.
+func isStructuralKind(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindFunction, graph.KindMethod, graph.KindType,
+		graph.KindInterface, graph.KindVariable, graph.KindConstant,
+		graph.KindField, graph.KindEnumMember:
+		return true
+	default:
+		return false
+	}
+}
+
 // ResolveAll re-runs the global cross-file reference resolver and
 // interface-implementation inference. Exposed for batch paths that
 // defer per-file resolver work until the end of a batch.
@@ -2305,6 +2395,34 @@ func (idx *Indexer) FileMtimes() map[string]int64 {
 		out[k] = v
 	}
 	return out
+}
+
+// RefreshFileMtime restamps the recorded modification time for a file
+// from its current on-disk mtime, without re-indexing it. The watcher
+// calls this when a save turned out to be structurally inert and the
+// reindex was skipped: the graph is already correct, but the recorded
+// mtime must advance past the save so the poller's mtime sweep does
+// not keep re-flagging the same untouched file. A file absent from
+// disk or never indexed is a no-op.
+func (idx *Indexer) RefreshFileMtime(filePath string) {
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return
+	}
+	relPath, err := filepath.Rel(idx.rootPath, absPath)
+	if err != nil {
+		relPath = filePath
+	}
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return
+	}
+	key := filepath.ToSlash(relPath)
+	idx.mtimeMu.Lock()
+	if _, tracked := idx.fileMtimes[key]; tracked {
+		idx.fileMtimes[key] = info.ModTime().UnixNano()
+	}
+	idx.mtimeMu.Unlock()
 }
 
 // SetFileMtimes restores the file modification time map from a persisted snapshot.
