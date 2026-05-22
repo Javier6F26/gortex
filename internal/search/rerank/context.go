@@ -64,6 +64,16 @@ type Context struct {
 	// treated as 1.0 everywhere.
 	ComboBoostOf func(nodeID string) float64
 
+	// AuthorityOf and HubOf return a node's HITS authority and hub
+	// scores, each normalised into [0, 1] against the graph maxima.
+	// Authority measures "depended on by load-bearing code"; hub
+	// measures "calls many load-bearing pieces". The HITS signal
+	// uses both -- it rewards authority but penalises a high hub
+	// score so a called-by-everything utility does not score like a
+	// true authority. When either is nil the HITS signal sits at 0.
+	AuthorityOf func(nodeID string) float64
+	HubOf       func(nodeID string) float64
+
 	// Now provides the current unix time in seconds. Overridable for
 	// tests; zero means "use time.Now().Unix()".
 	Now int64

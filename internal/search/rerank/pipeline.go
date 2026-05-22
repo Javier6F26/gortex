@@ -160,6 +160,7 @@ func DefaultSignals() []Signal {
 		BM25Signal{},
 		SemanticSignal{},
 		FanInSignal{},
+		HITSSignal{},
 		FanOutSignal{},
 		ChurnSignal{},
 		CoChangeSignal{},
@@ -193,6 +194,7 @@ func DefaultWeights() map[string]float64 {
 		SignalBM25:           1.00,
 		SignalSemantic:       0.80,
 		SignalFanIn:          0.60,
+		SignalHITS:           0.40,
 		SignalFanOut:         0.20,
 		SignalChurn:          0.30,
 		SignalCoChange:       0.25,
@@ -214,6 +216,7 @@ const (
 	SignalBM25           = "bm25"
 	SignalSemantic       = "semantic"
 	SignalFanIn          = "fan_in"
+	SignalHITS           = "hits"
 	SignalFanOut         = "fan_out"
 	SignalChurn          = "churn"
 	SignalCoChange       = "co_change"
@@ -235,6 +238,7 @@ func AllSignalNames() []string {
 		SignalBM25,
 		SignalSemantic,
 		SignalFanIn,
+		SignalHITS,
 		SignalFanOut,
 		SignalChurn,
 		SignalCoChange,

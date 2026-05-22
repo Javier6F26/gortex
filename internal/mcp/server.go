@@ -102,6 +102,11 @@ type Server struct {
 	communities    *analysis.CommunityResult
 	processes      *analysis.ProcessResult
 	pageRank       *analysis.PageRankResult
+	// hits holds the HITS authority/hub scores over the call graph.
+	// Authority measures "depended on by load-bearing code"; the
+	// search rerank consumes it as a complement to raw fan-in.
+	// Rebuilt each RunAnalysis pass; guarded by analysisMu.
+	hits *analysis.HITSResult
 	// autoConcepts is the per-repo, LLM-free concept vocabulary mined
 	// from symbol names -- the deterministic complement to LLM query
 	// expansion. Rebuilt on every RunAnalysis pass; guarded by
@@ -1383,6 +1388,9 @@ func (s *Server) RunAnalysis() {
 	// so equivalence-class expansion can bridge repo-specific terms
 	// even with no LLM provider configured.
 	s.autoConcepts = search.BuildAutoConcepts(s.graph)
+	// HITS authority/hub scores -- fed into the search rerank as an
+	// authority signal that complements raw fan-in.
+	s.hits = analysis.ComputeHITS(s.graph)
 	s.analysisMu.Unlock()
 
 	// Bootstrap-resource payloads (graph_stats, index_health, etc.)
@@ -1436,6 +1444,15 @@ func (s *Server) getAutoConcepts() *search.AutoConcepts {
 	s.analysisMu.RLock()
 	defer s.analysisMu.RUnlock()
 	return s.autoConcepts
+}
+
+// getHITS returns the HITS authority/hub result. Nil until the
+// first RunAnalysis pass; callers nil-check (HITSResult accessors
+// are themselves nil-safe).
+func (s *Server) getHITS() *analysis.HITSResult {
+	s.analysisMu.RLock()
+	defer s.analysisMu.RUnlock()
+	return s.hits
 }
 
 // SetArchitecture installs the declarative architecture-rules DSL so

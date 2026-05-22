@@ -58,6 +58,26 @@ func (s *Server) buildRerankContext(ctx context.Context, query string) *rerank.C
 		}
 	}
 
+	// HITS authority / hub scores feed the authority rerank signal.
+	// Both closures normalise against the graph maxima so the signal
+	// receives values already in [0, 1].
+	if h := s.getHITS(); h != nil {
+		hits := h
+		maxAuth, maxHub := hits.MaxAuth, hits.MaxHub
+		rctx.AuthorityOf = func(id string) float64 {
+			if maxAuth <= 0 {
+				return 0
+			}
+			return hits.AuthorityOf(id) / maxAuth
+		}
+		rctx.HubOf = func(id string) float64 {
+			if maxHub <= 0 {
+				return 0
+			}
+			return hits.HubOf(id) / maxHub
+		}
+	}
+
 	// Co-change feeds the rerank pipeline once the git-history mine
 	// has run (lazily, on the first find_co_changing_symbols call, or
 	// from an enriched snapshot). Until then the signal sits at 0.
