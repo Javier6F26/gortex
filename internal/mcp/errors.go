@@ -75,6 +75,16 @@ const (
 	// Generic catch-all so per-tool handlers don't have to invent
 	// their own code for "you passed nonsense".
 	ErrCodeInvalidArgument ErrorCode = "invalid_argument"
+
+	// ErrCodeToolBlockedByMode — the call was refused because the
+	// session's runtime mode forbids it (an editing tool while the
+	// session is in planning mode). Switch with set_planning_mode.
+	ErrCodeToolBlockedByMode ErrorCode = "tool_blocked_by_mode"
+
+	// ErrCodeToolOutOfPhase — an active workflow does not allow this
+	// tool in the current phase. The error data carries the current
+	// phase and the allowed-tool list.
+	ErrCodeToolOutOfPhase ErrorCode = "tool_out_of_phase"
 )
 
 // StructuredError is the JSON shape encoded into the TextContent

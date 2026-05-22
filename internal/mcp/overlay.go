@@ -77,6 +77,11 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 		// Tolerate hallucinated / mistyped parameter names before the
 		// handler reads arguments (e.g. "symbol" accepted as "id").
 		s.reconcileToolParams(&req)
+		// Enforce the session's runtime mode / workflow phase — a hard
+		// gate even if the client never re-read tools/list.
+		if blocked := s.checkToolGate(ctx, req.Params.Name); blocked != nil {
+			return blocked, nil
+		}
 		view, err := s.buildOverlayViewForCtx(ctx)
 		if err != nil {
 			// Drift surfaces as a structured tool error result so the

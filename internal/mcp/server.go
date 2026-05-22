@@ -357,6 +357,11 @@ type sessionState struct {
 	scopeWorkspaceID string
 	scopeProjectID   string
 	scopeRepoPrefix  string
+
+	// planningMode, when true, removes every editing tool from this
+	// session's tool surface and hard-blocks edit calls — a runtime
+	// no-writes guarantee toggled by set_planning_mode (tools_mode.go).
+	planningMode bool
 }
 
 type lastSearchState struct {
@@ -655,25 +660,6 @@ const serverInstructions = `Gortex is a code-intelligence graph server — it in
 // NewServer creates an MCP server with all Gortex tools registered.
 func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
 	s := &Server{
-		mcpServer: server.NewMCPServer("gortex", Version,
-			// Surface "how to drive this server" to MCP clients in the
-			// initialize response — see serverInstructions.
-			server.WithInstructions(serverInstructions),
-			// listChanged=true: tools_search promotes deferred tools
-			// into the live MCP server on demand, which fires
-			// notifications/tools/list_changed. Lazy-aware clients
-			// re-pull tools/list when they see the notification;
-			// clients that don't subscribe still get the schemas via
-			// the discovery tool's response payload. See lazy_tools.go.
-			server.WithToolCapabilities(true),
-			// subscribe=true lets clients call `resources/subscribe`
-			// for bootstrap URIs and receive
-			// `notifications/resources/updated` after each graph
-			// re-warm. listChanged=false because the resource set is
-			// static for the server's lifetime.
-			server.WithResourceCapabilities(true, false),
-			server.WithRecovery(),
-		),
 		engine:     engine,
 		graph:      g,
 		indexer:    idx,
@@ -687,6 +673,27 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 		guardRules: guardRules,
 		toolScopes: newScopeRegistry(),
 	}
+	// mcpServer is constructed after s exists so the per-session tool
+	// filter can close over s — toolSurfaceFilter varies the tools/list
+	// surface by the session's planning mode (see tools_mode.go).
+	s.mcpServer = server.NewMCPServer("gortex", Version,
+		// Surface "how to drive this server" to MCP clients in the
+		// initialize response — see serverInstructions.
+		server.WithInstructions(serverInstructions),
+		// listChanged=true: tools_search promotes deferred tools into
+		// the live MCP server on demand, and a planning-mode flip
+		// re-filters the surface — both rely on tools/list_changed.
+		server.WithToolCapabilities(true),
+		// subscribe=true lets clients call resources/subscribe for
+		// bootstrap URIs and receive notifications/resources/updated
+		// after each graph re-warm. listChanged=false — the resource
+		// set is static for the server's lifetime.
+		server.WithResourceCapabilities(true, false),
+		server.WithRecovery(),
+		// Per-session tools/list filter — hides editing tools while a
+		// session is in planning mode (see tools_mode.go).
+		server.WithToolFilter(s.toolSurfaceFilter),
+	)
 
 	// Assign the watcher only when the caller actually supplied one.
 	// Storing a typed-nil *indexer.Watcher in the watcherHistory
@@ -730,6 +737,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 
 	s.registerCoreTools()
 	s.registerCodingTools()
+	s.registerPlanningModeTool()
 	s.registerAnalysisTools()
 	s.registerEnhancementTools()
 	s.registerLSPTools()
