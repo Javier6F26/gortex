@@ -362,6 +362,10 @@ type sessionState struct {
 	// session's tool surface and hard-blocks edit calls — a runtime
 	// no-writes guarantee toggled by set_planning_mode (tools_mode.go).
 	planningMode bool
+
+	// workflow, when non-nil, is the active phase-enforcement state
+	// machine for this session (see tools_workflow.go).
+	workflow *workflowState
 }
 
 type lastSearchState struct {
@@ -738,6 +742,7 @@ func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watch
 	s.registerCoreTools()
 	s.registerCodingTools()
 	s.registerPlanningModeTool()
+	s.registerWorkflowTool()
 	s.registerAnalysisTools()
 	s.registerEnhancementTools()
 	s.registerLSPTools()

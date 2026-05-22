@@ -44,8 +44,15 @@ func (s *Server) sessionPlanningMode(ctx context.Context) bool {
 // toolSurfaceFilter is the per-session tools/list filter wired into the
 // MCP server. In planning mode it drops every editing tool so the agent
 // never sees a tool it is not allowed to call.
+// editingToolsHidden reports whether editing tools must be removed from
+// this session's tool surface — either planning mode or a block-mode
+// workflow currently in a non-editing phase.
+func (s *Server) editingToolsHidden(ctx context.Context) bool {
+	return s.sessionPlanningMode(ctx) || s.workflowHidesEdits(ctx)
+}
+
 func (s *Server) toolSurfaceFilter(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
-	if !s.sessionPlanningMode(ctx) {
+	if !s.editingToolsHidden(ctx) {
 		return tools
 	}
 	out := make([]mcp.Tool, 0, len(tools))
@@ -64,6 +71,9 @@ func (s *Server) toolSurfaceFilter(ctx context.Context, tools []mcp.Tool) []mcp.
 // client that never re-read tools/list cannot slip an edit through.
 func (s *Server) checkToolGate(ctx context.Context, toolName string) *mcp.CallToolResult {
 	if blocked := s.checkPlanningModeGate(ctx, toolName); blocked != nil {
+		return blocked
+	}
+	if blocked := s.checkWorkflowGate(ctx, toolName); blocked != nil {
 		return blocked
 	}
 	return nil
