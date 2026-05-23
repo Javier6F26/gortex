@@ -90,8 +90,10 @@ func (s *Server) registerCodingTools() {
 
 	s.addTool(
 		mcp.NewTool("suggest_pattern",
-			mcp.WithDescription("Given an existing symbol as an example, extracts the structural pattern for creating similar code. Returns the example source, sibling symbols with the same pattern, registration/wiring code, test patterns, and files to edit. Use when adding a new function/handler/extractor that follows an existing convention."),
+			mcp.WithDescription("Given an existing symbol as an example, extracts the structural pattern for creating similar code. Returns the example source, sibling symbols with the same pattern, registration/wiring code, test patterns, and files to edit. Source blocks longer than `max_source_lines` are elided to keep the response compact; pass a larger value when you need the full body. Use when adding a new function/handler/extractor that follows an existing convention."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol ID to use as the pattern example")),
+			mcp.WithNumber("max_source_lines", mcp.Description("Per-source elision threshold (default: 40). Each example / registration / test source block longer than this collapses to its head + a `... N lines elided ...` marker. Pass 0 to disable elision.")),
+			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for the project default.")),
 		),
 		s.handleSuggestPattern,
 	)
@@ -1124,6 +1126,45 @@ func (s *Server) handleGetTestTargets(ctx context.Context, req mcp.CallToolReque
 	})
 }
 
+// elideSourceForPattern keeps the first head + last tail of a source
+// block when it exceeds maxLines, joined by `... N lines elided ...`.
+// suggest_pattern emits up to seven source blocks per call (example +
+// up to ten registration callers + up to three test patterns) — full
+// bodies were the main reason a single call could exceed 5KB. Pass
+// maxLines <= 0 to disable elision.
+func elideSourceForPattern(source string, maxLines int) string {
+	if maxLines <= 0 || source == "" {
+		return source
+	}
+	lines := strings.Split(source, "\n")
+	if len(lines) <= maxLines {
+		return source
+	}
+	// Keep ~2/3 of the budget at the head (declarations + body
+	// opening), 1/3 at the tail (closing scope / return). A few-line
+	// preview of each end is enough for an agent to follow the
+	// pattern; the elision marker tells the caller they can ask for
+	// more by raising max_source_lines.
+	head := (maxLines * 2) / 3
+	if head < 1 {
+		head = 1
+	}
+	tail := maxLines - head
+	if tail < 1 {
+		tail = 1
+	}
+	if head+tail >= len(lines) {
+		return source
+	}
+	elided := len(lines) - head - tail
+	var b strings.Builder
+	b.WriteString(strings.Join(lines[:head], "\n"))
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "... %d lines elided (raise max_source_lines to see) ...\n", elided)
+	b.WriteString(strings.Join(lines[len(lines)-tail:], "\n"))
+	return b.String()
+}
+
 func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	exampleID, err := req.RequireString("id")
 	if err != nil {
@@ -1134,6 +1175,14 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 	if node == nil {
 		return mcp.NewToolResultError("symbol not found: " + exampleID), nil
 	}
+
+	// Per-source elision threshold. The handler stitches together
+	// the example, every registration caller, and up to three test
+	// patterns — each with full source — which used to balloon the
+	// response to several KB on real handlers. Elide each source
+	// past this many lines so the default response stays compact;
+	// pass `max_source_lines: 0` to opt out.
+	maxSourceLines := req.GetInt("max_source_lines", 40)
 
 	result := map[string]any{
 		"example": map[string]any{
@@ -1148,7 +1197,7 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 	if node.StartLine > 0 && node.EndLine > 0 {
 		if absPath, err := s.resolveNodePath(node); err == nil {
 			if source, _, _, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, 0); err == nil {
-				result["example_source"] = source
+				result["example_source"] = elideSourceForPattern(source, maxSourceLines)
 			}
 		}
 	}
@@ -1196,7 +1245,7 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 		if cn.StartLine > 0 && cn.EndLine > 0 {
 			if absPath, err := s.resolveNodePath(cn); err == nil {
 				if source, _, _, err := s.readLinesForCtx(ctx, absPath, cn.StartLine, cn.EndLine, 0); err == nil {
-					entry["source"] = source
+					entry["source"] = elideSourceForPattern(source, maxSourceLines)
 				}
 			}
 		}
@@ -1226,7 +1275,7 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 			if tn.StartLine > 0 && tn.EndLine > 0 {
 				if absPath, err := s.resolveNodePath(tn); err == nil {
 					if source, _, _, err := s.readLinesForCtx(ctx, absPath, tn.StartLine, tn.EndLine, 0); err == nil {
-						entry["source"] = source
+						entry["source"] = elideSourceForPattern(source, maxSourceLines)
 					}
 				}
 			}
