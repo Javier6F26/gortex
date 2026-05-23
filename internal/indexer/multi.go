@@ -1389,6 +1389,56 @@ func (mi *MultiIndexer) GrepText(query string, limit int) []trigram.Match {
 	return out
 }
 
+// GrepRegexp fans out a trigram-accelerated regex search across every
+// tracked per-repo Indexer and returns the union, capped at limit.
+// Mirrors GrepText: match paths are re-stamped from repo-root-relative
+// to repo-prefixed so downstream tools route hits back to the right
+// working tree. pathPrefix, when non-empty, restricts the scan to
+// files under that prefix on each indexer. A pattern that does not
+// compile in any indexer is reported once; per-indexer errors after
+// the first compile are otherwise treated as no-match.
+func (mi *MultiIndexer) GrepRegexp(pattern, pathPrefix string, limit int) ([]trigram.Match, error) {
+	if mi == nil || pattern == "" {
+		return nil, nil
+	}
+	mi.mu.RLock()
+	type job struct {
+		prefix string
+		idx    *Indexer
+	}
+	jobs := make([]job, 0, len(mi.indexers))
+	for prefix, idx := range mi.indexers {
+		if idx == nil {
+			continue
+		}
+		jobs = append(jobs, job{prefix: prefix, idx: idx})
+	}
+	mi.mu.RUnlock()
+
+	perCap := limit
+	out := make([]trigram.Match, 0, len(jobs)*8)
+	for _, j := range jobs {
+		hits, err := j.idx.GrepRegexp(pattern, pathPrefix, perCap)
+		if err != nil {
+			// First compile error short-circuits — the pattern is the
+			// caller's fault and won't compile in any other indexer
+			// either (the trigram searcher uses the same regexp engine).
+			return nil, err
+		}
+		if len(hits) == 0 {
+			continue
+		}
+		for i := range hits {
+			hits[i].Path = j.prefix + "/" + hits[i].Path
+		}
+		out = append(out, hits...)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // IndexerForFile routes an absolute path to the per-repo Indexer that
 // owns it. Returns (nil, "") when no tracked repo contains the path.
 // Used by the MCP overlay middleware to find the right Indexer for a

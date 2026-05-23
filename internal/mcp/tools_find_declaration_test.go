@@ -17,6 +17,7 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/search"
 )
 
 // setupDeclServer indexes a multi-file Go project where one function is
@@ -209,4 +210,65 @@ func TestFindDeclaration_BadRegex(t *testing.T) {
 	})
 	require.True(t, result.IsError)
 	assert.Contains(t, toolResultText(result), "invalid regex")
+}
+
+// TestFindDeclaration_MultiRepoFanout pins the regression: in
+// multi-repo mode the daemon owns a MultiIndexer and s.indexer has
+// no rootPath, so the legacy s.indexer.GrepText path returned no
+// matches and find_declaration silently reported `count: 0` for
+// use sites that genuinely existed across the workspace. The fix
+// routes Stage 1 through the MultiIndexer fan-out so use-site hits
+// surface with repo-prefixed paths.
+func TestFindDeclaration_MultiRepoFanout(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "alpha"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "alpha", "main.go"), []byte(`package alpha
+
+func uniqueDecl() int { return 1 }
+
+func consumer() int { return uniqueDecl() + uniqueDecl() }
+`), 0o644))
+	// Second repo so IsMultiRepo() is true; the use_site only lives
+	// in alpha but multi-repo dispatch should still find it.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "beta"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "beta", "main.go"), []byte("package beta\n\nfunc placeholder() {}\n"), 0o644))
+
+	repoA := filepath.Join(dir, "alpha")
+	repoB := filepath.Join(dir, "beta")
+
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{
+		Repos: []config.RepoEntry{
+			{Path: repoA, Name: "alpha"},
+			{Path: repoB, Name: "beta"},
+		},
+	}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	g := graph.New()
+	mi := indexer.NewMultiIndexer(g, reg, search.NewBM25(), cm, zap.NewNop())
+	_, err = mi.IndexAll()
+	require.NoError(t, err)
+	require.True(t, mi.IsMultiRepo())
+
+	eng := query.NewEngine(g)
+	singleton := indexer.New(g, reg, config.IndexConfig{}, zap.NewNop())
+	srv := NewServer(eng, g, singleton, nil, zap.NewNop(), nil, MultiRepoOptions{
+		ConfigManager: cm,
+		MultiIndexer:  mi,
+	})
+
+	payload := declResult(t, callTool(t, srv, "find_declaration", map[string]any{
+		"use_site": "uniqueDecl(",
+	}))
+	require.Equal(t, float64(1), payload["count"],
+		"expected one declaration with two grouped use sites; got %v", payload)
+	names := declNames(payload)
+	require.Contains(t, names, "uniqueDecl")
+	require.Equal(t, 2, names["uniqueDecl"], "two use sites must group under one declaration")
 }

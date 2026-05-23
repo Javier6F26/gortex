@@ -130,16 +130,32 @@ func (s *Server) handleFindDeclaration(ctx context.Context, req mcp.CallToolRequ
 // findUseSiteMatches runs Stage 1 — the trigram-accelerated search that
 // locates candidate use sites. For a literal it uses GrepText and
 // post-filters by path_prefix; for a regex it uses GrepRegexp, which
-// applies the prefix natively.
+// applies the prefix natively. Multi-repo mode fans out across every
+// tracked per-repo Indexer — the singleton s.indexer has no rootPath
+// in that mode, so its trigram index is empty and a direct call
+// returns no matches.
 func (s *Server) findUseSiteMatches(useSite string, isRegex bool, pathPrefix string, limit int) ([]trigram.Match, error) {
 	if isRegex {
-		matches, err := s.indexer.GrepRegexp(useSite, pathPrefix, limit)
+		var (
+			matches []trigram.Match
+			err     error
+		)
+		if s.multiIndexer != nil {
+			matches, err = s.multiIndexer.GrepRegexp(useSite, pathPrefix, limit)
+		} else if s.indexer != nil {
+			matches, err = s.indexer.GrepRegexp(useSite, pathPrefix, limit)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("invalid regex: %v", err)
 		}
 		return matches, nil
 	}
-	raw := s.indexer.GrepText(useSite, 0)
+	var raw []trigram.Match
+	if s.multiIndexer != nil {
+		raw = s.multiIndexer.GrepText(useSite, 0)
+	} else if s.indexer != nil {
+		raw = s.indexer.GrepText(useSite, 0)
+	}
 	var matches []trigram.Match
 	for _, m := range raw {
 		if pathPrefix != "" && !strings.HasPrefix(m.Path, pathPrefix) {
