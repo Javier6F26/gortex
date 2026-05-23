@@ -92,7 +92,7 @@ func (c *CMS) Add(x uint64) {
 // Count returns the minimum across all hash rows — the canonical CMS
 // frequency estimate. The result is an upper bound on the true count.
 func (c *CMS) Count(x uint64) uint32 {
-	var minCount uint32 = ^uint32(0)
+	minCount := ^uint32(0)
 	for i := 0; i < c.depth; i++ {
 		idx := cmsHash(x, c.seeds[i]) & c.mask
 		if c.counts[i][idx] < minCount {
