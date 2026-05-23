@@ -269,6 +269,7 @@ require (
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	github.com/yalue/onnxruntime_go v1.30.1
 	github.com/zeebo/blake3 v0.2.4
+	go.etcd.io/bbolt v1.4.3
 	go.uber.org/zap v1.28.0
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
@@ -354,7 +355,6 @@ require (
 	github.com/x448/float16 v0.8.4 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.52.0 // indirect
