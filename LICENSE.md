@@ -1,163 +1,201 @@
-# Gortex License
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
 
-## Part 1: Source-Available License (Based on PolyForm Small Business 1.0.0)
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
-Copyright (c) 2024-2026 Andrey Kumanyaev <me@zzet.org>
+   1. Definitions.
 
-### 1. Purpose
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
 
-This license lets you use and share this software for free if you are a
-small business, individual, open-source project, educational institution,
-nonprofit, or socially critical organization. If you are a larger company,
-you need a commercial license.
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
 
-### 2. Acceptance
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
 
-To use this software, you must agree to all of the terms of this license.
-If you do not agree, you may not use this software.
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
 
-### 3. Permitted Use
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
 
-You may use, copy, modify, and distribute this software, subject to the
-conditions below:
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
 
-**Free use is permitted for:**
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
 
-- **(a) Individuals** — personal, educational, research, or hobby use
-- **(b) Open-source projects** — projects with source code publicly available
-  under an OSI-approved license
-- **(c) Small businesses** — organizations with fewer than 50 employees AND
-  less than $500,000 USD in annual revenue (adjusted for inflation from 2026)
-- **(d) Nonprofits and NGOs** — registered nonprofit organizations
-- **(e) Educational institutions** — schools, universities, research labs
-- **(f) Government and public sector** — government agencies and public
-  institutions
-- **(g) Socially critical organizations** — healthcare providers, emergency
-  services, humanitarian organizations, and organizations whose primary
-  mission serves public welfare
-- **(h) Listed contributors** — see Part 3 (Contributor License)
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
 
-### 4. Commercial License Required
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
 
-A commercial license is required for:
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
 
-- Organizations with **50 or more employees** OR **$500,000 USD or more in
-  annual revenue** that do not qualify under Section 3
-- Any use of this software to provide a **competing product or service** —
-  a product or service whose primary purpose is code intelligence, code
-  analysis, code graph construction, or AI-assisted code navigation that
-  is substantially similar to Gortex
-- **Resale, sublicensing, or bundling** of this software as part of a paid
-  product or service
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
 
-To obtain a commercial license, contact: **license@zzet.org**
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
 
-### 5. Attribution
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
 
-All use, modification, distribution, derivative works, or works inspired
-by this software **must**:
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
 
-- **(a)** Preserve all copyright notices and license text
-- **(b)** Include a prominent attribution: *"Built with Gortex by Andrey
-  Kumanyaev (https://github.com/zzet/gortex)"* or equivalent
-- **(c)** If the work is a derivative, rewrite, or substantially inspired
-  by this software, the attribution must appear in the project's README,
-  documentation, or About page
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
 
-### 6. No Warranty
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
 
-THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
-OR IMPLIED. THE AUTHOR IS NOT LIABLE FOR ANY DAMAGES ARISING FROM USE OF
-THIS SOFTWARE.
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
 
-### 7. Termination
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
 
-Your license terminates automatically if you violate any of these terms.
-Upon termination, you must stop using and destroy all copies of the
-software.
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
 
----
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for describing the origin of the Work and
+      reproducing the content of the NOTICE file.
 
-## Part 2: Commercial License Terms
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
 
-Commercial licenses are available for organizations that exceed the
-thresholds in Section 4. Commercial licenses include:
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
 
-- **Standard Commercial** — use within one organization, unlimited
-  developers, annual subscription
-- **Enterprise** — multi-organization use, custom terms, priority support
-- **OEM/Reseller** — bundling with your product, negotiated terms
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
 
-Pricing is based on organization size and use case. Contact
-**license@zzet.org** for details.
+   END OF TERMS AND CONDITIONS
 
----
+   APPENDIX: How to apply the Apache License to your work.
 
-## Part 3: Contributor License
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
 
-Active contributors listed in the `CONTRIBUTORS.md` file in the root of
-this repository receive the following additional rights:
+   Copyright 2024-2026 Andrey Kumanyaev <me@zzet.org>
 
-### 3.1 Contributor Commercial License
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
 
-Each listed contributor is granted a **non-transferable, non-exclusive
-commercial license** to use this software within **one (1) organization**
-— the organization they are employed by or affiliated with at the time
-they were added to `CONTRIBUTORS.md`.
+       http://www.apache.org/licenses/LICENSE-2.0
 
-### 3.2 Scope
-
-- The contributor commercial license covers the contributor's current
-  employer/organization only
-- The license is for **non-competing use** — the organization may not use
-  this software to build a competing product (as defined in Section 4)
-- The license is valid as long as the contributor is listed as an
-  **active contributor** in `CONTRIBUTORS.md` (the file may also contain
-  a historical section to honor past contributions, but only active
-  contributors hold the commercial license)
-
-### 3.3 Transfer
-
-- The contributor commercial license **cannot be transferred** to a
-  different organization without **explicit written approval** from the
-  copyright holder (Andrey Kumanyaev)
-- If the contributor changes employers, they may request a license
-  transfer by contacting **license@zzet.org**
-
-### 3.4 Revocation
-
-- The copyright holder may move a contributor from the active list to
-  the historical list in `CONTRIBUTORS.md` at any time, which revokes
-  their contributor commercial license
-- Contributors who are moved to the historical list retain the right to
-  use versions of the software released before their removal under the
-  contributor license terms, for a period of **six (6) months** from the
-  date of removal from the active list. After this period, standard
-  license terms (Part 1) apply
-
----
-
-## Part 4: Definitions
-
-- **"Organization"** — a company, partnership, sole proprietorship, or
-  other legal entity, together with all entities that control, are
-  controlled by, or are under common control with it
-- **"Annual revenue"** — total gross revenue of the organization and its
-  affiliates in the most recently completed fiscal year, in USD
-- **"Competing product or service"** — a product or service whose primary
-  purpose is code intelligence, code analysis, knowledge graph
-  construction from source code, or AI-assisted code navigation
-- **"Derivative work"** — any work that is based on, derived from,
-  incorporates, or is substantially inspired by this software
-- **"Socially critical organization"** — an organization whose primary
-  mission is healthcare, emergency services, disaster relief, humanitarian
-  aid, or public welfare, and which is not primarily a for-profit entity
-
----
-
-## Part 5: Contact
-
-For commercial licensing, questions, or transfer requests:
-
-- Email: **license@zzet.org**
-- GitHub: **https://github.com/zzet/gortex**
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.

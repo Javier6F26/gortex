@@ -46,7 +46,7 @@ const (
 // without re-deriving them.
 const (
 	pluginName        = "gortex"
-	pluginDescription = "Your AI's live map of your codebase — every call, dependency, and contract indexed across your repos, shared across every running agent via a local daemon. Gives Claude Code, Cursor, and any MCP-aware client 52 graph-aware tools so they answer \"what calls this?\", \"what breaks if I rename UserStore?\", or \"which services consume this endpoint?\" in one call instead of grepping for minutes. Real AST parsing across 92 languages — deterministic, zero LLM calls during indexing. Useful before refactoring, when tracing bugs across services, exploring unfamiliar code, or any time your agent reaches for Grep or Read. Returns precise answers tagged with confidence tiers (compiler-grade vs heuristic). Local-first, source-available, free under defined thresholds."
+	pluginDescription = "Your AI's live map of your codebase — every call, dependency, and contract indexed across your repos, shared across every running agent via a local daemon. Gives Claude Code, Cursor, and any MCP-aware client 52 graph-aware tools so they answer \"what calls this?\", \"what breaks if I rename UserStore?\", or \"which services consume this endpoint?\" in one call instead of grepping for minutes. Real AST parsing across 92 languages — deterministic, zero LLM calls during indexing. Useful before refactoring, when tracing bugs across services, exploring unfamiliar code, or any time your agent reaches for Grep or Read. Returns precise answers tagged with confidence tiers (compiler-grade vs heuristic). Local-first, Apache 2.0 licensed."
 	pluginAuthorName  = "Andrey Kumanyaev"
 	pluginAuthorEmail = "support@gortex.dev"
 	pluginHomepage    = "https://gortex.dev"
@@ -203,7 +203,7 @@ spawns a one-shot MCP server per session — same tools, slower cold start.
 
 - Homepage: https://gortex.dev
 - Source:   https://github.com/zzet/gortex
-- License:  https://github.com/zzet/gortex/blob/main/LICENSE.md (source-available; free under defined thresholds)
+- License:  https://github.com/zzet/gortex/blob/main/LICENSE.md (Apache 2.0)
 `
 
 // pluginLicenseBody is the LICENSE shipped inside the plugin
@@ -212,15 +212,11 @@ spawns a one-shot MCP server per session — same tools, slower cold start.
 // follow that pattern by emitting a one-line pointer to the canonical
 // LICENSE.md in the upstream repo. Keeps the plugin directory small
 // and avoids drift from the source-of-truth license.
-const pluginLicenseBody = `Gortex is licensed under the terms in LICENSE.md at the root of the
-upstream repository: https://github.com/zzet/gortex/blob/main/LICENSE.md
+const pluginLicenseBody = `Gortex is licensed under the Apache License, Version 2.0. The full
+license text lives in LICENSE.md at the root of the upstream repository:
+https://github.com/zzet/gortex/blob/main/LICENSE.md
 
-Source-available under PolyForm Small Business 1.0.0 with a
-contributor-perks addendum. Free for organisations under defined
-size and revenue thresholds; commercial license available for
-larger deployments.
-
-Copyright (c) 2024-2026 Andrey Kumanyaev <me@zzet.org>
+Copyright 2024-2026 Andrey Kumanyaev <me@zzet.org>
 `
 
 // EmitPluginBundle writes a marketplace plugin layout under
