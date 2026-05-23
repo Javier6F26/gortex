@@ -150,6 +150,30 @@ func TestTrimGCXBytes_NoTrimUnderCap(t *testing.T) {
 	assert.Equal(t, string(payload), string(out))
 }
 
+// TestTrimGCXBytes_TightCapKeepsOneRow pins the floor: when every
+// row crosses the requested cap, the trimmer overshoots by one row
+// rather than emitting a zero-row response. A zero-row response
+// hides the row shape and forces the caller to guess at how big each
+// row is before tightening their scope; keeping one row makes the
+// truncation observable.
+func TestTrimGCXBytes_TightCapKeepsOneRow(t *testing.T) {
+	header := "GCX1 tool=test fields=a,b\n"
+	wide := strings.Repeat("x", 200) + "\t" + strings.Repeat("y", 200) + "\n"
+	payload := []byte(header + wide + wide + wide)
+	// Cap is below header+wide+comment; baseline behaviour would have
+	// returned header-only with kept_rows=0.
+	out, trimmed := trimGCXBytes(payload, 200)
+	require.True(t, trimmed)
+	text := string(out)
+	require.True(t, strings.HasPrefix(text, header))
+	require.Contains(t, text, "# truncated_by_budget=true")
+	require.Contains(t, text, "original_rows=3")
+	require.Contains(t, text, "kept_rows=1")
+	// One row's worth of overshoot is the bound; the response stays
+	// dominated by one row + bookkeeping.
+	require.Less(t, len(out), len(header)+len(wide)+200)
+}
+
 // TestEffectiveBudget_DefaultAndOptOut verifies the budget-by-default
 // contract: callers who don't specify get the project default, an
 // explicit `max_bytes` overrides, and `max_bytes: 0` is the explicit

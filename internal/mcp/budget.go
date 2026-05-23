@@ -424,6 +424,17 @@ func trimGCXBytes(payload []byte, maxBytes int) ([]byte, bool) {
 		}
 		keep = i + 1
 	}
+	// Floor: when the input had any rows but every row crosses the
+	// cap, keep one anyway. A response with zero rows + a
+	// truncated_by_budget marker is uninformative — the caller can't
+	// see the row shape, can't decide whether to re-issue with a
+	// tighter scope, and can't even tell which fields are populated.
+	// One overflowing row tells them more than zero. The overshoot is
+	// bounded (one row's worth of bytes) and the truncation comment
+	// rides on the response so downstream parsers know we overran.
+	if keep == 0 && len(rowEnds) > 0 {
+		keep = 1
+	}
 
 	// Compute kept_rows = non-comment rows in the prefix [0, keep).
 	keptRows := 0
