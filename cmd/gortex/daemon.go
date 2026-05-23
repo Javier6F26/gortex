@@ -21,6 +21,8 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var (
@@ -466,6 +468,11 @@ func startPeriodicSnapshots(g *graph.Graph, mi *indexer.MultiIndexer, version st
 // spawnDetachedDaemon re-invokes the binary with GORTEX_DAEMON_CHILD=1
 // set, the log redirected to the daemon log file, and the child
 // parented to init. Parent exits as soon as the child has the socket up.
+//
+// On a TTY the parent shows a mesh-spinner banner and a styled "ready" card
+// once the socket is live. On a non-TTY (CI scripts, automation) we keep the
+// historical one-line "[gortex daemon] detached (pid X, log: Y)" message so
+// existing parsers don't break.
 func spawnDetachedDaemon() error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -497,6 +504,12 @@ func spawnDetachedDaemon() error {
 	exited := make(chan error, 1)
 	go func() { exited <- child.Wait() }()
 
+	emitDaemonStartBanner(os.Stderr)
+	sp := newDaemonSpawnSpinner(os.Stderr)
+	if sp != nil {
+		sp.Start("Waiting for daemon socket")
+	}
+
 	// Wait until the socket is live or a timeout hits, so we fail fast
 	// if the child died on startup. The socket opens after buildDaemonState
 	// decodes the snapshot; on a multi-hundred-MB snapshot that decode
@@ -504,31 +517,107 @@ func spawnDetachedDaemon() error {
 	// daemon mid-load. 60 s comfortably covers ~1 GiB snapshots while
 	// still failing fast on a child that crashed outright (those die
 	// in well under a second).
-	deadline := time.Now().Add(60 * time.Second)
+	start := time.Now()
+	deadline := start.Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		if daemon.IsRunning() {
-			fmt.Fprintf(os.Stderr, "[gortex daemon] detached (pid %d, log: %s)\n",
-				child.Process.Pid, daemon.LogFilePath())
+			elapsed := time.Since(start).Truncate(10 * time.Millisecond)
+			if sp != nil {
+				sp.Set("", fmt.Sprintf("socket up · %s", elapsed))
+				sp.Done()
+				emitDaemonStartSummary(os.Stderr, child.Process.Pid, elapsed)
+			} else {
+				fmt.Fprintf(os.Stderr, "[gortex daemon] detached (pid %d, log: %s)\n",
+					child.Process.Pid, daemon.LogFilePath())
+			}
 			return nil
 		}
 		// Bail out early if the child has already exited — no point
 		// waiting another 59 seconds for a corpse.
 		select {
 		case werr := <-exited:
-			return fmt.Errorf("daemon exited during startup (%v); check %s",
+			failMsg := fmt.Errorf("daemon exited during startup (%v); check %s",
 				werr, daemon.LogFilePath())
+			if sp != nil {
+				sp.Fail(failMsg)
+			}
+			return failMsg
 		default:
+		}
+		if sp != nil {
+			sp.Set("", fmt.Sprintf("snapshot decoding · %s", time.Since(start).Truncate(100*time.Millisecond)))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("daemon did not come up within 60s; check %s", daemon.LogFilePath())
+	timeoutErr := fmt.Errorf("daemon did not come up within 60s; check %s", daemon.LogFilePath())
+	if sp != nil {
+		sp.Fail(timeoutErr)
+	}
+	return timeoutErr
 }
 
-func runDaemonStop(_ *cobra.Command, _ []string) error {
-	if !daemon.IsRunning() {
-		fmt.Fprintln(os.Stderr, "[gortex daemon] not running")
+// newDaemonSpawnSpinner returns a spinner bound to w when it's a TTY (and the
+// global --no-progress flag isn't set). Returns nil otherwise, so callers can
+// branch on the spinner's presence to choose between the framed-card vs.
+// one-line output paths.
+func newDaemonSpawnSpinner(w io.Writer) *progress.Spinner {
+	if noProgress || !progress.IsTTY(w) {
 		return nil
 	}
+	return progress.NewSpinner(w)
+}
+
+// emitDaemonStartBanner prints the gortex mesh banner + subtitle for the
+// detach flow. Only fires on a TTY — non-TTY callers stay quiet so script
+// stderr remains parseable.
+func emitDaemonStartBanner(w io.Writer) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	banner := tui.Banner{
+		Title:    "gortex daemon start",
+		Subtitle: "Spawning daemon in the background.",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitDaemonStartSummary prints the post-spawn card showing pid, socket, log
+// path, elapsed time, and useful next-step hints. Only fires on a TTY.
+func emitDaemonStartSummary(w io.Writer, pid int, elapsed time.Duration) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	stats := []string{
+		progress.Stat(fmt.Sprintf("%d", pid), "pid", progress.StatGood),
+		progress.Stat(elapsed.String(), "boot", progress.StatGood),
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleOK.Render("✓")+"  "+progress.StyleStrong.Render("daemon ready"))
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+	_, _ = fmt.Fprintln(w, "     "+progress.Row("socket", daemon.SocketPath(), 8))
+	_, _ = fmt.Fprintln(w, "     "+progress.Row("log", daemon.LogFilePath(), 8))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "     "+progress.Heading("next"))
+	_, _ = fmt.Fprintln(w, "     "+progress.Step(1, "track a repo:    gortex track <path>"))
+	_, _ = fmt.Fprintln(w, "     "+progress.Step(2, "watch status:    gortex daemon status --watch"))
+	_, _ = fmt.Fprintln(w, "     "+progress.Step(3, "shut down:       gortex daemon stop"))
+	_, _ = fmt.Fprintln(w)
+}
+
+func runDaemonStop(cmd *cobra.Command, _ []string) error {
+	w := cmd.ErrOrStderr()
+	if !daemon.IsRunning() {
+		emitDaemonStopAlreadyDown(w)
+		return nil
+	}
+
+	// Capture uptime + socket *before* shutdown so we can show them in the
+	// post-stop summary (the socket file vanishes on clean shutdown).
+	socket := daemon.SocketPath()
+	uptime := daemonUptimeBeforeStop()
+
 	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
 	if err != nil {
 		// Daemon said it was alive but won't talk — probably a stale PID file
@@ -543,8 +632,68 @@ func runDaemonStop(_ *cobra.Command, _ []string) error {
 	if !resp.OK {
 		return fmt.Errorf("shutdown rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
 	}
-	fmt.Fprintln(os.Stderr, "[gortex daemon] stopped")
+	emitDaemonStopSummary(w, socket, uptime)
 	return nil
+}
+
+// daemonUptimeBeforeStop best-effort-fetches the daemon's reported uptime via
+// a Status control before shutdown so the summary card can show how long the
+// process ran. Returns 0 on any error — we'd rather degrade the card than
+// fail the stop.
+func daemonUptimeBeforeStop() time.Duration {
+	c, err := daemonControlClient()
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = c.Close() }()
+	resp, err := c.Control(daemon.ControlStatus, nil)
+	if err != nil || !resp.OK {
+		return 0
+	}
+	var st daemon.StatusResponse
+	if jerr := json.Unmarshal(resp.Result, &st); jerr != nil {
+		return 0
+	}
+	return time.Duration(st.UptimeSeconds) * time.Second
+}
+
+// emitDaemonStopAlreadyDown prints the "not running" message: a one-liner on
+// non-TTY for script compat, a styled hint card on TTY.
+func emitDaemonStopAlreadyDown(w io.Writer) {
+	if !progress.IsTTY(w) || noProgress {
+		_, _ = fmt.Fprintln(w, "[gortex daemon] not running")
+		return
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleHint.Render("◌  daemon was not running — nothing to stop"))
+	_, _ = fmt.Fprintln(w, "     "+progress.Caption("start with `gortex daemon start --detach`"))
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitDaemonStopSummary prints the post-shutdown banner + result card mirroring
+// daemon start's surface: uptime + socket path so the user can confirm the
+// right daemon went down.
+func emitDaemonStopSummary(w io.Writer, socket string, uptime time.Duration) {
+	if !progress.IsTTY(w) || noProgress {
+		_, _ = fmt.Fprintln(w, "[gortex daemon] stopped")
+		return
+	}
+	banner := tui.Banner{
+		Title:    "gortex daemon stop",
+		Subtitle: "Daemon shut down cleanly.",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	stats := []string{progress.Stat("clean shutdown", "", progress.StatGood)}
+	if uptime > 0 {
+		stats = append(stats, progress.Stat(uptime.Truncate(time.Second).String(), "uptime", progress.StatNeutral))
+	}
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleOK.Render("✓")+"  "+progress.StyleStrong.Render("stopped"))
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+	if socket != "" {
+		_, _ = fmt.Fprintln(w, "     "+progress.Row("socket", socket+" (removed)", 8))
+	}
+	_, _ = fmt.Fprintln(w)
 }
 
 func runDaemonRestart(cmd *cobra.Command, args []string) error {

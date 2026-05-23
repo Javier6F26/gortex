@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var workspaceCmd = &cobra.Command{
@@ -285,9 +288,21 @@ func runWorkspaceList(cmd *cobra.Command, _ []string) error {
 		return enc.Encode(entries)
 	}
 
+	tty := progress.IsTTY(cmd.ErrOrStderr()) && !noProgress
+
 	if len(entries) == 0 {
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "(no tracked repos)")
+		if tty {
+			emitWorkspaceBanner(cmd.ErrOrStderr(), "list", "Workspace declarations across every tracked repo.")
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "  "+progress.StyleHint.Render("◌  no tracked repos — run `gortex track <path>` to add one"))
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+		} else {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), "(no tracked repos)")
+		}
 		return nil
+	}
+
+	if tty {
+		emitWorkspaceBanner(cmd.ErrOrStderr(), "list", "Workspace declarations across every tracked repo.")
 	}
 
 	t := table.NewWriter()
@@ -341,23 +356,69 @@ func runWorkspaceSet(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-			"updated %s: %s → workspace=%s project=%s\n",
-			path, repoLabel(r), workspace, project)
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(),
-			"\nNote: a running daemon needs `gortex daemon reload` (or restart) to pick up the change.")
+		emitWorkspaceSetSummary(cmd, path, repoLabel(r), workspace, project, true)
 		return nil
 	}
 
 	if err := stampWorkspace(r.Path, workspace, project); err != nil {
 		return err
 	}
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(),
-		"updated %s/.gortex.yaml: workspace=%s project=%s\n",
-		r.Path, workspace, project)
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(),
-		"\nNote: a running daemon needs `gortex daemon reload` (or restart) to pick up the change.")
+	emitWorkspaceSetSummary(cmd, r.Path+"/.gortex.yaml", repoLabel(r), workspace, project, false)
 	return nil
+}
+
+// emitWorkspaceBanner prints the workspace-subcommand banner on stderr. We
+// keep banners on stderr so the table / JSON / one-liner on stdout stays
+// pipe-clean for scripts.
+func emitWorkspaceBanner(w io.Writer, mode, subtitle string) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	banner := tui.Banner{
+		Title:    "gortex workspace — " + mode,
+		Subtitle: subtitle,
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitWorkspaceSetSummary prints the post-set summary card showing the file
+// modified, the repo affected, and the new workspace/project. Non-TTY callers
+// see the legacy one-liner so script parsers keep matching on "updated …".
+func emitWorkspaceSetSummary(cmd *cobra.Command, target, repo, workspace, project string, global bool) {
+	w := cmd.ErrOrStderr()
+	if !progress.IsTTY(w) || noProgress {
+		out := cmd.OutOrStdout()
+		if global {
+			_, _ = fmt.Fprintf(out, "updated %s: %s → workspace=%s project=%s\n",
+				target, repo, workspace, project)
+		} else {
+			_, _ = fmt.Fprintf(out, "updated %s: workspace=%s project=%s\n",
+				target, workspace, project)
+		}
+		_, _ = fmt.Fprintln(out, "\nNote: a running daemon needs `gortex daemon reload` (or restart) to pick up the change.")
+		return
+	}
+
+	mode := "set"
+	if global {
+		mode = "set --global"
+	}
+	emitWorkspaceBanner(w, mode, "Updated workspace declaration for "+repo+".")
+
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleOK.Render("✓")+"  "+progress.StyleStrong.Render(repo))
+	stats := []string{
+		progress.Stat(workspace, "workspace", progress.StatGood),
+	}
+	if project != "" && project != workspace {
+		stats = append(stats, progress.Stat(project, "project", progress.StatNeutral))
+	}
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+	_, _ = fmt.Fprintln(w, "     "+progress.Row("file", target, 8))
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "     "+progress.Caption("a running daemon needs `gortex daemon reload` (or restart) to pick up the change."))
+	_, _ = fmt.Fprintln(w)
 }
 
 // stampWorkspace writes workspace+project into a repo's .gortex.yaml

@@ -3,8 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var statusIndex string
@@ -51,12 +55,19 @@ func runStatusViaDaemon(cmd *cobra.Command) error {
 	if err := json.Unmarshal(resp.Result, &st); err != nil {
 		return fmt.Errorf("parse status: %w", err)
 	}
+
 	w := cmd.OutOrStdout()
-	_, _ = fmt.Fprintf(w, "daemon      %s (pid %d, uptime %s)\n",
-		st.Version, st.PID, time.Duration(st.UptimeSeconds)*time.Second)
-	_, _ = fmt.Fprintf(w, "sessions    %d\n", st.Sessions)
-	if st.MemoryBytes > 0 {
-		_, _ = fmt.Fprintf(w, "memory      %.1f MB\n", float64(st.MemoryBytes)/(1024*1024))
+	emitStatusBanner(cmd.ErrOrStderr(), "daemon view", "Aggregate status across every tracked repository.")
+
+	if progress.IsTTY(cmd.ErrOrStderr()) && !noProgress {
+		emitDaemonStatusCard(cmd.ErrOrStderr(), st)
+	} else {
+		_, _ = fmt.Fprintf(w, "daemon      %s (pid %d, uptime %s)\n",
+			st.Version, st.PID, time.Duration(st.UptimeSeconds)*time.Second)
+		_, _ = fmt.Fprintf(w, "sessions    %d\n", st.Sessions)
+		if st.MemoryBytes > 0 {
+			_, _ = fmt.Fprintf(w, "memory      %.1f MB\n", float64(st.MemoryBytes)/(1024*1024))
+		}
 	}
 	if len(st.TrackedRepos) == 0 {
 		_, _ = fmt.Fprintln(w, "tracked repos: (none — run `gortex track <path>` to add one)")
@@ -145,24 +156,30 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 
 	stats := g.Stats()
 
-	_, _ = fmt.Fprintf(os.Stdout, "Repository:  %s\n", statusIndex)
-	_, _ = fmt.Fprintf(os.Stdout, "Files:       %d\n", result.FileCount)
-	_, _ = fmt.Fprintf(os.Stdout, "Nodes:       %d\n", stats.TotalNodes)
-	_, _ = fmt.Fprintf(os.Stdout, "Edges:       %d\n", stats.TotalEdges)
-	_, _ = fmt.Fprintf(os.Stdout, "Duration:    %dms\n\n", result.DurationMs)
+	emitStatusBanner(cmd.ErrOrStderr(), "local index", "One-shot index of "+statusIndex+" (no daemon).")
 
-	if len(stats.ByLanguage) > 0 {
-		_, _ = fmt.Fprintln(os.Stdout, "Languages:")
-		for lang, count := range stats.ByLanguage {
-			_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d nodes\n", lang, count)
+	if progress.IsTTY(cmd.ErrOrStderr()) && !noProgress {
+		emitLocalStatusCard(cmd.ErrOrStderr(), statusIndex, result.FileCount, stats, result.DurationMs)
+	} else {
+		_, _ = fmt.Fprintf(os.Stdout, "Repository:  %s\n", statusIndex)
+		_, _ = fmt.Fprintf(os.Stdout, "Files:       %d\n", result.FileCount)
+		_, _ = fmt.Fprintf(os.Stdout, "Nodes:       %d\n", stats.TotalNodes)
+		_, _ = fmt.Fprintf(os.Stdout, "Edges:       %d\n", stats.TotalEdges)
+		_, _ = fmt.Fprintf(os.Stdout, "Duration:    %dms\n\n", result.DurationMs)
+
+		if len(stats.ByLanguage) > 0 {
+			_, _ = fmt.Fprintln(os.Stdout, "Languages:")
+			for lang, count := range stats.ByLanguage {
+				_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d nodes\n", lang, count)
+			}
+			_, _ = fmt.Fprintln(os.Stdout)
 		}
-		_, _ = fmt.Fprintln(os.Stdout)
-	}
 
-	if len(stats.ByKind) > 0 {
-		_, _ = fmt.Fprintln(os.Stdout, "By kind:")
-		for kind, count := range stats.ByKind {
-			_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d\n", kind, count)
+		if len(stats.ByKind) > 0 {
+			_, _ = fmt.Fprintln(os.Stdout, "By kind:")
+			for kind, count := range stats.ByKind {
+				_, _ = fmt.Fprintf(os.Stdout, "  %-14s %d\n", kind, count)
+			}
 		}
 	}
 
@@ -173,6 +190,89 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// emitStatusBanner prints the shared status banner on stderr (so stdout
+// remains a clean key/value stream for scripts piping `gortex status`).
+// TTY-only; non-TTY callers see nothing on stderr.
+func emitStatusBanner(w io.Writer, mode, subtitle string) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	banner := tui.Banner{
+		Title:    "gortex status — " + mode,
+		Subtitle: subtitle,
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitDaemonStatusCard renders the daemon view as a styled header card.
+// Includes pid, uptime, version, sessions, memory in a single stat strip and
+// follows with the workspace rollup line.
+func emitDaemonStatusCard(w io.Writer, st daemon.StatusResponse) {
+	uptime := (time.Duration(st.UptimeSeconds) * time.Second).Truncate(time.Second)
+	stats := []string{
+		progress.Stat(st.Version, "version", progress.StatNeutral),
+		progress.Stat(strconv.Itoa(st.PID), "pid", progress.StatNeutral),
+		progress.Stat(uptime.String(), "uptime", progress.StatGood),
+		progress.Stat(strconv.Itoa(st.Sessions), "sessions", progress.StatNeutral),
+	}
+	if st.MemoryBytes > 0 {
+		stats = append(stats,
+			progress.Stat(fmt.Sprintf("%.1f MB", float64(st.MemoryBytes)/(1024*1024)),
+				"memory", progress.StatNeutral))
+	}
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleOK.Render("●")+"  "+
+		progress.StyleStrong.Render("daemon up"))
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitLocalStatusCard renders the standalone-index summary card: a stat strip
+// + language and kind chip rows so the eye picks up the breakdown without
+// hunting through a long table.
+func emitLocalStatusCard(w io.Writer, repo string, files int, stats graph.GraphStats, durationMs int64) {
+	_, _ = fmt.Fprintln(w, "  "+progress.Row("repo", repo, 10))
+	stat := []string{
+		progress.Stat(humanIntFromInt(files), "files", progress.StatNeutral),
+		progress.Stat(humanIntFromInt(stats.TotalNodes), "nodes", progress.StatGood),
+		progress.Stat(humanIntFromInt(stats.TotalEdges), "edges", progress.StatGood),
+		progress.Stat(fmt.Sprintf("%dms", durationMs), "indexed in", progress.StatNeutral),
+	}
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stat...))
+
+	if len(stats.ByLanguage) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "  "+progress.Heading("languages", strconv.Itoa(len(stats.ByLanguage))))
+		var langs []string
+		for lang, count := range stats.ByLanguage {
+			langs = append(langs, fmt.Sprintf("%s %s", lang, progress.StyleHint.Render(humanIntFromInt(count))))
+		}
+		sort.Strings(langs)
+		_, _ = fmt.Fprintln(w, "  "+progress.Chips(langs, 80))
+	}
+
+	if len(stats.ByKind) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "  "+progress.Heading("by kind", strconv.Itoa(len(stats.ByKind))))
+		var kinds []string
+		for kind, count := range stats.ByKind {
+			kinds = append(kinds, fmt.Sprintf("%s %s", kind, progress.StyleHint.Render(humanIntFromInt(count))))
+		}
+		sort.Strings(kinds)
+		_, _ = fmt.Fprintln(w, "  "+progress.Chips(kinds, 80))
+	}
+	_, _ = fmt.Fprintln(w)
+}
+
+// humanIntFromInt is a small adapter so the status helpers can pass plain
+// int counters into chip strings without each callsite having to widen
+// to int64 + strconv. Falls through to humanizeInt for the actual format
+// (thousands-separated, defined elsewhere in cmd/gortex).
+func humanIntFromInt(n int) string {
+	return humanizeInt(n)
 }
 
 // printMultiRepoStatus displays per-repo and per-project statistics from the GlobalConfig.

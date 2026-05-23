@@ -57,12 +57,13 @@ var (
 	initSkillsMaxSkills int
 
 	// Non-interactive / reporting knobs
-	initYes        bool
-	initAgents     string
-	initAgentsSkip string
-	initJSON       bool
-	initDryRun     bool
-	initForce      bool
+	initYes         bool
+	initInteractive bool
+	initAgents      string
+	initAgentsSkip  string
+	initJSON        bool
+	initDryRun      bool
+	initForce       bool
 )
 
 var initCmd = &cobra.Command{
@@ -93,6 +94,7 @@ func init() {
 	initCmd.Flags().IntVar(&initSkillsMaxSkills, "skills-max", 20, "maximum number of skills to generate")
 
 	initCmd.Flags().BoolVarP(&initYes, "yes", "y", false, "skip the interactive wizard (implied when stdin is not a TTY)")
+	initCmd.Flags().BoolVarP(&initInteractive, "interactive", "i", false, "force the full-screen wizard (banner + agent checklist + options panel + live dashboard) even when stdin would normally fall through to defaults")
 	initCmd.Flags().StringVar(&initAgents, "agents", "", "comma-separated list of agents to configure ('auto' means every registered adapter)")
 	initCmd.Flags().StringVar(&initAgentsSkip, "agents-skip", "", "comma-separated list of agents to skip (composable with --agents)")
 	initCmd.Flags().BoolVar(&initJSON, "json", false, "emit a structured JSON report on stdout")
@@ -139,9 +141,27 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 		initSkills = false
 	}
 
-	// Interactive wizard — only asks about hooks now (global/per-repo
-	// split is owned by the separate `gortex install` command).
-	if !initYes && !initHooksOnly && isInteractive() {
+	// Interactive wizard. Two flavours:
+	//   * --interactive (-i) or a TTY without --yes: launch the full
+	//     bubbletea wizard (banner + agent checklist + options panel +
+	//     confirm). The wizard owns every decision; if the user cancels
+	//     we return without touching disk.
+	//   * Non-TTY or --yes: fall through to the legacy bufio prompt for
+	//     the single hooks question so CI scripts that piped a yes/no
+	//     line into `gortex init` keep working.
+	wantWizard := initInteractive || (!initYes && !initHooksOnly && progress.IsTTY(cmd.ErrOrStderr()) && isInteractive())
+	if wantWizard {
+		cancelled, err := runInitWizard(cmd, &cobraInitState{
+			rootPath: root,
+		})
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "  cancelled — no changes made.")
+			return nil
+		}
+	} else if !initYes && !initHooksOnly && isInteractive() {
 		hooksPreset := cmd.Flags().Changed("hooks") || cmd.Flags().Changed("no-hooks")
 		if choice, ran := runInteractiveInit(os.Stdin, cmd.ErrOrStderr(), hooksPreset); ran {
 			if !hooksPreset {
@@ -182,11 +202,8 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 	}
 
 	realStderr := cmd.ErrOrStderr()
-	sp := progress.NewSpinner(realStderr)
-	if noProgress {
-		sp.Disable()
-	}
-	sp.Start("Initializing gortex")
+	prog := selectInitProgress(realStderr)
+	prog.Start("Initializing gortex")
 
 	// Buffer chatty adapter logs while the animation is running. On success
 	// drop them — the summary already conveys outcome. On failure replay
@@ -197,7 +214,7 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 		results []*agents.Result
 		opts    agents.ApplyOpts
 	)
-	captured := sp.Enabled()
+	captured := prog.Enabled()
 	if captured {
 		cmd.SetErr(&chatter)
 	}
@@ -215,9 +232,9 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			sp.Fail(err)
+			prog.Fail(err)
 		} else {
-			sp.Done()
+			prog.Done()
 		}
 		if captured {
 			cmd.SetErr(realStderr)
@@ -235,25 +252,27 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 	// instructions surface). Index once, feed both.
 	needIndex := initAnalyze || initSkills
 	if needIndex {
-		sp.Set("Indexing repository", absRoot)
-		ctx := progress.WithReporter(context.Background(), sp)
-		// Silence zap info logs from the indexer when the spinner is live;
-		// the spinner's sub-status already shows the same stage transitions.
+		prog.Stage(stageIndex, absRoot)
+		ctx := progress.WithReporter(context.Background(), prog.Reporter())
+		// Silence zap info logs from the indexer when the surface is live;
+		// the dashboard / spinner already shows the same stage transitions.
 		var idxLogger *zap.Logger
-		if sp.Enabled() {
+		if prog.Enabled() {
 			idxLogger = zap.NewNop()
 		}
 		g, idxErr := indexRepoForInit(ctx, absRoot, idxLogger)
 		if idxErr != nil {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex init] indexing failed: %v — proceeding without analysis/skills\n", idxErr)
 		} else {
+			prog.StageDone(stageIndex, "")
 			if initAnalyze {
-				sp.Set("Analyzing codebase", "")
+				prog.Stage(stageAnalyze, "")
 				eng := query.NewEngine(g)
 				env.AnalyzedOverview = claudemd.Generate(eng, 180)
+				prog.StageDone(stageAnalyze, "")
 			}
 			if initSkills {
-				sp.Set("Generating skills", "")
+				prog.Stage(stageSkills, "")
 				generated, routing := genskills.Build(g, genskills.BuildOpts{
 					MinSize:   initSkillsMinSize,
 					MaxSkills: initSkillsMaxSkills,
@@ -261,15 +280,15 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 				if len(generated) > 0 {
 					env.GeneratedSkills = toEnvSkills(generated)
 					env.SkillsRouting = routing
-					sp.Set("", fmt.Sprintf("%d community skill(s)", len(generated)))
+					prog.StageDone(stageSkills, fmt.Sprintf("%d community skill(s)", len(generated)))
 				} else {
-					sp.Set("", fmt.Sprintf("no communities large enough (min-size: %d)", initSkillsMinSize))
+					prog.StageDone(stageSkills, fmt.Sprintf("no communities large enough (min-size: %d)", initSkillsMinSize))
 				}
 			}
 		}
 	}
 
-	sp.Set("Configuring editors", "")
+	prog.Stage(stageAdapters, "")
 	registry := buildRegistry()
 	selected, err := registry.Filter(initAgents, initAgentsSkip)
 	if err != nil {
@@ -279,7 +298,7 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 	opts = agents.ApplyOpts{DryRun: initDryRun, Force: initForce}
 	results = make([]*agents.Result, 0, len(selected))
 	for _, a := range selected {
-		sp.Set("", a.Name())
+		prog.Sub(a.Name())
 		r, applyErr := a.Apply(env, opts)
 		if applyErr != nil {
 			if a.Name() == claudecode.Name {
@@ -291,7 +310,7 @@ func runInit(cmd *cobra.Command, args []string) (err error) {
 			results = append(results, r)
 		}
 	}
-	sp.Set("", fmt.Sprintf("%d adapter(s) configured", len(results)))
+	prog.StageDone(stageAdapters, fmt.Sprintf("%d adapter(s) configured", len(results)))
 
 	// Always update Gortex's own global config so the daemon picks
 	// up this repo next time it starts (harmless when no daemon).

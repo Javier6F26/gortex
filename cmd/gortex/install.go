@@ -21,6 +21,7 @@ import (
 // interactive wizard or the --json reporters.
 var (
 	installYes         bool
+	installInteractive bool
 	installAgents      string
 	installAgentsSkip  string
 	installJSON        bool
@@ -50,6 +51,7 @@ each repository.`,
 
 func init() {
 	installCmd.Flags().BoolVarP(&installYes, "yes", "y", false, "skip any interactive prompts (implied when stdin is not a TTY)")
+	installCmd.Flags().BoolVarP(&installInteractive, "interactive", "i", false, "force the full-screen install wizard (banner + agent checklist + options panel + live dashboard)")
 	installCmd.Flags().StringVar(&installAgents, "agents", "", "comma-separated list of agents to configure ('auto' means every registered adapter)")
 	installCmd.Flags().StringVar(&installAgentsSkip, "agents-skip", "", "comma-separated list of agents to skip (composable with --agents)")
 	installCmd.Flags().BoolVar(&installJSON, "json", false, "emit a structured JSON report on stdout (banner still goes to stderr)")
@@ -87,14 +89,27 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("gortex install needs a home directory; $HOME is empty")
 	}
 
-	realStderr := cmd.ErrOrStderr()
-	sp := progress.NewSpinner(realStderr)
-	if noProgress {
-		sp.Disable()
+	// Interactive wizard — same shape as `gortex init -i`, just sourced from
+	// the install* globals and writing under Home instead of Root. The
+	// wizard mutates the install* globals (agents list, hooks, hook-mode) so
+	// the orchestration below sees them as if they came from the flag set.
+	wantWizard := installInteractive || (!installYes && progress.IsTTY(cmd.ErrOrStderr()) && isInteractive())
+	if wantWizard {
+		cancelled, werr := runInstallWizard(cmd, home)
+		if werr != nil {
+			return werr
+		}
+		if cancelled {
+			_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "  cancelled — no changes made.")
+			return nil
+		}
 	}
-	sp.Start("Installing gortex")
+
+	realStderr := cmd.ErrOrStderr()
+	prog := selectInstallProgress(realStderr)
+	prog.Start("Installing gortex")
 	if installClaudeMd && !installDryRun {
-		sp.Set("", fmt.Sprintf("merging %s (use --no-claude-md to skip)",
+		prog.Sub(fmt.Sprintf("merging %s (use --no-claude-md to skip)",
 			filepath.Join(home, ".claude", "CLAUDE.md")))
 	}
 
@@ -106,15 +121,15 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 		results []*agents.Result
 		opts    agents.ApplyOpts
 	)
-	captured := sp.Enabled()
+	captured := prog.Enabled()
 	if captured {
 		cmd.SetErr(&chatter)
 	}
 	defer func() {
 		if err != nil {
-			sp.Fail(err)
+			prog.Fail(err)
 		} else {
-			sp.Done()
+			prog.Done()
 		}
 		if captured {
 			cmd.SetErr(realStderr)
@@ -149,9 +164,9 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 
 	opts = agents.ApplyOpts{DryRun: installDryRun, Force: installForce}
 	results = make([]*agents.Result, 0, len(selected))
-	sp.Set("", fmt.Sprintf("%d adapter(s)", len(selected)))
+	prog.Stage(stageAdapters, fmt.Sprintf("%d adapter(s)", len(selected)))
 	for _, a := range selected {
-		sp.Set("", a.Name())
+		prog.Sub(a.Name())
 		r, applyErr := a.Apply(env, opts)
 		if applyErr != nil {
 			// Claude Code is load-bearing — propagate. Other
@@ -165,7 +180,7 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 			results = append(results, r)
 		}
 	}
-	sp.Set("", fmt.Sprintf("%d adapter(s) configured", len(results)))
+	prog.StageDone(stageAdapters, fmt.Sprintf("%d adapter(s) configured", len(results)))
 
 	// Ensure the daemon config file exists so --track doesn't
 	// fail with "no config" on first use.

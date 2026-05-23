@@ -11,7 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/savings"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var (
@@ -152,21 +154,47 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path, eventsPa
 }
 
 // emitSavingsDashboard renders the bar-chart dashboard. Layout mirrors
-// semble's format_savings_report(): a header with cumulative USD on top,
-// then one row per bucket with bar / percentage / token counts / dollar
+// semble's format_savings_report(): a header card with cumulative USD on
+// top, then one row per bucket with bar / percentage / token counts / dollar
 // amount, optionally followed by a per-tool breakdown in --verbose mode.
+//
+// On a TTY we wrap the header in a styled banner + stat-strip card; on a
+// non-TTY (output piped into grep / a file) we preserve the bare text
+// header so script parsers keep matching.
 func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eventsPath string) {
-	fmt.Println("Gortex Token Savings")
-	fmt.Println("====================")
-	fmt.Printf("Store:          %s\n", path)
-	if eventsPath != "" {
-		fmt.Printf("Event log:      %s\n", eventsPath)
-	}
-	if !snap.FirstSeen.IsZero() {
-		fmt.Printf("Tracking since: %s\n", snap.FirstSeen.Format("2006-01-02 15:04"))
-	}
-	if !snap.LastUpdated.IsZero() {
-		fmt.Printf("Last updated:   %s\n", snap.LastUpdated.Format("2006-01-02 15:04"))
+	tty := progress.IsTTY(os.Stdout) && !noProgress
+
+	if tty {
+		banner := tui.Banner{
+			Title:    "gortex savings",
+			Subtitle: "Token-savings dashboard — Today / Last 7 days / All time.",
+		}.Render()
+		fmt.Println()
+		fmt.Println(banner)
+		fmt.Println()
+		fmt.Println("  " + progress.Row("store", path, 14))
+		if eventsPath != "" {
+			fmt.Println("  " + progress.Row("event log", eventsPath, 14))
+		}
+		if !snap.FirstSeen.IsZero() {
+			fmt.Println("  " + progress.Row("tracking since", snap.FirstSeen.Format("2006-01-02 15:04"), 14))
+		}
+		if !snap.LastUpdated.IsZero() {
+			fmt.Println("  " + progress.Row("last updated", snap.LastUpdated.Format("2006-01-02 15:04"), 14))
+		}
+	} else {
+		fmt.Println("Gortex Token Savings")
+		fmt.Println("====================")
+		fmt.Printf("Store:          %s\n", path)
+		if eventsPath != "" {
+			fmt.Printf("Event log:      %s\n", eventsPath)
+		}
+		if !snap.FirstSeen.IsZero() {
+			fmt.Printf("Tracking since: %s\n", snap.FirstSeen.Format("2006-01-02 15:04"))
+		}
+		if !snap.LastUpdated.IsZero() {
+			fmt.Printf("Last updated:   %s\n", snap.LastUpdated.Format("2006-01-02 15:04"))
+		}
 	}
 
 	// USD header — total avoided, headlined by the model we want to
@@ -175,13 +203,29 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path, eve
 	headline, headlineModel := pickHeadlineCost(costs, savingsModel)
 	fmt.Println()
 	if snap.Totals.CallsCounted == 0 {
-		fmt.Println("No source-reading tool calls recorded yet.")
-		fmt.Println("Run `gortex mcp` and use get_symbol_source / batch_symbols / smart_context.")
+		if tty {
+			fmt.Println("  " + progress.StyleHint.Render("◌  no source-reading tool calls recorded yet"))
+			fmt.Println("     " + progress.Caption("run `gortex mcp` and use get_symbol_source / batch_symbols / smart_context"))
+			fmt.Println()
+		} else {
+			fmt.Println("No source-reading tool calls recorded yet.")
+			fmt.Println("Run `gortex mcp` and use get_symbol_source / batch_symbols / smart_context.")
+		}
 		return
 	}
-	fmt.Printf("Cost avoided:   %s (%s) across %s calls · %s tokens saved\n",
-		formatUSD(headline), headlineModel,
-		humanInt(snap.Totals.CallsCounted), humanInt(snap.Totals.TokensSaved))
+	if tty {
+		stats := []string{
+			progress.Stat(formatUSD(headline), headlineModel, progress.StatGood),
+			progress.Stat(humanInt(snap.Totals.CallsCounted), "calls", progress.StatNeutral),
+			progress.Stat(humanInt(snap.Totals.TokensSaved), "tokens saved", progress.StatGood),
+		}
+		fmt.Println("  " + progress.StyleOK.Render("$") + "  " + progress.StyleStrong.Render("cost avoided"))
+		fmt.Println("     " + progress.StatStrip(stats...))
+	} else {
+		fmt.Printf("Cost avoided:   %s (%s) across %s calls · %s tokens saved\n",
+			formatUSD(headline), headlineModel,
+			humanInt(snap.Totals.CallsCounted), humanInt(snap.Totals.TokensSaved))
+	}
 
 	// Per-bucket bar rows.
 	fmt.Println()

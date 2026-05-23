@@ -15,12 +15,15 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
@@ -29,6 +32,8 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var (
@@ -78,22 +83,47 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	// Index the repo (same shape as bench/perf — fresh indexer,
-	// no embedder needed for a topology-only score).
+	w := cmd.ErrOrStderr()
+	emitAuditBanner(w, abs)
+
+	// Index the repo with a spinner so the user sees progress instead of a
+	// silent multi-second pause on larger trees. Indexer logs are silenced
+	// on TTY (the spinner already renders the same stage transitions).
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	cfg := config.Config{}
-	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[audit] indexing %s...\n", abs)
-	if _, err := idx.Index(abs); err != nil {
-		return fmt.Errorf("index: %w", err)
+	logger := loggerForSpinner(cmd, zap.NewNop())
+	idx := indexer.New(g, reg, cfg.Index, logger)
+
+	sp := newAuditSpinner(w)
+	if sp != nil {
+		sp.Start("Indexing repository")
+		sp.Set("", abs)
+	} else {
+		_, _ = fmt.Fprintf(w, "[audit] indexing %s...\n", abs)
+	}
+	if _, ierr := idx.Index(abs); ierr != nil {
+		if sp != nil {
+			sp.Fail(ierr)
+		}
+		return fmt.Errorf("index: %w", ierr)
+	}
+	if sp != nil {
+		sp.Done()
 	}
 
 	report := computeAuditReport(g)
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-		"[audit] %d callable symbols · mean complexity-health %.1f · grade %s\n",
-		report.SymbolCount, report.MeanScore, report.Grade)
+
+	// On non-TTY (or --no-progress / non-svg formats), preserve the legacy
+	// summary line so script parsers keep working.
+	if !progress.IsTTY(w) || noProgress || strings.ToLower(auditFormat) != "svg" {
+		_, _ = fmt.Fprintf(w,
+			"[audit] %d callable symbols · mean complexity-health %.1f · grade %s\n",
+			report.SymbolCount, report.MeanScore, report.Grade)
+	} else {
+		emitAuditGradeCard(w, report)
+	}
 
 	switch strings.ToLower(auditFormat) {
 	case "svg":
@@ -347,6 +377,124 @@ func renderBadgeSVG(r auditReport) string {
 		labelW/2, label,
 		labelW+gradeW/2, grade,
 	)
+}
+
+// newAuditSpinner returns a fresh mesh spinner bound to w when stderr is a
+// TTY (and --no-progress isn't set). Returns nil otherwise; the caller falls
+// back to a one-line "indexing ..." print.
+func newAuditSpinner(w io.Writer) *progress.Spinner {
+	if noProgress || !progress.IsTTY(w) {
+		return nil
+	}
+	return progress.NewSpinner(w)
+}
+
+// emitAuditBanner prints the gortex mesh banner + subtitle naming the repo
+// under audit. TTY-only so non-TTY callers (CI badges, scripts) keep their
+// minimal stderr trail.
+func emitAuditBanner(w io.Writer, repoPath string) {
+	if !progress.IsTTY(w) || noProgress {
+		return
+	}
+	short := repoPath
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(repoPath, home) {
+		short = "~" + strings.TrimPrefix(repoPath, home)
+	}
+	banner := tui.Banner{
+		Title:    "gortex audit",
+		Subtitle: "Computing complexity-axis health grade for " + filepath.Base(repoPath) + ".",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w, "  "+progress.Row("repo", short, 8))
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitAuditGradeCard renders the celebratory result panel: a big colour-tiered
+// grade chip, stat strip with symbol count + mean score, and a one-line
+// breakdown of the per-grade distribution. The shields.io SVG is still
+// written to .gortex/badge.svg by the caller — this is just the on-screen
+// reward.
+func emitAuditGradeCard(w io.Writer, r auditReport) {
+	gradeStyle := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(progress.PaletteFg()).
+		Background(auditGradeBG(r.Grade)).
+		Padding(0, 2)
+	gradeChip := gradeStyle.Render(" " + r.Grade + " ")
+
+	_, _ = fmt.Fprintln(w, "  "+gradeChip+"   "+
+		progress.StyleStrong.Render(fmt.Sprintf("%.1f", r.MeanScore))+
+		"  "+progress.StyleHint.Render("/ 100  ·  mean complexity-health"))
+
+	stats := []string{
+		progress.Stat(strconv.Itoa(r.SymbolCount), "callable symbols", progress.StatNeutral),
+	}
+	stats = append(stats, progress.Stat(gradeBlurb(r.Grade), "", auditStatSeverity(r.Grade)))
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+
+	if len(r.GradeCounts) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "     "+progress.Heading("grade distribution"))
+		parts := make([]string, 0, 5)
+		for _, k := range []string{"A", "B", "C", "D", "F"} {
+			parts = append(parts,
+				lipgloss.NewStyle().Bold(true).Foreground(auditGradeBG(k)).Render(k)+
+					"  "+progress.StyleVal.Render(strconv.Itoa(r.GradeCounts[k])),
+			)
+		}
+		_, _ = fmt.Fprintln(w, "     "+strings.Join(parts, progress.StyleHint.Render("   ·   ")))
+	}
+	_, _ = fmt.Fprintln(w)
+}
+
+// auditGradeBG maps an A-F letter to the same shields.io tier colour the SVG
+// uses, so the on-screen card and the rendered badge agree visually.
+func auditGradeBG(grade string) lipgloss.Color {
+	switch grade {
+	case "A":
+		return lipgloss.Color("#4c1") // brightgreen
+	case "B":
+		return lipgloss.Color("#97ca00") // green
+	case "C":
+		return lipgloss.Color("#dfb317") // yellow
+	case "D":
+		return lipgloss.Color("#fe7d37") // orange
+	default:
+		return lipgloss.Color("#e05d44") // red
+	}
+}
+
+// gradeBlurb returns the short human prefix shown next to the score in the
+// card's stat strip.
+func gradeBlurb(grade string) string {
+	switch grade {
+	case "A":
+		return "excellent topology"
+	case "B":
+		return "healthy"
+	case "C":
+		return "watch fan-out hotspots"
+	case "D":
+		return "consider refactoring"
+	default:
+		return "high coupling risk"
+	}
+}
+
+// auditStatSeverity colour-codes the blurb chip per grade band so the card
+// telegraphs urgency without re-reading the letter.
+func auditStatSeverity(grade string) progress.StatSeverity {
+	switch grade {
+	case "A", "B":
+		return progress.StatGood
+	case "C":
+		return progress.StatNeutral
+	case "D":
+		return progress.StatWarn
+	default:
+		return progress.StatBad
+	}
 }
 
 // gradeColour returns the shields.io standard tier colour per

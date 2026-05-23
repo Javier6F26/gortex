@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
@@ -21,7 +24,19 @@ import (
 	llmprovider "github.com/zzet/gortex/internal/llm/provider"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 	"github.com/zzet/gortex/internal/wiki"
+)
+
+// Wiki dashboard stage labels. Kept as package vars so the orchestration
+// code and the dashboard constructor share one source of truth.
+var (
+	stageWikiIndex    = "Index repository"
+	stageWikiAnalyze  = "Analyze graph"
+	stageWikiContract = "Extract contracts"
+	stageWikiDocs     = "Build docs bundle"
+	stageWikiPages    = "Generate pages"
 )
 
 var (
@@ -85,7 +100,7 @@ func init() {
 }
 
 func runWiki(cmd *cobra.Command, args []string) error {
-	logger := newLogger()
+	logger := loggerForSpinner(cmd, newLogger())
 	defer func() { _ = logger.Sync() }()
 
 	path := "."
@@ -102,31 +117,43 @@ func runWiki(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	w := cmd.ErrOrStderr()
+	stages := buildWikiStages(wikiNoContracts, wikiNoDocs)
+	dash := startWikiDashboard(w, absPath, stages)
+
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	idx := indexer.New(g, reg, cfg.Index, logger)
 
 	t0 := time.Now()
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
+	dash.stage(stageWikiIndex, "")
+	ctx := dash.context(context.Background())
+	if _, err := idx.IndexCtx(ctx, path); err != nil {
+		dash.fail(stageWikiIndex, err)
 		return fmt.Errorf("index %q: %w", path, err)
 	}
 	idx.ResolveAll()
 	indexDur := time.Since(t0)
-
 	stats := g.Stats()
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-		"[gortex wiki] indexed %s: %d nodes, %d edges in %dms\n",
-		path, stats.TotalNodes, stats.TotalEdges, indexDur.Milliseconds())
+	dash.done(stageWikiIndex, fmt.Sprintf("%d nodes · %d edges · %dms",
+		stats.TotalNodes, stats.TotalEdges, indexDur.Milliseconds()))
 
+	dash.stage(stageWikiAnalyze, "")
 	communities := analysis.DetectCommunities(g)
 	processes := analysis.DiscoverProcesses(g)
 	hotspots := analysis.FindHotspots(g, communities, 0)
 	cycles := analysis.DetectCycles(g, communities, "")
+	dash.done(stageWikiAnalyze, fmt.Sprintf("%d communities · %d processes · %d hotspots",
+		len(communities.Communities), len(processes.Processes), len(hotspots)))
 
 	var contractList []contracts.Contract
-	if cr := idx.ContractRegistry(); cr != nil {
-		contractList = cr.All()
+	if !wikiNoContracts {
+		dash.stage(stageWikiContract, "")
+		if cr := idx.ContractRegistry(); cr != nil {
+			contractList = cr.All()
+		}
+		dash.done(stageWikiContract, fmt.Sprintf("%d contracts", len(contractList)))
 	}
 
 	repoSlug := wikiRepo
@@ -134,37 +161,38 @@ func runWiki(cmd *cobra.Command, args []string) error {
 		repoSlug = wiki.RepoSlugFromPath(absPath)
 	}
 
-	// Optional: docs bundle is included unless --no-docs.
 	var docsMarkdown string
 	if !wikiNoDocs {
+		dash.stage(stageWikiDocs, "")
 		bundle, derr := docs.Generate(docs.Deps{Graph: g}, docs.Options{
 			WorkspaceID: wikiWorkspace,
 		})
 		if derr != nil {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex wiki] docs bundle skipped: %v\n", derr)
+			dash.done(stageWikiDocs, "skipped: "+derr.Error())
 		} else {
 			docsMarkdown = docs.RenderMarkdown(bundle)
+			dash.done(stageWikiDocs, fmt.Sprintf("%d bytes", len(docsMarkdown)))
 		}
 	}
 
 	var enhancer wiki.Enhancer
 	if wikiEnhance {
-		if e, err := makeWikiEnhancer(cfg, logger); err != nil {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-				"[gortex wiki] --enhance disabled: %v (falling back to template-only)\n", err)
+		if e, eerr := makeWikiEnhancer(cfg, logger); eerr != nil {
+			dash.sub("LLM enhancer disabled: " + eerr.Error())
 		} else if e != nil {
 			enhancer = e
 		}
 	}
 
+	dash.stage(stageWikiPages, "")
 	gen := wiki.New(wiki.Inputs{
-		Graph:        g,
-		Communities:  communities,
-		Processes:    processes,
-		Hotspots:     hotspots,
-		Cycles:       cycles,
-		Contracts:    contractList,
-		DocsBundle:   docsMarkdown,
+		Graph:       g,
+		Communities: communities,
+		Processes:   processes,
+		Hotspots:    hotspots,
+		Cycles:      cycles,
+		Contracts:   contractList,
+		DocsBundle:  docsMarkdown,
 	}, wiki.Options{
 		OutputDir:      wikiOutputDir,
 		Format:         wikiFormat,
@@ -183,16 +211,161 @@ func runWiki(cmd *cobra.Command, args []string) error {
 	})
 	result, _, err := gen.Generate(context.Background())
 	if err != nil {
+		dash.fail(stageWikiPages, err)
 		return fmt.Errorf("generate wiki: %w", err)
 	}
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
-		"[gortex wiki] wrote %d files under %s\n", len(result.Files), result.OutputDir)
+	dash.done(stageWikiPages, fmt.Sprintf("%d files → %s", len(result.Files), result.OutputDir))
+	dash.finish(nil)
+
+	emitWikiSummary(w, result.OutputDir, repoSlug, len(result.Files))
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "open: %s/%s/index.md\n", result.OutputDir, repoSlug)
 
 	// Silence unused-export warnings — exporter is referenced for
 	// cross-package availability assertions.
 	_ = exporter.Stats{}
 	return nil
+}
+
+// buildWikiStages returns the ordered dashboard stage list given the per-pass
+// flags. Skipped passes (no-contracts, no-docs) drop their stages so the
+// dashboard doesn't show ghost rows the orchestration never advances through.
+func buildWikiStages(noContracts, noDocs bool) []string {
+	stages := []string{stageWikiIndex, stageWikiAnalyze}
+	if !noContracts {
+		stages = append(stages, stageWikiContract)
+	}
+	if !noDocs {
+		stages = append(stages, stageWikiDocs)
+	}
+	stages = append(stages, stageWikiPages)
+	return stages
+}
+
+// wikiDashSession bundles the running tea.Program + controller for the wiki
+// dashboard. Closes cleanly on finish; methods are safe no-ops when the
+// session was never opened (non-TTY callers).
+type wikiDashSession struct {
+	prog       *tea.Program
+	controller *tui.DashboardController
+	doneCh     chan struct{}
+	w          io.Writer
+}
+
+// startWikiDashboard spawns the multi-pane dashboard against w when stderr is
+// a TTY. Returns a controller-bearing struct in both cases; on non-TTY it
+// falls back to one-line stderr prints, preserving the legacy log shape.
+func startWikiDashboard(w io.Writer, repoPath string, stages []string) *wikiDashSession {
+	if !progress.IsTTY(w) || noProgress {
+		_, _ = fmt.Fprintf(w, "[gortex wiki] indexing %s...\n", repoPath)
+		return &wikiDashSession{w: w}
+	}
+	// Banner first so the dashboard frame doesn't take over before the user
+	// sees what's being generated.
+	banner := tui.Banner{
+		Title:    "gortex wiki",
+		Subtitle: "Generating multi-page markdown wiki from the indexed graph.",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
+
+	model := tui.NewDashboard("gortex wiki", stages)
+	prog := tea.NewProgram(model,
+		tea.WithOutput(w),
+		tea.WithoutSignalHandler(),
+	)
+	controller := tui.NewDashboardController(prog)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		_, _ = prog.Run()
+	}()
+	return &wikiDashSession{prog: prog, controller: controller, doneCh: doneCh, w: w}
+}
+
+func (s *wikiDashSession) enabled() bool { return s != nil && s.controller != nil }
+
+func (s *wikiDashSession) stage(name, sub string) {
+	if s.enabled() {
+		s.controller.SetActive(name, sub)
+		return
+	}
+	_, _ = fmt.Fprintf(s.w, "[gortex wiki] %s\n", name)
+}
+func (s *wikiDashSession) sub(sub string) {
+	if s.enabled() {
+		s.controller.Sub(sub)
+	}
+}
+func (s *wikiDashSession) done(name, sub string) {
+	if s.enabled() {
+		s.controller.Done(name, sub)
+		return
+	}
+	if sub != "" {
+		_, _ = fmt.Fprintf(s.w, "[gortex wiki] %s — %s\n", name, sub)
+	}
+}
+func (s *wikiDashSession) fail(name string, err error) {
+	if s.enabled() {
+		s.controller.Fail(name, err)
+		<-s.doneCh
+		return
+	}
+	_, _ = fmt.Fprintf(s.w, "[gortex wiki] %s failed: %v\n", name, err)
+}
+func (s *wikiDashSession) finish(err error) {
+	if s.enabled() {
+		s.controller.Finish(err)
+		<-s.doneCh
+	}
+}
+
+// context attaches a progress reporter to ctx that forwards indexer stage
+// events into the dashboard's current active stage as sub-labels. Falls
+// through unchanged on non-TTY callers.
+func (s *wikiDashSession) context(ctx context.Context) context.Context {
+	if !s.enabled() {
+		return ctx
+	}
+	return progress.WithReporter(ctx, &wikiDashReporter{ctl: s.controller})
+}
+
+type wikiDashReporter struct {
+	ctl *tui.DashboardController
+}
+
+func (r *wikiDashReporter) Report(stage string, current, total int) {
+	if r == nil || r.ctl == nil || stage == "" {
+		return
+	}
+	sub := stage
+	switch {
+	case total > 0:
+		sub = fmt.Sprintf("%s · %d / %d", stage, current, total)
+	case current > 0:
+		sub = fmt.Sprintf("%s · %d", stage, current)
+	}
+	r.ctl.Sub(sub)
+}
+
+// emitWikiSummary prints the post-generation card. TTY-only — non-TTY callers
+// already saw the "[gortex wiki] Generate pages — N files → out/" line from
+// the dashboard fallback.
+func emitWikiSummary(w io.Writer, outDir, repoSlug string, files int) {
+	if !progress.IsTTY(w) || noProgress {
+		_, _ = fmt.Fprintf(w, "[gortex wiki] wrote %d files under %s\n", files, outDir)
+		return
+	}
+	_, _ = fmt.Fprintln(w)
+	stats := []string{
+		progress.Stat(strconv.Itoa(files), "files written", progress.StatGood),
+	}
+	_, _ = fmt.Fprintln(w, "  "+progress.StyleOK.Render("✓")+"  "+progress.StyleStrong.Render("wiki generated"))
+	_, _ = fmt.Fprintln(w, "     "+progress.StatStrip(stats...))
+	_, _ = fmt.Fprintln(w, "     "+progress.Row("output", outDir, 8))
+	_, _ = fmt.Fprintln(w, "     "+progress.Row("entry", outDir+"/"+repoSlug+"/index.md", 8))
+	_, _ = fmt.Fprintln(w)
 }
 
 // makeWikiEnhancer constructs the LLM-backed enhancer. Only claudecli

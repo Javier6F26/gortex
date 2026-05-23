@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/table"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/persistence"
+	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/tui"
 )
 
 var reposJSON bool
@@ -157,15 +160,32 @@ func describeRepo(store persistence.Store, r config.RepoEntry) repoStatus {
 }
 
 // renderReposTable prints the repo list as an ASCII table — the default
-// human-readable form. Columns mirror the repoStatus JSON fields.
+// human-readable form. Columns mirror the repoStatus JSON fields. On a TTY
+// we wrap the table in a styled banner + bottom stat strip; on a non-TTY
+// (script piping `gortex repos | grep …`) we keep only the bare table so
+// parser-shaped scripts don't break.
 func renderReposTable(cmd *cobra.Command, entries []repoStatus) error {
+	out := cmd.OutOrStdout()
+	stderr := cmd.ErrOrStderr()
+	tty := progress.IsTTY(stderr) && !noProgress
+
 	if len(entries) == 0 {
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), "(no tracked repos)")
+		if tty {
+			emitReposBanner(stderr)
+			_, _ = fmt.Fprintln(stderr, "  "+progress.StyleHint.Render("◌  no tracked repos — run `gortex track <path>` to add one"))
+			_, _ = fmt.Fprintln(stderr)
+		} else {
+			_, _ = fmt.Fprintln(out, "(no tracked repos)")
+		}
 		return nil
 	}
 
+	if tty {
+		emitReposBanner(stderr)
+	}
+
 	t := table.NewWriter()
-	t.SetOutputMirror(cmd.OutOrStdout())
+	t.SetOutputMirror(out)
 	t.SetStyle(table.StyleLight)
 	t.AppendHeader(table.Row{"repo", "head", "indexed", "last indexed", "freshness", "path"})
 	t.SetColumnConfigs([]table.ColumnConfig{
@@ -183,12 +203,59 @@ func renderReposTable(cmd *cobra.Command, entries []repoStatus) error {
 			shortSHA(e.HeadCommit),
 			shortSHA(e.IndexedCommit),
 			lastIndexedCell(e),
-			freshnessCell(e),
+			freshnessCell(e, tty),
 			e.Path,
 		})
 	}
 	t.Render()
+
+	if tty {
+		emitReposSummary(stderr, entries)
+	}
 	return nil
+}
+
+// emitReposBanner prints the gortex mesh banner on stderr above the table.
+// Keeping the banner on stderr (not stdout) means `gortex repos | grep foo`
+// still sees only the table on stdout — the JSON / table is parseable, the
+// decoration is purely visual.
+func emitReposBanner(w interface{ Write([]byte) (int, error) }) {
+	banner := tui.Banner{
+		Title:    "gortex repos",
+		Subtitle: "Every tracked repository with its git head and index freshness.",
+	}.Render()
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, banner)
+	_, _ = fmt.Fprintln(w)
+}
+
+// emitReposSummary appends a stat strip below the table: total / fresh /
+// stale / never-indexed counts so the eye gets the headline at a glance.
+func emitReposSummary(w interface{ Write([]byte) (int, error) }, entries []repoStatus) {
+	fresh, stale, never := 0, 0, 0
+	for _, e := range entries {
+		switch {
+		case !e.Indexed:
+			never++
+		case e.Stale:
+			stale++
+		default:
+			fresh++
+		}
+	}
+	stats := []string{
+		progress.Stat(strconv.Itoa(len(entries)), "tracked", progress.StatNeutral),
+		progress.Stat(strconv.Itoa(fresh), "fresh", progress.StatGood),
+	}
+	if stale > 0 {
+		stats = append(stats, progress.Stat(strconv.Itoa(stale), "stale", progress.StatWarn))
+	}
+	if never > 0 {
+		stats = append(stats, progress.Stat(strconv.Itoa(never), "never indexed", progress.StatBad))
+	}
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "  "+progress.StatStrip(stats...))
+	_, _ = fmt.Fprintln(w)
 }
 
 // shortSHA abbreviates a 40-char git SHA to its 12-char prefix for the
@@ -212,14 +279,23 @@ func lastIndexedCell(e repoStatus) string {
 	return e.LastIndexed.Local().Format("2006-01-02 15:04:05")
 }
 
-// freshnessCell renders the staleness indicator for the table.
-func freshnessCell(e repoStatus) string {
+// freshnessCell renders the staleness indicator for the table. On a TTY
+// the label is colour-tiered (green/yellow/red) so the eye picks up risk
+// from a long list at a glance; non-TTY keeps the plain text so scripts
+// that grep for "stale" / "fresh" still match.
+func freshnessCell(e repoStatus, tty bool) string {
+	label := "fresh"
+	style := progress.StyleOK
 	switch {
 	case !e.Indexed:
-		return "not indexed"
+		label = "not indexed"
+		style = progress.StyleErr
 	case e.Stale:
-		return "stale"
-	default:
-		return "fresh"
+		label = "stale"
+		style = progress.StyleHint
 	}
+	if !tty {
+		return label
+	}
+	return style.Render(label)
 }
