@@ -218,6 +218,11 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 						meta:       clone.Meta,
 					})
 				}
+				// Return the clone shell to the pool. The Meta map (if
+				// any) is owned by the reindexJob now and lives on; the
+				// Edge struct itself is per-iteration garbage and is
+				// the part worth recycling.
+				releaseResolverClone(clone)
 			}
 			perWorkerJobs[idx] = jobs
 		}(w, pending[start:end])
@@ -460,6 +465,18 @@ type reindexJob struct {
 	meta       map[string]any
 }
 
+// resolverClonePool recycles the *graph.Edge shells handed out by
+// cloneEdgeForResolve. The clone is per-iteration garbage in the
+// ResolveAll worker — Get / Put across the inner loop turns the per-
+// edge alloc into pool churn. Profile #4 (post lineBytesUpTo) showed
+// cloneEdgeForResolve still pulling its share of the resolver's flat
+// CPU; pooling removes it. The cloned Edge's Meta map is intentionally
+// NOT pooled — when a resolution succeeds, the map travels onto the
+// real edge via reindexJob.meta and is owned there afterwards.
+var resolverClonePool = sync.Pool{
+	New: func() any { return &graph.Edge{} },
+}
+
 // cloneEdgeForResolve returns a deep-enough copy of e for safe
 // worker-local mutation by resolveEdge: every scalar / string field
 // is value-copied; Meta is duplicated when present so a helper
@@ -468,8 +485,14 @@ type reindexJob struct {
 // inspecting that map). Meta is the only reference-typed field on
 // Edge that resolveEdge may write to today; any future Edge field
 // of map / slice type will need handling here too.
+//
+// The returned *Edge must be released with releaseResolverClone once
+// the worker is done with it (after any reindexJob has captured the
+// Meta pointer). Forgetting to release just means the clone falls
+// back to GC, not a leak.
 func cloneEdgeForResolve(e *graph.Edge) *graph.Edge {
-	clone := *e
+	clone := resolverClonePool.Get().(*graph.Edge)
+	*clone = *e
 	if clone.Meta != nil {
 		dup := make(map[string]any, len(clone.Meta))
 		for k, v := range clone.Meta {
@@ -477,7 +500,21 @@ func cloneEdgeForResolve(e *graph.Edge) *graph.Edge {
 		}
 		clone.Meta = dup
 	}
-	return &clone
+	return clone
+}
+
+// releaseResolverClone returns a clone produced by cloneEdgeForResolve
+// to the pool. Safe to call after the worker has copied any needed
+// fields (To, Kind, Origin, Meta, …) into a reindexJob — the job
+// retains its own references to those values, and the Edge shell is
+// no longer needed. Zeroing prevents the next Get from seeing stale
+// pointer fields the GC would otherwise be unable to reclaim.
+func releaseResolverClone(clone *graph.Edge) {
+	if clone == nil {
+		return
+	}
+	*clone = graph.Edge{}
+	resolverClonePool.Put(clone)
 }
 
 // resolveEdge mutates e.To in place and returns the prior value
