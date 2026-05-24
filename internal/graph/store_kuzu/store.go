@@ -1,11 +1,15 @@
 package store_kuzu
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/gob"
 	"fmt"
 	"iter"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +41,17 @@ type Store struct {
 	resolveMu sync.Mutex
 
 	edgeIdentityRevs atomic.Int64
+
+	// Bulk-load fast path. When the indexer brackets its parse loop
+	// with BeginBulkLoad/FlushBulk, AddBatch routes incoming rows
+	// into these slices instead of round-tripping through Cypher per
+	// call. FlushBulk dedupes the buffers and commits via Kuzu's
+	// COPY FROM CSV — one INSERT-only statement per table, no MERGE
+	// cost, no per-row Cypher parse/plan. See BeginBulkLoad doc.
+	bulkMu     sync.Mutex
+	bulkActive bool
+	bulkNodes  []*graph.Node
+	bulkEdges  []*graph.Edge
 }
 
 // Compile-time assertion: *Store satisfies graph.Store.
@@ -285,6 +300,19 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 {
 		return
 	}
+	// Bulk-load fast path: buffer in memory, defer Cypher to FlushBulk.
+	// The buffer lock is held briefly only across the slice append —
+	// the indexer's parse workers can hammer AddBatch in parallel with
+	// minimal contention.
+	s.bulkMu.Lock()
+	if s.bulkActive {
+		s.bulkNodes = append(s.bulkNodes, nodes...)
+		s.bulkEdges = append(s.bulkEdges, edges...)
+		s.bulkMu.Unlock()
+		return
+	}
+	s.bulkMu.Unlock()
+
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.addNodesUnwindLocked(nodes)
@@ -1330,5 +1358,309 @@ func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return strings.TrimSpace(s[:i])
 	}
+	return s
+}
+
+// -- BulkLoader implementation -------------------------------------------
+
+// Compile-time assertion: *Store satisfies graph.BulkLoader, so the
+// indexer's BulkLoader probe picks up the COPY-FROM-CSV fast path
+// instead of falling through to per-batch UNWIND.
+var _ graph.BulkLoader = (*Store)(nil)
+
+// BeginBulkLoad enters buffer-mode write. Subsequent AddBatch calls
+// append into in-memory slices without round-tripping to Kuzu; the
+// buffer is committed via Kuzu's COPY FROM primitive when FlushBulk
+// is called. Calling twice without an intervening FlushBulk panics.
+func (s *Store) BeginBulkLoad() {
+	s.bulkMu.Lock()
+	defer s.bulkMu.Unlock()
+	if s.bulkActive {
+		panic("store_kuzu: BeginBulkLoad called twice without FlushBulk")
+	}
+	s.bulkActive = true
+}
+
+// FlushBulk commits the accumulated bulk buffer via Kuzu's COPY FROM
+// CSV path — one INSERT-only statement per table, no MERGE cost, no
+// per-row Cypher parse/plan. After FlushBulk, AddBatch returns to its
+// regular per-call UNWIND path.
+//
+// Dedup contract: nodes are deduped by ID (last write wins, matching
+// the in-memory store's AddBatch semantics); edges are deduped by the
+// identity tuple (from, to, kind, file_path, line). Edge endpoints
+// not present in the node buffer are auto-stubbed so the rel-table
+// foreign-key constraint is satisfied (mirrors the per-call
+// mergeStubNodeLocked path).
+func (s *Store) FlushBulk() error {
+	s.bulkMu.Lock()
+	if !s.bulkActive {
+		s.bulkMu.Unlock()
+		return fmt.Errorf("store_kuzu: FlushBulk without BeginBulkLoad")
+	}
+	nodes := s.bulkNodes
+	edges := s.bulkEdges
+	s.bulkNodes = nil
+	s.bulkEdges = nil
+	s.bulkActive = false
+	s.bulkMu.Unlock()
+
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.copyBulkLocked(nodes, edges)
+}
+
+// copyBulkLocked dedupes the bulk buffers, writes them to temp CSV
+// files, and runs COPY FROM for each table. Must be called with
+// s.writeMu held.
+func (s *Store) copyBulkLocked(nodes []*graph.Node, edges []*graph.Edge) error {
+	// Dedup nodes by ID (last write wins). The in-memory store's
+	// AddBatch overwrites on duplicate ID; mirror that here.
+	nodePos := make(map[string]int, len(nodes))
+	dedupedNodes := nodes[:0]
+	for _, n := range nodes {
+		if n == nil || n.ID == "" {
+			continue
+		}
+		if pos, ok := nodePos[n.ID]; ok {
+			dedupedNodes[pos] = n
+		} else {
+			nodePos[n.ID] = len(dedupedNodes)
+			dedupedNodes = append(dedupedNodes, n)
+		}
+	}
+	nodes = dedupedNodes
+
+	// Dedup edges by identity tuple (last write wins). Same rationale
+	// as the in-memory store's MERGE semantics.
+	type edgeKey struct {
+		from, to, kind, file string
+		line                 int
+	}
+	edgePos := make(map[edgeKey]int, len(edges))
+	dedupedEdges := edges[:0]
+	for _, e := range edges {
+		if e == nil {
+			continue
+		}
+		k := edgeKey{e.From, e.To, string(e.Kind), e.FilePath, e.Line}
+		if pos, ok := edgePos[k]; ok {
+			dedupedEdges[pos] = e
+		} else {
+			edgePos[k] = len(dedupedEdges)
+			dedupedEdges = append(dedupedEdges, e)
+		}
+	}
+	edges = dedupedEdges
+
+	// Auto-stub endpoints not in the node buffer. The rel-table
+	// foreign-key constraint requires both endpoints to exist in the
+	// node table; per-call AddEdge handles this via
+	// mergeStubNodeLocked. For COPY there's no per-row hook, so we
+	// pre-stub here.
+	for _, e := range edges {
+		if e.From != "" {
+			if _, ok := nodePos[e.From]; !ok {
+				nodePos[e.From] = len(nodes)
+				nodes = append(nodes, &graph.Node{ID: e.From})
+			}
+		}
+		if e.To != "" {
+			if _, ok := nodePos[e.To]; !ok {
+				nodePos[e.To] = len(nodes)
+				nodes = append(nodes, &graph.Node{ID: e.To})
+			}
+		}
+	}
+
+	if len(nodes) == 0 && len(edges) == 0 {
+		return nil
+	}
+
+	// Write CSV files to a per-flush temp dir. Cleaned up regardless
+	// of COPY success/failure.
+	dir, err := os.MkdirTemp("", "kuzu-bulk-")
+	if err != nil {
+		return fmt.Errorf("mkdir bulk tmp: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if len(nodes) > 0 {
+		nodesPath := filepath.Join(dir, "nodes.csv")
+		if err := writeNodesTSV(nodesPath, nodes); err != nil {
+			return fmt.Errorf("write nodes tsv: %w", err)
+		}
+		// HEADER=false maps columns by position (no chance of a
+		// header-name mismatch silently dropping rows). DELIM='\t'
+		// because Kuzu's CSV parser does not handle RFC-4180-style
+		// quoted strings containing commas — it splits on the
+		// delimiter naively. Code identifiers and names never contain
+		// tabs, so TSV sidesteps the quoting problem entirely.
+		copyQ := fmt.Sprintf("COPY Node FROM '%s' (HEADER=false, DELIM='\t')", escapeCypherStringLit(nodesPath))
+		res, err := s.conn.Query(copyQ)
+		if err != nil {
+			return fmt.Errorf("copy nodes: %w", err)
+		}
+		res.Close()
+	}
+
+	if len(edges) > 0 {
+		edgesPath := filepath.Join(dir, "edges.csv")
+		if err := writeEdgesTSV(edgesPath, edges); err != nil {
+			return fmt.Errorf("write edges tsv: %w", err)
+		}
+		copyQ := fmt.Sprintf("COPY Edge FROM '%s' (HEADER=false, DELIM='\t')", escapeCypherStringLit(edgesPath))
+		res, err := s.conn.Query(copyQ)
+		if err != nil {
+			return fmt.Errorf("copy edges: %w", err)
+		}
+		res.Close()
+	}
+
+	return nil
+}
+
+// writeNodesTSV writes nodes to a tab-separated values file in
+// schema-column order. Kuzu's COPY FROM parser does not honour
+// RFC-4180 quoted-string escaping (a quoted field with embedded
+// commas is naively split on the delimiter), so TSV with a sanitised
+// payload is the safe transport for arbitrary user data. Tabs in
+// any text column are replaced with a single space; newlines with a
+// space — these characters never appear in code identifiers,
+// qualified names, or file paths, and base64-encoded meta is
+// tab-/newline-free by construction.
+func writeNodesTSV(path string, nodes []*graph.Node) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	bw := bufio.NewWriterSize(f, 1<<20)
+	defer bw.Flush()
+
+	for _, n := range nodes {
+		metaStr := ""
+		if len(n.Meta) > 0 {
+			s, err := encodeMeta(n.Meta)
+			if err != nil {
+				return fmt.Errorf("encode meta for %q: %w", n.ID, err)
+			}
+			metaStr = s
+		}
+		fields := [12]string{
+			sanitizeTSV(n.ID),
+			sanitizeTSV(string(n.Kind)),
+			sanitizeTSV(n.Name),
+			sanitizeTSV(n.QualName),
+			sanitizeTSV(n.FilePath),
+			strconv.Itoa(n.StartLine),
+			strconv.Itoa(n.EndLine),
+			sanitizeTSV(n.Language),
+			sanitizeTSV(n.RepoPrefix),
+			sanitizeTSV(n.WorkspaceID),
+			sanitizeTSV(n.ProjectID),
+			metaStr,
+		}
+		for i, f := range fields {
+			if i > 0 {
+				if err := bw.WriteByte('\t'); err != nil {
+					return err
+				}
+			}
+			if _, err := bw.WriteString(f); err != nil {
+				return err
+			}
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeEdgesTSV writes edges to a TSV file with FROM/TO ids in the
+// first two columns (matching Kuzu's REL CSV convention) followed by
+// the rel-table property columns in schema order.
+func writeEdgesTSV(path string, edges []*graph.Edge) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	bw := bufio.NewWriterSize(f, 1<<20)
+	defer bw.Flush()
+
+	for _, e := range edges {
+		metaStr := ""
+		if len(e.Meta) > 0 {
+			s, err := encodeMeta(e.Meta)
+			if err != nil {
+				return fmt.Errorf("encode meta for edge %q→%q: %w", e.From, e.To, err)
+			}
+			metaStr = s
+		}
+		crossRepo := "0"
+		if e.CrossRepo {
+			crossRepo = "1"
+		}
+		fields := [11]string{
+			sanitizeTSV(e.From),
+			sanitizeTSV(e.To),
+			sanitizeTSV(string(e.Kind)),
+			sanitizeTSV(e.FilePath),
+			strconv.Itoa(e.Line),
+			strconv.FormatFloat(e.Confidence, 'g', -1, 64),
+			sanitizeTSV(e.ConfidenceLabel),
+			sanitizeTSV(e.Origin),
+			sanitizeTSV(e.Tier),
+			crossRepo,
+			metaStr,
+		}
+		for i, f := range fields {
+			if i > 0 {
+				if err := bw.WriteByte('\t'); err != nil {
+					return err
+				}
+			}
+			if _, err := bw.WriteString(f); err != nil {
+				return err
+			}
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sanitizeTSV strips bytes that would corrupt a tab-separated record —
+// tabs become spaces, CR/LF become spaces. Code identifiers, qualified
+// names, file paths, and base64-encoded meta strings never contain
+// these in practice; the sanitiser exists to guarantee a malformed
+// extractor output can't break the cold-load path.
+func sanitizeTSV(s string) string {
+	if !strings.ContainsAny(s, "\t\r\n") {
+		return s
+	}
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\t', '\r', '\n':
+			b = append(b, ' ')
+		default:
+			b = append(b, c)
+		}
+	}
+	return string(b)
+}
+
+// escapeCypherStringLit escapes a string for safe use inside a Cypher
+// single-quoted literal — turns ' into \' and \ into \\. Used for
+// COPY FROM paths, which are templated into the Cypher query (no
+// parameter binding for COPY paths in the current Kuzu binding).
+func escapeCypherStringLit(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
 	return s
 }
