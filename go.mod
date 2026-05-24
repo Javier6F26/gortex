@@ -285,6 +285,7 @@ require (
 )
 
 require (
+	github.com/LadybugDB/go-ladybug v0.13.1 // indirect
 	github.com/RoaringBitmap/roaring/v2 v2.18.0 // indirect
 	github.com/apache/arrow-go/v18 v18.4.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect

@@ -39,6 +39,7 @@ import (
 	"github.com/zzet/gortex/internal/graph/store_cayley"
 	"github.com/zzet/gortex/internal/graph/store_duckdb"
 	"github.com/zzet/gortex/internal/graph/store_kuzu"
+	"github.com/zzet/gortex/internal/graph/store_ladybug"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/parser"
@@ -97,7 +98,8 @@ func main() {
 	skipKuzu := flag.Bool("skip-kuzu", false, "skip the kuzu (Cypher) backend")
 	skipCayley := flag.Bool("skip-cayley", false, "skip the cayley (pure-Go quad store) backend")
 	skipDuckDB := flag.Bool("skip-duckdb", false, "skip the duckdb (columnar SQL) backend")
-	only := flag.String("only", "", "comma-separated subset to run (memory,bolt,sqlite,kuzu,cayley,duckdb); overrides skip-* flags")
+	skipLadybug := flag.Bool("skip-ladybug", false, "skip the ladybug (Kuzu fork, Cypher) backend")
+	only := flag.String("only", "", "comma-separated subset to run (memory,bolt,sqlite,kuzu,cayley,duckdb,ladybug); overrides skip-* flags")
 	flag.Parse()
 	if *root == "" {
 		die("usage: store-bench -root <path>")
@@ -114,6 +116,7 @@ func main() {
 	wantKuzu := !*skipKuzu
 	wantCayley := !*skipCayley
 	wantDuckDB := !*skipDuckDB
+	wantLadybug := !*skipLadybug
 	if *only != "" {
 		set := map[string]bool{}
 		for _, s := range strings.Split(*only, ",") {
@@ -121,6 +124,7 @@ func main() {
 		}
 		wantMem, wantBolt, wantSQLite = set["memory"], set["bolt"], set["sqlite"]
 		wantKuzu, wantCayley, wantDuckDB = set["kuzu"], set["cayley"], set["duckdb"]
+		wantLadybug = set["ladybug"]
 	}
 
 	var results []benchResult
@@ -231,6 +235,27 @@ func main() {
 				diskFn := func() int64 {
 					_ = s.Close()
 					return fileSize(path) + fileSize(path+".wal")
+				}
+				return s, diskFn, nil
+			}))
+	}
+	if wantLadybug {
+		fmt.Fprintln(os.Stderr, "[ladybug] indexing through LadybugDB (Kuzu-fork, Cypher) Store...")
+		results = append(results, runBackend("ladybug", absRoot, *workers, *querySize,
+			func() (graph.Store, func() int64, error) {
+				dir, err := os.MkdirTemp("", "store-bench-ladybug-*")
+				if err != nil {
+					return nil, nil, err
+				}
+				path := filepath.Join(dir, "store.lbug")
+				s, err := store_ladybug.Open(path)
+				if err != nil {
+					os.RemoveAll(dir)
+					return nil, nil, err
+				}
+				diskFn := func() int64 {
+					_ = s.Close()
+					return dirSize(path)
 				}
 				return s, diskFn, nil
 			}))
