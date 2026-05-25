@@ -62,7 +62,7 @@ func (s *Server) handleAnalyzePageRank(ctx context.Context, req mcp.CallToolRequ
 	if v, ok := args["tolerance"].(float64); ok && v > 0 {
 		tolerance = v
 	}
-	nodeKinds := parseKindFilter(stringArg(args, "kind"))
+	nodeKinds := parseKindFilter(stringArg(args, "node_kinds"))
 
 	hits := s.runPageRank(graph.PageRankOpts{
 		NodeKinds:     nodeKinds,

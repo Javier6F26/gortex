@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/indexer"
@@ -328,7 +330,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Multi-repo support.
-	cm, err := config.NewConfigManager("")
+	cm, err := config.NewConfigManager(cfgFile)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[gortex] warning: could not load global config: %v\n", err)
 	}
@@ -422,11 +424,24 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		srv.SetLSPDiagnosticsBroadcasting()
 	}
 
-	// Create persistence store.
+	// Create persistence store. The snapshot cache exists for the
+	// in-memory backend, where heap state is lost on restart — load
+	// from snapshot skips the parse phase on a warm restart. For
+	// on-disk backends (ladybug, sqlite, duckdb) the store IS
+	// already persistent across restarts: re-opening the same path
+	// hands back the previous run's graph in milliseconds, and
+	// replaying a snapshot via per-row g.AddNode would just
+	// re-write everything we already have at glacial per-row
+	// Cypher speed. Skip the cache entirely on those backends.
 	var store persistence.Store
-	if serverNoCache {
+	persistentBackend := !strings.EqualFold(strings.TrimSpace(serverBackend), "memory") && strings.TrimSpace(serverBackend) != ""
+	switch {
+	case serverNoCache:
 		store = persistence.NopStore{}
-	} else {
+	case persistentBackend:
+		fmt.Fprintf(os.Stderr, "[gortex] server: snapshot cache disabled (backend=%s persists across restarts)\n", serverBackend)
+		store = persistence.NopStore{}
+	default:
 		var err error
 		store, err = persistence.NewFileStore(serverCacheDir, version)
 		if err != nil {
@@ -594,9 +609,35 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Background: index, multi-repo, analyze — graph populates while HTTP is live.
 	go func() {
-		// When MultiIndexer is available (global config has repos), use it exclusively.
-		// Single --index flag is only used when no multi-repo config exists.
-		if mi != nil {
+		// Live progress logging — the daemon runs without a TTY so
+		// the Spinner reporter is silent. Hook a zap-logging reporter
+		// + a graph-size heartbeat so the log shows what's happening.
+		hbCtx, hbCancel := context.WithCancel(context.Background())
+		defer hbCancel()
+		progress.StartHeartbeat(hbCtx, logger, "indexing", 5*time.Second, func() map[string]any {
+			// idx.Graph() follows the indexer's active store —
+			// during cold-start the indexer swaps to an in-memory
+			// shadow, so reading via idx.Graph() shows the live
+			// growing count. g.NodeCount() would always read the
+			// disk store and stay at 0 until FlushBulk drains.
+			cur := idx.Graph()
+			if cur == nil {
+				cur = g
+			}
+			return map[string]any{
+				"nodes":      cur.NodeCount(),
+				"edges":      cur.EdgeCount(),
+				"disk_nodes": g.NodeCount(),
+				"disk_edges": g.EdgeCount(),
+			}
+		})
+		// When the active config has repos AND no explicit --index was
+		// requested, use MultiIndexer (it handles the per-repo flow).
+		// When --index is set the user wants single-repo behaviour,
+		// even when a multi-repo config exists — bypass MultiIndexer.
+		hasActiveRepos := cm != nil && len(cm.ActiveRepos()) > 0
+		useMulti := mi != nil && hasActiveRepos && serverIndex == ""
+		if useMulti {
 			if serverWorkspace != "" || serverScopeProject != "" {
 				fmt.Fprintf(os.Stderr, "[gortex] server: multi-repo indexing (scope: workspace=%q project=%q)...\n", serverWorkspace, serverScopeProject)
 			} else {

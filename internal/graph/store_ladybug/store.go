@@ -1291,10 +1291,25 @@ func (s *Store) runWriteLocked(query string, args map[string]any) {
 }
 
 // querySelect runs a read-shaped Cypher statement and materialises
-// every row before returning. We deliberately consume the iterator
-// to release the connection — open iterators hold the kuzu_query
-// handle and re-entrant store calls would deadlock waiting for it.
+// every row before returning. Holds writeMu for the conn.Query
+// lifecycle: the Go binding shares one C connection handle across
+// goroutines; concurrent conn.Query calls (e.g. several per-repo
+// Indexers each doing NodeCount on shadow-swap entry) race in the
+// C layer and SIGSEGV. writeMu is now the connection-serialisation
+// mutex (the name predates the read-also-needs-it discovery).
+//
+// We consume the iterator to release the connection — open
+// iterators hold the kuzu_query handle and re-entrant store calls
+// would deadlock waiting for it.
 func (s *Store) querySelect(query string, args map[string]any) [][]any {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return s.querySelectInner(query, args)
+}
+
+// querySelectInner is the unlocked body shared between querySelect
+// (locks) and querySelectLocked (caller already holds writeMu).
+func (s *Store) querySelectInner(query string, args map[string]any) [][]any {
 	res, err := s.executeOrQuery(query, args)
 	if err != nil {
 		panicOnFatal(err)
@@ -1321,11 +1336,10 @@ func (s *Store) querySelect(query string, args map[string]any) [][]any {
 }
 
 // querySelectLocked is querySelect for callers that already hold
-// writeMu and so must not call into the public querySelect (which
-// does not lock — but the underlying connection is shared, so the
-// distinction matters only as a documentation aid).
+// writeMu. Routes to the same unlocked body querySelect uses
+// (re-acquiring writeMu would deadlock).
 func (s *Store) querySelectLocked(query string, args map[string]any) [][]any {
-	return s.querySelect(query, args)
+	return s.querySelectInner(query, args)
 }
 
 // executeOrQuery hides the prepared-vs-direct distinction. KuzuDB

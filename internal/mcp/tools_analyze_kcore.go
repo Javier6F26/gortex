@@ -55,7 +55,7 @@ func (s *Server) handleAnalyzeKCore(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	hits := s.runKCore(graph.KCoreOpts{
-		NodeKinds: parseKindFilter(stringArg(args, "kind")),
+		NodeKinds: parseKindFilter(stringArg(args, "node_kinds")),
 	})
 
 	// Filter by min_degree (drop trivial low-core nodes), then cap.

@@ -1724,9 +1724,21 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	//     state.
 	var diskTarget graph.Store
 	var inMemShadow *graph.Graph
-	if bl, ok := idx.graph.(graph.BulkLoader); ok &&
-		idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 &&
-		len(files) <= shadowMaxFileCount() {
+	bl, blOK := idx.graph.(graph.BulkLoader)
+	preNodes := idx.graph.NodeCount()
+	preEdges := idx.graph.EdgeCount()
+	belowShadowMax := len(files) <= shadowMaxFileCount()
+	idx.logger.Info("indexer: shadow-swap decision",
+		zap.String("repo", idx.RepoPrefix()),
+		zap.Bool("bulk_loader", blOK),
+		zap.Int("pre_nodes", preNodes),
+		zap.Int("pre_edges", preEdges),
+		zap.Int("files", len(files)),
+		zap.Int("shadow_max_files", shadowMaxFileCount()),
+		zap.Bool("below_shadow_max", belowShadowMax),
+		zap.Bool("shadow_taken", blOK && preNodes == 0 && preEdges == 0 && belowShadowMax),
+	)
+	if blOK && preNodes == 0 && preEdges == 0 && belowShadowMax {
 		diskTarget = idx.graph
 		inMemShadow = graph.New()
 		idx.graph = inMemShadow
@@ -1748,6 +1760,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				return
 			}
 			reporter.Report("persisting bulk graph", 0, 0)
+			drainStart := time.Now()
+			shadowNodeCount := inMemShadow.NodeCount()
+			shadowEdgeCount := inMemShadow.EdgeCount()
+			idx.logger.Info("indexer: drain start (shadow → disk)",
+				zap.String("repo", idx.RepoPrefix()),
+				zap.Int("shadow_nodes", shadowNodeCount),
+				zap.Int("shadow_edges", shadowEdgeCount),
+			)
 			bl.BeginBulkLoad()
 			// Drain the shadow shard-by-shard so the indexer's hold on
 			// the 11-GB Linux-scale graph is released progressively
@@ -1803,9 +1823,21 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				diskTarget.AddBatch(nil, edgeBuf)
 				edgeBuf = nil
 			}
+			flushStart := time.Now()
+			idx.logger.Info("indexer: FlushBulk start",
+				zap.String("repo", idx.RepoPrefix()),
+				zap.Duration("drain_elapsed", flushStart.Sub(drainStart)),
+			)
 			if ferr := bl.FlushBulk(); ferr != nil {
 				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
 			}
+			idx.logger.Info("indexer: FlushBulk complete",
+				zap.String("repo", idx.RepoPrefix()),
+				zap.Duration("flush_elapsed", time.Since(flushStart)),
+				zap.Duration("total_drain", time.Since(drainStart)),
+				zap.Int("nodes", shadowNodeCount),
+				zap.Int("edges", shadowEdgeCount),
+			)
 			// Build the backend FTS after the bulk load completes so
 			// CREATE_FTS_INDEX has the full corpus to scan in one
 			// pass. BulkUpsertSymbolFTS does its own
