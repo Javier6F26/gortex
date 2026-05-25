@@ -3909,51 +3909,58 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// the wire format.
 	idx.inlineEnvelopeShapes(reg)
 
-	for _, c := range reg.All() {
-		contractNode := &graph.Node{
+	all := reg.All()
+	nodes := make([]*graph.Node, 0, len(all))
+	edges := make([]*graph.Edge, 0, len(all))
+	for _, c := range all {
+		nodes = append(nodes, &graph.Node{
 			ID:       c.ID,
 			Kind:     graph.KindContract,
 			Name:     c.ID,
 			FilePath: c.FilePath,
 			Language: "contract",
 			Meta:     map[string]any{"type": string(c.Type), "role": string(c.Role)},
-		}
-		idx.graph.AddNode(contractNode)
+		})
 
+		if c.SymbolID == "" {
+			continue
+		}
 		edgeKind := graph.EdgeProvides
 		if c.Role == contracts.RoleConsumer {
 			edgeKind = graph.EdgeConsumes
 		}
-		if c.SymbolID != "" {
-			idx.graph.AddEdge(&graph.Edge{
+		edges = append(edges, &graph.Edge{
+			From:     c.SymbolID,
+			To:       c.ID,
+			Kind:     edgeKind,
+			FilePath: c.FilePath,
+			Line:     c.Line,
+		})
+		// Framework-layer EdgeHandlesRoute. Emitted alongside
+		// EdgeProvides for HTTP / gRPC / WS / GraphQL / topic
+		// providers so `analyze kind=routes` and other
+		// framework-aware tools walk one targeted edge instead
+		// of filtering EdgeProvides by contract type. Consumers
+		// (callers of routes) and non-route contract types (env,
+		// OpenAPI specs, DI tokens) intentionally skip this
+		// edge — they aren't route handlers.
+		if c.Role == contracts.RoleProvider && isRouteContractType(c.Type) {
+			edges = append(edges, &graph.Edge{
 				From:     c.SymbolID,
 				To:       c.ID,
-				Kind:     edgeKind,
+				Kind:     graph.EdgeHandlesRoute,
 				FilePath: c.FilePath,
 				Line:     c.Line,
+				Meta: map[string]any{
+					"contract_type": string(c.Type),
+				},
 			})
-			// Framework-layer EdgeHandlesRoute. Emitted alongside
-			// EdgeProvides for HTTP / gRPC / WS / GraphQL / topic
-			// providers so `analyze kind=routes` and other
-			// framework-aware tools walk one targeted edge instead
-			// of filtering EdgeProvides by contract type. Consumers
-			// (callers of routes) and non-route contract types (env,
-			// OpenAPI specs, DI tokens) intentionally skip this
-			// edge — they aren't route handlers.
-			if c.Role == contracts.RoleProvider && isRouteContractType(c.Type) {
-				idx.graph.AddEdge(&graph.Edge{
-					From:     c.SymbolID,
-					To:       c.ID,
-					Kind:     graph.EdgeHandlesRoute,
-					FilePath: c.FilePath,
-					Line:     c.Line,
-					Meta: map[string]any{
-						"contract_type": string(c.Type),
-					},
-				})
-			}
 		}
 	}
+
+	bulkStart := time.Now()
+	idx.bulkCommit(nodes, edges)
+	bulkElapsed := time.Since(bulkStart)
 
 	idx.contractRegistry = reg
 	repo := idx.rootPath
@@ -3962,7 +3969,32 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	}
 	idx.logger.Info("contracts extracted",
 		zap.String("repo", repo),
-		zap.Int("count", len(reg.All())))
+		zap.Int("count", len(all)),
+		zap.Duration("commit_bulk_elapsed", bulkElapsed))
+}
+
+// bulkCommit writes nodes + edges through the backend's BulkLoader
+// fast path when available (Ladybug's COPY FROM is ~100x faster than
+// per-row Cypher MERGE) and falls back to a single AddBatch otherwise.
+// The store is non-empty at call time — see graph.BulkLoader's contract
+// note — so Ladybug's FlushBulk merges on primary key without
+// duplicating existing rows.
+func (idx *Indexer) bulkCommit(nodes []*graph.Node, edges []*graph.Edge) {
+	if len(nodes) == 0 && len(edges) == 0 {
+		return
+	}
+	if bl, ok := idx.graph.(graph.BulkLoader); ok {
+		bl.BeginBulkLoad()
+		idx.graph.AddBatch(nodes, edges)
+		if err := bl.FlushBulk(); err != nil {
+			idx.logger.Warn("bulkCommit: FlushBulk failed",
+				zap.Error(err),
+				zap.Int("nodes", len(nodes)),
+				zap.Int("edges", len(edges)))
+		}
+		return
+	}
+	idx.graph.AddBatch(nodes, edges)
 }
 
 // isRouteContractType reports whether a ContractType corresponds to a
@@ -5328,6 +5360,7 @@ func (idx *Indexer) extractGoModContracts(reg *contracts.Registry) {
 	found := goModExtractor.Extract(goModFilePath, goModSrc, nil, nil)
 	reg.AddAllScoped(found, idx.repoPrefix, idx.workspaceID, idx.projectID)
 
+	var nodes []*graph.Node
 	for i := range found {
 		c := found[i]
 		if c.Type != contracts.ContractDependency {
@@ -5336,7 +5369,7 @@ func (idx *Indexer) extractGoModContracts(reg *contracts.Registry) {
 		if idx.graph.GetNode(c.ID) != nil {
 			continue
 		}
-		idx.graph.AddNode(&graph.Node{
+		nodes = append(nodes, &graph.Node{
 			ID:         c.ID,
 			Kind:       graph.KindContract,
 			Name:       c.ID,
@@ -5345,6 +5378,9 @@ func (idx *Indexer) extractGoModContracts(reg *contracts.Registry) {
 			RepoPrefix: idx.repoPrefix,
 			Meta:       map[string]any{"type": string(c.Type), "role": string(c.Role)},
 		})
+	}
+	if len(nodes) > 0 {
+		idx.graph.AddBatch(nodes, nil)
 	}
 }
 
