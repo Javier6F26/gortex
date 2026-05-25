@@ -3913,6 +3913,14 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	nodes := make([]*graph.Node, 0, len(all))
 	edges := make([]*graph.Edge, 0, len(all))
 	for _, c := range all {
+		// dep::<module> nodes were materialised by extractGoModContracts
+		// before ResolveAll (so the import bridge could find them);
+		// re-emitting them here would PK-collide on backends whose bulk
+		// COPY is INSERT-only (Ladybug). The pre-pass is the single
+		// writer for that contract type.
+		if c.Type == contracts.ContractDependency {
+			continue
+		}
 		nodes = append(nodes, &graph.Node{
 			ID:       c.ID,
 			Kind:     graph.KindContract,
@@ -3977,8 +3985,9 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 // fast path when available (Ladybug's COPY FROM is ~100x faster than
 // per-row Cypher MERGE) and falls back to a single AddBatch otherwise.
 // The store is non-empty at call time — see graph.BulkLoader's contract
-// note — so Ladybug's FlushBulk merges on primary key without
-// duplicating existing rows.
+// note. Ladybug's COPY is INSERT-only on the node table, so callers
+// MUST not pass node IDs that already exist on disk; commitContracts
+// filters dep::<module> contracts for that reason.
 func (idx *Indexer) bulkCommit(nodes []*graph.Node, edges []*graph.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 {
 		return
