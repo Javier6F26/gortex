@@ -295,7 +295,15 @@ func New(g graph.Store, reg *parser.Registry, cfg config.IndexConfig, logger *za
 		// corpus sizes can happen in a background goroutine without
 		// racing with concurrent searches. Subsequent reassignments to
 		// idx.search (Hybrid wrap, etc.) should use swap helpers below.
-		search:        search.NewSwappable(search.NewAuto()),
+		//
+		// When the backing store implements graph.SymbolSearcher
+		// (today only store_ladybug), the initial backend is a thin
+		// adapter that forwards Search to the store's native FTS.
+		// The in-process Bleve / BM25 build path is then bypassed
+		// entirely — saving ~100MB heap on a Vscode-scale repo and
+		// putting search in the same address space as the rest of
+		// the graph queries.
+		search:        search.NewSwappable(initialSearchBackend(g)),
 		config:        cfg,
 		transforms:    newTransformPipeline(cfg.Transforms, logger),
 		logger:        logger,
@@ -347,6 +355,21 @@ func searchIndexFields(n *graph.Node) []string {
 	}
 	sig, _ := n.Meta["signature"].(string)
 	return []string{n.Name, n.FilePath, sig}
+}
+
+// initialSearchBackend picks the search.Backend the indexer wraps
+// in its Swappable on construction. When the underlying store
+// implements graph.SymbolSearcher (today only store_ladybug), a
+// thin adapter routes Search calls through the store's native FTS
+// — the in-process BM25 / Bleve build path is bypassed entirely.
+// Otherwise falls through to search.NewAuto which picks BM25 for
+// small corpora and auto-upgrades to Bleve once the size warrants
+// it.
+func initialSearchBackend(g graph.Store) search.Backend {
+	if s, ok := g.(graph.SymbolSearcher); ok {
+		return search.NewSymbolSearcherBackend(s)
+	}
+	return search.NewAuto()
 }
 
 // ftsTokensFor produces the pre-tokenised text the backend FTS path
