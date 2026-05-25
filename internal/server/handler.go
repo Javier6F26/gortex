@@ -50,7 +50,7 @@ import (
 // SetConfigManager / SetEventHub after construction.
 type Handler struct {
 	mcpServer     *mcpserver.MCPServer
-	graph         *graph.Graph
+	graph         graph.Store
 	version       string
 	logger        *zap.Logger
 	mux           *http.ServeMux
@@ -65,7 +65,7 @@ type Handler struct {
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.
-func NewHandler(mcpServer *mcpserver.MCPServer, g *graph.Graph, version string, logger *zap.Logger) *Handler {
+func NewHandler(mcpServer *mcpserver.MCPServer, g graph.Store, version string, logger *zap.Logger) *Handler {
 	h := &Handler{
 		mcpServer: mcpServer,
 		graph:     g,
@@ -84,7 +84,7 @@ func NewHandler(mcpServer *mcpserver.MCPServer, g *graph.Graph, version string, 
 func (h *Handler) Mux() *http.ServeMux { return h.mux }
 
 // Graph returns the graph instance for sub-handlers that need direct access.
-func (h *Handler) Graph() *graph.Graph { return h.graph }
+func (h *Handler) Graph() graph.Store { return h.graph }
 
 // SetEventHub wires the watch-mode event hub so /v1/events can stream
 // graph-change events to subscribers, and starts the activity-buffer

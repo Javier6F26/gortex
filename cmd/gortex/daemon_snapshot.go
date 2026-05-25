@@ -592,7 +592,7 @@ func loadSnapshot(g *graph.Graph, logger *zap.Logger) (snapshotLoadResult, error
 // Used by `gortex server --snapshot <path>` so a per-workspace
 // process can boot from a specific snapshot file produced by the
 // cloud indexer worker.
-func loadSnapshotFrom(g *graph.Graph, path string, logger *zap.Logger) (snapshotLoadResult, error) {
+func loadSnapshotFrom(g graph.Store, path string, logger *zap.Logger) (snapshotLoadResult, error) {
 	// Allocate Contracts up front so every early-return path (missing
 	// file, gzip error, header decode error, schema mismatch) hands the
 	// caller a safe-to-read zero-value instead of a nil map. The warmup

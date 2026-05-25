@@ -724,7 +724,7 @@ const serverInstructions = `Gortex is a code-intelligence graph server — it in
 - Pass format:"gcx" to list-shaped tools for a compact, round-trippable wire format (~27% fewer tokens).`
 
 // NewServer creates an MCP server with all Gortex tools registered.
-func NewServer(engine *query.Engine, g *graph.Graph, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
+func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
 	s := &Server{
 		engine:     engine,
 		graph:      g,
