@@ -137,3 +137,68 @@ func TestPageRanker_ConsecutiveCallsDoNotLeak(t *testing.T) {
 		assert.Equal(t, "hub", hits[0].NodeID)
 	}
 }
+
+func TestCommunityDetector_FindsTwoCommunities(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+	hits, err := s.Louvain(graph.CommunityOpts{})
+	require.NoError(t, err)
+	require.Len(t, hits, 7)
+
+	// Group hits by community ID.
+	byComm := map[int64][]string{}
+	for _, h := range hits {
+		byComm[h.CommunityID] = append(byComm[h.CommunityID], h.NodeID)
+	}
+	assert.GreaterOrEqual(t, len(byComm), 2,
+		"Louvain should find at least 2 communities for the two-triangle graph; got %v", byComm)
+
+	// Members of the same triangle should land in the same community.
+	commFor := map[string]int64{}
+	for _, h := range hits {
+		commFor[h.NodeID] = h.CommunityID
+	}
+	assert.Equal(t, commFor["a"], commFor["b"],
+		"a + b should be in the same community (triangle 1); got %v", commFor)
+	assert.Equal(t, commFor["b"], commFor["c"],
+		"b + c should be in the same community (triangle 1); got %v", commFor)
+	assert.Equal(t, commFor["d"], commFor["e"],
+		"d + e should be in the same community (triangle 2); got %v", commFor)
+	assert.Equal(t, commFor["e"], commFor["f"],
+		"e + f should be in the same community (triangle 2); got %v", commFor)
+}
+
+func TestCommunityDetector_RespectsTuningKnobs(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+	hits, err := s.Louvain(graph.CommunityOpts{
+		MaxPhases:     5,
+		MaxIterations: 5,
+	})
+	require.NoError(t, err)
+	require.Len(t, hits, 7)
+}
+
+// TestCommunityDetector_ConsecutiveCallsDoNotLeak — identical
+// project → run → drop hygiene check as the PageRanker side.
+func TestCommunityDetector_ConsecutiveCallsDoNotLeak(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+	for i := 0; i < 3; i++ {
+		hits, err := s.Louvain(graph.CommunityOpts{})
+		require.NoError(t, err, "consecutive Louvain call %d must succeed", i)
+		require.Len(t, hits, 7)
+	}
+}
+
+// TestAlgo_PageRankThenLouvain — interleaved different-algo calls
+// must not stomp on each other's projection. Catches a regression
+// where the algoProjectionName collision between two distinct
+// algos would surface as a "graph G already exists" binder error.
+func TestAlgo_PageRankThenLouvain(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+	prHits, err := s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, prHits, 1)
+
+	louvainHits, err := s.Louvain(graph.CommunityOpts{})
+	require.NoError(t, err)
+	require.Len(t, louvainHits, 7)
+}

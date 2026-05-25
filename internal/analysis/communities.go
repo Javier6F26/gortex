@@ -5,6 +5,7 @@ import (
 	"math"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -123,105 +124,7 @@ func DetectCommunitiesLouvain(g *graph.Graph) *CommunityResult {
 	}
 	sort.Strings(commIDs) // deterministic visitation
 	comm, commNodes := louvainLocalMoves(commIDs, neighbors, degree, totalWeight)
-
-	// Build result
-	nodeMap := make(map[string]*graph.Node)
-	for _, n := range nodes {
-		nodeMap[n.ID] = n
-	}
-
-	result := &CommunityResult{
-		NodeToComm: make(map[string]string),
-	}
-
-	// Renumber communities. We sort by old id so renumbering is
-	// stable across reruns (the underlying ids are member ids, which
-	// were sorted to drive the local-moves loop deterministically).
-	oldIDs := make([]string, 0, len(commNodes))
-	for cid := range commNodes {
-		if len(commNodes[cid]) >= 2 {
-			oldIDs = append(oldIDs, cid)
-		}
-	}
-	sort.Strings(oldIDs)
-	commRemap := make(map[string]string, len(oldIDs))
-	for i, cid := range oldIDs {
-		commRemap[cid] = fmt.Sprintf("community-%d", i)
-	}
-
-	for nodeID, cid := range comm {
-		if newID, ok := commRemap[cid]; ok {
-			result.NodeToComm[nodeID] = newID
-		}
-	}
-
-	// Build Community objects
-	for oldID, members := range commNodes {
-		newID, ok := commRemap[oldID]
-		if !ok {
-			continue
-		}
-
-		fileSet := make(map[string]bool)
-		for _, mid := range members {
-			if n, ok := nodeMap[mid]; ok {
-				fileSet[n.FilePath] = true
-			}
-		}
-
-		files := make([]string, 0, len(fileSet))
-		for f := range fileSet {
-			files = append(files, f)
-		}
-		sort.Strings(files)
-
-		label := inferCommunityLabel(members, nodeMap, files)
-		cohesion := computeCohesion(members, neighbors)
-		hub := findHub(members, nodeMap, neighbors)
-
-		c := Community{
-			ID:       newID,
-			Label:    label,
-			Members:  members,
-			Files:    files,
-			Size:     len(members),
-			Cohesion: cohesion,
-			Hub:      hub,
-		}
-		result.Communities = append(result.Communities, c)
-	}
-
-	// Multi-pass label disambiguation: Louvain often splits a single
-	// directory into many call-density-based sub-clusters (e.g. 48
-	// different clusters whose files all live in parser/languages/).
-	// The directory-based label is identical for all of them, which
-	// reads as duplicate cards in the UI. We tag colliding labels
-	// with the cluster's hub symbol — the function/type that
-	// everything else in the cluster connects through — which is the
-	// most semantically meaningful disambiguator.
-	disambiguateLabels(result.Communities)
-
-	// Sibling grouping. Louvain genuinely produces dozens of peer
-	// communities under a single dominant directory (48 clusters all
-	// rooted at parser/languages/ in this codebase). Formally those
-	// peers are not sub-communities at the *modularity* level — we
-	// confirmed phase-2 Louvain doesn't merge them — but in
-	// navigation terms they obviously belong together. We surface
-	// that by computing ParentID from the cluster's directory head
-	// (the part of the label before " · sample" and " +N dirs"):
-	// any two clusters whose head matches get the same ParentID, so
-	// the UI can render them under a shared section header.
-	assignDirectoryParents(result.Communities)
-
-	// Sort by size descending
-	sort.Slice(result.Communities, func(i, j int) bool {
-		return result.Communities[i].Size > result.Communities[j].Size
-	})
-
-	// Compute modularity
-	result.Modularity = computeModularity(comm, neighbors, degree, totalWeight)
-
-	return result
+	return finaliseCommunityPartition(nodes, comm, commNodes, neighbors, degree, totalWeight)
 }
 
 // disambiguateLabels makes every cluster label unique. The
@@ -784,4 +687,175 @@ func namePrefixLabel(members []string, nodeMap map[string]*graph.Node) string {
 		}
 	}
 	return bestPrefix
+}
+
+// finaliseCommunityPartition converts a (nodeID → community label)
+// partition into a fully-shaped CommunityResult: renumbered IDs,
+// per-cluster files / cohesion / hub, label disambiguation, and
+// sibling-group parent assignment. Shared by the in-process Louvain
+// path (which builds the partition itself) and the backend-delegated
+// path (DetectCommunitiesLouvainBackend, which takes the partition
+// from graph.CommunityDetector).
+//
+// commNodes can be nil; when it is, the function inverts comm to
+// recover the per-community member list (one extra pass — only used
+// on the backend path where commNodes isn't pre-built).
+func finaliseCommunityPartition(
+	nodes []*graph.Node,
+	comm map[string]string,
+	commNodes map[string][]string,
+	neighbors map[string]map[string]float64,
+	degree map[string]float64,
+	totalWeight float64,
+) *CommunityResult {
+	if commNodes == nil {
+		commNodes = make(map[string][]string, len(comm))
+		for nid, cid := range comm {
+			commNodes[cid] = append(commNodes[cid], nid)
+		}
+	}
+
+	nodeMap := make(map[string]*graph.Node, len(nodes))
+	for _, n := range nodes {
+		nodeMap[n.ID] = n
+	}
+
+	result := &CommunityResult{
+		NodeToComm: make(map[string]string),
+	}
+
+	// Renumber: keep clusters of size >= 2, sort old labels for
+	// determinism, mint sequential "community-N" names.
+	oldIDs := make([]string, 0, len(commNodes))
+	for cid := range commNodes {
+		if len(commNodes[cid]) >= 2 {
+			oldIDs = append(oldIDs, cid)
+		}
+	}
+	sort.Strings(oldIDs)
+	commRemap := make(map[string]string, len(oldIDs))
+	for i, cid := range oldIDs {
+		commRemap[cid] = fmt.Sprintf("community-%d", i)
+	}
+
+	for nodeID, cid := range comm {
+		if newID, ok := commRemap[cid]; ok {
+			result.NodeToComm[nodeID] = newID
+		}
+	}
+
+	for oldID, members := range commNodes {
+		newID, ok := commRemap[oldID]
+		if !ok {
+			continue
+		}
+		fileSet := make(map[string]bool)
+		for _, mid := range members {
+			if n, ok := nodeMap[mid]; ok {
+				fileSet[n.FilePath] = true
+			}
+		}
+		files := make([]string, 0, len(fileSet))
+		for f := range fileSet {
+			files = append(files, f)
+		}
+		sort.Strings(files)
+
+		c := Community{
+			ID:       newID,
+			Label:    inferCommunityLabel(members, nodeMap, files),
+			Members:  members,
+			Files:    files,
+			Size:     len(members),
+			Cohesion: computeCohesion(members, neighbors),
+			Hub:      findHub(members, nodeMap, neighbors),
+		}
+		result.Communities = append(result.Communities, c)
+	}
+
+	disambiguateLabels(result.Communities)
+	assignDirectoryParents(result.Communities)
+	sort.Slice(result.Communities, func(i, j int) bool {
+		return result.Communities[i].Size > result.Communities[j].Size
+	})
+	result.Modularity = computeModularity(comm, neighbors, degree, totalWeight)
+	return result
+}
+
+// DetectCommunitiesLouvainBackend runs Louvain via the backend's
+// engine-native implementation (graph.CommunityDetector — today
+// only store_ladybug) and threads the resulting partition through
+// the same post-processing the in-process DetectCommunitiesLouvain
+// uses. The output is shape-identical: every Community label,
+// hub, cohesion, parent, and modularity field is populated from
+// the partition, so downstream consumers (UI, rerank pipeline)
+// can't tell which path produced it.
+//
+// Returns nil when the backend errors — callers should fall
+// through to the in-process path rather than surface a half-done
+// CommunityResult.
+func DetectCommunitiesLouvainBackend(g *graph.Graph, cd graph.CommunityDetector) *CommunityResult {
+	if g == nil || cd == nil {
+		return nil
+	}
+	hits, err := cd.Louvain(graph.CommunityOpts{})
+	if err != nil || len(hits) == 0 {
+		return nil
+	}
+
+	nodes := g.AllNodes()
+	symbolNodes := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		if n.Kind != graph.KindFile && n.Kind != graph.KindImport {
+			symbolNodes[n.ID] = true
+		}
+	}
+
+	// Rebuild the same weighted neighbor view DetectCommunitiesLouvain
+	// uses — needed for cohesion / hub / modularity. The work is
+	// O(V + E) per call; small relative to the engine-native
+	// partitioning save.
+	type edgeKey struct{ a, b string }
+	weights := make(map[edgeKey]float64)
+	for _, e := range g.AllEdges() {
+		if !symbolNodes[e.From] || !symbolNodes[e.To] {
+			continue
+		}
+		w := edgeWeight(e.Kind)
+		if w == 0 {
+			continue
+		}
+		weights[edgeKey{e.From, e.To}] += w
+		weights[edgeKey{e.To, e.From}] += w
+	}
+	neighbors := make(map[string]map[string]float64)
+	for k, w := range weights {
+		if neighbors[k.a] == nil {
+			neighbors[k.a] = make(map[string]float64)
+		}
+		neighbors[k.a][k.b] = w
+	}
+	var totalWeight float64
+	for _, w := range weights {
+		totalWeight += w
+	}
+	totalWeight /= 2
+	degree := make(map[string]float64, len(symbolNodes))
+	for id := range symbolNodes {
+		for _, w := range neighbors[id] {
+			degree[id] += w
+		}
+	}
+
+	comm := make(map[string]string, len(hits))
+	for _, h := range hits {
+		if !symbolNodes[h.NodeID] {
+			continue
+		}
+		comm[h.NodeID] = strconv.FormatInt(h.CommunityID, 10)
+	}
+	if len(comm) == 0 {
+		return nil
+	}
+	return finaliseCommunityPartition(nodes, comm, nil, neighbors, degree, totalWeight)
 }

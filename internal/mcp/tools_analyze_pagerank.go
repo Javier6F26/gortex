@@ -170,6 +170,80 @@ func parseKindFilter(in string) []graph.NodeKind {
 	return out
 }
 
+// handleAnalyzeLouvain returns the Louvain partitioning of the
+// graph. When the backing store implements graph.CommunityDetector
+// (today only store_ladybug), the partitioning is delegated to the
+// engine-native implementation and threaded through the existing
+// label / hub / cohesion / parent post-processing
+// (analysis.DetectCommunitiesLouvainBackend) so the response is
+// shape-identical to the in-process path. Otherwise the in-process
+// DetectCommunitiesLouvain runs.
+//
+// Distinct from `analyze kind=clusters` which uses the Leiden
+// algorithm (the Server's cached communities). Louvain produces
+// different — typically more granular — partitions; this kind
+// exposes it as a first-class result for clients that want the
+// Louvain shape specifically.
+func (s *Server) handleAnalyzeLouvain(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	limit := 50
+	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	result := s.runLouvain()
+	if result == nil {
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"communities": []any{},
+			"modularity":  0.0,
+		})
+	}
+
+	communities := result.Communities
+	if limit > 0 && limit < len(communities) {
+		communities = communities[:limit]
+	}
+
+	if s.isGCX(ctx, req) {
+		return s.gcxResponseWithBudget(req)(encodeAnalyze("louvain", map[string]any{
+			"communities": communities,
+			"modularity":  result.Modularity,
+		}))
+	}
+	if isCompact(req) {
+		var b strings.Builder
+		fmt.Fprintf(&b, "modularity=%.4f communities=%d\n", result.Modularity, len(result.Communities))
+		for _, c := range communities {
+			fmt.Fprintf(&b, "  %s size=%d cohesion=%.3f label=%s hub=%s\n",
+				c.ID, c.Size, c.Cohesion, c.Label, c.Hub)
+		}
+		return mcp.NewToolResultText(b.String()), nil
+	}
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"communities": communities,
+		"modularity":  result.Modularity,
+		"total":       len(result.Communities),
+	})
+}
+
+// runLouvain picks the engine-native CommunityDetector when the
+// backing store implements it, otherwise falls back to the
+// pure-Go in-process Louvain. The output shape is identical
+// either way (analysis.DetectCommunitiesLouvainBackend threads
+// the engine-native partition through the same post-processing).
+func (s *Server) runLouvain() *analysis.CommunityResult {
+	if store := s.backendStore(); store != nil {
+		if cd, ok := store.(graph.CommunityDetector); ok {
+			if r := analysis.DetectCommunitiesLouvainBackend(s.graph, cd); r != nil {
+				return r
+			}
+			// Engine-native error path falls through to the
+			// in-process implementation rather than surfacing
+			// a half-completed result.
+		}
+	}
+	return analysis.DetectCommunitiesLouvain(s.graph)
+}
+
 // makeKindAllow returns a predicate that reports whether a node's
 // kind passes the filter. nil node is always rejected (defensive).
 func makeKindAllow(kinds []graph.NodeKind) func(*graph.Node) bool {

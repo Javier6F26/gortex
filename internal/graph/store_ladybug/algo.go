@@ -208,3 +208,59 @@ func (s *Store) PageRank(opts graph.PageRankOpts) ([]graph.PageRankHit, error) {
 	}
 	return hits, nil
 }
+
+// Louvain runs community detection over a projected subgraph and
+// returns one hit per node with the integer community label the
+// algorithm assigned. Ladybug treats edges as undirected when
+// computing modularity even though the projected Edge table is
+// directed — callers that care about directed modularity should
+// run the in-process fallback (analysis.DetectCommunitiesLouvain).
+//
+// CommunityID values are opaque integers (Ladybug uses internal
+// node offsets); two nodes with the same ID are in the same
+// community, but the integer itself isn't stable across runs.
+func (s *Store) Louvain(opts graph.CommunityOpts) ([]graph.CommunityHit, error) {
+	projOpts := projectionOpts{nodeKinds: opts.NodeKinds, edgeKinds: opts.EdgeKinds}
+
+	var args []string
+	if opts.MaxPhases > 0 {
+		args = append(args, fmt.Sprintf("maxPhases := %d", opts.MaxPhases))
+	}
+	if opts.MaxIterations > 0 {
+		args = append(args, fmt.Sprintf("maxIterations := %d", opts.MaxIterations))
+	}
+	knobs := ""
+	if len(args) > 0 {
+		knobs = ", " + strings.Join(args, ", ")
+	}
+
+	var hits []graph.CommunityHit
+	err := s.withProjection(projOpts, func(name string) error {
+		q := fmt.Sprintf(
+			`CALL louvain('%s'%s) RETURN node.id AS id, louvain_id`,
+			name, knobs,
+		)
+		rows, err := querySelectSafe(s, q, nil)
+		if err != nil {
+			return fmt.Errorf("louvain: %w", err)
+		}
+		hits = make([]graph.CommunityHit, 0, len(rows))
+		for _, row := range rows {
+			if len(row) < 2 {
+				continue
+			}
+			id, _ := row[0].(string)
+			if id == "" {
+				continue
+			}
+			cid := asInt64(row[1])
+			hits = append(hits, graph.CommunityHit{NodeID: id, CommunityID: cid})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return hits, nil
+}
+

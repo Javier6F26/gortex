@@ -484,3 +484,49 @@ type PageRankHit struct {
 type PageRanker interface {
 	PageRank(opts PageRankOpts) ([]PageRankHit, error)
 }
+
+// CommunityOpts tunes Louvain community detection over a projected
+// subgraph. Zero values request the backend default
+// (maxPhases=20, maxIterations=20 on Ladybug). NodeKinds / EdgeKinds
+// restrict the projection; an empty filter runs over the full graph.
+type CommunityOpts struct {
+	NodeKinds     []NodeKind
+	EdgeKinds     []EdgeKind
+	MaxPhases     int
+	MaxIterations int
+}
+
+// CommunityHit is one row of the Louvain output: the node ID plus
+// the integer community label the algorithm assigned. Two nodes
+// with the same CommunityID are in the same community; the actual
+// integer is opaque (Ladybug uses internal node offsets and
+// promises no stability across runs).
+type CommunityHit struct {
+	NodeID      string
+	CommunityID int64
+}
+
+// CommunityDetector is an optional interface backends MAY
+// implement to expose engine-native Louvain community detection
+// (Ladybug uses a parallel Grappolo implementation). When the
+// store implements it, the daemon's analysis.DetectCommunitiesLouvain
+// path can delegate the partitioning step and keep the existing
+// post-processing (label disambiguation, hub detection, cohesion,
+// parent assignment).
+//
+// Contract:
+//
+//   - Louvain runs the algorithm against a projected subgraph and
+//     returns one hit per node assigning it to a community. The
+//     projection is declared and torn down per call.
+//
+//   - Ladybug's implementation treats edges as undirected (the
+//     modularity score is computed on the undirected graph even
+//     though the projected Edge table is directed). Callers that
+//     care about directed modularity should consult the in-process
+//     fallback.
+//
+//   - Close is implied by graph.Store.Close.
+type CommunityDetector interface {
+	Louvain(opts CommunityOpts) ([]CommunityHit, error)
+}
