@@ -43,6 +43,14 @@ type Store struct {
 
 	edgeIdentityRevs atomic.Int64
 
+	// writeGen monotonically advances on every successful graph
+	// mutation. Cheap, lock-free, and consumed by the algo
+	// projection cache to invalidate a stale CALL PROJECT_GRAPH
+	// declaration when the underlying graph has changed. Reads
+	// must NOT bump it — only paths that hit disk via COPY /
+	// MERGE / CREATE / DELETE / SET on Node or Edge.
+	writeGen atomic.Uint64
+
 	// Bulk-load fast path. When the indexer brackets its parse loop
 	// with BeginBulkLoad/FlushBulk, AddBatch routes incoming rows
 	// into these slices instead of round-tripping through Cypher per
@@ -122,8 +130,13 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db, conn: conn, pool: pool}, nil
 }
 
-// Close closes the underlying connection and database.
+// Close closes the underlying connection and database. Drops any
+// cached PROJECT_GRAPH declaration first so the engine's catalog
+// isn't left holding a dangling projection across the teardown —
+// the algo extension's catalog state would otherwise be
+// rehydrated on the next Open.
 func (s *Store) Close() error {
+	s.dropCachedProjection()
 	if s.pool != nil {
 		s.pool.close()
 	}
@@ -189,6 +202,7 @@ func (s *Store) AddNode(n *graph.Node) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.upsertNodeLocked(n)
+	s.writeGen.Add(1)
 }
 
 func (s *Store) upsertNodeLocked(n *graph.Node) {
@@ -239,6 +253,7 @@ func (s *Store) AddEdge(e *graph.Edge) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.upsertEdgeLocked(e)
+	s.writeGen.Add(1)
 }
 
 func (s *Store) upsertEdgeLocked(e *graph.Edge) {
@@ -375,6 +390,7 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 		}
 		s.upsertEdgeLocked(e)
 	}
+	s.writeGen.Add(1)
 }
 
 // addNodesUnwindLocked materialises nodes as a list of structs and
@@ -548,6 +564,7 @@ SET e.origin = $origin, e.tier = $tier`
 		e.Tier = newTier
 	}
 	s.edgeIdentityRevs.Add(1)
+	s.writeGen.Add(1)
 	return true
 }
 
@@ -634,6 +651,7 @@ RETURN row.from, row.to, row.kind, row.file_path, row.line, row.origin, row.tier
 		totalChanged += changed
 		if changed > 0 {
 			s.edgeIdentityRevs.Add(int64(changed))
+			s.writeGen.Add(1)
 		}
 	}
 	return totalChanged
@@ -660,6 +678,7 @@ func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.reindexEdgeLocked(e, oldTo)
+	s.writeGen.Add(1)
 }
 
 func (s *Store) reindexEdgeLocked(e *graph.Edge, oldTo string) {
@@ -694,11 +713,16 @@ func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 	// explicit DELETE/MATCH/MERGE sequence sidesteps the engine bug.
 	// Bulk indexing routes through the BulkLoader COPY path so the
 	// resolver hot path doesn't pay this loop's cost on cold start.
+	mutated := false
 	for _, r := range batch {
 		if r.Edge == nil || r.OldTo == r.Edge.To {
 			continue
 		}
 		s.reindexEdgeLocked(r.Edge, r.OldTo)
+		mutated = true
+	}
+	if mutated {
+		s.writeGen.Add(1)
 	}
 }
 
@@ -733,6 +757,7 @@ DELETE e`
 		"to":   to,
 		"kind": string(kind),
 	})
+	s.writeGen.Add(1)
 	return true
 }
 
@@ -781,6 +806,7 @@ RETURN count(DISTINCT e)`, column)
 
 	del := fmt.Sprintf(`MATCH (n:Node) WHERE n.%s = $v DETACH DELETE n`, column)
 	s.runWriteLocked(del, map[string]any{"v": value})
+	s.writeGen.Add(1)
 	return int(nNodes), int(nEdges)
 }
 
@@ -1501,7 +1527,13 @@ func (s *Store) FlushBulk() error {
 	// copyBulkLocked itself runs its COPY queries through the
 	// connection pool, so two concurrent FlushBulks parallelise
 	// instead of serialising on a single Connection handle.
-	return s.copyBulkLocked(nodes, edges)
+	if err := s.copyBulkLocked(nodes, edges); err != nil {
+		return err
+	}
+	if len(nodes) > 0 || len(edges) > 0 {
+		s.writeGen.Add(1)
+	}
+	return nil
 }
 
 func (s *Store) nodeCountLocked() int {
@@ -1904,6 +1936,7 @@ RETURN count(newE) AS resolved`
 	n, _ := vals[0].(int64)
 	if n > 0 {
 		s.edgeIdentityRevs.Add(n)
+		s.writeGen.Add(1)
 	}
 	return int(n), nil
 }

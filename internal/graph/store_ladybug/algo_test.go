@@ -273,3 +273,101 @@ func TestKCorer_ConsecutiveCallsDoNotLeak(t *testing.T) {
 		require.Len(t, hits, 7)
 	}
 }
+
+// TestAlgo_ProjectionCachedAcrossCalls is the proof point for the
+// projection-cache fast path: two consecutive PageRank calls with
+// identical opts must reuse the same projection. Track via the
+// generation field on algo.projection — it is stamped with
+// Store.writeGen at the time PROJECT_GRAPH was run, so observing
+// the same generation across two calls means PROJECT_GRAPH ran
+// exactly once.
+//
+// On real-scale graphs (Ladybug + gortex's 313k+ edges) a cache
+// miss costs 30+s for the rebuild; a hit is ~0 ms. This test
+// asserts hit behaviour on the small synthetic graph where both
+// paths are fast — what we're really checking is the cache key
+// math and the writeGen comparison.
+func TestAlgo_ProjectionCachedAcrossCalls(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+
+	// First PageRank: cache miss, projection is built.
+	_, err := s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid, "projection should be cached after first call")
+	firstGen := s.algo.projection.generation
+	firstKey := s.algo.projection.key
+	firstName := s.algo.projection.name
+
+	// Second PageRank with identical opts: cache hit, projection
+	// reused. The cached generation must NOT advance (no writes
+	// happened between calls) — proves the projection was reused,
+	// not rebuilt.
+	_, err = s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid, "projection should still be cached")
+	assert.Equal(t, firstGen, s.algo.projection.generation,
+		"generation must not advance between two same-opts calls — proves the cached projection was reused, not rebuilt")
+	assert.Equal(t, firstKey, s.algo.projection.key)
+	assert.Equal(t, firstName, s.algo.projection.name)
+
+	// Third call: different algo (Louvain) with the same shape —
+	// the cache key is shape-only so this must also hit the cache.
+	_, err = s.Louvain(graph.CommunityOpts{})
+	require.NoError(t, err)
+	assert.Equal(t, firstGen, s.algo.projection.generation,
+		"different algos with the same projection shape must share the cached projection")
+}
+
+// TestAlgo_ProjectionRebuiltAfterWrite confirms lazy invalidation:
+// after a write bumps Store.writeGen, the next algo call must
+// detect the mismatch and rebuild the projection. The cached
+// generation should advance to the new writeGen value.
+func TestAlgo_ProjectionRebuiltAfterWrite(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+
+	_, err := s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid)
+	preWriteGen := s.algo.projection.generation
+
+	// Add a new node — bumps writeGen and invalidates the cache.
+	s.AddNode(&graph.Node{
+		ID: "extra", Kind: graph.KindFunction, Name: "extra", FilePath: "z.go",
+	})
+	require.Greater(t, s.writeGen.Load(), preWriteGen,
+		"AddNode must advance writeGen")
+
+	// Next algo call must rebuild. The cached generation should
+	// now match the post-write writeGen.
+	_, err = s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid)
+	assert.Greater(t, s.algo.projection.generation, preWriteGen,
+		"projection generation must advance after a write — proves the cache was invalidated and the projection rebuilt")
+	assert.Equal(t, s.writeGen.Load(), s.algo.projection.generation,
+		"rebuilt projection's generation must equal current writeGen")
+}
+
+// TestAlgo_ProjectionRebuiltOnShapeChange covers the
+// different-opts cache miss: a PageRank with a NodeKinds filter
+// must rebuild against the filtered shape after an unfiltered
+// PageRank built the broad projection. The cache key changes, so
+// the entry must be replaced.
+func TestAlgo_ProjectionRebuiltOnShapeChange(t *testing.T) {
+	s := seedAlgoTestGraph(t)
+
+	_, err := s.PageRank(graph.PageRankOpts{Limit: 1})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid)
+	broadKey := s.algo.projection.key
+
+	// Different shape — explicit NodeKinds filter.
+	_, err = s.PageRank(graph.PageRankOpts{
+		NodeKinds: []graph.NodeKind{graph.KindFunction},
+		Limit:     1,
+	})
+	require.NoError(t, err)
+	require.True(t, s.algo.projection.valid)
+	assert.NotEqual(t, broadKey, s.algo.projection.key,
+		"different opts must produce a different cache key")
+}

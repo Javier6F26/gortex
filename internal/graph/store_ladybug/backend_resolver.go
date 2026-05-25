@@ -282,6 +282,7 @@ func (s *Store) runResolverQueryLocked(query, ruleName string) (int, error) {
 	n, _ := vals[0].(int64)
 	if n > 0 {
 		s.edgeIdentityRevs.Add(n)
+		s.writeGen.Add(1)
 	}
 	return int(n), nil
 }
