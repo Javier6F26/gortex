@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	"github.com/coder/hnsw"
+
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // vectorFrameMagic prefixes the framed VectorBackend.Save format: a
@@ -18,7 +20,24 @@ import (
 // map — so old snapshots keep working.
 var vectorFrameMagic = [4]byte{'G', 'V', 'X', '1'}
 
+// VectorDelegate is the subset of graph.VectorSearcher the
+// VectorBackend shim consults when it's been told to delegate
+// instead of holding an in-process HNSW. Exported (with a
+// graph.VectorHit return) so the indexer can install a delegate
+// without writing a translation layer — search already depends on
+// graph for SymbolHit, so the type sharing is free.
+type VectorDelegate interface {
+	SimilarTo(vec []float32, limit int) ([]graph.VectorHit, error)
+}
+
 // VectorBackend stores and searches embedding vectors using HNSW index.
+//
+// When delegate is set (via SetDelegate), the in-process HNSW is
+// bypassed entirely: Add becomes a no-op (the indexer drives the
+// delegate's bulk-upsert directly), Search forwards to the
+// delegate's SimilarTo. The dims and chunkMap stay live so callers
+// that need them (HybridBackend.dechunkVectorIDs) keep working
+// against the same VectorBackend surface.
 type VectorBackend struct {
 	graph *hnsw.Graph[string]
 	count int
@@ -30,6 +49,16 @@ type VectorBackend struct {
 	// returned twice and chunk IDs never leak to callers.
 	chunkMap map[string]string
 	mu       sync.RWMutex
+
+	// delegate is the optional engine-native vector searcher (today
+	// only graph.SymbolSearcher-implementing stores). Set means
+	// "don't build the in-process HNSW; route reads through here".
+	// The wrapped delegateCount tracks Add-call deltas so Count()
+	// reports a non-zero figure once the indexer has finished its
+	// bulk upsert — HybridBackend gates the vector channel on
+	// Count() > 0.
+	delegate      VectorDelegate
+	delegateCount int
 }
 
 // NewVector creates a vector search backend for the given embedding dimensions.
@@ -75,6 +104,16 @@ func (v *VectorBackend) HasChunks() bool {
 func (v *VectorBackend) Add(id string, vector []float32) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.delegate != nil {
+		// Delegated mode: the indexer pushes vectors to the
+		// engine-native HNSW via the graph.VectorSearcher
+		// interface directly. Add here is a no-op so the
+		// in-process hnsw.Graph never allocates memory for what
+		// the delegate already owns; count tracks deltas so
+		// Count()'s "is the index populated" gate fires.
+		v.delegateCount++
+		return
+	}
 	v.graph.Add(hnsw.Node[string]{
 		Key:   id,
 		Value: hnsw.Vector(vector),
@@ -82,8 +121,37 @@ func (v *VectorBackend) Add(id string, vector []float32) {
 	v.count++
 }
 
+// SetDelegate routes Search / Count through an engine-native vector
+// searcher (today the Ladybug store's graph.VectorSearcher). After
+// the call:
+//   - Add is a no-op (the indexer talks to the delegate directly via
+//     graph.VectorSearcher.BulkUpsertEmbeddings / UpsertEmbedding),
+//   - Search forwards to delegate.SimilarTo,
+//   - Count reflects the delegate-delta count (not the in-process
+//     graph), so HybridBackend.searchChannels's `v.Count() > 0` gate
+//     fires once the indexer has populated the backend.
+func (v *VectorBackend) SetDelegate(d VectorDelegate) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.delegate = d
+}
+
 // Search returns the k nearest neighbors to the query vector.
 func (v *VectorBackend) Search(query []float32, k int) []string {
+	v.mu.RLock()
+	d := v.delegate
+	v.mu.RUnlock()
+	if d != nil {
+		hits, err := d.SimilarTo(query, k)
+		if err != nil || len(hits) == 0 {
+			return nil
+		}
+		ids := make([]string, len(hits))
+		for i, h := range hits {
+			ids[i] = h.NodeID
+		}
+		return ids
+	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.count == 0 {
@@ -101,6 +169,9 @@ func (v *VectorBackend) Search(query []float32, k int) []string {
 func (v *VectorBackend) Count() int {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.delegate != nil {
+		return v.delegateCount
+	}
 	return v.count
 }
 

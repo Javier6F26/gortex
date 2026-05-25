@@ -357,6 +357,24 @@ func searchIndexFields(n *graph.Node) []string {
 	return []string{n.Name, n.FilePath, sig}
 }
 
+// vectorSearcherDelegate is the search.VectorDelegate-shaped
+// adapter the indexer hands to VectorBackend.SetDelegate when the
+// underlying store implements graph.VectorSearcher. SimilarTo just
+// forwards — search.VectorDelegate is defined to return
+// graph.VectorHit slices directly, so there's no translation work
+// here, just a small struct so the in-process search package
+// doesn't depend on graph.VectorSearcher's full surface.
+type vectorSearcherDelegate struct {
+	s graph.VectorSearcher
+}
+
+func (d *vectorSearcherDelegate) SimilarTo(vec []float32, limit int) ([]graph.VectorHit, error) {
+	if d == nil || d.s == nil {
+		return nil, nil
+	}
+	return d.s.SimilarTo(vec, limit)
+}
+
 // initialSearchBackend picks the search.Backend the indexer wraps
 // in its Swappable on construction. When the underlying store
 // implements graph.SymbolSearcher (today only store_ladybug), a
@@ -3082,15 +3100,18 @@ func (idx *Indexer) buildSearchIndex() {
 	}
 
 	vecBackend := search.NewVector(dims)
-	// Backend FTS — VectorSearcher capability bridging: if the
-	// underlying store implements graph.VectorSearcher, mirror
-	// every embedding into its native HNSW too. The in-process
-	// HNSW above stays for the legacy read path; Vector Step 3
-	// will skip the in-process build entirely once the backend
-	// adapter is wired through search.ChannelSearcher.
+	// VectorSearcher capability bridging: if the underlying store
+	// has a native HNSW, install it as the in-process backend's
+	// delegate — Add becomes a no-op, Search forwards to the
+	// engine, and we don't allocate `dim × 4 × N` bytes of heap
+	// for a parallel in-process HNSW. The indexer still drives
+	// the writes (BulkUpsertEmbeddings below) so the engine
+	// index lands with the same corpus the in-process one would
+	// have built.
 	vecSearcher, _ := idx.graph.(graph.VectorSearcher)
 	var backendItems []graph.VectorItem
 	if vecSearcher != nil {
+		vecBackend.SetDelegate(&vectorSearcherDelegate{s: vecSearcher})
 		backendItems = make([]graph.VectorItem, 0, len(vectors))
 	}
 	for i, vec := range vectors {
