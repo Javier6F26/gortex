@@ -36,7 +36,7 @@ import (
 // instance per running daemon; every session the daemon accepts shares
 // these pointers.
 type daemonState struct {
-	graph         *graph.Graph
+	graph         graph.Store
 	indexer       *indexer.Indexer
 	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager
@@ -177,7 +177,20 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		}
 	}
 
-	g := graph.New()
+	g, backendCleanup, err := openBackend(daemonBackend, daemonBackendPath, logger)
+	if err != nil {
+		return nil, fmt.Errorf("opening backend %q: %w", daemonBackend, err)
+	}
+	// Cleanup runs at daemon shutdown via the returned state's
+	// teardown chain (see DaemonState.Close); store it on the
+	// state so deferred close fires after every other shutdown
+	// step (snapshot save, etc.).
+	defer func() {
+		if err != nil {
+			backendCleanup()
+		}
+	}()
+
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
 	languages.RegisterCustomGrammars(reg, cfg.Index.Grammars, logger)
@@ -189,10 +202,20 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	// make that incremental path viable — without them, warmup would
 	// have no signal to distinguish "indexed and unchanged" from "new
 	// on disk", treat everything as stale, and produce duplicate
-	// nodes/edges on every restart (bug B1).
-	loadResult, err := loadSnapshot(g, logger)
-	if err != nil {
-		logger.Warn("daemon: snapshot load failed", zap.Error(err))
+	// nodes/edges on every restart (bug B1). For persistent backends
+	// (ladybug, sqlite, duckdb) the on-disk store IS the snapshot —
+	// snapshot load is skipped to avoid replaying gob-encoded state
+	// over the already-populated disk store.
+	var loadResult snapshotLoadResult
+	if mg, ok := g.(*graph.Graph); ok {
+		// Snapshot replay (gob+gzip → per-row AddNode) only makes
+		// sense for the in-memory backend. On-disk backends already
+		// persist across restarts — re-running snapshot load would
+		// just rewrite their existing rows.
+		loadResult, err = loadSnapshot(mg, logger)
+		if err != nil {
+			logger.Warn("daemon: snapshot load failed", zap.Error(err))
+		}
 	}
 
 	idx := indexer.New(g, reg, cfg.Index, logger)

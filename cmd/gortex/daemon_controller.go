@@ -31,7 +31,7 @@ import (
 // otherwise. The mutex is coarse; finer locking is a later optimization.
 type realController struct {
 	mu            sync.Mutex
-	graph         *graph.Graph
+	graph         graph.Store
 	indexer       *indexer.Indexer
 	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager

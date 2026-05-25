@@ -39,6 +39,8 @@ var (
 	daemonStatusInterval    time.Duration
 	daemonHTTPAddr          string
 	daemonHTTPAuthToken     string
+	daemonBackend           string
+	daemonBackendPath       string
 )
 
 var daemonCmd = &cobra.Command{
@@ -97,6 +99,10 @@ func init() {
 		"also expose the MCP 2026 Streamable HTTP transport on this TCP address (e.g. 127.0.0.1:7411); empty disables")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
+	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "memory",
+		"storage backend: memory (in-process, default — fastest, no persistence) | ladybug (embedded Cypher graph DB — persists to --backend-path)")
+	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
+		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/<backend>.store")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
@@ -174,7 +180,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if mw != nil {
 			_ = mw.Stop()
 		}
-		saveSnapshot(state.graph, collectSnapshotRepos(state.multiIndexer), collectSnapshotContracts(state.multiIndexer), collectSnapshotVector(state.multiIndexer), version, logger)
+		if mg, ok := state.graph.(*graph.Graph); ok {
+			// Snapshot save is gob+gzip of the in-memory graph;
+			// only meaningful for the memory backend. On-disk
+			// backends already persist via their own engine.
+			saveSnapshot(mg, collectSnapshotRepos(state.multiIndexer), collectSnapshotContracts(state.multiIndexer), collectSnapshotVector(state.multiIndexer), version, logger)
+		}
 		if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
@@ -309,7 +320,14 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// the GC then has to clean up. Skipping snapshots until ready cleared
 	// a stall observed in profile #5 where saveSnapshotTo was the only
 	// runnable goroutine on a daemon mid-warmup.
-	stopSnapshotter := startPeriodicSnapshots(state.graph, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
+	// Periodic snapshots are gob+gzip exports of the in-memory
+	// *graph.Graph; only meaningful for the memory backend.
+	// On-disk backends already persist via their own engine, so
+	// the snapshot ticker is a no-op there.
+	var stopSnapshotter func() = func() {}
+	if mg, ok := state.graph.(*graph.Graph); ok {
+		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
+	}
 	defer stopSnapshotter()
 
 	// Periodic savings flush — 5 minute interval. Bounds on-crash data
