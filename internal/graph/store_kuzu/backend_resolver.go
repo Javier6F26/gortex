@@ -186,7 +186,45 @@ RETURN count(newE) AS resolved`
 	}
 	return total, nil
 }
-func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
+// ResolveCrossRepo drains unresolved edges that bind unambiguously
+// to a Node in a different repo. Only fires when the caller has a
+// non-empty repo_prefix (i.e. we're in a multi-repo workspace) and
+// exactly one candidate exists in a different repo. Sets
+// cross_repo=true on the resulting edge so downstream consumers
+// know the binding crosses a workspace boundary.
+func (s *Store) ResolveCrossRepo() (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	const q = `
+MATCH (caller:Node)-[e:Edge]->(stub:Node)
+WHERE stub.id STARTS WITH 'unresolved::'
+  AND caller.repo_prefix <> ''
+WITH e, caller, stub, substring(stub.id, 13, size(stub.id) - 12) AS name
+OPTIONAL MATCH (cnd:Node {name: name})
+WHERE cnd.repo_prefix <> caller.repo_prefix
+  AND cnd.repo_prefix <> ''
+  AND cnd.id <> stub.id
+WITH e, caller, stub, name, count(cnd) AS cnt
+WHERE cnt = 1
+MATCH (target:Node {name: name})
+WHERE target.repo_prefix <> caller.repo_prefix
+  AND target.repo_prefix <> ''
+  AND target.id <> stub.id
+DELETE e
+CREATE (caller)-[newE:Edge {
+    kind: e.kind,
+    file_path: e.file_path,
+    line: e.line,
+    confidence: e.confidence,
+    confidence_label: e.confidence_label,
+    origin: 'ast_resolved',
+    tier: 'ast_resolved',
+    cross_repo: 1,
+    meta: e.meta
+}]->(target)
+RETURN count(newE) AS resolved`
+	return s.runResolverQueryLocked(q, "ResolveCrossRepo")
+}
 // ResolveExternalCallStubs ensures every external::* edge target
 // has a corresponding Node row with kind='external' and promotes
 // the edge's origin to ast_resolved. Kuzu's AddEdge already

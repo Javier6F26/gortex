@@ -132,7 +132,35 @@ WHERE edges.edge_id = c.edge_id`
 	}
 	return total, nil
 }
-func (s *Store) ResolveCrossRepo() (int, error)             { return 0, nil }
+// ResolveCrossRepo drains unresolved edges where the unique
+// candidate lives in a different repo than the caller. Sets
+// cross_repo=true on the resulting edge.
+func (s *Store) ResolveCrossRepo() (int, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	const q = `
+WITH unique_candidates AS (
+    SELECT e.edge_id, MIN(t.id) AS target_id
+    FROM edges e
+    JOIN nodes c ON c.id = e.from_id
+    JOIN nodes t ON t.name = substring(e.to_id, 13)
+                AND t.repo_prefix <> c.repo_prefix
+                AND t.repo_prefix <> ''
+                AND t.id <> e.to_id
+    WHERE e.to_id LIKE 'unresolved::%'
+      AND c.repo_prefix <> ''
+    GROUP BY e.edge_id
+    HAVING COUNT(*) = 1
+)
+UPDATE edges
+SET to_id      = u.target_id,
+    origin     = 'ast_resolved',
+    tier       = 'ast_resolved',
+    cross_repo = TRUE
+FROM unique_candidates u
+WHERE edges.edge_id = u.edge_id`
+	return s.runResolverUpdateLocked(q, "ResolveCrossRepo")
+}
 // ResolveExternalCallStubs creates a Node row for every external::*
 // edge target that doesn't yet have one, sets kind='external' and
 // derives name from the id, then promotes the edge origin to
