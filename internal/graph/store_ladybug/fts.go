@@ -142,7 +142,10 @@ func (s *Store) BulkUpsertSymbolFTS(items []graph.SymbolFTSItem) error {
 		return fmt.Errorf("mkdir bulk tmp: %w", err)
 	}
 	defer os.RemoveAll(dir)
-	path := filepath.Join(dir, "symbolfts.tsv")
+	// Ladybug's COPY binder rejects ".tsv" with "Cannot load from file
+	// type tsv"; the parser dispatches on extension. ".csv" + DELIM='\t'
+	// is the convention the Node / Edge / SymbolVec bulk loaders use.
+	path := filepath.Join(dir, "symbolfts.csv")
 	if err := writeSymbolFTSTSV(path, items); err != nil {
 		return fmt.Errorf("write SymbolFTS tsv: %w", err)
 	}

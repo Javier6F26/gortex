@@ -70,8 +70,12 @@ func resolveBackendPath(in, filename string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("abs path %q: %w", in, err)
 	}
+	// Ladybug Open expects either an existing directory (it reuses
+	// it) or a non-existing path (it creates the dir). We MkdirAll
+	// the parent so the path is reachable; the store itself opens
+	// the leaf.
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		return "", fmt.Errorf("mkdir %q: %w", filepath.Dir(abs), err)
+		return "", fmt.Errorf("mkdir parent %q: %w", filepath.Dir(abs), err)
 	}
 	return abs, nil
 }
