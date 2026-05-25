@@ -40,6 +40,21 @@ const (
 	// node, not its enclosing function. EdgeMemberOf links to the
 	// enclosing function. EdgeCaptures lists outer bindings closed over.
 	KindClosure NodeKind = "closure"
+	// KindLocal represents an intra-function binding — a variable
+	// declared inside a function body via `x := …` / `var x = …` / a
+	// range clause / a type-switch / a for-init clause. ID convention:
+	// `<ownerID>#local:<name>@+<offsetFromOwnerStartLine>` (the
+	// leading `+` flags the value as a relative offset so the IDs
+	// stay stable when the enclosing function moves as a whole).
+	// EdgeMemberOf links each binding to its enclosing function or
+	// method. KindLocal is excluded from the BM25 search index by
+	// shouldIndexForSearch — surfacing `err` / `data` / `n` / `i`
+	// from every function would flood every name lookup. The data-
+	// flow analysis (flow_between, taint_paths, ...) traverses the
+	// EdgeValueFlow / EdgeArgOf / EdgeReturnsTo edges that target
+	// these nodes; consumers that want the locals can ask for them
+	// by kind explicitly.
+	KindLocal NodeKind = "local"
 	// KindConstant peels off `const`, `iota`, top-level immutable
 	// bindings, and language-specific constant declarations from
 	// KindVariable. Existing variable-kind nodes are re-classified on

@@ -235,7 +235,10 @@ const (
 	// declaration line (leading `+` flags the value as a relative
 	// offset). The offset-based ID keeps locals stable across edits
 	// that shift the function as a whole — only edits inside the
-	// function above a binding shift that binding's ID.
+	// function above a binding shift that binding's ID. Each ID is
+	// also materialised as a KindLocal node linked to the owner
+	// via EdgeMemberOf; the search index excludes KindLocal so
+	// these per-binding nodes don't pollute name lookups.
 	// These IDs are valid edge endpoints — BFS traverses them — but
 	// no graph node is created, keeping search results free of
 	// every transient binding in every function body.

@@ -32,10 +32,15 @@ import (
 // incremental indexer: adding a line *above* the enclosing
 // function leaves every local-binding ID inside it stable, so the
 // per-save edge churn collapses from O(locals-in-file) to
-// O(locals-below-the-edit). These IDs are valid edge endpoints —
-// the BFS in `flow_between` traverses them — but no graph node is
-// materialised, keeping symbol search free of every transient
-// binding in every function body.
+// O(locals-below-the-edit).
+//
+// Each binding is materialised as a KindLocal graph node anchored
+// to the enclosing function via EdgeMemberOf, so dataflow edges
+// targeting locals are not orphan endpoints — they navigate to a
+// first-class node like every other edge. KindLocal nodes are
+// excluded from the BM25 search index (see
+// internal/indexer.shouldIndexForSearch) so identifiers like
+// `err` / `data` / `n` / `i` don't flood search results.
 //
 // v1 limitations:
 //
@@ -71,8 +76,42 @@ func emitGoDataflow(ownerID string, ownerStartLine int, body *sitter.Node, param
 		src:            src,
 		scope:          scope,
 		result:         result,
+		emittedLocals:  map[string]struct{}{},
 	}
 	walker.walk(body)
+}
+
+// bindLocal computes the canonical local-binding ID, registers it in
+// scope, and on first sight emits the corresponding KindLocal node +
+// EdgeMemberOf edge so the binding is a first-class graph element
+// rather than a phantom edge endpoint. Returns the ID. Dedupe key is
+// the ID itself: a binding visited through multiple walk paths still
+// produces one node row.
+func (w *goFlowWalker) bindLocal(name string, line int) string {
+	id := w.localID(name, line)
+	w.scope.bindings[name] = []string{id}
+	if _, ok := w.emittedLocals[id]; ok {
+		return id
+	}
+	w.emittedLocals[id] = struct{}{}
+	w.result.Nodes = append(w.result.Nodes, &graph.Node{
+		ID:        id,
+		Kind:      graph.KindLocal,
+		Name:      name,
+		FilePath:  w.filePath,
+		StartLine: line,
+		EndLine:   line,
+		Language:  "go",
+	})
+	w.result.Edges = append(w.result.Edges, &graph.Edge{
+		From:     id,
+		To:       w.ownerID,
+		Kind:     graph.EdgeMemberOf,
+		FilePath: w.filePath,
+		Line:     line,
+		Origin:   graph.OriginASTResolved,
+	})
+	return id
 }
 
 
@@ -93,7 +132,10 @@ func newGoFlowScope() *goFlowScope {
 // ownerStartLine is the 1-based source line of the function's
 // declaration — local-binding IDs are anchored to it so edits
 // above the function don't churn every binding inside;
-// scope tracks live bindings; result accumulates emitted edges.
+// scope tracks live bindings; result accumulates emitted edges;
+// emittedLocals dedupes KindLocal node emissions so a binding
+// visited through more than one walk path doesn't produce
+// duplicate node rows.
 type goFlowWalker struct {
 	ownerID        string
 	ownerStartLine int
@@ -101,6 +143,7 @@ type goFlowWalker struct {
 	src            []byte
 	scope          *goFlowScope
 	result         *parser.ExtractionResult
+	emittedLocals  map[string]struct{}
 }
 
 func (w *goFlowWalker) walk(n *sitter.Node) {
@@ -245,9 +288,7 @@ func (w *goFlowWalker) declareTarget(lhs *sitter.Node, decl bool, line int) (str
 		if name == "" || name == "_" {
 			return "", false
 		}
-		id := w.localID(name, line)
-		w.scope.bindings[name] = []string{id}
-		return id, true
+		return w.bindLocal(name, line), true
 	case "selector_expression":
 		// `x.field = …` — write goes to the field node when known.
 		field := lhs.ChildByFieldName("field")
@@ -364,8 +405,7 @@ func (w *goFlowWalker) handleRangeClause(n *sitter.Node) {
 		if name == "" || name == "_" {
 			continue
 		}
-		id := w.localID(name, line)
-		w.scope.bindings[name] = []string{id}
+		id := w.bindLocal(name, line)
 		for _, src := range rhsSources {
 			if src == "" || src == id {
 				continue

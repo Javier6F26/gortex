@@ -361,6 +361,14 @@ func (idx *Indexer) shouldIndexForSearch(n *graph.Node) bool {
 	if n.Kind == graph.KindFile || n.Kind == graph.KindImport {
 		return false
 	}
+	// KindLocal nodes are intra-function bindings emitted to satisfy
+	// rel-table FK constraints on the dataflow edges that target
+	// locals. They have a real Name (the variable identifier) but
+	// surfacing them in BM25 would flood every search for common
+	// names like `err`, `data`, `n`, `i`. Excluded unconditionally.
+	if n.Kind == graph.KindLocal {
+		return false
+	}
 	// Prose-section nodes are searchable only when prose indexing is
 	// enabled (search.index_prose); the rest of the graph is
 	// unaffected by the toggle.
