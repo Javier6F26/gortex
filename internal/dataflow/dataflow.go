@@ -372,6 +372,17 @@ func (p TaintPattern) matches(n *graph.Node) bool {
 // distinct symbol IDs whose nodes match the pattern. Returns the
 // caller-friendly nodes themselves so MCP responses can include
 // names + paths without a second lookup.
+//
+// The seed set is bounded by taintEligibleKinds — the fixed 8-kind
+// allowlist (function/method/param/field/variable/constant/type/
+// interface) that taintEligible enforces. Iterating the per-kind
+// NodesByKind bucket of each lets the backend stream only those
+// kinds instead of materialising the full node table over cgo;
+// on Ladybug AllNodes() pulled ~70k rows per request just to land
+// at a handful of taint candidates. Pattern post-filters (name /
+// path / pattern-supplied kind) still run Go-side — they compose
+// AND, can't be projected onto the bucket index efficiently, and
+// the per-bucket population is already small.
 func (e *Engine) ResolveCandidates(p TaintPattern, limit int) []*graph.Node {
 	if e == nil || e.g == nil || p.Empty() {
 		return nil
@@ -380,26 +391,43 @@ func (e *Engine) ResolveCandidates(p TaintPattern, limit int) []*graph.Node {
 		limit = 100
 	}
 	out := make([]*graph.Node, 0, 16)
-	for _, n := range e.g.AllNodes() {
-		if !taintEligible(n) {
-			continue
-		}
-		if !p.matches(n) {
-			continue
-		}
-		out = append(out, n)
+	for _, k := range taintEligibleKinds {
 		if len(out) >= limit {
 			break
+		}
+		for n := range e.g.NodesByKind(k) {
+			if n == nil {
+				continue
+			}
+			if !p.matches(n) {
+				continue
+			}
+			out = append(out, n)
+			if len(out) >= limit {
+				break
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
+// taintEligibleKinds is the seed-bucket allowlist that mirrors
+// taintEligible. Kept as a slice (not a set) so callers can iterate
+// the NodesByKind bucket of each kind in a stable order.
+var taintEligibleKinds = []graph.NodeKind{
+	graph.KindFunction, graph.KindMethod, graph.KindParam,
+	graph.KindField, graph.KindVariable, graph.KindConstant,
+	graph.KindType, graph.KindInterface,
+}
+
 // taintEligible filters the node universe to symbols that could
 // plausibly be a dataflow source or sink. Files / imports / pkg
 // markers don't carry value semantics, so excluding them up front
-// keeps the candidate set focused.
+// keeps the candidate set focused. Mirrors taintEligibleKinds —
+// kept as a switch (not a set lookup) because expandSinkCandidates
+// uses Kind directly on individual nodes where the slice form would
+// be a needless containment check.
 func taintEligible(n *graph.Node) bool {
 	if n == nil {
 		return false
