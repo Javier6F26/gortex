@@ -192,15 +192,23 @@ func architectureSummary(allScoped []*graph.Node, inScope map[string]*graph.Node
 		return languages[i].Name < languages[j].Name
 	})
 
-	totalEdges := 0
-	for _, e := range g.AllEdges() {
-		if _, ok := inScope[e.From]; !ok {
-			continue
+	// Common case — unbound session + no path-prefix — every node
+	// is in scope so the edge count is exactly the backend's
+	// EdgeCount(), which is an O(1) lookup. Skips materialising
+	// every edge over cgo just to count them.
+	var totalEdges int
+	if len(inScope) == g.NodeCount() {
+		totalEdges = g.EdgeCount()
+	} else {
+		for _, e := range g.AllEdges() {
+			if _, ok := inScope[e.From]; !ok {
+				continue
+			}
+			if _, ok := inScope[e.To]; !ok {
+				continue
+			}
+			totalEdges++
 		}
-		if _, ok := inScope[e.To]; !ok {
-			continue
-		}
-		totalEdges++
 	}
 
 	primary := ""

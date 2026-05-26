@@ -76,12 +76,19 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 	}
 
 	// Edge count, bounded to edges whose endpoints are both in scope.
+	// Unbound sessions never set inScope, so the count is exactly
+	// the backend's EdgeCount() — an O(1) lookup that skips
+	// materialising every edge over cgo.
 	totalEdges := 0
-	for _, e := range s.graph.AllEdges() {
-		if inScope != nil && (!inScope[e.From] || !inScope[e.To]) {
-			continue
+	if inScope == nil {
+		totalEdges = s.graph.EdgeCount()
+	} else {
+		for _, e := range s.graph.AllEdges() {
+			if !inScope[e.From] || !inScope[e.To] {
+				continue
+			}
+			totalEdges++
 		}
-		totalEdges++
 	}
 
 	summary := map[string]any{

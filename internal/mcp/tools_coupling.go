@@ -233,21 +233,3 @@ func packageOfPath(path string, depth int) string {
 	return strings.Join(parts[:depth], "/")
 }
 
-// isCouplingEdge identifies edges that signal real dependency
-// — calls, imports, implements, extends, references, instantiates.
-// Structural edges (defines, member_of) don't count.
-func isCouplingEdge(k graph.EdgeKind) bool {
-	switch k {
-	case graph.EdgeCalls,
-		graph.EdgeImports,
-		graph.EdgeImplements,
-		graph.EdgeExtends,
-		graph.EdgeReferences,
-		graph.EdgeInstantiates,
-		graph.EdgeCrossRepoCalls,
-		graph.EdgeCrossRepoImplements,
-		graph.EdgeCrossRepoExtends:
-		return true
-	}
-	return false
-}
