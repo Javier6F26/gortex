@@ -407,9 +407,19 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 		}
 	}
 
+	// Engine-side rctx wins over the opts-piggybacked one (the explicit
+	// arg is the load-bearing path for callers that build the context
+	// inline). Callers (the MCP search_symbols handler) that build the
+	// rctx upstream and want both BM25 calls to share the same edge-
+	// cache seeding pass it through opts.RerankContext instead.
+	gatherCtx := rctx
+	if gatherCtx == nil {
+		gatherCtx = opts.RerankContext
+	}
+
 	var cands []*rerank.Candidate
 	if s := e.getSearch(); s != nil && s.Count() > 0 {
-		cands = e.gatherBackendCandidates(query, fetchLimit, opts.SearchTimings)
+		cands = e.gatherBackendCandidates(query, fetchLimit, opts.SearchTimings, gatherCtx)
 	} else {
 		start := time.Now()
 		nodes := e.searchSubstring(query, fetchLimit)
@@ -446,7 +456,11 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 			ctx = &rerank.Context{}
 		}
 		ctx.Graph = e.g
+		rerankStart := time.Now()
 		e.rerank.Rerank(query, cands, ctx)
+		if opts.SearchTimings != nil {
+			opts.SearchTimings.EngineRerankMS += time.Since(rerankStart).Milliseconds()
+		}
 	}
 
 	if len(cands) > limit {
@@ -475,44 +489,131 @@ func (e *Engine) SearchSymbolsScoped(query string, limit int, opts QueryOptions)
 // 0-based TextRank and VectorRank (or -1 when the channel didn't
 // return it) so the rerank pipeline can score per channel.
 //
-// The BM25 / vector / bigram tiers all return raw node IDs; the
-// implementation materialises them through a single batched
-// GetNodesByIDs call instead of per-id GetNode. On disk backends
-// (Ladybug) that collapses 60+ cgo Cypher round-trips per query
-// into one — the dominant cost on the search hot path before this
-// changed.
-func (e *Engine) gatherBackendCandidates(query string, limit int, timings *SearchTimings) []*rerank.Candidate {
+// Bundle fast path: when the backend implements
+// SymbolBundleSearcherBackend, BM25 hits + their Node payload + their
+// in/out edges all arrive in one engine round-trip. The bundle's
+// edges seed rctx (when non-nil) so the rerank pipeline's prepare
+// pass can skip its own batched fetch entirely. Vector channel IDs
+// (which don't carry edges in the bundle) still route through the
+// per-call GetNodesByIDs + GetIn/OutEdgesByNodeIDs path; bundle and
+// vector candidates merge into one rerank slice.
+//
+// Fallback (no bundle support): the legacy path — Search() / channel
+// for IDs, GetNodesByIDs to materialise. On disk backends (Ladybug)
+// the bundle fast path collapses 3 cgo round-trips (FTS + nodes +
+// the rerank's 2 edge fetches) into 4 server-side queries with no
+// engine→rerank boundary crossings; the GetNodesByIDs cost goes
+// away entirely for the BM25 hits.
+func (e *Engine) gatherBackendCandidates(query string, limit int, timings *SearchTimings, rctx *rerank.Context) []*rerank.Candidate {
 	backend := e.getSearch()
 
-	// Pull text + vector channels separately when the backend exposes
-	// them (HybridBackend). Otherwise treat plain Search() output as
-	// text-only. The wall-clock for the backend search call lands on
-	// the outer caller's BM25*MS bucket — measuring around the engine
-	// boundary captures the full per-call cost without double-counting
-	// against the post-call GetNodesByIDs / FindNodesByName / Fallback
-	// phases that this function instruments individually below.
+	// Bundle fast path. The SymbolBundleSearcherBackend assertion
+	// chains through Swappable → HybridBackend → SymbolSearcherBackend
+	// in production; both Swappable and HybridBackend forward when
+	// the inner backend supports it. Vector IDs still need the
+	// per-call materialise — bundles don't carry vector hits.
 	var (
-		textResults []search.SearchResult
-		vectorIDs   []string
+		textResults    []search.SearchResult
+		vectorIDs      []string
+		bundleHandled  bool
+		bundleNodeByID = make(map[string]*graph.Node)
 	)
-	if cs, ok := backend.(search.ChannelSearcher); ok {
-		textResults, vectorIDs = cs.SearchChannels(query, limit*2)
-	} else {
-		textResults = backend.Search(query, limit*2)
+	if bsb, ok := backend.(search.SymbolBundleSearcherBackend); ok {
+		// Pull the vector channel separately when present. Bundles
+		// cover BM25 only; the engine merges vector hits below.
+		vectorBackend, vectorOK := backend.(search.ChannelSearcher)
+		bundleStart := time.Now()
+		bundles := bsb.SearchSymbolBundles(query, limit*2)
+		if timings != nil {
+			timings.BundleMS += time.Since(bundleStart).Milliseconds()
+		}
+		if len(bundles) > 0 {
+			bundleHandled = true
+			textResults = make([]search.SearchResult, 0, len(bundles))
+			outSeed := make(map[string][]*graph.Edge, len(bundles))
+			inSeed := make(map[string][]*graph.Edge, len(bundles))
+			for _, b := range bundles {
+				if b.Node == nil {
+					continue
+				}
+				bundleNodeByID[b.Node.ID] = b.Node
+				textResults = append(textResults, search.SearchResult{ID: b.Node.ID, Score: b.Score})
+				outSeed[b.Node.ID] = b.OutEdges
+				inSeed[b.Node.ID] = b.InEdges
+			}
+			// Seed the rerank context's edge caches so prepare() can
+			// skip its own batched fetch for the bundle-covered IDs.
+			// preSeeded=true is the contract that prepare's batched
+			// edge fetch is now redundant — see rerank.Context for the
+			// invariant the engine relies on (the next caller's
+			// candidate set is fully covered by these maps for the
+			// BM25 hits; vector / substring fallback hits are still
+			// served by the per-candidate accessor fallback).
+			if rctx != nil {
+				rctx.SeedEdgeCaches(inSeed, outSeed, true)
+			}
+		}
+		// Vector channel: only when the bundle path took the BM25
+		// branch. Otherwise the fallback path below pulls both.
+		if vectorOK {
+			_, vectorIDs = vectorBackend.SearchChannels(query, limit*2)
+		}
 	}
 
-	// Collect every ID surfaced by the backend tiers up front, then
-	// materialise them with one batched fetch. Empty IDs are tolerated
-	// — the batch lookup ignores them and the per-id insert short-
-	// circuits below.
+	// Legacy / fallback path: bundle backend absent OR returned no
+	// hits. Pull text + vector channels separately when the backend
+	// exposes them (HybridBackend). Otherwise treat plain Search()
+	// output as text-only. The wall-clock for the backend search
+	// call lands on the outer caller's BM25*MS bucket — measuring
+	// around the engine boundary captures the full per-call cost
+	// without double-counting against the post-call GetNodesByIDs /
+	// FindNodesByName / Fallback phases that this function
+	// instruments individually below.
+	if !bundleHandled {
+		type timedChan interface {
+			SearchChannelsTimed(query string, limit int) ([]search.SearchResult, []string, search.ChannelTimings)
+		}
+		if tc, ok := backend.(timedChan); ok {
+			var stats search.ChannelTimings
+			textResults, vectorIDs, stats = tc.SearchChannelsTimed(query, limit*2)
+			if timings != nil {
+				timings.TextBackendMS += stats.TextMS
+				timings.EmbedMS += stats.EmbedMS
+				timings.VectorSearchMS += stats.VectorSearchMS
+			}
+		} else if cs, ok := backend.(search.ChannelSearcher); ok {
+			textStart := time.Now()
+			textResults, vectorIDs = cs.SearchChannels(query, limit*2)
+			if timings != nil {
+				timings.TextBackendMS += time.Since(textStart).Milliseconds()
+			}
+		} else {
+			textStart := time.Now()
+			textResults = backend.Search(query, limit*2)
+			if timings != nil {
+				timings.TextBackendMS += time.Since(textStart).Milliseconds()
+			}
+		}
+	}
+
+	// Collect every ID NOT covered by the bundle path (vector hits +
+	// fallback path's text hits) and materialise them with one
+	// batched fetch. Empty IDs are tolerated — the batch lookup
+	// ignores them and the per-id insert short-circuits below.
 	idBatch := make([]string, 0, len(textResults)+len(vectorIDs))
 	for _, r := range textResults {
 		if r.ID != "" {
+			if _, covered := bundleNodeByID[r.ID]; covered {
+				continue
+			}
 			idBatch = append(idBatch, r.ID)
 		}
 	}
 	for _, id := range vectorIDs {
 		if id != "" {
+			if _, covered := bundleNodeByID[id]; covered {
+				continue
+			}
 			idBatch = append(idBatch, id)
 		}
 	}
@@ -520,6 +621,16 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 	nodeByID := e.g.GetNodesByIDs(idBatch)
 	if timings != nil {
 		timings.GetNodesMS += time.Since(getNodesStart).Milliseconds()
+	}
+	if nodeByID == nil {
+		// GetNodesByIDs returns nil for empty input — we still need a
+		// non-nil map below to merge the bundle's nodes into.
+		nodeByID = make(map[string]*graph.Node, len(bundleNodeByID))
+	}
+	// Merge the bundle's already-materialised nodes into the same
+	// lookup map the per-candidate insert step below reads from.
+	for id, n := range bundleNodeByID {
+		nodeByID[id] = n
 	}
 
 	idx := make(map[string]int) // node ID → slice index for dedup

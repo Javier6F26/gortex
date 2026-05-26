@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/search/rerank"
 )
 
 // SubGraph is a JSON-serializable result from a graph query.
@@ -69,6 +70,15 @@ type QueryOptions struct {
 	// reset). Never serialised — `json:"-"` keeps the option struct
 	// JSON shape stable.
 	SearchTimings *SearchTimings `json:"-"`
+
+	// RerankContext is the optional rerank context the engine uses when
+	// gathering bundle candidates: each bundle's in/out edges are
+	// seeded into the context's edge caches so the handler-side
+	// rerank.Pipeline.Rerank can skip its own batched edge fetch on
+	// the merged candidate set. Pass nil — the engine's gather path
+	// still works, the bundle's edges are just discarded after the
+	// per-call rerank. Never serialised.
+	RerankContext *rerank.Context `json:"-"`
 }
 
 // SearchTimings carries per-phase wall-clock measurements collected
@@ -76,11 +86,34 @@ type QueryOptions struct {
 // didn't run on this call (e.g. FallbackMS is 0 when the BM25 result
 // already saturated the limit).
 type SearchTimings struct {
-	BM25PrimaryMS    int64 // time spent in the primary BM25 backend call
-	BM25ExpansionMS  int64 // time spent across all expansion-term BM25 calls
-	GetNodesMS       int64 // time spent materialising BM25/vector IDs via GetNodesByIDs
-	FindNameMS       int64 // time spent on the FindNodesByName splice-in
-	FallbackMS       int64 // time spent in the substring/name-contains fallback
+	BM25PrimaryMS   int64 // time spent in the primary BM25 backend call
+	BM25ExpansionMS int64 // time spent across all expansion-term BM25 calls
+	GetNodesMS      int64 // time spent materialising BM25/vector IDs via GetNodesByIDs
+	FindNameMS      int64 // time spent on the FindNodesByName splice-in
+	FallbackMS      int64 // time spent in the substring/name-contains fallback
+	// Sub-buckets of the BM25*MS totals — proves which phase inside
+	// the wrapper is actually slow. Accumulated across every
+	// primary + expansion BM25 invocation.
+	TextBackendMS  int64 // strictly inside Backend.Search / text channel
+	EmbedMS        int64 // inside embedder.Embed (vector path only)
+	VectorSearchMS int64 // inside vector.Search ANN call (vector path only)
+	EngineRerankMS int64 // inside rerank.Pipeline.Rerank in SearchSymbolsRanked
+	// BundleMS accumulates the wall-clock spent inside
+	// SymbolBundleSearcherBackend.SearchSymbolBundles (one Cypher per
+	// BM25 fan-out that returns Node + in/out edges in one bundle).
+	// When the backend supports bundles, the bundle path replaces the
+	// (TextBackend + GetNodes) sub-buckets; the bm25_backend_ms
+	// derivation in the handler subtracts BundleMS so the existing
+	// fields stay meaningful.
+	BundleMS int64
+	// CacheHitRate is the fraction of post-merge candidates whose
+	// in/out edges were already in the rerank Context cache when the
+	// handler-side prepare() ran. 1.0 means every candidate was
+	// pre-seeded from a bundle; 0.0 means the rerank had to fetch
+	// every candidate's edges itself. Populated by the handler when
+	// the bundle path is active so the search_symbols debug log can
+	// surface how often the seeding actually catches.
+	CacheHitRate float64
 }
 
 // ScopeAllows reports whether a node passes the workspace/project

@@ -1171,6 +1171,17 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	}
 	expandedTerms := mergeExpansionTerms(soupFragments, llmTerms, equivTerms)
 
+	// Build the rerank context BEFORE the BM25 fetch so the engine's
+	// bundle path can seed its edge caches as the BM25 calls land.
+	// The handler-side applyRerankBoostsTimed reuses this same rctx,
+	// so the merged candidate set's edges are already cached when
+	// prepare() runs against the post-filter slice. Without this
+	// pre-fetch construction the engine's bundle would build a
+	// throwaway cache on each BM25 call and the handler's later
+	// rerank would still fetch every candidate's edges itself.
+	rctx := s.buildRerankContext(ctx, q)
+	scope.RerankContext = rctx
+
 	var nodes []*graph.Node
 	var primaryCount int
 	if len(expandedTerms) > 0 {
@@ -1265,7 +1276,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// feedback, churn) layer on top once the agent has spent time
 	// in the codebase. Cold queries with no session data fall back
 	// to a structural-only pass.
-	rctx := s.buildRerankContext(ctx, q)
+	//
+	// rctx was built above (before the BM25 fetch) so the engine's
+	// bundle path could seed its edge caches into the same rctx the
+	// handler-side rerank will read from.
 	// Per-class rerank weighting: detect the query class (or honour an
 	// explicit query_class hint) and pin it on the rerank Context so
 	// the pipeline scales the bm25 / semantic blend accordingly.
@@ -1285,8 +1299,23 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	if isSoup {
 		queryClass = rerank.QueryClassKeywordSoup
 	}
-	rctx.QueryClass = queryClass
+	if rctx != nil {
+		rctx.QueryClass = queryClass
+	}
 	candsAfterFilter := len(nodes)
+	// Capture the post-filter candidate ID set so we can ask the rctx
+	// what fraction of these candidates' edges were already cached by
+	// the bundle pre-seed (vs needing prepare's own batched fetch).
+	// Hit-rate is reported on the debug log as cache_hit_rate.
+	if rctx != nil {
+		preIDs := make([]string, 0, len(nodes))
+		for _, n := range nodes {
+			if n != nil {
+				preIDs = append(preIDs, n.ID)
+			}
+		}
+		timings.CacheHitRate = rctx.EdgeCacheHitRate(preIDs)
+	}
 	var rerankBreakdown []*rerank.Candidate
 	var rerankPrepare, rerankSignals time.Duration
 	nodes, rerankPrepare, rerankSignals = applyRerankBoostsTimed(s, nodes, q, rctx, &rerankBreakdown)
@@ -1423,7 +1452,10 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		// "BM25 backend" cost = the BM25 wall-clock minus the inner
 		// phases the engine also accumulated under that call. Negative
 		// values are clamped to 0 (clock granularity / contention).
-		bm25Backend := timings.BM25PrimaryMS + timings.BM25ExpansionMS - timings.GetNodesMS - timings.FindNameMS - timings.FallbackMS
+		// BundleMS is subtracted too — it's a fold of the FTS + nodes
+		// + edge fetches that, on the legacy path, would have shown up
+		// in TextBackend / GetNodes / (no field for edges) separately.
+		bm25Backend := timings.BM25PrimaryMS + timings.BM25ExpansionMS - timings.GetNodesMS - timings.FindNameMS - timings.FallbackMS - timings.BundleMS
 		if bm25Backend < 0 {
 			bm25Backend = 0
 		}
@@ -1433,6 +1465,12 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 			zap.Int64("bm25_primary_ms", timings.BM25PrimaryMS),
 			zap.Int64("bm25_expansion_ms", timings.BM25ExpansionMS),
 			zap.Int64("bm25_backend_ms", bm25Backend),
+			zap.Int64("text_backend_ms", timings.TextBackendMS),
+			zap.Int64("embed_ms", timings.EmbedMS),
+			zap.Int64("vector_search_ms", timings.VectorSearchMS),
+			zap.Int64("engine_rerank_ms", timings.EngineRerankMS),
+			zap.Int64("bundle_ms", timings.BundleMS),
+			zap.Float64("cache_hit_rate", timings.CacheHitRate),
 			zap.Int64("get_nodes_ms", timings.GetNodesMS),
 			zap.Int64("find_name_ms", timings.FindNameMS),
 			zap.Int64("fallback_ms", timings.FallbackMS),

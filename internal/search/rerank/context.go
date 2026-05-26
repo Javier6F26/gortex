@@ -140,6 +140,15 @@ type Context struct {
 	// is identity-only (same slice, same length) — any mutation that
 	// reallocates resets it.
 	preparedCands []*Candidate
+
+	// cachePreSeeded is the caller's promise (via SeedEdgeCaches with
+	// preSeeded=true) that outEdgeCache / inEdgeCache already cover
+	// the candidate set the next Prepare call will see. When set,
+	// prepare() skips the batched edge fetch entirely — the bundle
+	// path's edges are authoritative and a second fetch is pure
+	// overhead. Reset by the caller (typically the engine, after each
+	// Search) to keep the flag from leaking across reranks.
+	cachePreSeeded bool
 }
 
 // Prepare populates the internal scratch fields used by every signal
@@ -149,6 +158,78 @@ type Context struct {
 // skips the duplicate work. Safe to call multiple times against the
 // same slice — it's a full reset on each call.
 func (c *Context) Prepare(cands []*Candidate) { c.prepare(cands) }
+
+// SeedEdgeCaches installs pre-fetched in/out edge maps the caller
+// already gathered (today: from the SymbolBundleSearcherBackend hot
+// path). The maps are merged into the context — IDs already in the
+// cache keep their existing entry, new IDs append. The accompanying
+// flag tells prepare() the caches are authoritative for the
+// candidate set so it can skip its own batched edge fetch on the
+// next Prepare call.
+//
+// IDs missing from the caller's bundle (vector-channel hits, fallback
+// substring matches) still get fetched the slow per-candidate way
+// through the outEdges / inEdges accessors when a signal asks for
+// them — the seed is a best-effort fast path, not a contract that
+// every candidate's edges are present. Callers MUST set
+// cachePreSeeded only when the seed covers the expected candidate set
+// (i.e. when the bundle backend returned a result for every BM25
+// hit in the merged candidate slice).
+func (c *Context) SeedEdgeCaches(inEdges, outEdges map[string][]*graph.Edge, preSeeded bool) {
+	if c.outEdgeCache == nil {
+		c.outEdgeCache = make(map[string][]*graph.Edge, len(outEdges))
+	}
+	for id, es := range outEdges {
+		if _, dup := c.outEdgeCache[id]; dup {
+			continue
+		}
+		c.outEdgeCache[id] = es
+	}
+	if c.inEdgeCache == nil {
+		c.inEdgeCache = make(map[string][]*graph.Edge, len(inEdges))
+	}
+	for id, es := range inEdges {
+		if _, dup := c.inEdgeCache[id]; dup {
+			continue
+		}
+		c.inEdgeCache[id] = es
+	}
+	if preSeeded {
+		c.cachePreSeeded = true
+	}
+}
+
+// CachePreSeeded reports whether the caller has signaled (via
+// SeedEdgeCaches with preSeeded=true) that the edge caches cover the
+// candidate set the next Prepare call will see. Exposed so the
+// MCP handler can report a cache-hit-rate / cache-pre-seeded boolean
+// in its debug log without grepping internal state.
+func (c *Context) CachePreSeeded() bool { return c.cachePreSeeded }
+
+// EdgeCacheHitRate reports the fraction of nodeIDs that have an entry
+// in the in OR out edge cache. 0.0 when the caches are empty; 1.0 when
+// every input id has a cache entry on both sides. Used by the
+// MCP handler to surface "did the bundle path actually catch?" on
+// the search_symbols debug log without exposing internal state.
+func (c *Context) EdgeCacheHitRate(ids []string) float64 {
+	if len(ids) == 0 {
+		return 0
+	}
+	hits := 0
+	for _, id := range ids {
+		// An id counts as a hit if BOTH the in-edge cache and the
+		// out-edge cache have an entry for it — that's the contract
+		// the bundle pre-seed promises. A half-seeded id (only one
+		// side cached) is a near-miss the prepare() pass would still
+		// have to satisfy by fetching the missing side.
+		_, hasOut := c.outEdgeCache[id]
+		_, hasIn := c.inEdgeCache[id]
+		if hasOut && hasIn {
+			hits++
+		}
+	}
+	return float64(hits) / float64(len(ids))
+}
 
 // now returns the active timestamp (test-injectable when Now != 0).
 func (c *Context) now() int64 {

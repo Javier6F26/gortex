@@ -70,7 +70,7 @@ func (h *HybridBackend) Remove(id string) {
 // for natural-language queries (where semantic similarity catches
 // synonymous wording).
 func (h *HybridBackend) Search(query string, limit int) []SearchResult {
-	textResults, vecIDs := h.searchChannels(query, limit)
+	textResults, vecIDs, _ := h.searchChannels(query, limit)
 	if len(vecIDs) == 0 {
 		if len(textResults) > limit {
 			return textResults[:limit]
@@ -89,17 +89,64 @@ func (h *HybridBackend) Search(query string, limit int) []SearchResult {
 // contribute as a separate Signal instead of being collapsed into a
 // single RRF score upstream of the rerank.
 func (h *HybridBackend) SearchChannels(query string, limit int) (textResults []SearchResult, vectorIDs []string) {
+	textResults, vectorIDs, _ = h.searchChannels(query, limit)
+	return textResults, vectorIDs
+}
+
+// ChannelTimings carries per-phase wall-clock numbers from one
+// SearchChannelsTimed call. Zero fields = phase didn't run (e.g.
+// VectorSearchMS=0 when the vector index is empty).
+type ChannelTimings struct {
+	TextMS         int64
+	EmbedMS        int64
+	VectorSearchMS int64
+}
+
+// SearchChannelsTimed is SearchChannels with a per-phase timing
+// breakdown so callers can prove which sub-step (text BM25 vs
+// vector embed vs vector ANN) actually cost wall-clock time.
+// Used by the MCP search_symbols handler's debug-log
+// instrumentation; production callers that don't care just use
+// SearchChannels.
+func (h *HybridBackend) SearchChannelsTimed(query string, limit int) ([]SearchResult, []string, ChannelTimings) {
 	return h.searchChannels(query, limit)
 }
 
-func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult, []string) {
+// SearchSymbolBundles forwards to the text backend's bundle path when
+// it implements SymbolBundleSearcherBackend. The vector channel does
+// not participate — its IDs ride out through SearchChannels/Timed as
+// before and the engine merges them with the bundle set. Returns nil
+// when the text backend has no bundle support (no-op for the
+// fallback path).
+//
+// HybridBackend wires both channels together in production, so the
+// engine's bundle-detection step type-asserts on the outer
+// HybridBackend through Swappable; this is what makes the bundle
+// path available when the daemon's search is the BM25 + vector
+// stack instead of a bare SymbolSearcherBackend.
+func (h *HybridBackend) SearchSymbolBundles(query string, limit int) []SymbolBundle {
+	if h == nil || h.text == nil {
+		return nil
+	}
+	if bs, ok := h.text.(SymbolBundleSearcherBackend); ok {
+		return bs.SearchSymbolBundles(query, limit)
+	}
+	return nil
+}
+
+func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult, []string, ChannelTimings) {
+	var stats ChannelTimings
+	tStart := time.Now()
 	textResults := h.text.Search(query, limit*2)
+	stats.TextMS = time.Since(tStart).Milliseconds()
 
 	var vecIDs []string
 	if h.vector.Count() > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		embedStart := time.Now()
 		queryVec, err := h.embedder.Embed(ctx, query)
+		stats.EmbedMS = time.Since(embedStart).Milliseconds()
 		if err == nil && queryVec != nil {
 			// When symbols are sub-chunked, one symbol owns several
 			// vectors, so a fixed top-k under-counts distinct symbols.
@@ -108,10 +155,13 @@ func (h *HybridBackend) searchChannels(query string, limit int) ([]SearchResult,
 			if h.vector.HasChunks() {
 				fetch = limit * 8
 			}
-			vecIDs = h.dechunkVectorIDs(h.vector.Search(queryVec, fetch), limit*2)
+			vecStart := time.Now()
+			rawVecIDs := h.vector.Search(queryVec, fetch)
+			stats.VectorSearchMS = time.Since(vecStart).Milliseconds()
+			vecIDs = h.dechunkVectorIDs(rawVecIDs, limit*2)
 		}
 	}
-	return textResults, vecIDs
+	return textResults, vecIDs, stats
 }
 
 // dechunkVectorIDs maps raw vector-search hits — which may be synthetic

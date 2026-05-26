@@ -53,6 +53,48 @@ func NewSymbolSearcherBackend(s graph.SymbolSearcher) *SymbolSearcherBackend {
 	return &SymbolSearcherBackend{s: s}
 }
 
+// SymbolBundle re-exports graph.SymbolBundle so callers (the query
+// engine, the rerank seed path) can construct + consume bundles
+// without re-importing the graph package next to the search
+// package import — symmetric with how SearchResult sits in
+// search/.
+type SymbolBundle = graph.SymbolBundle
+
+// SearchSymbolBundles is the bundled-search hot path: it forwards
+// to the wrapped graph.SymbolBundleSearcher when the underlying
+// store implements that capability, returning the matched node +
+// score + in/out edges in one engine round-trip. When the store
+// only implements SymbolSearcher (no Bundle support), this method
+// returns nil — callers MUST check the result and fall back to the
+// per-call Search → GetNodesByIDs → GetIn/OutEdgesByNodeIDs path.
+//
+// Exposed on SymbolSearcherBackend (the production search.Backend
+// adapter used in production) so the engine can type-assert through
+// the search.Backend chain via SymbolBundleSearcherBackend without
+// touching the daemon's wiring.
+func (b *SymbolSearcherBackend) SearchSymbolBundles(query string, limit int) []SymbolBundle {
+	if b == nil || b.s == nil || strings.TrimSpace(query) == "" {
+		return nil
+	}
+	bs, ok := b.s.(graph.SymbolBundleSearcher)
+	if !ok {
+		return nil
+	}
+	bundles, err := bs.SearchSymbolBundles(query, limit)
+	if err != nil {
+		return nil
+	}
+	return bundles
+}
+
+// SymbolBundleSearcherBackend is the interface the engine type-asserts
+// on a search.Backend to detect bundle support. Both
+// *SymbolSearcherBackend and *HybridBackend implement this; Swappable
+// forwards.
+type SymbolBundleSearcherBackend interface {
+	SearchSymbolBundles(query string, limit int) []SymbolBundle
+}
+
 // Search forwards to SymbolSearcher.SearchSymbols and translates
 // the per-hit (NodeID, Score) into search.SearchResult so callers
 // don't see the graph package at all.
