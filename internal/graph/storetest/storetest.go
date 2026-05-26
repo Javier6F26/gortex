@@ -74,6 +74,8 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("SymbolBundleSearcher", func(t *testing.T) { testSymbolBundleSearcher(t, factory) })
 	t.Run("DeadCodeCandidator", func(t *testing.T) { testDeadCodeCandidator(t, factory) })
 	t.Run("IfaceImplementsScanner", func(t *testing.T) { testIfaceImplementsScanner(t, factory) })
+	t.Run("NodeDegreeAggregator", func(t *testing.T) { testNodeDegreeAggregator(t, factory) })
+	t.Run("NodeFanAggregator", func(t *testing.T) { testNodeFanAggregator(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1388,5 +1390,217 @@ func testIfaceImplementsScanner(t *testing.T, factory Factory) {
 	sort.Strings(methods)
 	if fmt.Sprint(methods) != fmt.Sprint([]string{"Close", "Read"}) {
 		t.Fatalf("methods = %v, want [Close Read]", methods)
+	}
+}
+
+// testNodeDegreeAggregator exercises the optional
+// graph.NodeDegreeAggregator capability. Builds a small graph with
+// nodes that cover every classification branch
+// graph.GraphConnectivity / graph.ClassifyZeroEdge care about:
+//
+//   - isolated (zero edges).
+//   - leaf (exactly one edge in either direction).
+//   - usage-edge in-bound only (alive — at least one EdgeCalls in).
+//   - non-usage-edge in-bound only (no EdgeCalls / EdgeReferences /
+//     etc — counts as "likely unused").
+//   - usage-edge mixed with non-usage in-edges (still alive).
+//   - unknown id (must be elided).
+func testNodeDegreeAggregator(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	dc, ok := s.(graph.NodeDegreeAggregator)
+	if !ok {
+		t.Skip("backend does not implement graph.NodeDegreeAggregator")
+	}
+
+	s.AddNode(mkNode("Isolated", "Isolated", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("LeafSink", "LeafSink", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("LeafSource", "LeafSource", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Alive", "Alive", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("StructuralOnly", "StructuralOnly", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Mixed", "Mixed", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Caller", "Caller", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("FileNode", "FileNode", "a.go", graph.KindFile))
+
+	// One incoming call into LeafSink → leaf (in_count=1, out_count=0).
+	e1 := mkEdge("Caller", "LeafSink", graph.EdgeCalls)
+	e1.Line = 1
+	s.AddEdge(e1)
+	// One outgoing reference from LeafSource → leaf (in=0, out=1).
+	e2 := mkEdge("LeafSource", "Caller", graph.EdgeReferences)
+	e2.Line = 2
+	s.AddEdge(e2)
+	// Alive: incoming call → alive (in=1 usage).
+	e3 := mkEdge("Caller", "Alive", graph.EdgeCalls)
+	e3.Line = 3
+	s.AddEdge(e3)
+	// StructuralOnly: incoming EdgeDefines (NOT a usage kind) →
+	// classified as "likely unused" but not isolated.
+	e4 := mkEdge("FileNode", "StructuralOnly", graph.EdgeDefines)
+	e4.Line = 4
+	s.AddEdge(e4)
+	// Mixed: incoming EdgeDefines (non-usage) + incoming EdgeCalls
+	// (usage). UsageInCount must reflect ONLY the usage edge.
+	e5 := mkEdge("FileNode", "Mixed", graph.EdgeDefines)
+	e5.Line = 5
+	s.AddEdge(e5)
+	e6 := mkEdge("Caller", "Mixed", graph.EdgeCalls)
+	e6.Line = 6
+	s.AddEdge(e6)
+
+	ids := []string{
+		"Isolated",
+		"LeafSink",
+		"LeafSource",
+		"Alive",
+		"StructuralOnly",
+		"Mixed",
+		"unknown::id",
+	}
+	usage := []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}
+	rows := dc.NodeDegreeCounts(ids, usage)
+
+	byID := make(map[string]graph.NodeDegreeRow, len(rows))
+	for _, r := range rows {
+		byID[r.NodeID] = r
+	}
+	// Unknown id MUST be elided.
+	if _, ok := byID["unknown::id"]; ok {
+		t.Fatalf("NodeDegreeCounts must elide unknown ids, got row")
+	}
+
+	type want struct{ in, out, usageIn int }
+	cases := map[string]want{
+		"Isolated":       {0, 0, 0},
+		"LeafSink":       {1, 0, 1},
+		"LeafSource":     {0, 1, 0},
+		"Alive":          {1, 0, 1},
+		"StructuralOnly": {1, 0, 0},
+		"Mixed":          {2, 0, 1},
+	}
+	for id, w := range cases {
+		got, ok := byID[id]
+		if !ok {
+			t.Errorf("missing row for %s", id)
+			continue
+		}
+		if got.InCount != w.in || got.OutCount != w.out || got.UsageInCount != w.usageIn {
+			t.Errorf("row %s = in=%d out=%d usage=%d, want in=%d out=%d usage=%d",
+				id, got.InCount, got.OutCount, got.UsageInCount,
+				w.in, w.out, w.usageIn)
+		}
+	}
+
+	// Empty ids returns nil — never the whole graph.
+	if got := dc.NodeDegreeCounts(nil, usage); len(got) != 0 {
+		t.Fatalf("NodeDegreeCounts(nil) = %d, want 0", len(got))
+	}
+
+	// Empty usage kinds means UsageInCount is always 0 (totals
+	// still populated).
+	noUsage := dc.NodeDegreeCounts([]string{"Mixed"}, nil)
+	if len(noUsage) != 1 {
+		t.Fatalf("NodeDegreeCounts(Mixed, nil) = %d rows, want 1", len(noUsage))
+	}
+	if noUsage[0].InCount != 2 || noUsage[0].UsageInCount != 0 {
+		t.Fatalf("NodeDegreeCounts(Mixed, nil) = in=%d usage=%d, want in=2 usage=0",
+			noUsage[0].InCount, noUsage[0].UsageInCount)
+	}
+}
+
+// testNodeFanAggregator exercises the optional
+// graph.NodeFanAggregator capability. Builds a small graph that
+// exercises the per-direction kind filter independently:
+//
+//   - Hub: high fan-in (Calls + References) AND high fan-out (Calls).
+//   - Leaf: zero fan in either direction.
+//   - ReadHeavy: incoming Reads only — fan-in must be 0 when the
+//     filter is Calls+References.
+//   - CallerOnly: outgoing Calls only — fan-out non-zero, fan-in 0.
+//   - Unknown id elided.
+func testNodeFanAggregator(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	fa, ok := s.(graph.NodeFanAggregator)
+	if !ok {
+		t.Skip("backend does not implement graph.NodeFanAggregator")
+	}
+
+	s.AddNode(mkNode("Hub", "Hub", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Leaf", "Leaf", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("ReadHeavy", "ReadHeavy", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("CallerOnly", "CallerOnly", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Target1", "Target1", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Target2", "Target2", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Src1", "Src1", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("Src2", "Src2", "a.go", graph.KindFunction))
+
+	// Hub: 2 incoming Calls + 1 incoming Reference + 2 outgoing
+	// Calls + 1 outgoing Reference. With fan-in=Calls+Refs and
+	// fan-out=Calls: fan_in=3, fan_out=2.
+	add := func(from, to string, kind graph.EdgeKind, line int) {
+		e := mkEdge(from, to, kind)
+		e.Line = line
+		s.AddEdge(e)
+	}
+	add("Src1", "Hub", graph.EdgeCalls, 1)
+	add("Src2", "Hub", graph.EdgeCalls, 2)
+	add("Src1", "Hub", graph.EdgeReferences, 3)
+	add("Hub", "Target1", graph.EdgeCalls, 4)
+	add("Hub", "Target2", graph.EdgeCalls, 5)
+	add("Hub", "Target1", graph.EdgeReferences, 6)
+
+	// ReadHeavy: incoming Reads only.
+	add("Src1", "ReadHeavy", graph.EdgeReads, 7)
+	add("Src2", "ReadHeavy", graph.EdgeReads, 8)
+
+	// CallerOnly: outgoing Calls only.
+	add("CallerOnly", "Target1", graph.EdgeCalls, 9)
+
+	ids := []string{"Hub", "Leaf", "ReadHeavy", "CallerOnly", "unknown::id"}
+	rows := fa.NodeFanCounts(ids,
+		[]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences},
+		[]graph.EdgeKind{graph.EdgeCalls},
+	)
+
+	byID := make(map[string]graph.NodeFanRow, len(rows))
+	for _, r := range rows {
+		byID[r.NodeID] = r
+	}
+	if _, ok := byID["unknown::id"]; ok {
+		t.Fatalf("NodeFanCounts must elide unknown ids, got row")
+	}
+
+	type want struct{ in, out int }
+	cases := map[string]want{
+		"Hub":        {3, 2},
+		"Leaf":       {0, 0},
+		"ReadHeavy":  {0, 0},
+		"CallerOnly": {0, 1},
+	}
+	for id, w := range cases {
+		got, ok := byID[id]
+		if !ok {
+			t.Errorf("missing row for %s", id)
+			continue
+		}
+		if got.FanIn != w.in || got.FanOut != w.out {
+			t.Errorf("row %s = in=%d out=%d, want in=%d out=%d",
+				id, got.FanIn, got.FanOut, w.in, w.out)
+		}
+	}
+
+	// Empty ids returns nil.
+	if got := fa.NodeFanCounts(nil, []graph.EdgeKind{graph.EdgeCalls}, nil); len(got) != 0 {
+		t.Fatalf("NodeFanCounts(nil) = %d, want 0", len(got))
+	}
+
+	// Empty kind sets → all-zero rows for known ids only.
+	zeros := fa.NodeFanCounts([]string{"Hub", "unknown::id"}, nil, nil)
+	if len(zeros) != 1 {
+		t.Fatalf("NodeFanCounts(empty kinds) = %d rows, want 1 (Hub only)", len(zeros))
+	}
+	if zeros[0].NodeID != "Hub" || zeros[0].FanIn != 0 || zeros[0].FanOut != 0 {
+		t.Fatalf("NodeFanCounts(empty kinds) = %+v, want Hub/0/0", zeros[0])
 	}
 }

@@ -748,3 +748,70 @@ type IfaceImplementsRow struct {
 type IfaceImplementsScanner interface {
 	IfaceImplementsRows() []IfaceImplementsRow
 }
+
+// NodeDegreeRow is one tuple returned by NodeDegreeAggregator. InCount
+// counts EVERY incoming edge (any kind); OutCount counts EVERY outgoing
+// edge; UsageInCount counts only the subset whose kind is in the
+// "usage" set (Calls, References, Instantiates, Implements, Extends,
+// Reads, Writes, Tests). The split exists because connectivity_health
+// needs the totals (for isolated / leaf classification) AND the
+// usage-edge presence (to fold ClassifyZeroEdge's logic in
+// server-side); pulling them in one row saves a second cgo trip per
+// node.
+type NodeDegreeRow struct {
+	NodeID       string
+	InCount      int
+	OutCount     int
+	UsageInCount int
+}
+
+// NodeDegreeAggregator is an optional capability backends MAY
+// implement to return per-node in/out edge counts plus a usage-edge
+// count, server-side. Used by analysis.GraphConnectivity to replace
+// the per-node g.GetInEdges(id) + g.GetOutEdges(id) +
+// graph.ClassifyZeroEdge(id) trio — three cgo round-trips per node
+// on Ladybug, three full edge materialisations per node on disk.
+// One round-trip returns all three counts and lets the analyzer
+// classify isolated / leaf / source-only / sink-only / extraction-gap
+// without ever materialising the underlying edge structs.
+//
+// The usageKinds slice MUST mirror graph.usageEdgeKinds (the set
+// ClassifyZeroEdge consults). Empty usageKinds means UsageInCount is
+// always 0; an empty input ids slice returns nil.
+//
+// Optional capability — GraphConnectivity falls back to the per-node
+// GetInEdges/GetOutEdges path when the backend doesn't implement it.
+type NodeDegreeAggregator interface {
+	NodeDegreeCounts(ids []string, usageKinds []EdgeKind) []NodeDegreeRow
+}
+
+// NodeFanRow is one tuple returned by NodeFanAggregator. FanIn counts
+// incoming edges whose kind is in the fanInKinds set; FanOut counts
+// outgoing edges whose kind is in the fanOutKinds set. The two kind
+// sets are passed by the caller so the same capability serves both
+// FindHotspots (fanIn = Calls+References, fanOut = Calls) and any
+// future analyzer with a different kind split.
+type NodeFanRow struct {
+	NodeID string
+	FanIn  int
+	FanOut int
+}
+
+// NodeFanAggregator is an optional capability backends MAY implement
+// to compute per-node fan-in / fan-out counts filtered by edge kind,
+// server-side. Used by analysis.FindHotspots and
+// handleAnalyzeHealthScore to replace the AllEdges() materialisation
+// they both ran every call (~500k edges over cgo on the gortex
+// workspace, the bulk of the wall-clock cost on Ladybug). The Go-side
+// crossing computation still needs per-edge (from, to) for the
+// Calls/References kinds — that runs through EdgesByKind, which
+// streams without materialising the full edge set.
+//
+// Empty ids => nil; empty fanInKinds / fanOutKinds means that side
+// is always 0. Output order is unspecified.
+//
+// Optional capability — both analyzers fall back to the AllEdges scan
+// when the backend doesn't implement it.
+type NodeFanAggregator interface {
+	NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds []EdgeKind) []NodeFanRow
+}

@@ -691,6 +691,115 @@ func (g *Graph) IfaceImplementsRows() []IfaceImplementsRow {
 	return out
 }
 
+// NodeDegreeCounts is the in-memory reference implementation of
+// NodeDegreeAggregator. Walks the per-node in/out edge buckets the
+// in-memory backend already maintains — same cost as the per-node
+// loop GraphConnectivity ran before this capability landed, just
+// folded into one method call so the analyzer can pick the disk
+// backend's bulk implementation transparently. Missing ids are
+// elided from the result (matching the disk contract).
+func (g *Graph) NodeDegreeCounts(ids []string, usageKinds []EdgeKind) []NodeDegreeRow {
+	if len(ids) == 0 {
+		return nil
+	}
+	usage := make(map[EdgeKind]struct{}, len(usageKinds))
+	for _, k := range usageKinds {
+		usage[k] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]NodeDegreeRow, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		// Skip unknown ids — the disk backend's WHERE n.id IN $ids
+		// clause naturally drops them; mirror that here so both
+		// backends return the same row count.
+		if g.GetNode(id) == nil {
+			continue
+		}
+		in := g.GetInEdges(id)
+		row := NodeDegreeRow{
+			NodeID:   id,
+			InCount:  len(in),
+			OutCount: len(g.GetOutEdges(id)),
+		}
+		if len(usage) > 0 {
+			for _, e := range in {
+				if e == nil {
+					continue
+				}
+				if _, ok := usage[e.Kind]; ok {
+					row.UsageInCount++
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// NodeFanCounts is the in-memory reference implementation of
+// NodeFanAggregator. Two passes over the per-node in/out edge buckets
+// the in-memory backend already maintains, filtered by the caller's
+// kind sets. Disk backends override with one Cypher per direction
+// to drop the AllEdges() materialisation FindHotspots / health_score
+// were running every call.
+func (g *Graph) NodeFanCounts(ids []string, fanInKinds []EdgeKind, fanOutKinds []EdgeKind) []NodeFanRow {
+	if len(ids) == 0 {
+		return nil
+	}
+	inSet := make(map[EdgeKind]struct{}, len(fanInKinds))
+	for _, k := range fanInKinds {
+		inSet[k] = struct{}{}
+	}
+	outSet := make(map[EdgeKind]struct{}, len(fanOutKinds))
+	for _, k := range fanOutKinds {
+		outSet[k] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]NodeFanRow, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		if g.GetNode(id) == nil {
+			continue
+		}
+		row := NodeFanRow{NodeID: id}
+		if len(inSet) > 0 {
+			for _, e := range g.GetInEdges(id) {
+				if e == nil {
+					continue
+				}
+				if _, ok := inSet[e.Kind]; ok {
+					row.FanIn++
+				}
+			}
+		}
+		if len(outSet) > 0 {
+			for _, e := range g.GetOutEdges(id) {
+				if e == nil {
+					continue
+				}
+				if _, ok := outSet[e.Kind]; ok {
+					row.FanOut++
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 // SetEdgeProvenanceBatch is the batched sibling of SetEdgeProvenance.
 // Same story as ReindexEdges: per-call in memory, one transaction in
 // the disk backends. Returns the number of edges whose Origin
