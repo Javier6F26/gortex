@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"maps"
 	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -72,9 +73,7 @@ func (s *Server) handleGetRepoOutline(ctx context.Context, req mcp.CallToolReque
 		// Unbound: Stats().ByLanguage already aggregates this server-
 		// side; the cgo cost is one GROUP BY instead of one row per node.
 		stats := s.graph.Stats()
-		for lang, c := range stats.ByLanguage {
-			langCounts[lang] = c
-		}
+		maps.Copy(langCounts, stats.ByLanguage)
 		totalScopedNodes = stats.TotalNodes
 	}
 	var languages []langEntry

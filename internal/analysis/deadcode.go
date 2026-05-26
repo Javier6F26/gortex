@@ -3,6 +3,7 @@ package analysis
 import (
 	"math"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -352,11 +353,8 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 			allowed := incomingUsageKinds(n.Kind)
 			inEdges := incomingByID[n.ID]
 			for _, e := range inEdges {
-				for _, k := range allowed {
-					if e.Kind == k {
-						incomingCount++
-						break
-					}
+				if slices.Contains(allowed, e.Kind) {
+					incomingCount++
 				}
 			}
 		}

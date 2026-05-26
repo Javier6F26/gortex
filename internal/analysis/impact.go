@@ -95,7 +95,7 @@ func AnalyzeImpact(g graph.Store, symbolIDs []string, communities *CommunityResu
 	// Determine risk level
 	d1 := len(result.ByDepth[1])
 	d2 := len(result.ByDepth[2])
-	result.Risk = assessRisk(d1, d2, len(result.TestFiles))
+	result.Risk = assessRisk(d1, d2)
 
 	// Find affected processes
 	if processes != nil {
@@ -347,7 +347,7 @@ func filterHeuristicEntries(entries []ImpactEntry) []ImpactEntry {
 	return kept
 }
 
-func assessRisk(directDeps, transitiveDeps, testFiles int) RiskLevel {
+func assessRisk(directDeps, transitiveDeps int) RiskLevel {
 	if directDeps >= 10 || (directDeps >= 5 && transitiveDeps >= 20) {
 		return RiskCritical
 	}

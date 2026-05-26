@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -443,7 +444,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 	// Gather recent symbols from parameter or session state.
 	var recentIDs []string
 	if recentStr != "" {
-		for _, id := range strings.Split(recentStr, ",") {
+		for id := range strings.SplitSeq(recentStr, ",") {
 			recentIDs = append(recentIDs, strings.TrimSpace(id))
 		}
 	}
@@ -578,14 +579,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 	var candidates []prefetchCandidate
 	for id, sc := range scoreMap {
 		// Exclude recently viewed symbols themselves
-		isRecent := false
-		for _, rid := range recentIDs {
-			if id == rid {
-				isRecent = true
-				break
-			}
-		}
-		if isRecent {
+		if slices.Contains(recentIDs, id) {
 			continue
 		}
 
@@ -629,14 +623,8 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 	if limit <= 0 {
 		limit = 10
 	}
-	offset := decodeCursor(req.GetString("cursor", ""))
-	if offset > totalCount {
-		offset = totalCount
-	}
-	endIdx := offset + limit
-	if endIdx > totalCount {
-		endIdx = totalCount
-	}
+	offset := min(decodeCursor(req.GetString("cursor", "")), totalCount)
+	endIdx := min(offset+limit, totalCount)
 	candidates = candidates[offset:endIdx]
 	truncated := endIdx < totalCount
 	nextCursor := ""
@@ -1090,7 +1078,7 @@ func allowedKindsSlice(allowed map[graph.NodeKind]struct{}) []graph.NodeKind {
 	for k := range allowed {
 		out = append(out, k)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	slices.Sort(out)
 	return out
 }
 
@@ -1101,7 +1089,7 @@ func allowedKindsSlice(allowed map[graph.NodeKind]struct{}) []graph.NodeKind {
 // fields included too.
 func parseAnalyzeKindsFilter(arg string) map[graph.NodeKind]struct{} {
 	out := map[graph.NodeKind]struct{}{}
-	for _, k := range strings.Split(arg, ",") {
+	for k := range strings.SplitSeq(arg, ",") {
 		k = strings.TrimSpace(strings.ToLower(k))
 		if k == "" {
 			continue
@@ -2188,13 +2176,8 @@ func (s *Server) handleScaffold(ctx context.Context, req mcp.CallToolRequest) (*
 				return mcp.NewToolResultError(fmt.Sprintf("could not read %s: %v", edit.FilePath, readErr)), nil
 			}
 			lines := strings.Split(string(content), "\n")
-			insertIdx := edit.InsertionLine - 1
-			if insertIdx < 0 {
-				insertIdx = 0
-			}
-			if insertIdx > len(lines) {
-				insertIdx = len(lines)
-			}
+			insertIdx := max(edit.InsertionLine-1, 0)
+			insertIdx = min(insertIdx, len(lines))
 			newLines := make([]string, 0, len(lines)+strings.Count(edit.Code, "\n")+2)
 			newLines = append(newLines, lines[:insertIdx]...)
 			newLines = append(newLines, "")
@@ -2546,10 +2529,7 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		}
 	}
 
-	successfullyIndexed := totalDetected - len(parseErrors)
-	if successfullyIndexed < 0 {
-		successfullyIndexed = 0
-	}
+	successfullyIndexed := max(totalDetected-len(parseErrors), 0)
 
 	var healthScore float64
 	if totalDetected > 0 {
@@ -2912,10 +2892,7 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 		for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
 			symbolStart += len(lines[i]) + 1
 		}
-		symbolEnd := symbolStart + len(symbolSource)
-		if symbolEnd > len(fileStr) {
-			symbolEnd = len(fileStr)
-		}
+		symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))
 
 		offset := strings.Index(fileStr[symbolStart:symbolEnd], o.edit.OldSource)
 		if offset < 0 {
@@ -3089,10 +3066,7 @@ func (s *Server) handleGetContracts(ctx context.Context, req mcp.CallToolRequest
 	if contractsOffset > contractsTotal {
 		contractsOffset = contractsTotal
 	}
-	contractsEnd := contractsOffset + contractsLimit
-	if contractsEnd > contractsTotal {
-		contractsEnd = contractsTotal
-	}
+	contractsEnd := min(contractsOffset+contractsLimit, contractsTotal)
 	filtered = filtered[contractsOffset:contractsEnd]
 	contractsTruncated := contractsEnd < contractsTotal
 	contractsNextCursor := ""

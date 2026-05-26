@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
 	"sort"
 	"strings"
 
@@ -1304,10 +1305,8 @@ func appendUnique(dst []string, v string) []string {
 	if v == "" {
 		return dst
 	}
-	for _, x := range dst {
-		if x == v {
-			return dst
-		}
+	if slices.Contains(dst, v) {
+		return dst
 	}
 	return append(dst, v)
 }

@@ -146,11 +146,11 @@ func TestAnalyzeImpact_DropsHeuristicNoiseAtTransitiveDepths(t *testing.T) {
 }
 
 func TestAnalyzeImpact_RiskLevels(t *testing.T) {
-	assert.Equal(t, RiskLow, assessRisk(0, 0, 0))
-	assert.Equal(t, RiskLow, assessRisk(1, 1, 0))
-	assert.Equal(t, RiskMedium, assessRisk(2, 3, 0))
-	assert.Equal(t, RiskHigh, assessRisk(5, 5, 0))
-	assert.Equal(t, RiskCritical, assessRisk(10, 10, 0))
+	assert.Equal(t, RiskLow, assessRisk(0, 0))
+	assert.Equal(t, RiskLow, assessRisk(1, 1))
+	assert.Equal(t, RiskMedium, assessRisk(2, 3))
+	assert.Equal(t, RiskHigh, assessRisk(5, 5))
+	assert.Equal(t, RiskCritical, assessRisk(10, 10))
 }
 
 func TestScoreEntryPoint(t *testing.T) {

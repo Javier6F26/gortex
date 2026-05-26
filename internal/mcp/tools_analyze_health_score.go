@@ -272,10 +272,7 @@ func (s *Server) handleAnalyzeHealthScore(ctx context.Context, req mcp.CallToolR
 		// (30..365d) = 100→50; stale-zone (365..1095d) = 50→0;
 		// dead (>1095d) = 0.
 		if ts, ok := extractTimestamp(n.Meta); ok {
-			ageDays := int(now.Sub(time.Unix(ts, 0)).Hours() / 24)
-			if ageDays < 0 {
-				ageDays = 0
-			}
+			ageDays := max(int(now.Sub(time.Unix(ts, 0)).Hours()/24), 0)
 			row.AgeDays = &ageDays
 			recHealth := recencyScore(ageDays)
 			row.RecencyPct = &recHealth

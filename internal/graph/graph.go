@@ -2,6 +2,7 @@ package graph
 
 import (
 	"iter"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1356,7 +1357,7 @@ func (g *Graph) AddBatch(nodes []*Node, edges []*Edge) {
 		inEdgesByShard[shardIdx(e.To)] = append(inEdgesByShard[shardIdx(e.To)], e)
 	}
 
-	for i := 0; i < numShards; i++ {
+	for i := range numShards {
 		if len(nodesByShard[i]) == 0 && len(outEdgesByShard[i]) == 0 && len(inEdgesByShard[i]) == 0 {
 			continue
 		}
@@ -2506,10 +2507,8 @@ func (g *Graph) ReachableForwardByKinds(seeds []string, kinds []EdgeKind) map[st
 func (g *Graph) ThrowerErrorSurface(pathPrefix string) []ThrowerErrorRow {
 	byThrower := map[string]*ThrowerErrorRow{}
 	addUnique := func(set []string, v string) []string {
-		for _, s := range set {
-			if s == v {
-				return set
-			}
+		if slices.Contains(set, v) {
+			return set
 		}
 		return append(set, v)
 	}

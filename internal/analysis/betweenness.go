@@ -190,7 +190,7 @@ func samplePivots(ids []string, k int) []string {
 	rng := rand.New(rand.NewSource(betweennessSeed))
 	perm := rng.Perm(len(ids))
 	out := make([]string, k)
-	for i := 0; i < k; i++ {
+	for i := range k {
 		out[i] = ids[perm[i]]
 	}
 	return out

@@ -447,7 +447,7 @@ func (s *Server) resolveOverlayEdges(layer *graph.OverlayLayer) {
 	// in-place via AddEdge / removal pattern (layer is meant
 	// to be append-only post-construction; the resolver pass runs
 	// before the layer is handed to the View, so we still own it).
-	for from, edges := range layer.OutEdgesByFromAll() {
+	for _, edges := range layer.OutEdgesByFromAll() {
 		for _, e := range edges {
 			if !strings.HasPrefix(e.To, unresolvedPrefix) {
 				continue
@@ -464,13 +464,12 @@ func (s *Server) resolveOverlayEdges(layer *graph.OverlayLayer) {
 			if target == "" {
 				continue
 			}
-			resolved := s.lookupOverlayTarget(layer, target, from)
+			resolved := s.lookupOverlayTarget(layer, target)
 			if resolved == "" {
 				continue
 			}
 			e.To = resolved
 		}
-		_ = from
 	}
 	// Rebuild the layer's inEdges index now that targets may have
 	// changed. The layer exposes a Rebuild helper so we don't have
@@ -482,7 +481,7 @@ func (s *Server) resolveOverlayEdges(layer *graph.OverlayLayer) {
 // short name in (layer ∪ base). Returns the node ID on a unique
 // match, empty string otherwise. Tied matches return empty so the
 // edge stays as a placeholder rather than picking the wrong target.
-func (s *Server) lookupOverlayTarget(layer *graph.OverlayLayer, name, _fromID string) string {
+func (s *Server) lookupOverlayTarget(layer *graph.OverlayLayer, name string) string {
 	overlay := layer.NodesByName(name)
 	if len(overlay) == 1 {
 		return overlay[0].ID

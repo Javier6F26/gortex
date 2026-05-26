@@ -453,10 +453,7 @@ type tokenStats struct {
 // returned and fullFile are token counts (cl100k_base via internal/tokens).
 func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile int64) {
 	ts.mu.Lock()
-	saved := fullFile - returned
-	if saved < 0 {
-		saved = 0
-	}
+	saved := max(fullFile-returned, 0)
 	ts.tokensSaved += saved
 	ts.tokensReturned += returned
 	ts.callCount++

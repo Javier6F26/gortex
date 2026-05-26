@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"maps"
 	"sort"
 	"strings"
 
@@ -194,9 +195,7 @@ func architectureSummary(allScoped []*graph.Node, inScope map[string]bool, total
 		// the backend's cached stats. One indexed groupby vs a
 		// whole-table scan over cgo.
 		stats := g.Stats()
-		for lang, c := range stats.ByLanguage {
-			langCounts[lang] = c
-		}
+		maps.Copy(langCounts, stats.ByLanguage)
 	} else {
 		for _, n := range allScoped {
 			if !inScope[n.ID] || n.Language == "" {

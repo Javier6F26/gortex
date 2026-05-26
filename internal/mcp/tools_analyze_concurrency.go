@@ -354,7 +354,7 @@ func (s *Server) handleAnalyzeUnclosedChannels(ctx context.Context, req mcp.Call
 		if anyCloser {
 			continue
 		}
-		risk, reason := classifyUnclosed(info.Sends, len(info.Senders), info.Recvs)
+		risk, reason := classifyUnclosed(len(info.Senders), info.Recvs)
 		rows = append(rows, unclosedRow{
 			Channel:  info.Channel,
 			FilePath: info.FilePath,
@@ -422,7 +422,7 @@ func (s *Server) handleAnalyzeUnclosedChannels(ctx context.Context, req mcp.Call
 // receivers — the receiver may or may not range; without arg flow
 // we can't tell. Low: senders without receivers, almost always a
 // fire-and-forget signal.
-func classifyUnclosed(sends, senders, recvs int) (string, string) {
+func classifyUnclosed(senders, recvs int) (string, string) {
 	switch {
 	case senders >= 2 && recvs >= 1:
 		return "high", "multiple senders with consumer(s) and no detected close — receivers will hang on range"
