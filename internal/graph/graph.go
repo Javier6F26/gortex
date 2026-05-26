@@ -983,6 +983,137 @@ func (g *Graph) NodesByKinds(kinds []NodeKind) []*Node {
 	return out
 }
 
+// EdgeKindCounts is the in-memory reference implementation of the
+// EdgeKindCounter capability. One AllEdges scan with a per-kind
+// tally — the exact loop the get_surprising_connections Go fallback
+// already runs today, just exposed as a single method call so the
+// disk backends can short-circuit with a Cypher GROUP BY.
+//
+// Empty graph returns nil so callers can short-circuit a downstream
+// "kindCounts != nil" gate.
+func (g *Graph) EdgeKindCounts() map[EdgeKind]int {
+	out := map[EdgeKind]int{}
+	for _, e := range g.AllEdges() {
+		if e == nil {
+			continue
+		}
+		out[e.Kind]++
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// CrossRepoEdgeCounts is the in-memory reference implementation of
+// CrossRepoEdgeAggregator. Iterates the four cross_repo_* byKind
+// buckets and groups by (kind, fromRepoPrefix, toRepoPrefix). Same
+// algorithm as the architecture handler's AllEdges loop but exposes
+// it as a single capability so disk backends can fold the join into
+// one Cypher.
+//
+// Returns nil when the graph carries no cross-repo edges (single-
+// repo mode) so the caller's empty-list rendering kicks in without
+// allocating.
+func (g *Graph) CrossRepoEdgeCounts() []CrossRepoEdgeRow {
+	type key struct {
+		kind     EdgeKind
+		fromRepo string
+		toRepo   string
+	}
+	counts := map[key]int{}
+	for _, k := range []EdgeKind{
+		EdgeCrossRepoCalls,
+		EdgeCrossRepoImplements,
+		EdgeCrossRepoExtends,
+	} {
+		for e := range g.EdgesByKind(k) {
+			if e == nil {
+				continue
+			}
+			from := g.GetNode(e.From)
+			to := g.GetNode(e.To)
+			if from == nil || to == nil {
+				continue
+			}
+			counts[key{kind: e.Kind, fromRepo: from.RepoPrefix, toRepo: to.RepoPrefix}]++
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]CrossRepoEdgeRow, 0, len(counts))
+	for k, c := range counts {
+		out = append(out, CrossRepoEdgeRow{
+			Kind: k.kind, FromRepo: k.fromRepo, ToRepo: k.toRepo, Count: c,
+		})
+	}
+	return out
+}
+
+// FileImportCounts is the in-memory reference implementation of
+// FileImportAggregator. Iterates the EdgeImports byKind bucket and
+// groups by the target file path — coalescing to To-node FilePath
+// or, when the indexer pointed the import edge at the file node
+// directly, the target ID. Same algorithm as the AllEdges loop in
+// mostImportedFiles; the win lives in disk backends where AllEdges
+// + per-edge GetNode round-trips over cgo dwarf the few hundred
+// surviving rows.
+//
+// scope, when non-nil, bounds the result to edges whose target ID
+// lies in the slice (session-workspace clamp). A nil scope counts
+// every imports edge. An empty (non-nil) scope returns nil — never
+// a whole-graph scan.
+func (g *Graph) FileImportCounts(scope []string) []FileImportCountRow {
+	if scope != nil && len(scope) == 0 {
+		return nil
+	}
+	var allowed map[string]struct{}
+	if scope != nil {
+		allowed = make(map[string]struct{}, len(scope))
+		for _, id := range scope {
+			if id == "" {
+				continue
+			}
+			allowed[id] = struct{}{}
+		}
+		if len(allowed) == 0 {
+			return nil
+		}
+	}
+	counts := map[string]int{}
+	for e := range g.EdgesByKind(EdgeImports) {
+		if e == nil {
+			continue
+		}
+		target := g.GetNode(e.To)
+		if target == nil {
+			continue
+		}
+		if allowed != nil {
+			if _, ok := allowed[target.ID]; !ok {
+				continue
+			}
+		}
+		path := target.FilePath
+		if path == "" {
+			path = target.ID
+		}
+		if path == "" {
+			continue
+		}
+		counts[path]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	out := make([]FileImportCountRow, 0, len(counts))
+	for p, c := range counts {
+		out = append(out, FileImportCountRow{FilePath: p, Count: c})
+	}
+	return out
+}
+
 // SetEdgeProvenanceBatch is the batched sibling of SetEdgeProvenance.
 // Same story as ReindexEdges: per-call in memory, one transaction in
 // the disk backends. Returns the number of edges whose Origin

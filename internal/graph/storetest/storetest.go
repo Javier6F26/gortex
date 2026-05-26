@@ -81,6 +81,9 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("NodesInFilesByKindFinder", func(t *testing.T) { testNodesInFilesByKindFinder(t, factory) })
 	t.Run("EdgesByKindsScanner", func(t *testing.T) { testEdgesByKindsScanner(t, factory) })
 	t.Run("NodesByKindsScanner", func(t *testing.T) { testNodesByKindsScanner(t, factory) })
+	t.Run("EdgeKindCounter", func(t *testing.T) { testEdgeKindCounter(t, factory) })
+	t.Run("CrossRepoEdgeAggregator", func(t *testing.T) { testCrossRepoEdgeAggregator(t, factory) })
+	t.Run("FileImportAggregator", func(t *testing.T) { testFileImportAggregator(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -2008,5 +2011,193 @@ func testNodesByKindsScanner(t *testing.T, factory Factory) {
 	wantDup := []string{"pkg/a.go::Fn1", "pkg/a.go::Fn2"}
 	if got := sortNodeIDs(gotDup); fmt.Sprint(got) != fmt.Sprint(wantDup) {
 		t.Fatalf("NodesByKinds(dup function) = %v, want %v", got, wantDup)
+	}
+}
+
+// testEdgeKindCounter exercises the optional graph.EdgeKindCounter
+// capability. Seeds a graph with several kinds in different
+// frequencies and asserts the per-kind tally matches what an
+// AllEdges()+map[kind]++ loop would compute.
+func testEdgeKindCounter(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	ek, ok := s.(graph.EdgeKindCounter)
+	if !ok {
+		t.Skip("backend does not implement graph.EdgeKindCounter")
+	}
+
+	// Empty graph returns nil or empty — both are valid per the
+	// contract; callers must treat them the same.
+	if got := ek.EdgeKindCounts(); len(got) != 0 {
+		t.Fatalf("EdgeKindCounts(empty) = %v, want empty", got)
+	}
+
+	s.AddNode(mkNode("A", "A", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("B", "B", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("C", "C", "a.go", graph.KindFunction))
+	s.AddNode(mkNode("f1", "a.go", "a.go", graph.KindFile))
+
+	// 3 calls, 2 references, 1 imports.
+	e1 := mkEdge("A", "B", graph.EdgeCalls)
+	e2 := mkEdge("A", "C", graph.EdgeCalls)
+	e2.Line = 2
+	e3 := mkEdge("B", "C", graph.EdgeCalls)
+	e3.Line = 3
+	e4 := mkEdge("A", "C", graph.EdgeReferences)
+	e4.Line = 4
+	e5 := mkEdge("B", "C", graph.EdgeReferences)
+	e5.Line = 5
+	e6 := mkEdge("A", "f1", graph.EdgeImports)
+	e6.Line = 6
+	s.AddEdge(e1)
+	s.AddEdge(e2)
+	s.AddEdge(e3)
+	s.AddEdge(e4)
+	s.AddEdge(e5)
+	s.AddEdge(e6)
+
+	got := ek.EdgeKindCounts()
+	if got[graph.EdgeCalls] != 3 {
+		t.Fatalf("EdgeKindCounts[calls] = %d, want 3", got[graph.EdgeCalls])
+	}
+	if got[graph.EdgeReferences] != 2 {
+		t.Fatalf("EdgeKindCounts[references] = %d, want 2", got[graph.EdgeReferences])
+	}
+	if got[graph.EdgeImports] != 1 {
+		t.Fatalf("EdgeKindCounts[imports] = %d, want 1", got[graph.EdgeImports])
+	}
+	// No extends edge was added; absence must produce 0 via the
+	// zero value (callers index with `m[k]`).
+	if got[graph.EdgeExtends] != 0 {
+		t.Fatalf("EdgeKindCounts[extends] = %d, want 0", got[graph.EdgeExtends])
+	}
+}
+
+// testCrossRepoEdgeAggregator exercises the optional
+// graph.CrossRepoEdgeAggregator capability. Seeds a two-repo graph
+// with one cross_repo_calls + one cross_repo_implements and two
+// same-repo edges of other kinds. Asserts the per-triple counts and
+// that single-repo edges drop out.
+func testCrossRepoEdgeAggregator(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	ag, ok := s.(graph.CrossRepoEdgeAggregator)
+	if !ok {
+		t.Skip("backend does not implement graph.CrossRepoEdgeAggregator")
+	}
+
+	// Empty graph -> nil.
+	if got := ag.CrossRepoEdgeCounts(); got != nil {
+		t.Fatalf("CrossRepoEdgeCounts(empty) = %v, want nil", got)
+	}
+
+	s.AddNode(mkRepoNode("repoA::Caller", "Caller", "a/c.go", "repoA", graph.KindFunction))
+	s.AddNode(mkRepoNode("repoA::Callee2", "Callee2", "a/d.go", "repoA", graph.KindFunction))
+	s.AddNode(mkRepoNode("repoB::Callee", "Callee", "b/d.go", "repoB", graph.KindFunction))
+	s.AddNode(mkRepoNode("repoB::Iface", "Iface", "b/i.go", "repoB", graph.KindType))
+	s.AddNode(mkRepoNode("repoA::Impl", "Impl", "a/i.go", "repoA", graph.KindType))
+
+	// Two cross-repo edges to the same (kind, fromRepo, toRepo) +
+	// one cross-repo implements + one non-cross edge.
+	e1 := mkEdge("repoA::Caller", "repoB::Callee", graph.EdgeCrossRepoCalls)
+	e2 := mkEdge("repoA::Caller", "repoB::Callee", graph.EdgeCrossRepoCalls)
+	e2.Line = 2
+	e3 := mkEdge("repoA::Impl", "repoB::Iface", graph.EdgeCrossRepoImplements)
+	e3.Line = 3
+	e4 := mkEdge("repoA::Caller", "repoA::Callee2", graph.EdgeCalls)
+	e4.Line = 4
+	s.AddEdge(e1)
+	s.AddEdge(e2)
+	s.AddEdge(e3)
+	s.AddEdge(e4)
+
+	rows := ag.CrossRepoEdgeCounts()
+	// Sort for stable assertions — capability output order is
+	// unspecified.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Kind != rows[j].Kind {
+			return rows[i].Kind < rows[j].Kind
+		}
+		if rows[i].FromRepo != rows[j].FromRepo {
+			return rows[i].FromRepo < rows[j].FromRepo
+		}
+		return rows[i].ToRepo < rows[j].ToRepo
+	})
+	if len(rows) != 2 {
+		t.Fatalf("CrossRepoEdgeCounts: got %d rows, want 2 (rows=%v)", len(rows), rows)
+	}
+	if rows[0].Kind != graph.EdgeCrossRepoCalls || rows[0].FromRepo != "repoA" || rows[0].ToRepo != "repoB" || rows[0].Count != 2 {
+		t.Fatalf("CrossRepoEdgeCounts[0] = %+v, want {cross_repo_calls,repoA,repoB,2}", rows[0])
+	}
+	if rows[1].Kind != graph.EdgeCrossRepoImplements || rows[1].FromRepo != "repoA" || rows[1].ToRepo != "repoB" || rows[1].Count != 1 {
+		t.Fatalf("CrossRepoEdgeCounts[1] = %+v, want {cross_repo_implements,repoA,repoB,1}", rows[1])
+	}
+}
+
+// testFileImportAggregator exercises the optional
+// graph.FileImportAggregator capability. Seeds a graph with several
+// import edges and asserts the per-target-file counts. Covers both
+// the unscoped and the scope-bound paths plus the file-node-by-ID
+// vs symbol-FilePath import shapes.
+func testFileImportAggregator(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	ag, ok := s.(graph.FileImportAggregator)
+	if !ok {
+		t.Skip("backend does not implement graph.FileImportAggregator")
+	}
+
+	if got := ag.FileImportCounts(nil); got != nil {
+		t.Fatalf("FileImportCounts(empty graph) = %v, want nil", got)
+	}
+
+	// Two targets, three importing files, mixed shapes.
+	s.AddNode(mkNode("pkg/popular.go", "popular.go", "pkg/popular.go", graph.KindFile))
+	s.AddNode(mkNode("PopularFn", "PopularFn", "pkg/popular.go", graph.KindFunction))
+	s.AddNode(mkNode("pkg/lonely.go", "lonely.go", "pkg/lonely.go", graph.KindFile))
+	s.AddNode(mkNode("pkg/a.go", "a.go", "pkg/a.go", graph.KindFile))
+	s.AddNode(mkNode("pkg/b.go", "b.go", "pkg/b.go", graph.KindFile))
+	s.AddNode(mkNode("pkg/c.go", "c.go", "pkg/c.go", graph.KindFile))
+
+	// pkg/popular.go imported by 3 files (two via file-id, one via symbol-FilePath).
+	s.AddEdge(mkEdge("pkg/a.go", "pkg/popular.go", graph.EdgeImports))
+	s.AddEdge(mkEdge("pkg/b.go", "pkg/popular.go", graph.EdgeImports))
+	s.AddEdge(mkEdge("pkg/c.go", "PopularFn", graph.EdgeImports))
+	// pkg/lonely.go imported once.
+	s.AddEdge(mkEdge("pkg/a.go", "pkg/lonely.go", graph.EdgeImports))
+	// A calls edge — must drop out of imports counts.
+	s.AddEdge(mkEdge("pkg/a.go", "PopularFn", graph.EdgeCalls))
+
+	rows := ag.FileImportCounts(nil)
+	got := map[string]int{}
+	for _, r := range rows {
+		got[r.FilePath] = r.Count
+	}
+	if got["pkg/popular.go"] != 3 {
+		t.Fatalf("FileImportCounts[popular.go] = %d, want 3", got["pkg/popular.go"])
+	}
+	if got["pkg/lonely.go"] != 1 {
+		t.Fatalf("FileImportCounts[lonely.go] = %d, want 1", got["pkg/lonely.go"])
+	}
+
+	// Scope-bound: only count edges whose target is in the allow set.
+	scoped := ag.FileImportCounts([]string{"pkg/lonely.go"})
+	if len(scoped) != 1 || scoped[0].FilePath != "pkg/lonely.go" || scoped[0].Count != 1 {
+		t.Fatalf("FileImportCounts(scope=lonely) = %v, want [lonely.go:1]", scoped)
+	}
+
+	// Scope-bound with file-id + symbol shape both targeting popular.
+	scopedPop := ag.FileImportCounts([]string{"pkg/popular.go", "PopularFn"})
+	gotPop := map[string]int{}
+	for _, r := range scopedPop {
+		gotPop[r.FilePath] = r.Count
+	}
+	if gotPop["pkg/popular.go"] != 3 {
+		t.Fatalf("FileImportCounts(scope=popular+sym) = %v, want popular.go:3", scopedPop)
+	}
+
+	// Empty (non-nil) scope MUST return nil — never a whole-graph scan.
+	if got := ag.FileImportCounts([]string{}); got != nil {
+		t.Fatalf("FileImportCounts(empty scope) = %v, want nil", got)
 	}
 }

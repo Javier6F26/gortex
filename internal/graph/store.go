@@ -947,3 +947,84 @@ type EdgesByKindsScanner interface {
 type NodesByKindsScanner interface {
 	NodesByKinds(kinds []NodeKind) []*Node
 }
+
+// EdgeKindCounter is an optional capability backends MAY implement
+// to return one row per distinct edge kind with its occurrence
+// count, server-side. Used by handleGetSurprisingConnections to
+// derive the "rare kinds" set (kinds whose share of all edges is at
+// or below the rare_kind_pct threshold) without materialising every
+// edge over cgo just to bucket by Kind. On the gortex workspace the
+// AllEdges() bucket pass was ~286k edges over cgo per call; the
+// aggregator returns ~30 rows.
+//
+// The map's key is the EdgeKind; the value is the integer occurrence
+// count. Empty graph returns nil (or an empty map — callers MUST
+// treat both as "no rare kinds detected").
+//
+// Optional capability — handleGetSurprisingConnections falls back
+// to the AllEdges-driven kind bucketing when the backend doesn't
+// implement it.
+type EdgeKindCounter interface {
+	EdgeKindCounts() map[EdgeKind]int
+}
+
+// CrossRepoEdgeRow is one tuple returned by CrossRepoEdgeAggregator.
+// Kind is the cross_repo_* edge kind verbatim. FromRepo / ToRepo
+// are the source / target node's RepoPrefix; Count is the number of
+// underlying edges that share the triple.
+type CrossRepoEdgeRow struct {
+	Kind     EdgeKind
+	FromRepo string
+	ToRepo   string
+	Count    int
+}
+
+// CrossRepoEdgeAggregator is an optional capability backends MAY
+// implement to return pre-grouped cross-repo edge counts. Used by
+// the get_architecture handler's cross_repo rollup, which previously
+// scanned AllEdges() + per-edge GetNode(from)+GetNode(to) just to
+// emit one row per (kind, from_repo, to_repo). On the gortex
+// workspace that meant ~286k edge rows + ~thousands of GetNode
+// round-trips over cgo for typically <100 cross-repo rows. The
+// aggregator runs one Cypher GROUP BY and ships only the surviving
+// per-triple counts.
+//
+// Cross-repo edges are identified by graph.BaseKindForCrossRepo —
+// the disk implementation MUST use the same kind list (so single-
+// repo graphs return an empty slice, not a whole-graph scan).
+//
+// Optional capability — handleGetArchitecture falls back to the
+// AllEdges-driven loop when the backend doesn't implement it.
+type CrossRepoEdgeAggregator interface {
+	CrossRepoEdgeCounts() []CrossRepoEdgeRow
+}
+
+// FileImportCountRow is one tuple returned by FileImportAggregator.
+// FilePath is the imported file path (the target node's FilePath, or
+// the target node's ID when the indexer pointed the import edge at
+// the file node directly). Count is the number of distinct EdgeImports
+// edges whose To resolves to that path.
+type FileImportCountRow struct {
+	FilePath string
+	Count    int
+}
+
+// FileImportAggregator is an optional capability backends MAY
+// implement to return per-target-file incoming-imports counts in
+// one backend round-trip. Used by mostImportedFiles (shared between
+// get_repo_outline and suggest_queries) which previously scanned
+// AllEdges() + per-edge GetNode(to) just to bucket counts by path.
+// On the gortex workspace that loop materialised ~286k edges + per-
+// edge GetNode round-trips over cgo to produce a top-10 list. The
+// aggregator GROUPs server-side and ships the per-file counts only.
+//
+// scope, when non-nil, bounds the counted edges to those whose target
+// node ID lies in the slice (session-workspace clamp). An empty (but
+// non-nil) scope returns nil — never a whole-graph scan. A nil scope
+// means "no clamp" and counts every imports edge.
+//
+// Optional capability — mostImportedFiles falls back to the
+// AllEdges-driven loop when the backend doesn't implement it.
+type FileImportAggregator interface {
+	FileImportCounts(scope []string) []FileImportCountRow
+}
