@@ -57,6 +57,15 @@ type Store struct {
 	// call. FlushBulk dedupes the buffers and commits via Kuzu's
 	// COPY FROM CSV — one INSERT-only statement per table, no MERGE
 	// cost, no per-row Cypher parse/plan. See BeginBulkLoad doc.
+	// bulkSlot serialises BeginBulkLoad ↔ FlushBulk against the
+	// per-Store buffer. Concurrent per-repo Indexers each call
+	// BeginBulkLoad on the shared Store at drain time; without this
+	// mutex they would race on bulkActive and the second caller
+	// would observe bulkActive==true. Holding the slot for the full
+	// Begin→Flush window means concurrent drains serialise — the
+	// second drain blocks at BeginBulkLoad until the first flush
+	// returns the slot.
+	bulkSlot   sync.Mutex
 	bulkMu     sync.Mutex
 	bulkActive bool
 	bulkNodes  []*graph.Node
@@ -1502,13 +1511,17 @@ var _ graph.BulkLoader = (*Store)(nil)
 // BeginBulkLoad enters buffer-mode write. Subsequent AddBatch calls
 // append into in-memory slices without round-tripping to Kuzu; the
 // buffer is committed via Kuzu's COPY FROM primitive when FlushBulk
-// is called. Calling twice without an intervening FlushBulk panics.
+// is called.
+//
+// When two callers race (concurrent per-repo Indexers draining their
+// shadows into the same Store), the second blocks on bulkSlot until
+// the first FlushBulk releases it — drains serialise instead of
+// panicking. The matching FlushBulk MUST run on the same goroutine
+// (the IndexCtx defer pattern guarantees this).
 func (s *Store) BeginBulkLoad() {
+	s.bulkSlot.Lock()
 	s.bulkMu.Lock()
 	defer s.bulkMu.Unlock()
-	if s.bulkActive {
-		panic("store_ladybug: BeginBulkLoad called twice without FlushBulk")
-	}
 	s.bulkActive = true
 }
 
@@ -1535,6 +1548,17 @@ func (s *Store) FlushBulk() error {
 	s.bulkEdges = nil
 	s.bulkActive = false
 	s.bulkMu.Unlock()
+	// Release the per-Store bulk slot so the next concurrent drain
+	// (a different per-repo Indexer waiting in BeginBulkLoad) can
+	// take it. Held across the COPY below in the original design;
+	// releasing here lets the next caller start staging rows into
+	// its own buffer while this one's COPY is still in flight. The
+	// underlying COPY queries themselves still serialise on
+	// writeMu via runCopyPooled — that's where Ladybug's
+	// single-writer constraint actually bites — so unblocking the
+	// staging window is pure latency win, not a concurrency
+	// hazard.
+	s.bulkSlot.Unlock()
 
 	// Always take the COPY path. The prior fallback to per-row
 	// upsertNodeLocked when the store was non-empty existed to
