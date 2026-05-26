@@ -117,6 +117,23 @@ func (s *Swappable) SearchSymbolBundles(query string, limit int) []SymbolBundle 
 	return nil
 }
 
+// VectorChannelOnly forwards to the inner backend when it implements
+// the vector-only channel pull (today: HybridBackend). Lets the
+// engine fetch the vector channel without re-running text BM25 —
+// the bundle path already has the text hits. Returns (nil, zero
+// timings) when the inner backend isn't vector-aware.
+func (s *Swappable) VectorChannelOnly(query string, limit int) ([]string, ChannelTimings) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	type vco interface {
+		VectorChannelOnly(query string, limit int) ([]string, ChannelTimings)
+	}
+	if v, ok := s.inner.(vco); ok {
+		return v.VectorChannelOnly(query, limit)
+	}
+	return nil, ChannelTimings{}
+}
+
 func (s *Swappable) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

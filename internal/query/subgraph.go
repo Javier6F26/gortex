@@ -79,6 +79,17 @@ type QueryOptions struct {
 	// still works, the bundle's edges are just discarded after the
 	// per-call rerank. Never serialised.
 	RerankContext *rerank.Context `json:"-"`
+
+	// SkipInnerRerank, when true, makes SearchSymbolsRanked skip its
+	// own per-call rerank.Pipeline.Rerank pass. Callers that fan a
+	// search across N expansion terms and merge the results themselves
+	// (the MCP search_symbols handler) re-run the rerank once on the
+	// merged candidate set with the full session-aware context — the
+	// inner per-call rerank is wasted work whose output is mostly
+	// discarded by the merge. Flipping this on collapses N+1
+	// engine-side rerank invocations to zero. The merge-side rerank
+	// is the source of truth either way.
+	SkipInnerRerank bool `json:"-"`
 }
 
 // SearchTimings carries per-phase wall-clock measurements collected

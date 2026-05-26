@@ -450,7 +450,7 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 	// ranking within one merged corpus. No-op for a single-repo set.
 	crossRepoRerank(cands)
 
-	if e.rerank != nil {
+	if e.rerank != nil && !opts.SkipInnerRerank {
 		ctx := rctx
 		if ctx == nil {
 			ctx = &rerank.Context{}
@@ -531,7 +531,14 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 	if bsb, ok := backend.(search.SymbolBundleSearcherBackend); ok {
 		// Pull the vector channel separately when present. Bundles
 		// cover BM25 only; the engine merges vector hits below.
-		vectorBackend, vectorOK := backend.(search.ChannelSearcher)
+		// VectorChannelOnly avoids re-running the text BM25 path —
+		// the bundle already returned the BM25 hits and their full
+		// node + edge payload. Falling back to SearchChannels here
+		// would double-pay the FTS Cypher cost per BM25 fan-out.
+		type vectorOnly interface {
+			VectorChannelOnly(query string, limit int) ([]string, search.ChannelTimings)
+		}
+		vectorOnlyBackend, vectorOnlyOK := backend.(vectorOnly)
 		bundleStart := time.Now()
 		bundles := bsb.SearchSymbolBundles(query, limit*2)
 		if timings != nil {
@@ -565,8 +572,16 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, timings *Searc
 		}
 		// Vector channel: only when the bundle path took the BM25
 		// branch. Otherwise the fallback path below pulls both.
-		if vectorOK {
-			_, vectorIDs = vectorBackend.SearchChannels(query, limit*2)
+		// VectorChannelOnly skips the BM25 re-run (the bundle already
+		// returned text hits + their full payload); a few hundred
+		// microseconds of embed + ANN, not a second FTS Cypher.
+		if vectorOnlyOK {
+			vecIDs, stats := vectorOnlyBackend.VectorChannelOnly(query, limit*2)
+			vectorIDs = vecIDs
+			if timings != nil {
+				timings.EmbedMS += stats.EmbedMS
+				timings.VectorSearchMS += stats.VectorSearchMS
+			}
 		}
 	}
 

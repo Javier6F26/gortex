@@ -186,6 +186,14 @@ func fetchAndMergeBM25(eng *query.Engine, original string, expanded []string, fe
 // the primary call and the combined-expansion call. Pass nil to skip
 // instrumentation (e.g. unit tests that don't care).
 func fetchAndMergeBM25Timed(eng *query.Engine, original string, expanded []string, fetchLimit int, scope query.QueryOptions, timings *query.SearchTimings) (merged []*graph.Node, primaryCount int) {
+	// The merged candidate set is reranked by the handler with the
+	// full session-aware context; the per-call inner rerank inside
+	// SearchSymbolsRanked would be wasted work whose output the
+	// merge discards. SkipInnerRerank collapses the N+1 engine
+	// rerank invocations to zero — drops ~150-300ms per call on
+	// Ladybug (each inner rerank's Context.prepare costs at minimum
+	// two batched edge fetches when the bundle cache misses).
+	scope.SkipInnerRerank = true
 	primaryStart := time.Now()
 	primary := eng.SearchSymbolsScoped(original, fetchLimit, scope)
 	primaryCount = len(primary)

@@ -102,6 +102,35 @@ type ChannelTimings struct {
 	VectorSearchMS int64
 }
 
+// VectorChannelOnly returns the vector-channel IDs (embedder + ANN
+// search) WITHOUT re-running the text BM25 path. Used by the engine
+// when the text channel has already been satisfied via the bundle
+// path — the bundle returns Nodes + edges + scores already, so
+// re-running text Search would double-pay the FTS cost. Returns
+// nil and a zero ChannelTimings when the vector index is empty.
+func (h *HybridBackend) VectorChannelOnly(query string, limit int) ([]string, ChannelTimings) {
+	var stats ChannelTimings
+	if h == nil || h.vector == nil || h.vector.Count() == 0 {
+		return nil, stats
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	embedStart := time.Now()
+	queryVec, err := h.embedder.Embed(ctx, query)
+	stats.EmbedMS = time.Since(embedStart).Milliseconds()
+	if err != nil || queryVec == nil {
+		return nil, stats
+	}
+	fetch := limit * 2
+	if h.vector.HasChunks() {
+		fetch = limit * 8
+	}
+	vecStart := time.Now()
+	rawVecIDs := h.vector.Search(queryVec, fetch)
+	stats.VectorSearchMS = time.Since(vecStart).Milliseconds()
+	return h.dechunkVectorIDs(rawVecIDs, limit*2), stats
+}
+
 // SearchChannelsTimed is SearchChannels with a per-phase timing
 // breakdown so callers can prove which sub-step (text BM25 vs
 // vector embed vs vector ANN) actually cost wall-clock time.
