@@ -952,6 +952,37 @@ func (g *Graph) NodesInFilesByKind(files []string, kinds []NodeKind) []*Node {
 	return out
 }
 
+// NodesByKinds is the in-memory reference implementation of the
+// NodesByKindsScanner capability. Loops the existing NodesByKind
+// iterator per requested kind — algorithmic cost identical to the
+// hand-written `for _, n := range AllNodes() if n.Kind == K` pattern
+// the metadata analyzers used before. The win lives in the disk
+// backends, where one IN-list Cypher replaces the AllNodes() pull.
+//
+// Dedupes the kind set up front so a sloppy caller passing the same
+// kind twice doesn't double-yield — matches the Cypher backend's
+// IN-list dedup. Empty kinds returns nil without touching the store.
+func (g *Graph) NodesByKinds(kinds []NodeKind) []*Node {
+	if len(kinds) == 0 {
+		return nil
+	}
+	seen := make(map[NodeKind]struct{}, len(kinds))
+	var out []*Node
+	for _, k := range kinds {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		for n := range g.NodesByKind(k) {
+			if n == nil {
+				continue
+			}
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
 // SetEdgeProvenanceBatch is the batched sibling of SetEdgeProvenance.
 // Same story as ReindexEdges: per-call in memory, one transaction in
 // the disk backends. Returns the number of edges whose Origin

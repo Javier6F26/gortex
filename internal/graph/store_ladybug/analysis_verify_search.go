@@ -12,7 +12,55 @@ var (
 	_ graph.FileImporters            = (*Store)(nil)
 	_ graph.InEdgeCounter            = (*Store)(nil)
 	_ graph.NodesInFilesByKindFinder = (*Store)(nil)
+	_ graph.NodesByKindsScanner      = (*Store)(nil)
 )
+
+// NodesByKinds runs the multi-kind candidate scan inside Ladybug.
+// Replaces the AllNodes()-then-`if n.Kind != allowed` loop used by
+// the metadata analyze handlers (todos, stale_code, stale_flags,
+// ownership, coverage_gaps, coverage_summary, cgo_users, wasm_users,
+// orphan_tables, unreferenced_tables). The legacy path pulled every
+// node over cgo on every call — ~70k rows on the gortex workspace —
+// just to keep the handful that matched one of a few kinds. The
+// Cypher IN-list ships only the matching rows.
+//
+// One IN query, not a per-kind loop, because every extra round-trip
+// is one more cgo crossing. Kinds dedup keeps the IN list tight when
+// the caller passes redundant kinds, matching the in-memory reference.
+//
+// Meta filtering stays in Go: the meta column is a gob-encoded
+// base64 STRING so Cypher cannot inspect its inner keys. The
+// candidate-set reduction is the win — the meta gate runs against
+// the surviving rows on the Go side.
+func (s *Store) NodesByKinds(kinds []graph.NodeKind) []*graph.Node {
+	if len(kinds) == 0 {
+		return nil
+	}
+	seen := make(map[graph.NodeKind]struct{}, len(kinds))
+	allowed := make([]any, 0, len(kinds))
+	for _, k := range kinds {
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+		allowed = append(allowed, string(k))
+	}
+	if len(allowed) == 0 {
+		return nil
+	}
+	const q = `MATCH (n:Node) WHERE n.kind IN $kinds RETURN ` + nodeReturnCols
+	rows := s.querySelect(q, map[string]any{"kinds": allowed})
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]*graph.Node, 0, len(rows))
+	for _, r := range rows {
+		if n := rowToNode(r); n != nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
 
 // FileImporters runs the importing-files lookup inside Ladybug.
 // Replaces the handleCheckReferences AllEdges() loop — that loop

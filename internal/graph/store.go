@@ -920,3 +920,30 @@ type NodesInFilesByKindFinder interface {
 type EdgesByKindsScanner interface {
 	EdgesByKinds(kinds []EdgeKind) iter.Seq[*Edge]
 }
+
+// NodesByKindsScanner is an optional capability backends MAY implement
+// to fetch every node whose Kind is in the supplied set in a single
+// backend round-trip. Replaces the AllNodes() + Go-side `if n.Kind !=
+// allowed` filter used by the metadata-oriented analyze handlers
+// (todos, stale_code, stale_flags, ownership, coverage_gaps,
+// coverage_summary, cgo_users, wasm_users, orphan_tables,
+// unreferenced_tables). Each of those scans the entire node table just
+// to keep one or two kinds — on Ladybug that's ~70k rows over cgo on
+// the gortex workspace per call. The capability runs
+// `MATCH (n:Node) WHERE n.kind IN $kinds RETURN ...` and ships only the
+// matching rows.
+//
+// Why a separate kinds-IN scanner instead of looping the existing
+// NodesByKind iterator per kind: on Ladybug NodesByKind is one query
+// per call. Looping it for {function, method} doubles the round-trip
+// count and rebuilds the row decoder for each pass. One IN-list query
+// returns the union directly. The dedup is intentional — duplicated
+// kinds in the input never reach the IN-list, matching the in-memory
+// reference's behaviour.
+//
+// Optional capability — handlers fall back to AllNodes-driven scanning
+// when the backend doesn't implement it. Empty kinds returns nil
+// without touching the backend.
+type NodesByKindsScanner interface {
+	NodesByKinds(kinds []NodeKind) []*Node
+}

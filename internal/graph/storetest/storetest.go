@@ -80,6 +80,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("InEdgeCounter", func(t *testing.T) { testInEdgeCounter(t, factory) })
 	t.Run("NodesInFilesByKindFinder", func(t *testing.T) { testNodesInFilesByKindFinder(t, factory) })
 	t.Run("EdgesByKindsScanner", func(t *testing.T) { testEdgesByKindsScanner(t, factory) })
+	t.Run("NodesByKindsScanner", func(t *testing.T) { testNodesByKindsScanner(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1887,5 +1888,125 @@ func testEdgesByKindsScanner(t *testing.T, factory Factory) {
 	}
 	if stopped != 1 {
 		t.Fatalf("early stop yielded %d before break, want 1", stopped)
+	}
+}
+
+// testNodesByKindsScanner exercises the optional graph.NodesByKindsScanner
+// capability. Seeds nodes of several kinds, including ones whose Meta
+// holds the keys the metadata analyzers read, and asserts:
+//   - the IN-list returns exactly the union of the requested kinds
+//     (with nodes' Meta intact so post-filtering still works);
+//   - kinds the caller did not request never surface;
+//   - empty / nil kinds returns nil without scanning;
+//   - duplicate kinds in the input never duplicate the output.
+//
+// The Meta-preservation assertion is the load-bearing one: every
+// downstream handler still runs its meta gate in Go after the kind
+// pushdown, so the capability is worthless if Meta doesn't round-trip
+// through the backend.
+func testNodesByKindsScanner(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+	scan, ok := s.(graph.NodesByKindsScanner)
+	if !ok {
+		t.Skip("backend does not implement graph.NodesByKindsScanner")
+	}
+
+	// Two functions (one with coverage meta), one method, one type,
+	// one file (with cgo meta), one todo (with assignee meta), one
+	// table. Mix of meta-bearing and meta-bare nodes so the
+	// round-trip assertion covers both shapes. Meta values stay
+	// scalar — testMetaPreserved already covers flat round-trip, and
+	// the ladybug backend's gob encoder needs gob.Register for nested
+	// map shapes (out of scope for a kind-pushdown capability test).
+	fn1 := mkNode("pkg/a.go::Fn1", "Fn1", "pkg/a.go", graph.KindFunction)
+	fn1.Meta = map[string]any{
+		"coverage_pct": 42.5,
+		"author_email": "alice@example.com",
+	}
+	fn2 := mkNode("pkg/a.go::Fn2", "Fn2", "pkg/a.go", graph.KindFunction)
+	method := mkNode("pkg/a.go::T.M", "M", "pkg/a.go", graph.KindMethod)
+	typ := mkNode("pkg/a.go::T", "T", "pkg/a.go", graph.KindType)
+	file := mkNode("pkg/a.go", "a.go", "pkg/a.go", graph.KindFile)
+	file.Meta = map[string]any{"uses_cgo": true}
+	todo := mkNode("pkg/a.go::TODO:7", "TODO", "pkg/a.go", graph.KindTodo)
+	todo.Meta = map[string]any{
+		"tag":      "TODO",
+		"assignee": "alice",
+		"text":     "wire this up",
+	}
+	tbl := mkNode("table::users", "users", "schema/001.sql", graph.KindTable)
+	tbl.Meta = map[string]any{"table": "users", "dialect": "postgres"}
+
+	for _, n := range []*graph.Node{fn1, fn2, method, typ, file, todo, tbl} {
+		s.AddNode(n)
+	}
+
+	// Function + method — the stale_code/ownership/coverage default.
+	gotFnM := scan.NodesByKinds([]graph.NodeKind{graph.KindFunction, graph.KindMethod})
+	wantFnM := []string{"pkg/a.go::Fn1", "pkg/a.go::Fn2", "pkg/a.go::T.M"}
+	if got := sortNodeIDs(gotFnM); fmt.Sprint(got) != fmt.Sprint(wantFnM) {
+		t.Fatalf("NodesByKinds(function,method) = %v, want %v", got, wantFnM)
+	}
+
+	// Meta round-trip: pick up Fn1 and assert flat scalar meta survived.
+	var fn1Got *graph.Node
+	for _, n := range gotFnM {
+		if n.ID == "pkg/a.go::Fn1" {
+			fn1Got = n
+			break
+		}
+	}
+	if fn1Got == nil {
+		t.Fatalf("Fn1 missing from result")
+	}
+	if pct, _ := fn1Got.Meta["coverage_pct"].(float64); pct != 42.5 {
+		t.Fatalf("Fn1.Meta.coverage_pct = %v, want 42.5", fn1Got.Meta["coverage_pct"])
+	}
+	if email, _ := fn1Got.Meta["author_email"].(string); email != "alice@example.com" {
+		t.Fatalf("Fn1.Meta.author_email = %q, want alice@example.com", email)
+	}
+
+	// Single kind on a kind with meta — todo/file.
+	gotTodo := scan.NodesByKinds([]graph.NodeKind{graph.KindTodo})
+	if len(gotTodo) != 1 || gotTodo[0].ID != "pkg/a.go::TODO:7" {
+		t.Fatalf("NodesByKinds(todo) = %v, want [pkg/a.go::TODO:7]", sortNodeIDs(gotTodo))
+	}
+	if tag, _ := gotTodo[0].Meta["tag"].(string); tag != "TODO" {
+		t.Fatalf("Todo.Meta.tag = %q, want TODO", tag)
+	}
+
+	gotFile := scan.NodesByKinds([]graph.NodeKind{graph.KindFile})
+	if len(gotFile) != 1 || gotFile[0].ID != "pkg/a.go" {
+		t.Fatalf("NodesByKinds(file) = %v, want [pkg/a.go]", sortNodeIDs(gotFile))
+	}
+	if cgo, _ := gotFile[0].Meta["uses_cgo"].(bool); !cgo {
+		t.Fatalf("File.Meta.uses_cgo = false, want true")
+	}
+
+	// Table kind — for orphan/unreferenced analyzers.
+	gotTbl := scan.NodesByKinds([]graph.NodeKind{graph.KindTable})
+	if len(gotTbl) != 1 || gotTbl[0].ID != "table::users" {
+		t.Fatalf("NodesByKinds(table) = %v, want [table::users]", sortNodeIDs(gotTbl))
+	}
+
+	// Empty / nil kinds — nil result, no scan.
+	if got := scan.NodesByKinds(nil); got != nil {
+		t.Fatalf("NodesByKinds(nil) = %v, want nil", got)
+	}
+	if got := scan.NodesByKinds([]graph.NodeKind{}); got != nil {
+		t.Fatalf("NodesByKinds([]) = %v, want nil", got)
+	}
+
+	// Unknown kind — no rows, but still nil/empty, never the full table.
+	if got := scan.NodesByKinds([]graph.NodeKind{graph.NodeKind("no_such_kind")}); len(got) != 0 {
+		t.Fatalf("NodesByKinds(unknown) = %v, want 0 rows", got)
+	}
+
+	// Dedup: passing the same kind twice must not double-yield.
+	gotDup := scan.NodesByKinds([]graph.NodeKind{graph.KindFunction, graph.KindFunction})
+	wantDup := []string{"pkg/a.go::Fn1", "pkg/a.go::Fn2"}
+	if got := sortNodeIDs(gotDup); fmt.Sprint(got) != fmt.Sprint(wantDup) {
+		t.Fatalf("NodesByKinds(dup function) = %v, want %v", got, wantDup)
 	}
 }
