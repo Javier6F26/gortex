@@ -963,6 +963,37 @@ func (s *Store) EdgesByKind(kind graph.EdgeKind) iter.Seq[*graph.Edge] {
 	}
 }
 
+// EdgesByKinds yields every edge whose Kind is in the supplied set,
+// in a single backend round-trip. One Cypher query with a kind IN-list
+// replaces the N independent EdgesByKind queries the edge-driven
+// analyzers (channel_ops, pubsub, k8s_resources, kustomize, …)
+// otherwise need when they care about 2-5 kinds at once. Materialises
+// the row set before yielding for the same reentrancy reason as
+// EdgesByKind.
+//
+// Empty kinds yields nothing — matches the in-memory reference and
+// avoids handing Kuzu's planner an empty IN-list (which it tolerates
+// but plans badly).
+func (s *Store) EdgesByKinds(kinds []graph.EdgeKind) iter.Seq[*graph.Edge] {
+	return func(yield func(*graph.Edge) bool) {
+		uniq := dedupeEdgeKinds(kinds)
+		if len(uniq) == 0 {
+			return
+		}
+		const q = `MATCH (a:Node)-[e:Edge]->(b:Node) WHERE e.kind IN $kinds RETURN ` + edgeReturnCols
+		rows := s.querySelect(q, map[string]any{"kinds": edgeKindSliceToAny(uniq)})
+		for _, r := range rows {
+			e := rowToEdge(r)
+			if e == nil {
+				continue
+			}
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
 // NodesByKind yields every node whose Kind matches.
 func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	return func(yield func(*graph.Node) bool) {

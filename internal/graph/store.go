@@ -892,3 +892,31 @@ type InEdgeCounter interface {
 type NodesInFilesByKindFinder interface {
 	NodesInFilesByKind(files []string, kinds []NodeKind) []*Node
 }
+
+// EdgesByKindsScanner is an optional capability backends MAY
+// implement to stream every edge whose Kind is in the supplied set,
+// in a single backend round-trip. The fallback iterates AllEdges()
+// Go-side and filters in process — on Ladybug AllEdges materialises
+// every edge over cgo (~286k rows on the gortex workspace) for the
+// edge-driven analyzers (channel_ops, pubsub, k8s_resources,
+// kustomize, error_surface, …) that only care about a handful of
+// kinds. The capability runs `MATCH ()-[e:Edge]->() WHERE e.kind IN
+// $kinds RETURN ...` and ships back only the matching rows.
+//
+// The single-kind variant EdgesByKind already exists, but the
+// analyzers in question typically need 2-5 kinds in one pass; firing
+// EdgesByKind once per kind would issue N independent backend queries
+// when the planner can naturally batch them with an IN-list. Calling
+// EdgesByKinds with one kind is equivalent to EdgesByKind for that
+// kind — backends should still prefer the IN-list path so the call
+// site never branches on len(kinds).
+//
+// Empty kinds yields nothing — never a whole-table scan. Iterators
+// stop when the consumer's yield returns false; implementations MUST
+// honour early-stop so callers can break out of a search.
+//
+// Optional capability — analyzers fall back to per-kind EdgesByKind
+// iteration when the backend doesn't implement it.
+type EdgesByKindsScanner interface {
+	EdgesByKinds(kinds []EdgeKind) iter.Seq[*Edge]
+}

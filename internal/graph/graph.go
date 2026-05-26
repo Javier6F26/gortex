@@ -518,6 +518,45 @@ func (g *Graph) EdgesByKind(kind EdgeKind) iter.Seq[*Edge] {
 	}
 }
 
+// EdgesByKinds is the in-memory reference implementation of
+// EdgesByKindsScanner. Single pass over AllEdges with a small
+// pre-built kind set — same algorithmic cost as the legacy `for _, e
+// := range g.AllEdges() { if e.Kind == X || e.Kind == Y }` loop the
+// edge-driven analyzers used before this capability existed. Disk
+// backends override with a single `WHERE kind IN $kinds` query so the
+// edge-driven analyzers stop firing one EdgesByKind per kind (or
+// worse, scanning AllEdges and filtering Go-side).
+//
+// Empty kinds yields nothing — matches the disk contract.
+func (g *Graph) EdgesByKinds(kinds []EdgeKind) iter.Seq[*Edge] {
+	if len(kinds) == 0 {
+		return func(yield func(*Edge) bool) {}
+	}
+	set := make(map[EdgeKind]struct{}, len(kinds))
+	for _, k := range kinds {
+		if k == "" {
+			continue
+		}
+		set[k] = struct{}{}
+	}
+	if len(set) == 0 {
+		return func(yield func(*Edge) bool) {}
+	}
+	return func(yield func(*Edge) bool) {
+		for _, e := range g.AllEdges() {
+			if e == nil {
+				continue
+			}
+			if _, ok := set[e.Kind]; !ok {
+				continue
+			}
+			if !yield(e) {
+				return
+			}
+		}
+	}
+}
+
 // NodesByKind yields every node whose Kind matches. Same semantics
 // and same in-memory cost story as EdgesByKind.
 func (g *Graph) NodesByKind(kind NodeKind) iter.Seq[*Node] {

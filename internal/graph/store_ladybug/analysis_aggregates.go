@@ -11,6 +11,7 @@ import (
 var (
 	_ graph.NodeDegreeAggregator = (*Store)(nil)
 	_ graph.NodeFanAggregator    = (*Store)(nil)
+	_ graph.EdgesByKindsScanner  = (*Store)(nil)
 )
 
 // NodeDegreeCounts evaluates per-node in/out/usage edge counts

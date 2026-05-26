@@ -79,6 +79,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("FileImporters", func(t *testing.T) { testFileImporters(t, factory) })
 	t.Run("InEdgeCounter", func(t *testing.T) { testInEdgeCounter(t, factory) })
 	t.Run("NodesInFilesByKindFinder", func(t *testing.T) { testNodesInFilesByKindFinder(t, factory) })
+	t.Run("EdgesByKindsScanner", func(t *testing.T) { testEdgesByKindsScanner(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -1768,5 +1769,123 @@ func testNodesInFilesByKindFinder(t *testing.T, factory Factory) {
 	)
 	if len(gotDup) != 1 || gotDup[0].ID != "f1::T1" {
 		t.Fatalf("NodesInFilesByKind(dup) = %v, want [f1::T1]", sortNodeIDs(gotDup))
+	}
+}
+
+// testEdgesByKindsScanner exercises the optional
+// graph.EdgesByKindsScanner capability. Builds a small graph with a
+// mix of edge kinds, then verifies the streaming filter returns
+// exactly the union of the requested kinds in any order. Covers the
+// edge cases that the edge-driven analyzers rely on: zero-match (no
+// edge matches the requested kinds), empty filter (yields nothing —
+// never a whole-table scan), and early stop honouring the iterator
+// contract.
+func testEdgesByKindsScanner(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+
+	s.AddNode(mkNode("a", "A", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("b", "B", "x.go", graph.KindFunction))
+	s.AddNode(mkNode("c", "C", "y.go", graph.KindType))
+	s.AddNode(mkNode("d", "D", "y.go", graph.KindField))
+
+	calls1 := mkEdge("a", "b", graph.EdgeCalls)
+	calls1.Line = 1
+	calls2 := mkEdge("a", "b", graph.EdgeCalls)
+	calls2.Line = 2
+	refs := mkEdge("a", "c", graph.EdgeReferences)
+	writes := mkEdge("a", "d", graph.EdgeWrites)
+	throws := mkEdge("a", "c", graph.EdgeThrows)
+	s.AddEdge(calls1)
+	s.AddEdge(calls2)
+	s.AddEdge(refs)
+	s.AddEdge(writes)
+	s.AddEdge(throws)
+
+	es, ok := s.(graph.EdgesByKindsScanner)
+	if !ok {
+		t.Skip("backend does not implement graph.EdgesByKindsScanner")
+	}
+
+	// Multi-kind: union of Calls + References must surface all three
+	// calls/refs edges; counts (not pointers) compared so the in-memory
+	// and disk backends agree without relying on edge identity.
+	counts := map[graph.EdgeKind]int{}
+	for e := range es.EdgesByKinds([]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}) {
+		counts[e.Kind]++
+	}
+	if counts[graph.EdgeCalls] != 2 || counts[graph.EdgeReferences] != 1 {
+		t.Fatalf("EdgesByKinds(Calls,References) = %+v, want Calls:2 References:1", counts)
+	}
+	if got := len(counts); got != 2 {
+		t.Fatalf("EdgesByKinds(Calls,References) yielded %d distinct kinds, want 2", got)
+	}
+
+	// Single-kind via the multi-kind path must match EdgesByKind.
+	single := 0
+	for e := range es.EdgesByKinds([]graph.EdgeKind{graph.EdgeWrites}) {
+		if e.Kind != graph.EdgeWrites {
+			t.Fatalf("EdgesByKinds(Writes) yielded kind=%s, want Writes", e.Kind)
+		}
+		single++
+	}
+	if single != 1 {
+		t.Fatalf("EdgesByKinds(Writes) yielded %d, want 1", single)
+	}
+
+	// Dedupe: repeating a kind must not double-yield. The backend's
+	// IN-list MUST collapse duplicates.
+	dup := 0
+	for range es.EdgesByKinds([]graph.EdgeKind{graph.EdgeCalls, graph.EdgeCalls}) {
+		dup++
+	}
+	if dup != 2 {
+		t.Fatalf("EdgesByKinds(Calls,Calls) yielded %d, want 2 (no double-yield)", dup)
+	}
+
+	// Empty kinds yields nothing — never a whole-table scan.
+	empty := 0
+	for range es.EdgesByKinds(nil) {
+		empty++
+	}
+	if empty != 0 {
+		t.Fatalf("EdgesByKinds(nil) yielded %d, want 0", empty)
+	}
+	emptySlice := 0
+	for range es.EdgesByKinds([]graph.EdgeKind{}) {
+		emptySlice++
+	}
+	if emptySlice != 0 {
+		t.Fatalf("EdgesByKinds([]) yielded %d, want 0", emptySlice)
+	}
+
+	// Empty string kinds get elided (matches dedupeEdgeKinds contract).
+	blank := 0
+	for range es.EdgesByKinds([]graph.EdgeKind{"", "", ""}) {
+		blank++
+	}
+	if blank != 0 {
+		t.Fatalf("EdgesByKinds(blank) yielded %d, want 0", blank)
+	}
+
+	// Zero-match: a kind nothing in the graph uses yields nothing.
+	zero := 0
+	for range es.EdgesByKinds([]graph.EdgeKind{graph.EdgeKind("nonexistent")}) {
+		zero++
+	}
+	if zero != 0 {
+		t.Fatalf("EdgesByKinds(nonexistent) yielded %d, want 0", zero)
+	}
+
+	// Early stop honours the iterator contract.
+	stopped := 0
+	for range es.EdgesByKinds([]graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}) {
+		stopped++
+		if stopped == 1 {
+			break
+		}
+	}
+	if stopped != 1 {
+		t.Fatalf("early stop yielded %d before break, want 1", stopped)
 	}
 }
