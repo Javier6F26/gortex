@@ -1610,6 +1610,9 @@ func (s *Store) FlushBulk() error {
 	if len(nodes) > 0 || len(edges) > 0 {
 		s.writeGen.Add(1)
 	}
+	if len(nodes)+len(edges) >= mallocTrimRowThreshold {
+		mallocTrim()
+	}
 	return nil
 }
 

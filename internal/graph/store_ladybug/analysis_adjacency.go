@@ -48,6 +48,9 @@ RETURN a.id, b.id`
 		"ekinds": eKinds,
 		"nkinds": nKinds,
 	})
+	if len(rows) >= mallocTrimRowThreshold {
+		mallocTrim()
+	}
 	return func(yield func([2]string) bool) {
 		for _, r := range rows {
 			if len(r) < 2 {
@@ -108,6 +111,9 @@ RETURN a.id, b.id`
 			continue
 		}
 		out[from]++
+	}
+	if len(rows) >= mallocTrimRowThreshold {
+		mallocTrim()
 	}
 	if len(out) == 0 {
 		return nil

@@ -59,6 +59,9 @@ func (s *Store) NodesByKinds(kinds []graph.NodeKind) []*graph.Node {
 			out = append(out, n)
 		}
 	}
+	if len(rows) >= mallocTrimRowThreshold {
+		mallocTrim()
+	}
 	return out
 }
 
