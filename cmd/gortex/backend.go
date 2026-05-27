@@ -28,7 +28,7 @@ import (
 // build-tagged files (backend_memory.go is always built; the
 // disk-backed ones are gated by build tags). This file is the
 // shared dispatch.
-func openBackend(name, path string, logger *zap.Logger) (graph.Store, func(), error) {
+func openBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger) (graph.Store, func(), error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "memory", "mem", "in-memory":
 		s := graph.New()
@@ -40,8 +40,9 @@ func openBackend(name, path string, logger *zap.Logger) (graph.Store, func(), er
 		}
 		logger.Info("opening ladybug backend",
 			zap.String("path", resolved),
+			zap.Uint64("buffer_pool_mb", bufferPoolMB),
 		)
-		return openLadybugBackend(resolved)
+		return openLadybugBackend(resolved, bufferPoolMB)
 	default:
 		return nil, nil, fmt.Errorf("unknown --backend %q (expected: memory, ladybug)", name)
 	}

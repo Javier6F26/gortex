@@ -41,6 +41,7 @@ var (
 	daemonHTTPAuthToken     string
 	daemonBackend           string
 	daemonBackendPath       string
+	daemonBackendBufferPoolMB uint64
 )
 
 var daemonCmd = &cobra.Command{
@@ -103,6 +104,8 @@ func init() {
 		"storage backend: memory (in-process, default — fastest, no persistence) | ladybug (embedded Cypher graph DB — persists to --backend-path)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
 		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/<backend>.store")
+	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
+		"page-cache cap for the on-disk backend in MiB. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or falls back to 4096 (4 GiB); only consulted for --backend=ladybug")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
@@ -1147,6 +1150,21 @@ func daemonControlClient() (*daemon.Client, error) {
 		return nil, fmt.Errorf("daemon not reachable (%v) — is it running? Try `gortex daemon start`", err)
 	}
 	return c, nil
+}
+
+// resolveDaemonBufferPoolMB returns the effective buffer-pool cap.
+// Precedence: --backend-buffer-pool-mb flag > GORTEX_DAEMON_BUFFER_POOL_MB env > 0
+// (which Open then maps to DefaultBufferPoolMB inside the store).
+func resolveDaemonBufferPoolMB() uint64 {
+	if daemonBackendBufferPoolMB != 0 {
+		return daemonBackendBufferPoolMB
+	}
+	if env := strings.TrimSpace(os.Getenv("GORTEX_DAEMON_BUFFER_POOL_MB")); env != "" {
+		if v, err := strconv.ParseUint(env, 10, 64); err == nil {
+			return v
+		}
+	}
+	return 0
 }
 
 // killByPID is the fallback stop path for stale daemons that have a PID

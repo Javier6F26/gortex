@@ -177,7 +177,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		}
 	}
 
-	g, backendCleanup, err := openBackend(daemonBackend, daemonBackendPath, logger)
+	g, backendCleanup, err := openBackend(daemonBackend, daemonBackendPath, resolveDaemonBufferPoolMB(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("opening backend %q: %w", daemonBackend, err)
 	}

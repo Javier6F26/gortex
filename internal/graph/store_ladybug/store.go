@@ -100,9 +100,30 @@ var _ graph.Store = (*Store)(nil)
 // extra parallelism.
 const connPoolSize = 8
 
-// Open opens (or creates) a KuzuDB database at path and applies the
-// schema. The path is a directory KuzuDB owns end-to-end; an empty
-// directory is initialised on first open and reused on every
+// DefaultBufferPoolMB is the buffer-pool cap applied when the caller
+// passes Options{} (zero value). Ladybug's own default is 80% of
+// system RAM, which on a 16 GiB laptop reserves ~12.8 GiB before a
+// single row is inserted; clamping to a fixed 4 GiB keeps the
+// daemon's resident set predictable across machine sizes.
+const DefaultBufferPoolMB = 4096
+
+// Options configures the embedded Ladybug instance. The zero value
+// applies DefaultBufferPoolMB; callers override fields as needed.
+type Options struct {
+	// BufferPoolMB caps the engine's page cache in MiB. Zero falls
+	// back to DefaultBufferPoolMB.
+	BufferPoolMB uint64
+}
+
+// Open is the zero-config entry point. Equivalent to
+// OpenWithOptions(path, Options{}).
+func Open(path string) (*Store, error) {
+	return OpenWithOptions(path, Options{})
+}
+
+// OpenWithOptions opens (or creates) a Ladybug database at path and
+// applies the schema. The path is a directory Ladybug owns end-to-end;
+// an empty directory is initialised on first open and reused on every
 // subsequent open.
 //
 // Opens one "setup" connection for DDL + extension installs, then
@@ -111,8 +132,14 @@ const connPoolSize = 8
 // connection so concurrent reads + drains don't serialise on a
 // single Connection handle (the Go binding races in cgo without
 // a per-connection serialisation point).
-func Open(path string) (*Store, error) {
-	db, err := lbug.OpenDatabase(path, lbug.DefaultSystemConfig())
+func OpenWithOptions(path string, opts Options) (*Store, error) {
+	cfg := lbug.DefaultSystemConfig()
+	bufMB := opts.BufferPoolMB
+	if bufMB == 0 {
+		bufMB = DefaultBufferPoolMB
+	}
+	cfg.BufferPoolSize = bufMB * 1024 * 1024
+	db, err := lbug.OpenDatabase(path, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("store_ladybug: open %q: %w", path, err)
 	}

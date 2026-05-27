@@ -14,8 +14,10 @@ import (
 // — important because ladybug's writer locks the directory and
 // a subsequent reopen on the same path would fail until the
 // previous handle is closed.
-func openLadybugBackend(path string) (graph.Store, func(), error) {
-	s, err := store_ladybug.Open(path)
+func openLadybugBackend(path string, bufferPoolMB uint64) (graph.Store, func(), error) {
+	s, err := store_ladybug.OpenWithOptions(path, store_ladybug.Options{
+		BufferPoolMB: bufferPoolMB,
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open ladybug store at %q: %w", path, err)
 	}
