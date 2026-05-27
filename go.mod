@@ -383,3 +383,10 @@ replace github.com/mattn/go-pointer => ./internal/thirdparty/go-pointer
 // blocked the Windows build because github.com/coder/hnsw imports it
 // unconditionally. See internal/thirdparty/renameio.
 replace github.com/google/renameio => ./internal/thirdparty/renameio
+
+// Vendored copy of github.com/LadybugDB/go-ladybug v0.13.1 with a
+// missing lbug_value_destroy added to FlatTuple.GetValue. Upstream
+// leaks one C-side allocation per column of every materialised row;
+// observed as 15.8GB / 211M allocations in the DefaultMallocZone on
+// a daemon after warmup + 27 tool calls. See internal/thirdparty/go-ladybug.
+replace github.com/LadybugDB/go-ladybug => ./internal/thirdparty/go-ladybug

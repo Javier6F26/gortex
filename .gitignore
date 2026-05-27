@@ -51,3 +51,8 @@ eval/scripts/
 eval/logs/
 
 internal_docs/
+
+# Vendored native libraries (overrides global *.dylib / *.so / *.dll)
+!internal/thirdparty/go-ladybug/lib/**/*.dylib
+!internal/thirdparty/go-ladybug/lib/**/*.so
+!internal/thirdparty/go-ladybug/lib/**/*.dll
