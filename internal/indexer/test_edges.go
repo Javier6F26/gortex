@@ -151,14 +151,6 @@ func markTestSymbolsAndEmitEdges(g graph.Store) (markedTests int, edgesEmitted i
 	return markedTests, edgesEmitted
 }
 
-func isTestNode(n *graph.Node) bool {
-	if n == nil || n.Meta == nil {
-		return false
-	}
-	v, _ := n.Meta["is_test"].(bool)
-	return v
-}
-
 // detectTestRunnerForFile resolves the runner identifier for a test file
 // node by consulting three signals, in priority order:
 //

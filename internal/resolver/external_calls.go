@@ -254,16 +254,6 @@ func newExternalCallNode(nodeID, ecosystem, importPath, callerLang string) *grap
 	}
 }
 
-// edgeCallerLanguage returns the source language of the node that owns
-// the call edge's From end, falling back to the file extension of the
-// edge's own FilePath when the caller node carries no Language.
-func edgeCallerLanguage(g graph.Store, e *graph.Edge) string {
-	if from := g.GetNode(e.From); from != nil && from.Language != "" {
-		return from.Language
-	}
-	return langFamilyFromExt(e.FilePath)
-}
-
 // langFamilyFromExt maps a file extension to the coarse language label
 // stored on graph nodes. Distinct from builtins.go::langFromFilePath,
 // which collapses ts→ts/js→js for the built-in method tables; here we
