@@ -30,27 +30,13 @@ func DetectCrossRepoEdges(g graph.Store) int {
 		return 0
 	}
 	emitted := 0
-	for _, e := range g.AllEdges() {
+	for _, row := range crossRepoCandidates(g) {
+		e := row.Edge
 		if e == nil {
 			continue
 		}
 		crKind, ok := graph.CrossRepoKindFor(e.Kind)
 		if !ok {
-			continue
-		}
-		from := g.GetNode(e.From)
-		to := g.GetNode(e.To)
-		if from == nil || to == nil {
-			// Unresolved / external / stdlib / dep stub targets never
-			// have a graph node — they cannot be cross-repo.
-			continue
-		}
-		if from.RepoPrefix == "" || to.RepoPrefix == "" {
-			// Single-repo graph (no prefixes) — nothing crosses a
-			// boundary. Also covers a node whose repo wasn't stamped.
-			continue
-		}
-		if from.RepoPrefix == to.RepoPrefix {
 			continue
 		}
 		// Keep the bool flag on the base edge consistent with the
@@ -71,11 +57,62 @@ func DetectCrossRepoEdges(g graph.Store) int {
 			CrossRepo:       true,
 			Meta: map[string]any{
 				"base_kind":   string(e.Kind),
-				"source_repo": from.RepoPrefix,
-				"target_repo": to.RepoPrefix,
+				"source_repo": row.FromRepo,
+				"target_repo": row.ToRepo,
 			},
 		})
 		emitted++
 	}
 	return emitted
+}
+
+// crossRepoCandidates returns every edge whose Kind has a parallel
+// cross_repo_* kind AND whose endpoints carry two distinct, non-empty
+// RepoPrefix values. Routed through the storage layer's
+// CrossRepoCandidates capability when the backend implements it (one
+// Cypher join with the kind + repo-prefix filters in WHERE); falls
+// back to the AllEdges + per-edge GetNode walk otherwise.
+//
+// The base-kind set is derived from graph.CrossRepoKindFor by
+// iterating the in-process registry — the disk backend uses the same
+// kind list verbatim so single-repo graphs return no rows without a
+// whole-table scan.
+func crossRepoCandidates(g graph.Store) []graph.CrossRepoCandidateRow {
+	baseKinds := graph.BaseKindsForCrossRepo()
+	if cap, ok := g.(graph.CrossRepoCandidates); ok {
+		return cap.CrossRepoCandidates(baseKinds)
+	}
+	if len(baseKinds) == 0 {
+		return nil
+	}
+	kset := make(map[graph.EdgeKind]struct{}, len(baseKinds))
+	for _, k := range baseKinds {
+		kset[k] = struct{}{}
+	}
+	var out []graph.CrossRepoCandidateRow
+	for _, e := range g.AllEdges() {
+		if e == nil {
+			continue
+		}
+		if _, ok := kset[e.Kind]; !ok {
+			continue
+		}
+		from := g.GetNode(e.From)
+		to := g.GetNode(e.To)
+		if from == nil || to == nil {
+			continue
+		}
+		if from.RepoPrefix == "" || to.RepoPrefix == "" {
+			continue
+		}
+		if from.RepoPrefix == to.RepoPrefix {
+			continue
+		}
+		out = append(out, graph.CrossRepoCandidateRow{
+			Edge:     e,
+			FromRepo: from.RepoPrefix,
+			ToRepo:   to.RepoPrefix,
+		})
+	}
+	return out
 }
