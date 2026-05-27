@@ -5,22 +5,12 @@ package lbug
 import "C"
 
 import (
-	"math"
 	"time"
 )
 
 // unixEpoch returns the Unix epoch time.
 func unixEpoch() time.Time {
 	return time.Unix(0, 0)
-}
-
-// timeToLbugDate converts a time.Time to a lbug_date_t.
-func timeToLbugDate(inputTime time.Time) C.lbug_date_t {
-	diff := inputTime.Sub(unixEpoch())
-	diffDays := math.Floor(diff.Hours() / 24)
-	cLbugDate := C.lbug_date_t{}
-	cLbugDate.days = C.int32_t(diffDays)
-	return cLbugDate
 }
 
 // lbugDateToTime converts a lbug_date_t to a time.Time in UTC.

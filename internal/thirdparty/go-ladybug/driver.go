@@ -176,7 +176,7 @@ func (that *connection) Prepare(query string) (driver.Stmt, error) {
 	return that.prepareContext(nextContext(), query)
 }
 
-func (that *connection) prepareContext(ctx context.Context, query string) (SQLStatement, error) {
+func (that *connection) prepareContext(_ context.Context, query string) (SQLStatement, error) {
 	stmt, err := that.conn.Prepare(query)
 	if nil != err {
 		release(stmt)
