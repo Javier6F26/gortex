@@ -29,6 +29,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Fetch liblbug
+        run: bash scripts/fetch-lbug.sh
+
       - name: Build gortex
         run: go build -o /tmp/gortex ./cmd/gortex
 

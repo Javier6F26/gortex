@@ -52,7 +52,6 @@ eval/logs/
 
 internal_docs/
 
-# Vendored native libraries (overrides global *.dylib / *.so / *.dll)
-!internal/thirdparty/go-ladybug/lib/**/*.dylib
-!internal/thirdparty/go-ladybug/lib/**/*.so
-!internal/thirdparty/go-ladybug/lib/**/*.dll
+# liblbug native libraries are fetched at build time by
+# scripts/fetch-lbug.sh (run by make / CI / release), never committed.
+internal/thirdparty/go-ladybug/lib/

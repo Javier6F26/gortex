@@ -1,8 +1,17 @@
 version: 2
 
 # Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
-# cross-compile toolchains for all four targets below so CGO (tree-sitter)
-# links cleanly on a single Linux runner. See .github/workflows/release.yml.
+# cross-compile toolchains so CGO (tree-sitter + the statically-linked
+# liblbug) links cleanly on a single Linux runner. This config builds the
+# UNIX targets only (linux + darwin, both with liblbug static-linked into
+# a self-contained binary). Windows is built separately on a native
+# windows runner (see the `release-windows` job in release.yml) because
+# lbug's windows lib is MSVC-built and must be linked dynamically + shipped
+# as a DLL — it can't be static-linked from mingw.
+#
+# liblbug static archives are fetched into lib/static/<os>-<arch>/ by the
+# "Fetch liblbug" step in release.yml before this runs (the repo is
+# bind-mounted into the container).
 before:
   hooks:
     - go mod tidy
@@ -19,30 +28,14 @@ builds:
       # Version (see internal/version). Commit lands in the +build slot so
       # `gortex version` output round-trips as canonical semver.
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
-      # Statically link the mingw-w64 C/C++ runtime (libstdc++, libgcc,
-      # winpthread) into the Windows binary. CGO is on for tree-sitter and
-      # some grammar scanners ship C++; without -static the released
-      # gortex.exe dynamically links libstdc++-6.dll et al., which are not
-      # present on a stock Windows box — the binary fails to start with a
-      # missing-DLL error. No-op on linux/darwin, which keep their normal
-      # dynamic libc/libc++.
-      - '{{ if eq .Os "windows" }}-extldflags "-static"{{ end }}'
     env:
       - CGO_ENABLED=1
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
-    ignore:
-      # windows/arm64 needs an aarch64-w64-mingw32 cross-toolchain that
-      # the goreleaser-cross image doesn't ship; windows/amd64 covers
-      # every mainstream Windows dev box. Revisit when the image gains
-      # the llvm-mingw arm64 target.
-      - goos: windows
-        goarch: arm64
     # Per-target CC + CXX. goreleaser-cross exposes these cross-toolchains
     # on PATH; CGO needs both set per target triple because some deps
     # (tree-sitter yaml scanner, etc.) ship C++. Without CXX, the system
@@ -69,11 +62,6 @@ builds:
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
-      - goos: windows
-        goarch: amd64
-        env:
-          - CC=x86_64-w64-mingw32-gcc
-          - CXX=x86_64-w64-mingw32-g++
     # Per-target build hook. Fires after each Mach-O / ELF is linked,
     # before the archive step. The script is a no-op for non-darwin
     # targets, so we don't need a per-override hook list.
@@ -151,20 +139,9 @@ homebrew_casks:
       executable: gortex
       shell_parameter_format: cobra
 
-# Scoop manifest — `scoop install gortex` on Windows. goreleaser commits
-# the generated manifest (pointing at the signed windows/amd64 .zip in
-# this release) to a separate bucket repo on every tagged release,
-# exactly like the Homebrew cask above.
-scoops:
-  - name: gortex
-    repository:
-      owner: gortexhq
-      name: scoop-bucket
-      # GITHUB_TOKEN can only push to the source repo, so the bucket
-      # needs its own PAT with `repo` scope on gortexhq/scoop-bucket,
-      # stored as SCOOP_BUCKET_TOKEN in repo secrets. release.yml wires
-      # it in.
-      token: "{{ .Env.SCOOP_BUCKET_TOKEN }}"
-    homepage: "https://github.com/zzet/gortex"
-    description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
-    license: "Custom"
+# NOTE: the Scoop manifest is intentionally NOT generated here. Windows is
+# built by the separate `release-windows` job (native runner, dynamic
+# liblbug) and isn't an artifact of this goreleaser-cross run, so goreleaser
+# has no windows zip to point a scoop manifest at. Re-add a scoop manifest
+# (pointing at the windows job's zip) as a follow-up once the windows
+# release path is settled.
