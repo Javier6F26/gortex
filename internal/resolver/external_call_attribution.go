@@ -98,7 +98,13 @@ func (r *Resolver) attributeGoExternalCalls() {
 		modKey := modKey{repoPrefix: k.repoPrefix, importPath: k.importPath}
 		moduleID, ok := modules[modKey]
 		if !ok {
-			moduleID = graph.StubID(k.repoPrefix, graph.StubKindModule, "go", k.importPath)
+			// Ecosystem + path are ONE stub segment joined by a single
+			// colon (`go:<importPath>`), matching the npm convention
+			// (`module::npm:<pkg>`) and every module-id consumer
+			// (tools_analyze_external_calls). Passing them as two
+			// StubID parts would emit `module::go::<path>` (double
+			// colon) — the form that broke the attribution tests.
+			moduleID = graph.StubID(k.repoPrefix, graph.StubKindModule, "go:"+k.importPath)
 			modules[modKey] = moduleID
 			role := "external"
 			switch k.prefix {
