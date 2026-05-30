@@ -201,6 +201,12 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 			add(n.FilePath, filepath.Dir(n.FilePath))
 		}
 	}
+	// Materialise the resolved import edges and batch-load their endpoints
+	// (caller file + target) in one GetNodesByIDs — a per-edge GetNode here
+	// is a Cypher round-trip per import on a disk backend. Inlines
+	// edgeCallerFile's cached-node logic against the batch map.
+	var imports []*graph.Edge
+	ids := make(map[string]struct{})
 	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
 		// Skip imports still pointing at an unresolved placeholder or an
 		// out-of-repo stub — neither names an in-repo directory that a
@@ -211,8 +217,28 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 			strings.HasPrefix(e.To, "dep::") {
 			continue
 		}
-		callerFile := r.edgeCallerFile(e)
-		if target := r.graph.GetNode(e.To); target != nil && target.FilePath != "" {
+		imports = append(imports, e)
+		if e.From != "" {
+			ids[e.From] = struct{}{}
+		}
+		if e.To != "" {
+			ids[e.To] = struct{}{}
+		}
+	}
+	if len(imports) == 0 {
+		return closure
+	}
+	idList := make([]string, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	nodes := r.graph.GetNodesByIDs(idList)
+	for _, e := range imports {
+		callerFile := e.FilePath
+		if n := nodes[e.From]; n != nil && n.FilePath != "" {
+			callerFile = n.FilePath
+		}
+		if target := nodes[e.To]; target != nil && target.FilePath != "" {
 			add(callerFile, filepath.Dir(target.FilePath))
 		}
 	}

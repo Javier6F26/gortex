@@ -58,15 +58,39 @@ func (r *Resolver) rebindGoMethodReceivers() {
 	if len(typesIdx) == 0 {
 		return
 	}
-	var batch []graph.EdgeReindex
+	// Materialise the MemberOf edges and batch-load their endpoints in one
+	// GetNodesByIDs: a per-edge GetNode(e.From)+GetNode(e.To) here is two
+	// Cypher round-trips per method on a disk backend — across tens of
+	// thousands of methods it was a multi-minute cold-warmup stall.
+	var memberOf []*graph.Edge
+	ids := make(map[string]struct{})
 	for e := range r.graph.EdgesByKind(graph.EdgeMemberOf) {
-		method := r.graph.GetNode(e.From)
+		memberOf = append(memberOf, e)
+		if e.From != "" {
+			ids[e.From] = struct{}{}
+		}
+		if e.To != "" {
+			ids[e.To] = struct{}{}
+		}
+	}
+	if len(memberOf) == 0 {
+		return
+	}
+	idList := make([]string, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	nodes := r.graph.GetNodesByIDs(idList)
+
+	var batch []graph.EdgeReindex
+	for _, e := range memberOf {
+		method := nodes[e.From]
 		if method == nil || method.Language != "go" || method.Kind != graph.KindMethod {
 			continue
 		}
 		// Already resolves to a real type node — same-file methods
 		// land here. Nothing to do.
-		if n := r.graph.GetNode(e.To); n != nil && (n.Kind == graph.KindType || n.Kind == graph.KindInterface) {
+		if n := nodes[e.To]; n != nil && (n.Kind == graph.KindType || n.Kind == graph.KindInterface) {
 			continue
 		}
 		// Parse `<methodfile>::<typename>`. The split is on the LAST

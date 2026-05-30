@@ -389,10 +389,32 @@ func (cr *CrossRepoResolver) clearDirIndexes() {
 // graph is settled enough to be trustworthy evidence.
 func (cr *CrossRepoResolver) buildReachableReposIndex() {
 	idx := make(map[string]map[string]struct{})
+	// Materialise the import edges and batch-load their targets in one
+	// GetNodesByIDs — a per-edge GetNode(e.To) here is a Cypher round-trip
+	// per import on a disk backend, which under the cross-repo pass's
+	// import population was a multi-minute cold-warmup stall (it runs
+	// before the pass even logs "pass start").
+	var imports []*graph.Edge
+	ids := make(map[string]struct{})
 	for e := range cr.graph.EdgesByKind(graph.EdgeImports) {
+		imports = append(imports, e)
+		if e.To != "" {
+			ids[e.To] = struct{}{}
+		}
+	}
+	if len(imports) == 0 {
+		cr.reachableReposByFile = idx
+		return
+	}
+	idList := make([]string, 0, len(ids))
+	for id := range ids {
+		idList = append(idList, id)
+	}
+	nodes := cr.graph.GetNodesByIDs(idList)
+	for _, e := range imports {
 		// Only resolved imports carry evidence — an unresolved import
 		// target tells us nothing about which repo the caller reaches.
-		to := cr.graph.GetNode(e.To)
+		to := nodes[e.To]
 		if to == nil || to.RepoPrefix == "" {
 			continue
 		}

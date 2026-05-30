@@ -174,7 +174,7 @@ func (r *Resolver) fromIsGo(fromID string) bool {
 	// Fall back to looking up the owner node and checking its
 	// Language. More expensive but covers edge cases where the ID
 	// doesn't follow the `.go::Func` pattern.
-	if n := r.graph.GetNode(owner); n != nil && n.Language == "go" {
+	if n := r.cachedGetNode(owner); n != nil && n.Language == "go" {
 		return true
 	}
 	return false
