@@ -12,6 +12,14 @@ permissions:
   contents: read
   security-events: write
 
+# liblbug static-links on linux with -Wl,--whole-archive (forces its weak C++
+# RTTI into the binary so the dlopen'd FTS extension resolves — see
+# internal/thirdparty/go-ladybug/cgo_shared.go). --whole-archive isn't on cgo's
+# #cgo LDFLAGS allowlist, so govulncheck — which loads the cgo packages through
+# the Go toolchain — must allow it, the same way ci.yml does.
+env:
+  CGO_LDFLAGS_ALLOW: '-Wl,--(no-)?whole-archive'
+
 jobs:
   govulncheck:
     runs-on: ubuntu-latest
