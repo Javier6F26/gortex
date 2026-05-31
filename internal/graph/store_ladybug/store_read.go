@@ -481,6 +481,28 @@ func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
 	if len(uniq) == 0 {
 		return nil
 	}
+	// Cold-load fast path: the in-memory nameIdx is filled incrementally
+	// during bulk load, so the resolver's batch candidate lookup is a map
+	// hit per name instead of `WHERE n.name IN $names` — the IN form does
+	// NOT use the secondary name index (unlike the singular `= $name`), so
+	// it scans the whole node table. Every consumer (resolver candidate
+	// binding, search-assist, temporal) filters to callable/type symbols,
+	// which is exactly what the nameIdx keeps (it excludes the low-value
+	// kinds). lookupNodes is case-insensitive, so re-filter to the exact
+	// name to preserve the engine path's case-sensitive contract. Skip when
+	// the index is empty (warm-restart before its lazy fill) so this never
+	// triggers the bootstrap Cypher scan that crashed warmup.
+	if s.nameIdx != nil && s.nameIdx.populated() {
+		out := make(map[string][]*graph.Node, len(uniq))
+		for _, name := range uniq {
+			for _, n := range s.nameIdx.lookupNodes(name) {
+				if n != nil && n.Name == name {
+					out[name] = append(out[name], n)
+				}
+			}
+		}
+		return out
+	}
 	const q = `MATCH (n:Node) WHERE n.name IN $names RETURN ` + nodeReturnCols
 	rows := s.querySelect(q, map[string]any{"names": stringSliceToAny(uniq)})
 	out := make(map[string][]*graph.Node, len(uniq))

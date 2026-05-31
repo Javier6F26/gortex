@@ -178,6 +178,20 @@ func (idx *nameIndex) lookup(name string) []string {
 	return out
 }
 
+// populated reports whether the index holds any entries — true after a
+// cold load's incremental fill (addNodes via copyBulkLocked), false on a
+// fresh warm-restart open before the lazy bootstrap. Batch callers use it
+// to take the in-memory path WITHOUT calling bootstrap (whose concurrent
+// Cypher scan crashed warmup — see FindNodesByName).
+func (idx *nameIndex) populated() bool {
+	if idx == nil {
+		return false
+	}
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return len(idx.byN) > 0
+}
+
 // isIdentifierQuery reports whether a query looks like a literal
 // symbol name (no whitespace, no path separators, no dots, no
 // colons). Tier-0 fast path engages only on such queries; multi-
