@@ -51,6 +51,72 @@ func (idx *Indexer) materializeDataflowParams() {
 	}
 }
 
+// materializeDataflowParamsForFile is the single-file equivalent of
+// materializeDataflowParams, used on the incremental (fsnotify /
+// edit_file) re-index path so a one-line edit doesn't scan the whole
+// edge set. fileEdges is the file's freshly-extracted edge slice
+// (result.Edges from indexFile); only its From endpoints are read, so
+// stale To/From values from before resolution don't matter.
+//
+// A file's arg_of / returns_to From is NOT always a node in the file,
+// so node membership alone is insufficient. Two From classes exist:
+//   - file nodes: returns_to's From is the caller function, and an
+//     arg_of whose argument is a bare in-scope identifier has its From
+//     rewritten by the resolver to that local/param — GetFileNodes
+//     covers both.
+//   - synthetic ids: arg_of for a selector (obj.Field), package-
+//     qualified (pkg.V), global, or nested-call (f(g())) argument keeps
+//     a synthetic `unresolved::` / `external::` From that never becomes
+//     a file node. The resolver leaves these untouched, so the id the
+//     extractor emitted (still present in fileEdges) is the id in the
+//     graph.
+//
+// Probing the union of both, then keeping only edges whose FilePath is
+// this file, yields exactly the arg_of+returns_to set the whole-graph
+// pass would touch for it — faithful, not approximate. Each rewrite
+// needs only the edge plus a targeted callee lookup (paramNodeAtPosition
+// / findCallTarget). The batch path (Resolver.ResolveAll) still runs the
+// whole-graph variant once, where amortising one scan over many files
+// is the right trade.
+func (idx *Indexer) materializeDataflowParamsForFile(graphPath string, fileEdges []*graph.Edge) {
+	g := idx.graph
+	fromSet := make(map[string]struct{})
+	for _, n := range g.GetFileNodes(graphPath) {
+		if n != nil && n.ID != "" {
+			fromSet[n.ID] = struct{}{}
+		}
+	}
+	for _, e := range fileEdges {
+		if e != nil && (e.Kind == graph.EdgeArgOf || e.Kind == graph.EdgeReturnsTo) && e.From != "" {
+			fromSet[e.From] = struct{}{}
+		}
+	}
+	if len(fromSet) == 0 {
+		return
+	}
+	froms := make([]string, 0, len(fromSet))
+	for id := range fromSet {
+		froms = append(froms, id)
+	}
+	// A synthetic From can be shared across files, so restrict the rewrite
+	// to edges this file actually emitted: every arg_of / returns_to edge
+	// carries its call-site FilePath, so the filter keeps the set exactly
+	// the file's own.
+	for _, edges := range g.GetOutEdgesByNodeIDs(froms) {
+		for _, e := range edges {
+			if e == nil || e.FilePath != graphPath {
+				continue
+			}
+			switch e.Kind {
+			case graph.EdgeArgOf:
+				rewriteArgOf(g, e)
+			case graph.EdgeReturnsTo:
+				rewriteReturnsTo(g, e)
+			}
+		}
+	}
+}
+
 // rewriteArgOf walks the resolved callee's incoming param_of edges
 // and lifts the edge target from the function node to the param
 // node at the recorded position. Edges that already point at a

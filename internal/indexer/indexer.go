@@ -2589,8 +2589,10 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		// procedural callees may have just been lifted by
 		// ResolveFile, so re-run the dataflow materialisation pass
 		// to keep arg_of / returns_to edges in sync with the
-		// freshly resolved EdgeCalls graph.
-		idx.materializeDataflowParams()
+		// freshly resolved EdgeCalls graph. Scoped to this file's
+		// out-edges — not a whole-graph AllEdges scan — so an
+		// incremental edit stays O(file), not O(all edges).
+		idx.materializeDataflowParamsForFile(graphPath, result.Edges)
 		// Clone detection. EvictFile above removed this file's
 		// EdgeSimilarTo edges in both directions; a full recompute
 		// restores the correct set against the freshly stamped
