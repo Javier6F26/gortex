@@ -25,7 +25,7 @@ import (
 func (s *Server) registerEnrichChurnTool() {
 	s.addTool(
 		mcp.NewTool("enrich_churn",
-			mcp.WithDescription("Pre-compute per-file and per-symbol git churn data and stamp it on graph nodes so `get_churn_rate` can answer without a git subprocess. Walks `git log <branch>` and `git blame <branch>` once per file, then projects line-range commit counts onto every function/method node. The branch is the repository's default branch (origin/main, then origin/master, then local main/master/trunk) unless `branch` overrides. Idempotent: re-running updates the same Meta fields in place. Daemons backed by LadyBug persist the result across restarts; in-memory daemons recompute on next call."),
+			mcp.WithDescription("Pre-compute per-file and per-symbol git churn data and stamp it on graph nodes so `get_churn_rate` can answer without a git subprocess. Walks `git log <branch>` and `git blame <branch>` once per file, then projects line-range commit counts onto every function/method node. The branch is the repository's default branch (origin/main, then origin/master, then local main/master/trunk) unless `branch` overrides. Idempotent: re-running updates the same Meta fields in place. Disk-backed daemons (sqlite) persist the result across restarts; in-memory daemons recompute on next call."),
 			mcp.WithString("branch", mcp.Description("Branch / tag / SHA to compute churn against. Empty means resolve the repository's default branch.")),
 			mcp.WithString("path", mcp.Description("Optional path or repo prefix to scope the enrichment. Multi-repo daemons enrich every tracked repo when empty.")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),

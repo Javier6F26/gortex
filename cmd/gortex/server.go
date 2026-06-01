@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/indexer"
@@ -25,6 +24,7 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/semantic/goanalysis"
@@ -67,9 +67,9 @@ var (
 	// the in-memory graph before the HTTP listener accepts traffic.
 	// Used by gortex-cloud's per-workspace supervisor to boot a
 	// hosted gortex server from R2/Hetzner-OS-cached state.
-	serverSnapshot    string
-	serverBackend     string
-	serverBackendPath string
+	serverSnapshot            string
+	serverBackend             string
+	serverBackendPath         string
 	serverBackendBufferPoolMB uint64
 )
 
@@ -100,9 +100,9 @@ func init() {
 	serverCmd.Flags().BoolVar(&serverNoSemantic, "no-semantic", false, "disable semantic enrichment")
 	serverCmd.Flags().StringVar(&serverSemanticMode, "semantic-mode", "typecheck", "Go analysis mode: typecheck or callgraph")
 	serverCmd.Flags().StringVar(&serverSnapshot, "snapshot", "", "load a snapshot file at startup (gob+gzip; the format `gortex index --snapshot` writes). Used by gortex-cloud's per-workspace supervisor to boot from a precomputed snapshot.")
-	serverCmd.Flags().StringVar(&serverBackend, "backend", "memory", "storage backend: memory (in-process, default — fastest, no persistence) | ladybug (embedded Cypher graph DB — persists to --backend-path, slower per-op but cold-loads from disk) | sqlite (pure-Go embedded SQL, zero CGo — persists to --backend-path)")
+	serverCmd.Flags().StringVar(&serverBackend, "backend", "memory", "storage backend: memory (in-process, default — fastest, no persistence) | sqlite (pure-Go embedded SQL — persists to --backend-path, cold-loads from disk)")
 	serverCmd.Flags().Uint64Var(&serverBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
-		"page-cache cap for the on-disk backend in MiB. 0 falls back to 4096 (4 GiB); only consulted for --backend=ladybug")
+		"advisory page-cache cap (MiB) for on-disk backends. 0 lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	serverCmd.Flags().StringVar(&serverBackendPath, "backend-path", "", "directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/<backend>.store")
 	rootCmd.AddCommand(serverCmd)
 }
@@ -429,13 +429,12 @@ func runServer(cmd *cobra.Command, _ []string) error {
 
 	// Create persistence store. The snapshot cache exists for the
 	// in-memory backend, where heap state is lost on restart — load
-	// from snapshot skips the parse phase on a warm restart. For
-	// the ladybug on-disk backend the store IS already persistent
+	// from snapshot skips the parse phase on a warm restart. For an
+	// on-disk backend (sqlite) the store IS already persistent
 	// across restarts: re-opening the same path hands back the
-	// previous run's graph in milliseconds, and replaying a snapshot
-	// via per-row g.AddNode would just re-write everything we already
-	// have at glacial per-row Cypher speed. Skip the cache entirely
-	// on those backends.
+	// previous run's graph, and replaying a snapshot via per-row
+	// g.AddNode would just re-write everything we already have. Skip
+	// the cache entirely on those backends.
 	var store persistence.Store
 	persistentBackend := !strings.EqualFold(strings.TrimSpace(serverBackend), "memory") && strings.TrimSpace(serverBackend) != ""
 	switch {

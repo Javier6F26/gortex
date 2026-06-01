@@ -720,86 +720,86 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 								zap.Any("panic", r))
 						}
 					}()
-				// Route repos whose nodes came from the snapshot through
-				// ReconcileRepoCtx — it calls IncrementalReindex, which
-				// evicts files deleted while the daemon was down and
-				// re-indexes only files whose mtime changed. Repos not in
-				// the snapshot (newly tracked, or first startup after a
-				// schema bump) fall back to TrackRepoCtx, which does a
-				// full walk. Both paths end with the repo registered on
-				// the MultiIndexer; contract reconciliation is deferred
-				// to the single RunGlobalResolve call below.
-				//
-				// snapshotPartial == true forces the full-walk path even
-				// when prior mtimes exist: the partial-load signal means
-				// the persisted resolution state is no longer trustworthy
-				// (stale edges were dropped because their targets vanished),
-				// and the incremental path only re-resolves files whose
-				// mtime changed — so the dropped edges would never come
-				// back. Without this override every restart progressively
-				// erodes the graph until exported methods show zero
-				// callers despite having dozens of real call sites.
-				repoStart := time.Now()
-				// Prefer mtimes stored in the backend's FileMtime
-				// sidecar table — that lifts the persistence off the
-				// gob snapshot for the ladybug backend, which is the
-				// path that actually rebuilds across restarts. Falls
-				// back to the snapshot's per-repo FileMtimes when the
-				// backend doesn't implement the reader (memory) or
-				// hasn't seen this repo yet.
-				priorMtimes := priorMtimesFromStore(state.graph, entry, logger)
-				if len(priorMtimes) == 0 {
-					priorMtimes = priorMtimesForEntry(state.snapshotRepos, entry)
-				}
-				if state.snapshotPartial {
-					priorMtimes = nil
-				}
-				// A backend that crossed a schema-rebuild migration rung
-				// (NeedsRebuild) has on-disk rows in the old shape that an
-				// incremental reconcile cannot fix. Drop prior mtimes so every
-				// file re-indexes into the new schema (the nil branch below
-				// runs a full TrackRepoCtx and marks the repo changed, so the
-				// global resolve/derivation passes re-run too). No-op for
-				// backends without the capability and whenever no rebuild rung
-				// was crossed — the common case.
-				if storeNeedsRebuild(state.graph) {
-					if len(priorMtimes) > 0 {
-						logger.Info("daemon: backend signalled schema rebuild; forcing full re-index",
-							zap.String("path", entry.Path))
+					// Route repos whose nodes came from the snapshot through
+					// ReconcileRepoCtx — it calls IncrementalReindex, which
+					// evicts files deleted while the daemon was down and
+					// re-indexes only files whose mtime changed. Repos not in
+					// the snapshot (newly tracked, or first startup after a
+					// schema bump) fall back to TrackRepoCtx, which does a
+					// full walk. Both paths end with the repo registered on
+					// the MultiIndexer; contract reconciliation is deferred
+					// to the single RunGlobalResolve call below.
+					//
+					// snapshotPartial == true forces the full-walk path even
+					// when prior mtimes exist: the partial-load signal means
+					// the persisted resolution state is no longer trustworthy
+					// (stale edges were dropped because their targets vanished),
+					// and the incremental path only re-resolves files whose
+					// mtime changed — so the dropped edges would never come
+					// back. Without this override every restart progressively
+					// erodes the graph until exported methods show zero
+					// callers despite having dozens of real call sites.
+					repoStart := time.Now()
+					// Prefer mtimes stored in the backend's FileMtime
+					// sidecar table — that lifts the persistence off the
+					// gob snapshot for the ladybug backend, which is the
+					// path that actually rebuilds across restarts. Falls
+					// back to the snapshot's per-repo FileMtimes when the
+					// backend doesn't implement the reader (memory) or
+					// hasn't seen this repo yet.
+					priorMtimes := priorMtimesFromStore(state.graph, entry, logger)
+					if len(priorMtimes) == 0 {
+						priorMtimes = priorMtimesForEntry(state.snapshotRepos, entry)
 					}
-					priorMtimes = nil
-				}
-				pathFn := "track"
-				if priorMtimes != nil {
-					pathFn = "reconcile"
-					res, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes)
-					switch {
-					case err != nil:
-						logger.Warn("daemon: startup reconcile failed",
-							zap.String("path", entry.Path), zap.Error(err))
-						// Treat a failed reconcile as "changed" so the global
-						// passes still run — degrade toward correctness, not
-						// toward the fast path, when we can't trust the delta.
+					if state.snapshotPartial {
+						priorMtimes = nil
+					}
+					// A backend that crossed a schema-rebuild migration rung
+					// (NeedsRebuild) has on-disk rows in the old shape that an
+					// incremental reconcile cannot fix. Drop prior mtimes so every
+					// file re-indexes into the new schema (the nil branch below
+					// runs a full TrackRepoCtx and marks the repo changed, so the
+					// global resolve/derivation passes re-run too). No-op for
+					// backends without the capability and whenever no rebuild rung
+					// was crossed — the common case.
+					if storeNeedsRebuild(state.graph) {
+						if len(priorMtimes) > 0 {
+							logger.Info("daemon: backend signalled schema rebuild; forcing full re-index",
+								zap.String("path", entry.Path))
+						}
+						priorMtimes = nil
+					}
+					pathFn := "track"
+					if priorMtimes != nil {
+						pathFn = "reconcile"
+						res, err := state.multiIndexer.ReconcileRepoCtx(ctx, entry, priorMtimes)
+						switch {
+						case err != nil:
+							logger.Warn("daemon: startup reconcile failed",
+								zap.String("path", entry.Path), zap.Error(err))
+							// Treat a failed reconcile as "changed" so the global
+							// passes still run — degrade toward correctness, not
+							// toward the fast path, when we can't trust the delta.
+							changedRepos.Add(1)
+						case res != nil && (res.StaleFileCount > 0 || res.DeletedFileCount > 0 || len(res.FailedFiles) > 0):
+							changedRepos.Add(1)
+						}
+					} else {
+						// No prior mtimes → full cold (re)index of this repo,
+						// which is "changed" by definition.
 						changedRepos.Add(1)
-					case res != nil && (res.StaleFileCount > 0 || res.DeletedFileCount > 0 || len(res.FailedFiles) > 0):
-						changedRepos.Add(1)
+						if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+							logger.Warn("daemon: startup track failed",
+								zap.String("path", entry.Path), zap.Error(err))
+						}
 					}
-				} else {
-					// No prior mtimes → full cold (re)index of this repo,
-					// which is "changed" by definition.
-					changedRepos.Add(1)
-					if _, err := state.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
-						logger.Warn("daemon: startup track failed",
-							zap.String("path", entry.Path), zap.Error(err))
+					elapsed := time.Since(repoStart)
+					if elapsed > 2*time.Second {
+						logger.Info("daemon: warmup repo elapsed",
+							zap.String("path", entry.Path),
+							zap.String("path_fn", pathFn),
+							zap.Duration("elapsed", elapsed))
 					}
-				}
-				elapsed := time.Since(repoStart)
-				if elapsed > 2*time.Second {
-					logger.Info("daemon: warmup repo elapsed",
-						zap.String("path", entry.Path),
-						zap.String("path_fn", pathFn),
-						zap.Duration("elapsed", elapsed))
-				}
 				}(entry)
 			}
 		}()
@@ -1038,12 +1038,13 @@ func priorMtimesFromStore(g graph.Store, entry config.RepoEntry, logger *zap.Log
 }
 
 // storeNeedsRebuild reports whether the backend signalled, via the optional
-// NeedsRebuild capability, that a schema migration crossed a rung ALTER
+// NeedsRebuild capability, that a schema migration crossed a rung an ALTER
 // could not satisfy — so its persisted rows are in an old shape and the
-// warm/incremental reconcile must be bypassed for a full re-index. Backends
-// without the capability (the in-memory store) report false. See
-// store_ladybug.(*Store).NeedsRebuild and the ladder in
-// internal/graph/store_ladybug/migrate.go.
+// warm/incremental reconcile must be bypassed for a full re-index. This is a
+// generic, opt-in capability probe: a backend implements NeedsRebuild() bool
+// to participate. No backend currently does, so this always reports false;
+// it stays as a hook for any future on-disk store that needs schema-version
+// gating on warm restart.
 func storeNeedsRebuild(g any) bool {
 	rb, ok := g.(interface{ NeedsRebuild() bool })
 	return ok && rb.NeedsRebuild()

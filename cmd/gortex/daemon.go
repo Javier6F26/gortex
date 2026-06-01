@@ -39,11 +39,9 @@ var (
 	daemonStatusInterval      time.Duration
 	daemonHTTPAddr            string
 	daemonHTTPAuthToken       string
-	daemonBackend                     string
-	daemonBackendPath                 string
-	daemonBackendBufferPoolMB         uint64
-	daemonBackendResidentBufferPoolMB uint64
-	daemonBackendRSSReopenMB          uint64
+	daemonBackend             string
+	daemonBackendPath         string
+	daemonBackendBufferPoolMB uint64
 )
 
 var daemonCmd = &cobra.Command{
@@ -103,15 +101,11 @@ func init() {
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
-		"storage backend: sqlite (default — pure-Go embedded SQL, zero CGo, persists to --backend-path so warm restarts skip re-indexing) | ladybug (embedded Cypher graph DB, requires CGo) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
+		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
 		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/<backend>.store")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
-		"cold-index page-cache cap for the on-disk backend in MiB — the size the store opens at to absorb bulk-COPY join scratch. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or falls back to 4096 (4 GiB); only consulted for --backend=ladybug")
-	daemonStartCmd.Flags().Uint64Var(&daemonBackendResidentBufferPoolMB, "backend-resident-buffer-pool-mb", 0,
-		"steady-state page-cache cap in MiB the store shrinks to once warmup/cold-index completes (the on-disk graph is a few hundred MiB, so this caches the whole working set hot). 0 reads $GORTEX_DAEMON_RESIDENT_BUFFER_POOL_MB or falls back to 512; only consulted for --backend=ladybug")
-	daemonStartCmd.Flags().Uint64Var(&daemonBackendRSSReopenMB, "backend-rss-reopen-mb", 0,
-		"leak backstop: when process RSS exceeds this many MiB, periodically reopen the on-disk store to reclaim native memory the engine leaks per query (parse/bind ASTs). 0 reads $GORTEX_DAEMON_RSS_REOPEN_MB or falls back to 4096; set 0 in both to disable. Check cadence via $GORTEX_DAEMON_RSS_REOPEN_INTERVAL (default 5m). Only consulted for --backend=ladybug")
+		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
@@ -206,13 +200,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			// dump because there's no other persistence layer.
 			saveSnapshot(mg, collectSnapshotRepos(state.multiIndexer), collectSnapshotContracts(state.multiIndexer), collectSnapshotVector(state.multiIndexer), version, logger)
 		}
-		// Persistent backends (ladybug) no longer write a metadata
+		// Persistent backends (sqlite) no longer write a metadata
 		// snapshot: per-file mtimes live in the FileMtime sidecar
 		// table, contract records ride on KindContract.Meta, and the
-		// vector index is served directly by the ladybug native HNSW
-		// (`CALL QUERY_VECTOR_INDEX`). Warm restart reads everything
-		// it needs from `store.lbug` — no gob+gzip round-trip
-		// required.
+		// vector index is persisted by the backend itself. Warm
+		// restart reads everything it needs from the on-disk store —
+		// no gob+gzip round-trip required.
 		if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
@@ -347,19 +340,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// the GC then has to clean up. Skipping snapshots until ready cleared
 	// a stall observed in profile #5 where saveSnapshotTo was the only
 	// runnable goroutine on a daemon mid-warmup.
-	// Periodic snapshots. For the memory backend this is the full
-	// gob+gzip export of the in-memory graph. For persistent backends
-	// (ladybug) it's metadata-only — repos + contracts + vector —
-	// since the backend already persists the graph itself. Both
-	// shapes feed the warm-restart path that uses ReconcileRepoCtx
-	// instead of full TrackRepoCtx; without the metadata save, warm
-	// restart had no FileMtimes and crashed in BulkUpsertSymbolFTS.
 	// Periodic snapshots fire only for the memory backend — that's
 	// the path that has no other persistence layer for the graph
-	// itself. Ladybug-backed daemons rely on the backend's own
-	// durability (graph → store.lbug, FileMtimes → FileMtime sidecar
-	// table, contracts → KindContract.Meta, vectors → SymbolVec) so
-	// the gob+gzip snapshot is dead weight in that mode.
+	// itself. Persistent backends (sqlite) rely on the backend's own
+	// durability (graph + FileMtimes + contracts + vectors all live
+	// on disk) so the gob+gzip snapshot is dead weight in that mode.
 	stopSnapshotter := func() {}
 	if mg, ok := state.graph.(*graph.Graph); ok {
 		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
@@ -383,15 +368,6 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	stopJanitor := startReconcileJanitor(state.multiIndexer, reconcileInterval(), logger)
 	defer stopJanitor()
 
-	// Leak backstop: periodically reopen the on-disk store once RSS
-	// climbs past the threshold, reclaiming native memory the engine
-	// leaks per query. Engages only after the post-warmup shrink (gated
-	// on the resident cap inside). No-op on the memory backend / when
-	// disabled. See startBufferPoolBackstop.
-	stopBackstop := startBufferPoolBackstop(state.graph, resolveDaemonRSSReopenMB(),
-		resolveDaemonResidentBufferPoolMB(), rssReopenInterval(), logger)
-	defer stopBackstop()
-
 	if err := srv.Listen(); err != nil {
 		return err
 	}
@@ -410,12 +386,6 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		start := time.Now()
 		logger.Info("daemon: warmup starting")
 		mw := warmupDaemonState(state, logger)
-		// Cold index / warmup is done: shrink the page cache from the
-		// 4 GiB cold-index budget down to the resident serving size,
-		// which tears down and re-opens the store to actually return the
-		// buffer-pool high-water to the OS. No-op on the memory backend
-		// and when the resident cap already matches.
-		shrinkToResidentBufferPool(state.graph, resolveDaemonResidentBufferPoolMB(), logger)
 		controller.AttachWatcher(mw)
 		// Wire the daemon's MultiWatcher into the per-server history
 		// surface so `get_recent_changes` and `get_symbol_history` see
@@ -436,11 +406,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			// Co-change pre-warm: fire the git-history mine in the
 			// background so the first user-visible
 			// find_co_changing_symbols / search-rerank call sees a
-			// populated cache. On Ladybug the mine is dominated by
-			// the AllNodes + per-pair AddEdge disk-persist step that
-			// mineCoChange already defers into its own goroutine —
-			// but even the git log itself can take 10–30s on a large
-			// history, and we want that off every request path.
+			// populated cache. On a persistent backend the mine is
+			// dominated by the AllNodes + per-pair AddEdge disk-persist
+			// step that mineCoChange already defers into its own
+			// goroutine — but even the git log itself can take 10–30s
+			// on a large history, and we want that off every request
+			// path.
 			state.mcpServer.PrewarmCoChange()
 		}
 		elapsed := time.Since(start)
@@ -1269,50 +1240,6 @@ func resolveDaemonBufferPoolMB() uint64 {
 		}
 	}
 	return 0
-}
-
-// resolveDaemonResidentBufferPoolMB returns the steady-state buffer-pool
-// cap the daemon shrinks to after warmup. Precedence:
-// --backend-resident-buffer-pool-mb flag > GORTEX_DAEMON_RESIDENT_BUFFER_POOL_MB
-// env > 0 (which ReopenWithBufferPool maps to DefaultResidentBufferPoolMB).
-func resolveDaemonResidentBufferPoolMB() uint64 {
-	if daemonBackendResidentBufferPoolMB != 0 {
-		return daemonBackendResidentBufferPoolMB
-	}
-	if env := strings.TrimSpace(os.Getenv("GORTEX_DAEMON_RESIDENT_BUFFER_POOL_MB")); env != "" {
-		if v, err := strconv.ParseUint(env, 10, 64); err == nil {
-			return v
-		}
-	}
-	return 0
-}
-
-// resolveDaemonRSSReopenMB returns the RSS threshold (MiB) above which
-// the leak backstop reopens the store. Precedence: --backend-rss-reopen-mb
-// flag > GORTEX_DAEMON_RSS_REOPEN_MB env > 4096 default. An explicit 0
-// (flag or env) disables the backstop.
-func resolveDaemonRSSReopenMB() uint64 {
-	if daemonBackendRSSReopenMB != 0 {
-		return daemonBackendRSSReopenMB
-	}
-	if env := strings.TrimSpace(os.Getenv("GORTEX_DAEMON_RSS_REOPEN_MB")); env != "" {
-		if v, err := strconv.ParseUint(env, 10, 64); err == nil {
-			return v
-		}
-	}
-	return 4096
-}
-
-// rssReopenInterval returns how often the leak backstop samples RSS.
-// GORTEX_DAEMON_RSS_REOPEN_INTERVAL (a Go duration) overrides the 5m
-// default; a non-positive value disables the backstop.
-func rssReopenInterval() time.Duration {
-	if env := strings.TrimSpace(os.Getenv("GORTEX_DAEMON_RSS_REOPEN_INTERVAL")); env != "" {
-		if d, err := time.ParseDuration(env); err == nil {
-			return d
-		}
-	}
-	return 5 * time.Minute
 }
 
 // killByPID is the fallback stop path for stale daemons that have a PID

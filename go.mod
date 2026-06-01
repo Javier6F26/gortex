@@ -3,7 +3,6 @@ module github.com/zzet/gortex
 go 1.26.2
 
 require (
-	github.com/LadybugDB/go-ladybug v0.13.1
 	github.com/alexaandru/go-sitter-forest/ada v1.9.0
 	github.com/alexaandru/go-sitter-forest/agda v1.9.0
 	github.com/alexaandru/go-sitter-forest/aiken v1.9.0
@@ -348,7 +347,6 @@ require (
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/sahilm/fuzzy v0.1.2 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
-	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
@@ -389,10 +387,3 @@ replace github.com/mattn/go-pointer => ./internal/thirdparty/go-pointer
 // blocked the Windows build because github.com/coder/hnsw imports it
 // unconditionally. See internal/thirdparty/renameio.
 replace github.com/google/renameio => ./internal/thirdparty/renameio
-
-// Vendored copy of github.com/LadybugDB/go-ladybug v0.13.1 with a
-// missing lbug_value_destroy added to FlatTuple.GetValue. Upstream
-// leaks one C-side allocation per column of every materialised row;
-// observed as 15.8GB / 211M allocations in the DefaultMallocZone on
-// a daemon after warmup + 27 tool calls. See internal/thirdparty/go-ladybug.
-replace github.com/LadybugDB/go-ladybug => ./internal/thirdparty/go-ladybug

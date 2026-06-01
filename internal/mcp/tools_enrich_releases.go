@@ -24,7 +24,7 @@ import (
 func (s *Server) registerEnrichReleasesTool() {
 	s.addTool(
 		mcp.NewTool("enrich_releases",
-			mcp.WithDescription("Pre-compute the release timeline: list tags on the default branch (or `branch` override), stamp meta.added_in on every file present in each tag's tree, and materialise one KindRelease node per tag. The read tool `analyze kind=releases` then answers from this Meta without re-walking git. Idempotent; LadyBug-backed daemons persist the result across restarts."),
+			mcp.WithDescription("Pre-compute the release timeline: list tags on the default branch (or `branch` override), stamp meta.added_in on every file present in each tag's tree, and materialise one KindRelease node per tag. The read tool `analyze kind=releases` then answers from this Meta without re-walking git. Idempotent; disk-backed daemons (sqlite) persist the result across restarts."),
 			mcp.WithString("branch", mcp.Description("Branch / tag / SHA whose reachable tag set bounds the timeline. Empty resolves the repo's default branch; pass a value to override.")),
 			mcp.WithString("path", mcp.Description("Optional path or repo prefix to scope the enrichment. Multi-repo daemons enrich every tracked repo when empty.")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
