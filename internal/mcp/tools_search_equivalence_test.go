@@ -117,3 +117,22 @@ func TestSearchSymbols_EquivalenceAutoConcepts(t *testing.T) {
 	require.Truef(t, ids["pkg/radiusOnlySymbol.go::radiusOnlySymbol"],
 		"auto-concept mining should bridge 'blast' to a radius-named symbol; got %v", ids)
 }
+
+// TestSearchSymbols_ConceptThesaurusBridge confirms the concept-
+// relatedness thesaurus bridges an adjacent (non-synonym) concept
+// under expand:"equivalence" with NO LLM provider: a query for "auth"
+// reaches a symbol named only with "token".
+func TestSearchSymbols_ConceptThesaurusBridge(t *testing.T) {
+	srv := equivalenceTestServer(t, []string{
+		"LoginService", "TokenStore", "UnrelatedThing",
+	}, nil)
+	ids := searchIDs(t, srv, map[string]any{"query": "auth", "expand": "equivalence"})
+	// Direct synonym bridge still works.
+	require.Truef(t, ids["pkg/LoginService.go::LoginService"],
+		"synonym bridge auth -> LoginService should still hold; got %v", ids)
+	// Thesaurus (adjacent-concept) bridge: auth relates to the token
+	// class, so TokenStore is reachable even though "token" is not a
+	// synonym of "auth".
+	require.Truef(t, ids["pkg/TokenStore.go::TokenStore"],
+		"thesaurus bridge auth -> token -> TokenStore should hold; got %v", ids)
+}

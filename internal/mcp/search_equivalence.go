@@ -116,6 +116,9 @@ func (s *Server) expandEquivalenceClasses(query string) []string {
 		seen[term] = struct{}{}
 		out = append(out, term)
 	}
+	// Tier 1 -- direct synonym siblings (union-find) and per-repo
+	// auto-mined concept siblings. These are interchangeable with the
+	// query token, so they enter the OR-merge first / at full weight.
 	for _, tok := range tokens {
 		for _, sib := range table.Expand(tok) {
 			add(sib)
@@ -124,8 +127,44 @@ func (s *Server) expandEquivalenceClasses(query string) []string {
 			add(sib)
 		}
 	}
+
+	// Tier 2 -- concept-relatedness thesaurus siblings. "auth" pulls
+	// in "token" / "session" / "jwt": adjacent concepts, NOT synonyms.
+	// They run LLM-free under expand=equivalence, but at a strictly
+	// lower priority than Tier 1 -- appended AFTER every direct
+	// sibling so they trail in the OR-merge order, and bounded by
+	// relatedTermBudget per query so a related-concept bridge widens
+	// recall a little without flooding the candidate pool and eroding
+	// precision. Terms already emitted as a direct sibling are skipped
+	// by the shared dedupe.
+	relatedBudget := relatedTermBudget
+	for _, tok := range tokens {
+		if relatedBudget <= 0 {
+			break
+		}
+		for _, sib := range table.ExpandRelated(tok) {
+			if relatedBudget <= 0 {
+				break
+			}
+			before := len(out)
+			add(sib)
+			if len(out) > before {
+				relatedBudget--
+			}
+		}
+	}
 	return out
 }
+
+// relatedTermBudget caps how many concept-relatedness (Tier 2)
+// thesaurus terms a single query may contribute. Kept small so the
+// adjacent-concept bridge stays a recall nudge, not a flood -- the
+// related terms are not synonyms, so an unbounded fan-out would dilute
+// precision. The cap admits roughly the two nearest related classes'
+// members (the forward-declared neighbours rank first), enough to
+// bridge an adjacent concept without flooding the candidate pool.
+// Direct synonym siblings are never subject to this cap.
+const relatedTermBudget = 8
 
 // mergeExpansionTerms unions several expansion-term lists into one
 // deduplicated slice, preserving the order the lists are supplied
