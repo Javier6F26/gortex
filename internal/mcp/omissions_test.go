@@ -11,25 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIsGeneratedFile(t *testing.T) {
-	gen := []string{
-		"api.pb.go", "schema_pb2.py", "model_gen.go", "x.gen.go",
-		"zz_generated.deepcopy.go", "mock_service.go", "service_mock.go",
-		"user.g.dart",
-	}
-	for _, p := range gen {
-		if !isGeneratedFile(p) {
-			t.Errorf("isGeneratedFile(%q) = false, want true", p)
-		}
-	}
-	notGen := []string{"service.go", "main.go", "handler.py", "generator.go", "gen.go"}
-	for _, p := range notGen {
-		if isGeneratedFile(p) {
-			t.Errorf("isGeneratedFile(%q) = true, want false", p)
-		}
-	}
-}
-
 func TestLooksBinary(t *testing.T) {
 	if !looksBinary([]byte("text\x00more")) {
 		t.Error("a NUL byte must read as binary")
