@@ -1270,7 +1270,7 @@ func encodeSmartContext(result map[string]any) ([]byte, error) {
 	if mani, ok := result["context_manifest"].(map[string]any); ok {
 		entries, _ := mani["entries"].([]map[string]any)
 		manEnc := newGCX(&buf, "smart_context.manifest",
-			[]string{"id", "kind", "name", "path", "line", "tier", "relation", "distance", "compressed", "sig", "source"},
+			[]string{"id", "kind", "name", "path", "line", "tier", "relation", "distance", "sibling_count", "compressed", "sig", "source"},
 			"token_budget", str(mani["token_budget"]),
 			"tokens_used", str(mani["tokens_used"]),
 			"omitted", str(mani["omitted"]),
@@ -1285,6 +1285,7 @@ func encodeSmartContext(result map[string]any) ([]byte, error) {
 				str(e["tier"]),
 				str(e["relation"]),
 				e["distance"],
+				e["sibling_count"],
 				str(e["compressed"]),
 				str(e["signature"]),
 				str(e["source"]),

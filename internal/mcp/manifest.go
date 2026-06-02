@@ -19,6 +19,17 @@ const defaultManifestBudget = 8000
 // signatures. The estimate path mirrors this to size the flat shape.
 const smartCtxMaxSource = 3
 
+// skeletonizeSiblingThreshold is the polymorphic-family size above
+// which a focus type / interface / method is skeletonized (embedded as
+// a signature/structure-only stub) instead of full source. When a
+// symbol has more than this many interchangeable siblings — interface
+// implementors, method overriders, or co-implementors of a shared
+// interface — one representative shipping full detail is enough; the
+// rest of the family is redundant and ships compressed. The threshold
+// is deliberately conservative so a sole or near-sole implementation
+// (the symbol the agent actually needs) is never skeletonized.
+const skeletonizeSiblingThreshold = 3
+
 // manifestSourceKinds are the node kinds whose source is worth
 // embedding in a manifest; one-liners (vars, consts, fields) carry
 // their whole meaning in the signature already.
@@ -55,6 +66,18 @@ func (s *Server) buildContextManifest(ctx context.Context, focus, outlineCandida
 	placed := make(map[string]bool)
 	entries := make([]map[string]any, 0, len(focus)+len(outlineCandidates))
 	omitted := 0
+	// siblingCache memoises the polymorphic-family size per node ID for
+	// the duration of this call — a type that recurs across focus and
+	// ring is counted once.
+	siblingCache := make(map[string]int)
+	siblingCountOf := func(n *graph.Node) int {
+		if c, ok := siblingCache[n.ID]; ok {
+			return c
+		}
+		c := s.manifestSiblingCount(ctx, n)
+		siblingCache[n.ID] = c
+		return c
+	}
 
 	base := func(n *graph.Node) map[string]any {
 		e := map[string]any{
@@ -63,10 +86,11 @@ func (s *Server) buildContextManifest(ctx context.Context, focus, outlineCandida
 			"name":       n.Name,
 			"file_path":  n.FilePath,
 			"start_line": n.StartLine,
-			"relation":   "",
-			"distance":   0,
-			"compressed": false,
-			"source":     "",
+			"relation":      "",
+			"distance":      0,
+			"compressed":    false,
+			"source":        "",
+			"sibling_count": 0,
 		}
 		if sig, ok := n.Meta["signature"].(string); ok {
 			e["signature"] = sig
@@ -91,6 +115,27 @@ func (s *Server) buildContextManifest(ctx context.Context, focus, outlineCandida
 		e := base(n)
 		src := s.manifestSymbolSource(ctx, n)
 		if src != "" {
+			// Polymorphic-sibling skeletonization: a focus type /
+			// interface / method that belongs to a large interchangeable
+			// family (more than skeletonizeSiblingThreshold siblings)
+			// ships compressed — one representative is enough detail; the
+			// rest of the family is redundant. Gated strictly on kind so a
+			// sole-implementation focus symbol is never skeletonized.
+			if skeletonizableKind(n.Kind) {
+				if sc := siblingCountOf(n); sc > skeletonizeSiblingThreshold {
+					if comp, err := elide.CompressString(src, n.Language); err == nil {
+						if cc := int(tokens.CachedCountInt64(comp)); used+cc <= budget {
+							e["tier"] = "focus"
+							e["source"] = comp
+							e["compressed"] = true
+							e["sibling_count"] = sc
+							used += cc
+							entries = append(entries, e)
+							continue
+						}
+					}
+				}
+			}
 			if full := int(tokens.CachedCountInt64(src)); used+full <= budget {
 				e["tier"] = "focus"
 				e["source"] = src
@@ -195,6 +240,66 @@ func (s *Server) manifestSymbolSource(ctx context.Context, n *graph.Node) string
 		return ""
 	}
 	return src
+}
+
+// skeletonizableKind reports whether a node kind participates in a
+// polymorphic family worth skeletonizing: interfaces, concrete types,
+// and methods. Functions, vars, consts, and fields are never
+// skeletonized — they have no interchangeable sibling family.
+func skeletonizableKind(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindInterface, graph.KindType, graph.KindMethod:
+		return true
+	default:
+		return false
+	}
+}
+
+// manifestSiblingCount returns the size of a node's interchangeable
+// polymorphic family — the signal that decides skeletonization:
+//
+//   - interface  → the number of concrete types that implement it.
+//   - method     → the number of methods that override it.
+//   - type       → the largest co-implementor count across the
+//     interfaces the type implements (excluding the type itself), so a
+//     concrete type in a large interface family skeletonizes alongside
+//     its peers.
+//
+// A node with no family (a sole implementation, a non-polymorphic
+// type) returns 0. The lookups are graph reads; the caller memoises
+// them per manifest call.
+func (s *Server) manifestSiblingCount(ctx context.Context, n *graph.Node) int {
+	if n == nil {
+		return 0
+	}
+	eng := s.engineFor(ctx)
+	switch n.Kind {
+	case graph.KindInterface:
+		return len(eng.FindImplementations(n.ID))
+	case graph.KindMethod:
+		return len(eng.FindOverrides(n.ID))
+	case graph.KindType:
+		best := 0
+		for _, edge := range eng.GetOutEdges(n.ID) {
+			if edge.Kind != graph.EdgeImplements {
+				continue
+			}
+			impls := eng.FindImplementations(edge.To)
+			// Exclude the type itself from its own co-implementor count.
+			co := 0
+			for _, impl := range impls {
+				if impl != nil && impl.ID != n.ID {
+					co++
+				}
+			}
+			if co > best {
+				best = co
+			}
+		}
+		return best
+	default:
+		return 0
+	}
 }
 
 // ringScanLimit bounds how many callers/callees are scanned per focus
