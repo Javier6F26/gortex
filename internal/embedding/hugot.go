@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/knights-analytics/hugot"
@@ -165,6 +166,21 @@ func (p *HugotProvider) Close() error {
 	return nil
 }
 
+// embeddingOfflineEnv, when set to a truthy value (1/true), disables
+// network downloads of embedding models. ensureHugotModel then returns
+// an error for any not-yet-cached model so NewLocalProvider falls back
+// to the static provider. Useful for air-gapped hosts, sandboxes, and
+// tests that must not touch the network.
+const embeddingOfflineEnv = "GORTEX_EMBEDDING_OFFLINE"
+
+// embeddingDownloadsDisabled reports whether model downloads are turned
+// off via embeddingOfflineEnv. An unset or falsey value keeps the
+// default behaviour (download on first use).
+func embeddingDownloadsDisabled() bool {
+	on, _ := strconv.ParseBool(os.Getenv(embeddingOfflineEnv))
+	return on
+}
+
 // ensureHugotModel downloads the variant's HuggingFace repo if needed
 // and returns the on-disk path Hugot will load from. The ONNX file is
 // specified via DownloadOptions because most repos ship multiple
@@ -188,6 +204,14 @@ func ensureHugotModel(spec HugotVariant) (string, error) {
 	}
 	if tokenizerReady && variantReady {
 		return modelDir, nil
+	}
+
+	// Offline guard: when downloads are disabled, refuse to fetch a
+	// missing model instead of blocking on (or racing inside) the
+	// network downloader. NewLocalProvider treats this error as "backend
+	// unavailable" and falls through to the static provider.
+	if embeddingDownloadsDisabled() {
+		return "", fmt.Errorf("embedding model %s (%s) not cached and downloads are disabled via %s", spec.RepoID, spec.OnnxFile, embeddingOfflineEnv)
 	}
 
 	opts := hugot.NewDownloadOptions()

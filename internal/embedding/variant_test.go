@@ -12,6 +12,16 @@ import (
 // assert the negative: an empty variant must NOT produce the
 // "unknown hugot variant" error that only the variant branch can emit.
 func TestNewProviderFromConfig_EmptyVariantUsesDefault(t *testing.T) {
+	// Keep this hermetic and offline. The "local" path runs the real
+	// backend chain (ONNX → GoMLX → Hugot → static); with a cold cache
+	// Hugot would download MiniLM over the network — slow, flaky, and
+	// racy under -race inside go-huggingface's parallel downloader. Point
+	// the model cache at an empty temp dir and disable downloads so the
+	// chain deterministically falls back to the static provider, which is
+	// exactly the no-error, non-nil result this test asserts.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv(embeddingOfflineEnv, "1")
+
 	p, err := NewProviderFromConfig(ProviderConfig{Provider: "local", Variant: ""})
 	if err != nil {
 		// NewLocalProvider falls back to the static provider if no
