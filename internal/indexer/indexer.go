@@ -4186,6 +4186,34 @@ func (idx *Indexer) commitContracts(reg *contracts.Registry) {
 	// correct per-handler scope now that the graph is complete.
 	idx.resolveProviderHandlers(reg)
 
+	// Cross-file route-prefix joining. A FastAPI APIRouter declared in
+	// one file (`router = APIRouter(prefix="/users")`) is mounted under
+	// a second prefix elsewhere (`app.include_router(router,
+	// prefix="/api")`), so a route declared `@router.get("/{id}")`
+	// belongs at /api/users/{id}, not /{id}. Rewrite the affected
+	// provider contract IDs to the joined path before the matcher pairs
+	// them with consumers. Also handles Express app.use mounts and
+	// NestJS @Controller class prefixes. Reads source straight off disk
+	// (cached per file) — the same access pattern resolveProviderHandlers
+	// uses for cross-file handler bodies.
+	//
+	// Mount sites (a main.py that only calls include_router) often carry
+	// no route contracts, so the scan-file set comes from the graph's
+	// py/ts/js file nodes, not the registry — but only when at least one
+	// prefix-eligible route contract exists, so non-FastAPI/Express/Nest
+	// repos pay nothing.
+	if scanFiles := idx.routerPrefixScanFiles(reg); len(scanFiles) > 0 {
+		srcCache := make(map[string][]byte)
+		contracts.JoinRouterPrefixes(reg, scanFiles, func(filePath string) []byte {
+			if data, ok := srcCache[filePath]; ok {
+				return data
+			}
+			data := idx.contractFileSrc(filePath)
+			srcCache[filePath] = data
+			return data
+		})
+	}
+
 	// Trace response variables back to their call-site return types.
 	// Handles `source, err := h.svc.Get(...)` → response_type is
 	// whatever `h.svc.Get` returns. The enricher can't do this
@@ -4305,6 +4333,70 @@ func (idx *Indexer) bulkCommit(nodes []*graph.Node, edges []*graph.Edge) {
 		return
 	}
 	idx.graph.AddBatch(nodes, edges)
+}
+
+// routerPrefixScanFiles returns the set of source files
+// JoinRouterPrefixes must scan for router definitions and mount sites
+// (APIRouter / include_router / app.use). Returns nil when no HTTP
+// contract uses a prefix-joining framework (FastAPI / Express / NestJS),
+// so unrelated repos skip the file enumeration entirely. When eligible,
+// it enumerates py / ts / js / tsx / jsx file nodes from the graph — the
+// mount file (a FastAPI main.py) frequently has no route contract of its
+// own and so can't be discovered from the registry alone.
+func (idx *Indexer) routerPrefixScanFiles(reg *contracts.Registry) []string {
+	eligible := false
+	for _, c := range reg.All() {
+		if c.Type != contracts.ContractHTTP || c.Meta == nil {
+			continue
+		}
+		switch fw, _ := c.Meta["framework"].(string); fw {
+		case "fastapi/flask", "express", "nestjs":
+			eligible = true
+		}
+		if eligible {
+			break
+		}
+	}
+	if !eligible {
+		return nil
+	}
+
+	var out []string
+	for _, n := range idx.graph.AllNodes() {
+		if n.Kind != graph.KindFile {
+			continue
+		}
+		path := n.FilePath
+		if path == "" {
+			path = n.ID
+		}
+		switch {
+		case strings.HasSuffix(path, ".py"),
+			strings.HasSuffix(path, ".ts"),
+			strings.HasSuffix(path, ".tsx"),
+			strings.HasSuffix(path, ".js"),
+			strings.HasSuffix(path, ".jsx"):
+			out = append(out, path)
+		}
+	}
+	return out
+}
+
+// contractFileSrc reads the on-disk source for a contract FilePath
+// (which is repo-prefixed when the indexer uses a repo prefix). Returns
+// nil when the file can't be read. Mirrors the disk-resolution logic in
+// resolveProviderHandlers so cross-file passes share one access pattern.
+func (idx *Indexer) contractFileSrc(filePath string) []byte {
+	diskPath := filePath
+	if idx.repoPrefix != "" && strings.HasPrefix(diskPath, idx.repoPrefix+"/") {
+		diskPath = strings.TrimPrefix(diskPath, idx.repoPrefix+"/")
+	}
+	diskPath = filepath.Join(idx.rootPath, diskPath)
+	data, err := os.ReadFile(diskPath)
+	if err != nil {
+		return nil
+	}
+	return data
 }
 
 // isRouteContractType reports whether a ContractType corresponds to a
