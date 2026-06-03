@@ -80,8 +80,21 @@ func isSymfonyServicesYAML(root *yaml.Node) bool {
 	if root == nil || root.Kind != yaml.MappingNode {
 		return false
 	}
-	if svc := mappingGet(root, "services"); svc != nil && svc.Kind == yaml.MappingNode {
-		return true
+	svc := mappingGet(root, "services")
+	if svc == nil || svc.Kind != yaml.MappingNode {
+		return false
+	}
+	// Distinguish a Symfony services file from a docker-compose file —
+	// both have a top-level `services:`. Symfony service IDs are PHP FQCNs
+	// (contain a backslash) or the special `_defaults` / `_instanceof`
+	// keys; docker-compose service names are plain identifiers. Require at
+	// least one Symfony-shaped key so a compose file falls through to the
+	// generic YAML extractor.
+	for i := 0; i+1 < len(svc.Content); i += 2 {
+		key := strings.TrimSpace(svc.Content[i].Value)
+		if strings.Contains(key, `\`) || key == "_defaults" || key == "_instanceof" {
+			return true
+		}
 	}
 	return false
 }
