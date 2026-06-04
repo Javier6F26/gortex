@@ -1202,9 +1202,12 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	if !idx.config.Coverage.IsEnabled("configs") {
 		stripConfigArtifacts(result)
 	}
-	if idx.config.Coverage.IsEnabled("sql") {
-		applyMigrationExtraction(relPath, src, result)
-	}
+	// SQL migration / DDL extraction is high-signal — CREATE TABLE in a
+	// dedicated migration file or a `gortex db schema` dump is
+	// unambiguous, unlike the noisy code-side string-literal SQL the
+	// `sql` domain gates. Run it always; the strip below removes only the
+	// gated code-side SQL, preserving migration-origin schema nodes.
+	applyMigrationExtraction(relPath, src, result)
 	if !idx.config.Coverage.IsEnabled("sql") {
 		stripSQLArtifacts(result)
 	}
@@ -1213,23 +1216,33 @@ func (idx *Indexer) applyCoverageDomains(relPath, lang string, src []byte, resul
 	}
 }
 
-// applyMigrationExtraction detects when a file looks like a SQL
-// migration (path under migrate/ or migrations/) and parses
-// CREATE TABLE statements out of its source. Each declared table
-// is emitted as a KindTable node alongside the synthetic
-// KindMigration node for the file itself, with EdgeProvides edges
-// from migration → table so reverse-walk queries answer "which
-// migrations create this table". Migration tables use the
-// generic dialect since the .sql file by itself doesn't tell us
-// which dialect the application targets — agents that care about
-// dialect can join through the file path or surrounding go.mod.
+// applyMigrationExtraction parses CREATE TABLE DDL out of SQL migration
+// files (path under migrate/ or migrations/) and `gortex db schema` dumps
+// (recognised by their generated-header marker, wherever they're saved).
+// Each declared table becomes a KindTable node with its columns as
+// KindColumn nodes (EdgeMemberOf column → table), alongside the synthetic
+// KindMigration node for the file, with EdgeProvides edges from migration
+// → table so reverse-walk queries answer "which migrations create this
+// table". A generated dump carries the real dialect in its header;
+// hand-written migrations stay "generic" since the .sql file alone doesn't
+// tell us which dialect the application targets. All emitted nodes carry
+// Meta["origin"]="migration" so they survive the sql-domain strip — this
+// schema DDL is unambiguous and high-signal, unlike the code-side
+// string-literal SQL the `sql` coverage gate exists to suppress.
 func applyMigrationExtraction(relPath string, src []byte, result *parser.ExtractionResult) {
-	if !gortexsql.IsMigrationPath(relPath) {
+	generated := gortexsql.IsGeneratedSchema(src)
+	if !gortexsql.IsMigrationPath(relPath) && !generated {
 		return
 	}
-	tables := gortexsql.ExtractCreateTables(string(src))
+	tables := gortexsql.ExtractCreateTablesWithColumns(string(src))
 	if len(tables) == 0 {
 		return
+	}
+	dialect := "generic"
+	if generated {
+		if d := gortexsql.GeneratedSchemaDialect(src); d != "" {
+			dialect = d
+		}
 	}
 	migrationID := gortexsql.MigrationNodeID(relPath)
 	result.Nodes = append(result.Nodes, &graph.Node{
@@ -1239,14 +1252,16 @@ func applyMigrationExtraction(relPath string, src []byte, result *parser.Extract
 		FilePath: relPath,
 		Language: "sql",
 		Meta: map[string]any{
-			"dialect": "generic",
+			"dialect": dialect,
+			"origin":  "migration",
 		},
 	})
 	for _, t := range tables {
-		tableID := gortexsql.TableNodeID("generic", t.Schema, t.Table)
+		tableID := gortexsql.TableNodeID(dialect, t.Schema, t.Table)
 		meta := map[string]any{
 			"table":   t.Table,
-			"dialect": "generic",
+			"dialect": dialect,
+			"origin":  "migration",
 		}
 		if t.Schema != "" {
 			meta["schema"] = t.Schema
@@ -1266,6 +1281,35 @@ func applyMigrationExtraction(relPath string, src []byte, result *parser.Extract
 			FilePath: relPath,
 			Origin:   graph.OriginASTResolved,
 		})
+		for _, c := range t.Columns {
+			colID := gortexsql.ColumnNodeID(dialect, t.Schema, t.Table, c.Name)
+			cmeta := map[string]any{
+				"table":   t.Table,
+				"dialect": dialect,
+				"origin":  "migration",
+			}
+			if t.Schema != "" {
+				cmeta["schema"] = t.Schema
+			}
+			if c.Type != "" {
+				cmeta["type"] = c.Type
+			}
+			result.Nodes = append(result.Nodes, &graph.Node{
+				ID:       colID,
+				Kind:     graph.KindColumn,
+				Name:     c.Name,
+				FilePath: relPath,
+				Language: "sql",
+				Meta:     cmeta,
+			})
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     colID,
+				To:       tableID,
+				Kind:     graph.EdgeMemberOf,
+				FilePath: relPath,
+				Origin:   graph.OriginASTResolved,
+			})
+		}
 	}
 }
 
@@ -1281,7 +1325,7 @@ func stripSQLArtifacts(result *parser.ExtractionResult) {
 	stripped := make(map[string]struct{})
 	keptNodes := result.Nodes[:0]
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindTable || n.Kind == graph.KindMigration {
+		if (n.Kind == graph.KindTable || n.Kind == graph.KindMigration) && !isMigrationOriginNode(n) {
 			stripped[n.ID] = struct{}{}
 			continue
 		}
@@ -1330,7 +1374,7 @@ func stripConfigArtifacts(result *parser.ExtractionResult) {
 	stripped := make(map[string]struct{})
 	keptNodes := result.Nodes[:0]
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindConfigKey && !isInfraOriginConfigKey(n) {
+		if n.Kind == graph.KindConfigKey && !isInfraOriginConfigKey(n) && !isDocFrontmatterConfigKey(n) {
 			stripped[n.ID] = struct{}{}
 			continue
 		}
@@ -1355,12 +1399,42 @@ func stripConfigArtifacts(result *parser.ExtractionResult) {
 // nodes carry Meta["origin"] = "k8s" or "dockerfile" by convention.
 // The code-side extractors (Go os.Getenv, Python os.environ, viper,
 // struct-tag, …) leave Meta["origin"] empty.
+// isMigrationOriginNode reports whether a node was emitted by migration /
+// live-DB DDL extraction (Meta["origin"]=="migration"). These schema nodes
+// are high-signal and survive the sql-domain strip — the gate only removes
+// the noisy code-side string-literal SQL.
+func isMigrationOriginNode(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	o, _ := n.Meta["origin"].(string)
+	return o == "migration"
+}
+
 func isInfraOriginConfigKey(n *graph.Node) bool {
 	if n == nil || n.Kind != graph.KindConfigKey || n.Meta == nil {
 		return false
 	}
 	origin, _ := n.Meta["origin"].(string)
 	return origin == "k8s" || origin == "dockerfile"
+}
+
+// isDocFrontmatterConfigKey reports whether a KindConfigKey node is a
+// document's frontmatter metadata (Quarto .qmd, …) rather than code /
+// infra configuration. These keys ride with the document / prose ingest,
+// which is independent of the `configs` coverage domain, so they survive
+// the strip the same way infra-origin keys do — keeping a .qmd's declared
+// title / format / params searchable by default. Add new frontmatter
+// sources to the switch as prose extractors gain frontmatter support.
+func isDocFrontmatterConfigKey(n *graph.Node) bool {
+	if n == nil || n.Kind != graph.KindConfigKey || n.Meta == nil {
+		return false
+	}
+	switch src, _ := n.Meta["source"].(string); src {
+	case "quarto_frontmatter":
+		return true
+	}
+	return false
 }
 
 // stripFlagArtifacts drops KindFlag nodes and EdgeTogglesFlag
@@ -3513,6 +3587,17 @@ var dirIgnoreFiles = []string{".gortexignore", ".ignore", ".rgignore"}
 // present in one of its ancestor directories. isDir lets a trailing-
 // slash pattern prune a directory subtree instead of only its files.
 func (idx *Indexer) shouldExclude(path, root string, isDir bool) bool {
+	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
+	// MCP server config the MCP-config-as-graph feature targets (the
+	// extractor's own docs name .kiro/mcp.json). Descend those subtrees
+	// and index only the MCP config files within them — everything else
+	// stays excluded, so the agent-state noise never reaches the graph.
+	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) {
+		if isDir {
+			return false
+		}
+		return !excludes.IsMCPConfigFile(rel)
+	}
 	if m := idx.excludeMatcher(); m != nil && m.MatchAbsDir(path, root, isDir) {
 		return true
 	}
@@ -3829,6 +3914,10 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 	if !idx.deferGlobalPasses && (len(staleFiles) > 0 || len(deletedFiles) > 0) {
 		idx.resolver.InferImplements()
 		idx.resolver.InferOverrides()
+		// Keep capability edges (reads_env / executes_process /
+		// accesses_field) fresh on incremental reindex — same idempotent
+		// re-derive RunGlobalGraphPasses runs at full index.
+		synthesizeCapabilityEdges(idx.graph)
 		resolver.RunFrameworkSynthesizers(idx.graph)
 		// Incremental: synthesize external calls only for the reindexed
 		// files (O(edited files)), not a full-graph recompute.
@@ -4038,6 +4127,13 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 	if !idx.deferGlobalPasses {
 		idx.resolver.InferImplements()
 		idx.resolver.InferOverrides()
+		// Capability edges (reads_env / executes_process / accesses_field)
+		// re-derived from the freshly re-indexed files' base edges so the
+		// daemon's capability surface — what a supply-chain / least-privilege
+		// audit traverses — stays fresh between full indexes. Whole-graph but
+		// idempotent (AddEdge dedupes), matching the other synthesis passes
+		// re-run here.
+		synthesizeCapabilityEdges(idx.graph)
 		// Framework dynamic-dispatch synthesis — re-run because eviction
 		// may have dropped a handler, a registration edge, or an emit /
 		// listen edge, and each synthesizer's index must be rebuilt

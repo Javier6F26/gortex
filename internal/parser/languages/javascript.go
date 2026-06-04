@@ -341,15 +341,17 @@ func (e *JavaScriptExtractor) emitFunction(m parser.QueryResult, filePath, fileI
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
 	id := filePath + "::" + name
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("function %s()", name)},
-	})
+	}
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	if body := tsFunctionBody(def.Node); body != nil {
+		StampFunctionMetrics(node, body, "javascript")
 		emitJSXRenderEdges(id, body, src, filePath, result)
 	}
 }
@@ -359,11 +361,12 @@ func (e *JavaScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID s
 	def := m.Captures["arrow.def"]
 	arrowNames[name] = true
 	id := filePath + "::" + name
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("const %s = () =>", name)},
-	})
+	}
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
@@ -377,6 +380,7 @@ func (e *JavaScriptExtractor) emitArrow(m parser.QueryResult, filePath, fileID s
 		if body == nil {
 			body = arrow
 		}
+		StampFunctionMetrics(node, body, "javascript")
 		emitJSXRenderEdges(id, body, src, filePath, result)
 	}
 }
@@ -439,11 +443,15 @@ func (e *JavaScriptExtractor) emitMethod(m parser.QueryResult, filePath, fileID 
 	name := m.Captures["method.name"].Text
 	classID := filePath + "::" + className
 	methodID := filePath + "::" + className + "." + name
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: methodID, Kind: graph.KindMethod, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript",
-	})
+	}
+	if body := tsFunctionBody(def.Node); body != nil {
+		StampFunctionMetrics(node, body, "javascript")
+	}
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: methodID, To: classID, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: def.StartLine + 1,
 	})
@@ -479,15 +487,17 @@ func (e *JavaScriptExtractor) emitObjectLiteralMethod(m parser.QueryResult, file
 		name = owner + "." + member
 	}
 	id = fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("%s()", name)},
-	})
+	}
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	if body := tsFunctionBody(def.Node); body != nil {
+		StampFunctionMetrics(node, body, "javascript")
 		emitJSXRenderEdges(id, body, src, filePath, result)
 	}
 	if owner == "" {
@@ -517,11 +527,12 @@ func (e *JavaScriptExtractor) emitObjectArrowField(m parser.QueryResult, filePat
 		name = owner + "." + member
 	}
 	id = fmt.Sprintf("%s::%s@%d", filePath, name, def.StartLine+1)
-	result.Nodes = append(result.Nodes, &graph.Node{
+	node := &graph.Node{
 		ID: id, Kind: graph.KindFunction, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "javascript", Meta: map[string]any{"signature": fmt.Sprintf("%s: () =>", name)},
-	})
+	}
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
@@ -530,6 +541,7 @@ func (e *JavaScriptExtractor) emitObjectArrowField(m parser.QueryResult, filePat
 		if body == nil {
 			body = arrow
 		}
+		StampFunctionMetrics(node, body, "javascript")
 		emitJSXRenderEdges(id, body, src, filePath, result)
 	}
 	if owner == "" {

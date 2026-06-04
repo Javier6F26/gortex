@@ -233,6 +233,181 @@ func ExtractCreateTables(source string) []TableRef {
 	return refs
 }
 
+// CreateColumn is a column declared inside a CREATE TABLE body. Type is a
+// best-effort leading type token ("" when not determinable).
+type CreateColumn struct {
+	Name string
+	Type string
+}
+
+// CreateTableDef is a CREATE TABLE statement together with its declared
+// columns — the schema-ingestion counterpart to TableRef, used where
+// columns become first-class graph nodes (migration files, live-DB DDL).
+type CreateTableDef struct {
+	Schema  string
+	Table   string
+	Columns []CreateColumn
+}
+
+// tableConstraintHeads are the leading keywords of a table-level
+// constraint clause inside a CREATE TABLE body; an entry beginning with
+// one of these is not a column.
+var tableConstraintHeads = map[string]bool{
+	"PRIMARY": true, "FOREIGN": true, "CONSTRAINT": true, "UNIQUE": true,
+	"CHECK": true, "EXCLUDE": true, "LIKE": true, "PARTITION": true,
+	"INDEX": true, "KEY": true,
+}
+
+// ExtractCreateTablesWithColumns parses CREATE TABLE statements and their
+// column lists out of SQL DDL. The parenthesised body is scanned with
+// paren-depth + quote tracking (so VARCHAR(255) / NUMERIC(10,2) stay
+// intact), split on top-level commas, and the leading identifier of each
+// non-constraint entry is taken as a column. Best-effort and parser-free,
+// matching the rest of this package. Tables are de-duplicated by
+// schema::table and returned in a deterministic order.
+func ExtractCreateTablesWithColumns(source string) []CreateTableDef {
+	if source == "" {
+		return nil
+	}
+	locs := createTableRe.FindAllStringSubmatchIndex(source, -1)
+	seen := make(map[string]struct{})
+	var out []CreateTableDef
+	for _, loc := range locs {
+		if len(loc) < 4 || loc[2] < 0 {
+			continue
+		}
+		schema, table := splitSchemaTable(stripQuoting(source[loc[2]:loc[3]]))
+		if table == "" {
+			continue
+		}
+		key := schema + "::" + table
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		def := CreateTableDef{Schema: schema, Table: table}
+		if body := balancedParenBody(source, loc[3]); body != "" {
+			def.Columns = parseColumnDefs(body)
+		}
+		out = append(out, def)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Schema != out[j].Schema {
+			return out[i].Schema < out[j].Schema
+		}
+		return out[i].Table < out[j].Table
+	})
+	return out
+}
+
+// balancedParenBody returns the contents between the first '(' at or after
+// `from` and its matching ')', or "" when there is no balanced group
+// (e.g. CREATE TABLE ... AS SELECT, or CREATE TABLE x LIKE y).
+func balancedParenBody(s string, from int) string {
+	open := strings.IndexByte(s[from:], '(')
+	if open < 0 {
+		return ""
+	}
+	start := from + open
+	depth := 0
+	inSingle, inDouble := false, false
+	for i := start; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return s[start+1 : i]
+			}
+		}
+	}
+	return ""
+}
+
+// parseColumnDefs splits a CREATE TABLE body on top-level commas and reads
+// the leading identifier of each non-constraint entry as a column.
+func parseColumnDefs(body string) []CreateColumn {
+	var cols []CreateColumn
+	seen := make(map[string]struct{})
+	for _, seg := range splitTopLevel(body, ',') {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			continue
+		}
+		fields := strings.Fields(seg)
+		if len(fields) == 0 {
+			continue
+		}
+		if tableConstraintHeads[strings.ToUpper(stripQuoting(fields[0]))] {
+			continue
+		}
+		name := stripQuoting(fields[0])
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		typ := ""
+		if len(fields) > 1 {
+			typ = fields[1]
+		}
+		cols = append(cols, CreateColumn{Name: name, Type: typ})
+	}
+	return cols
+}
+
+// splitTopLevel splits s on sep at paren depth 0, ignoring sep inside
+// single/double quotes or parentheses.
+func splitTopLevel(s string, sep byte) []string {
+	var parts []string
+	depth := 0
+	inSingle, inDouble := false, false
+	last := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case inSingle:
+			if c == '\'' {
+				inSingle = false
+			}
+		case inDouble:
+			if c == '"' {
+				inDouble = false
+			}
+		case c == '\'':
+			inSingle = true
+		case c == '"':
+			inDouble = true
+		case c == '(':
+			depth++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+		case c == sep && depth == 0:
+			parts = append(parts, s[last:i])
+			last = i + 1
+		}
+	}
+	return append(parts, s[last:])
+}
+
 // ColumnRef is a single resolved column reference. Op is "read" for
 // columns appearing in SELECT projections, WHERE clauses, ORDER BY,
 // or GROUP BY; "write" for columns in INSERT INTO (col-list) and

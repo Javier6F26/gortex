@@ -163,15 +163,19 @@ const (
 	// EdgeDependsOn (overlay → base) and EdgeReferences
 	// (overlay → resource files).
 	KindKustomization NodeKind = "kustomization"
-	// KindImage represents a container image — either an external
-	// base image referenced by a Dockerfile FROM, or a build stage
-	// declared via `FROM ... AS <stage>`, or an image referenced
-	// by a K8s container spec. ID conventions:
+	// KindImage represents either a container image or a raster/vector
+	// image asset — distinguished by ID prefix and Meta. Container images
+	// come from a Dockerfile FROM (external base or `FROM ... AS <stage>`)
+	// or a K8s container spec; image assets are picture files ingested by
+	// the multimodal extractor. ID conventions:
 	//   `image::<name>:<tag>` for external/registry images (tag
 	//     defaults to "latest" when omitted)
 	//   `image::stage::<file>::<stage-name>` for Dockerfile build
 	//     stages
-	// Meta carries registry, digest (when pinned), platform.
+	//   `image::asset::<path>` for ingested image-file assets
+	// Meta carries registry/digest/platform for container images, and
+	// format/width/height/size_bytes/sha256 (asset_kind="image") for
+	// image-file assets.
 	KindImage NodeKind = "image"
 	// KindArtifact represents a non-code knowledge file declared in
 	// the `.gortex.yaml::artifacts` manifest — a DB schema (SQL /
