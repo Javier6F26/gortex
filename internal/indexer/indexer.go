@@ -3587,6 +3587,17 @@ var dirIgnoreFiles = []string{".gortexignore", ".ignore", ".rgignore"}
 // present in one of its ancestor directories. isDir lets a trailing-
 // slash pattern prune a directory subtree instead of only its files.
 func (idx *Indexer) shouldExclude(path, root string, isDir bool) bool {
+	// .claude/ and .kiro/ are Builtin-excluded wholesale, but may hold an
+	// MCP server config the MCP-config-as-graph feature targets (the
+	// extractor's own docs name .kiro/mcp.json). Descend those subtrees
+	// and index only the MCP config files within them — everything else
+	// stays excluded, so the agent-state noise never reaches the graph.
+	if rel, err := filepath.Rel(root, path); err == nil && excludes.InAgentConfigDir(rel) {
+		if isDir {
+			return false
+		}
+		return !excludes.IsMCPConfigFile(rel)
+	}
 	if m := idx.excludeMatcher(); m != nil && m.MatchAbsDir(path, root, isDir) {
 		return true
 	}
