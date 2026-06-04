@@ -116,6 +116,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("old_source", mcp.Required(), mcp.Description("Exact source fragment to replace (must be unique within the symbol)")),
 			mcp.WithString("new_source", mcp.Required(), mcp.Description("Replacement source fragment")),
 			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
+			mcp.WithBoolean("dry_run", mcp.Description("Validate the edit and return a unified-diff preview without writing (status: would_apply). Use to review the change before committing it.")),
 		),
 		s.handleEditSymbol,
 	)
@@ -2429,6 +2430,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("new_source is required"), nil
 	}
 	baseSHA := normalizeExpectedSHA(req.GetString("base_sha", ""))
+	dryRun := req.GetBool("dry_run", false)
 
 	if oldSource == newSource {
 		return mcp.NewToolResultError("old_source and new_source are identical"), nil
@@ -2541,6 +2543,22 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	editEnd := editStart + len(oldSource)
 	newContent := fileStr[:editStart] + newSource + fileStr[editEnd:]
 	newContentBytes := []byte(newContent)
+
+	if dryRun {
+		// Validate everything but skip the write; return a unified-diff
+		// preview so the caller can review the change before committing.
+		return s.respondJSONOrTOON(ctx, req, map[string]any{
+			"file":         node.FilePath,
+			"symbol":       id,
+			"lines_before": strings.Count(oldSource, "\n") + 1,
+			"lines_after":  strings.Count(newSource, "\n") + 1,
+			"start_line":   node.StartLine,
+			"status":       "would_apply",
+			"dry_run":      true,
+			"diff":         unifiedDiff(node.FilePath, fileStr, newContent),
+			"new_sha":      gitBlobSHA(newContentBytes),
+		})
+	}
 
 	// Write the file.
 	if err := os.WriteFile(absPath, newContentBytes, 0o644); err != nil {

@@ -449,6 +449,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 			"replacements":  replacements,
 			"bytes_written": len(newContentBytes),
 			"reindexed":     false,
+			"diff":          unifiedDiff(relPath, fileStr, newContent),
 			"new_sha":       newSHA,
 		})
 	}
@@ -526,10 +527,15 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	newSHA := gitBlobSHA(contentBytes)
 
 	if dryRun {
-		// Dry-run: skip the write + reindex but report what would happen.
+		// Dry-run: skip the write + reindex but report what would happen,
+		// including a unified-diff preview of the change.
 		dryStatus := "would_create"
+		oldContent := ""
 		if status == "overwritten" {
 			dryStatus = "would_overwrite"
+			if existing, e := os.ReadFile(absPath); e == nil {
+				oldContent = string(existing)
+			}
 		}
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"path":          relPath,
@@ -537,6 +543,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 			"dry_run":       true,
 			"bytes_written": len(contentBytes),
 			"reindexed":     false,
+			"diff":          unifiedDiff(relPath, oldContent, content),
 			"new_sha":       newSHA,
 		})
 	}
