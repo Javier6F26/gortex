@@ -43,6 +43,11 @@ func RegisterAll(reg *parser.Registry) {
 	reg.Register(NewSpringContextExtractor())
 	reg.Register(NewMarkdownExtractor())
 	reg.Register(NewQuartoExtractor())
+	// Multimodal assets — image files and PDF documents become graph
+	// nodes (DCA10). Registered before registerForestLanguages so they
+	// claim their extensions over any generic forest grammar.
+	reg.Register(NewImageAssetExtractor())
+	reg.Register(NewPDFExtractor())
 	reg.Register(NewOrgModeExtractor())
 	reg.Register(NewDartExtractor())
 	reg.Register(NewOCamlExtractor())
