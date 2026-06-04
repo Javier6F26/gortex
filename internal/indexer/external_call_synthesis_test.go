@@ -13,8 +13,8 @@ func TestExternalCallSynthesisEnabled_EnvOverride(t *testing.T) {
 	idx := newTestIndexer(g)
 	bptr := func(b bool) *bool { return &b }
 
-	// Default-on: key unset (nil) resolves to enabled.
-	require.True(t, idx.externalCallSynthesisEnabled())
+	// Default-off (opt-in): key unset (nil) resolves to disabled.
+	require.False(t, idx.externalCallSynthesisEnabled())
 
 	// Explicit opt-out via config.
 	idx.config.SynthesizeExternalCalls = bptr(false)

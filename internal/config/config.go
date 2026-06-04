@@ -503,15 +503,16 @@ type IndexConfig struct {
 	// identity node — `analyze kind=external_calls` then aggregates a
 	// service's whole external surface across repositories.
 	//
-	// Tri-state, default ON: a nil pointer (the key absent from config)
-	// resolves to enabled via ExternalCallSynthesisEnabledOrDefault, so
-	// external qualification is automatic for every language whose
-	// extractor lands calls on a dep/stdlib/external terminal
-	// (Go/Rust/Java/Python/C#/TS). Opt out per-repo with
-	// `.gortex.yaml::index::synthesize_external_calls: false` or the
-	// GORTEX_SYNTH_EXTERNAL_CALLS=0 environment override; language /
-	// stdlib calls are filtered out regardless so the synthetic nodes
-	// only ever name genuine third-party packages.
+	// Tri-state, default OFF: a nil pointer (the key absent) resolves to
+	// disabled via ExternalCallSynthesisEnabledOrDefault. Synthesis is a
+	// full-graph recompute that materialises a node per external package
+	// and re-targets every external call edge at each index settle point,
+	// so it stays opt-in to avoid a per-index cost on every repo. Enable
+	// with `.gortex.yaml::index::synthesize_external_calls: true` or
+	// GORTEX_SYNTH_EXTERNAL_CALLS=1 to get the stable cross-repo identity
+	// nodes. The qualification is per-language complete (Go/Rust/Java/
+	// Python/C#/TS); language / stdlib calls are filtered out regardless
+	// so the synthetic nodes only ever name genuine third-party packages.
 	SynthesizeExternalCalls *bool `mapstructure:"synthesize_external_calls" yaml:"synthesize_external_calls,omitempty"`
 	// Transforms are pluggable pre-ingestion content processors. Each
 	// rewrites a matching file's bytes before the parser sees them —
@@ -1066,12 +1067,17 @@ func (e EmbeddingConfig) EmbeddingEnabledOrDefault() bool {
 }
 
 // ExternalCallSynthesisEnabledOrDefault resolves the tri-state
-// SynthesizeExternalCalls flag against the default-on policy: an unset
-// flag (key absent) means external-package call qualification is ON, so
-// every external call gets a stable cross-repo identity node by default.
+// SynthesizeExternalCalls flag. An unset flag (key absent) means OFF:
+// materialising a synthetic node per external package and re-targeting
+// every external call edge is a full-graph recompute that runs at each
+// index settle point, so leaving it on by default imposed a multi-x
+// indexing-cost regression. It stays opt-in — enable it (config key or
+// GORTEX_SYNTH_EXTERNAL_CALLS=1) to get the stable cross-repo identity
+// nodes. The qualification itself is per-language complete (Go / Rust /
+// Java / Python / C# / TS), so turning it on is a single switch.
 func (i IndexConfig) ExternalCallSynthesisEnabledOrDefault() bool {
 	if i.SynthesizeExternalCalls == nil {
-		return true
+		return false
 	}
 	return *i.SynthesizeExternalCalls
 }

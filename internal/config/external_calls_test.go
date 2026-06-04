@@ -7,18 +7,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestExternalCallSynthesis_AbsentIsDefaultOn asserts that a config with
+// TestExternalCallSynthesis_AbsentIsDefaultOff asserts that a config with
 // no `synthesize_external_calls` key leaves the pointer nil — which the
-// tri-state resolver reads as "external-call qualification ON" — so every
-// external call gets a stable cross-repo identity node by default.
-func TestExternalCallSynthesis_AbsentIsDefaultOn(t *testing.T) {
+// tri-state resolver reads as "external-call synthesis OFF" — so the
+// full-graph synthesis stays opt-in and imposes no per-index cost.
+func TestExternalCallSynthesis_AbsentIsDefaultOff(t *testing.T) {
 	cfg, err := Load(writeConfig(t, "index:\n  workers: 2\n"))
 	require.NoError(t, err)
 
 	assert.Nil(t, cfg.Index.SynthesizeExternalCalls,
-		"an absent key must leave the pointer nil (not false) so default-on applies")
-	assert.True(t, cfg.Index.ExternalCallSynthesisEnabledOrDefault(),
-		"a nil flag must resolve to ON")
+		"an absent key must leave the pointer nil (not false)")
+	assert.False(t, cfg.Index.ExternalCallSynthesisEnabledOrDefault(),
+		"a nil flag must resolve to OFF (opt-in)")
 }
 
 // TestExternalCallSynthesis_ExplicitlyDisabled asserts an explicit
