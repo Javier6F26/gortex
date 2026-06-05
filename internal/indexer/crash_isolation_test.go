@@ -8,9 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/crashpool"
 	"github.com/zzet/gortex/internal/parser/languages"
 )
+
+// panicExtractor is a fake extractor that always panics — it stands in
+// for a real grammar/extractor fault on a malformed file.
+type panicExtractor struct{}
+
+func (panicExtractor) Language() string     { return "boom" }
+func (panicExtractor) Extensions() []string { return []string{".boom"} }
+func (panicExtractor) Extract(string, []byte) (*parser.ExtractionResult, error) {
+	panic("runtime error: slice bounds out of range [95:50]")
+}
 
 // crashWorkerEnv makes the indexer test binary re-execute itself as a
 // crashpool worker subprocess instead of running the test suite.
@@ -34,6 +45,36 @@ func TestExtractFile_InProcess(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, quarantined)
 	require.NotEmpty(t, result.Nodes)
+}
+
+// TestExtractFile_InProcessPanicIsolated guards issue #54: an extractor
+// panic on the in-process (pool == nil) path must be recovered and the
+// file quarantined, never crash the whole indexing run. Covers both the
+// no-budget direct call and the budgeted goroutine path.
+func TestExtractFile_InProcessPanicIsolated(t *testing.T) {
+	for _, budget := range []int{0, 5000} {
+		name := "no_budget"
+		if budget > 0 {
+			name = "with_budget"
+		}
+		t.Run(name, func(t *testing.T) {
+			g := graph.New()
+			idx := newTestIndexer(g)
+			idx.config.MaxExtractMillis = budget
+
+			result, quarantined, err := idx.extractFile(nil, nil, "boom.boom", "boom.boom",
+				"boom", panicExtractor{}, []byte("anything"))
+
+			require.Error(t, err, "a recovered panic must surface as an error")
+			var pe *extractorPanicError
+			require.ErrorAs(t, err, &pe, "error must be an extractorPanicError")
+			require.True(t, quarantined, "the file must be quarantined, not silently dropped")
+			require.Len(t, result.Nodes, 1)
+			require.Equal(t, graph.KindFile, result.Nodes[0].Kind)
+			require.Equal(t, true, result.Nodes[0].Meta["quarantined"])
+			require.Contains(t, result.Nodes[0].Meta["parse_error"], "extractor panic")
+		})
+	}
 }
 
 // TestExtractFile_SubprocessPool exercises the full parent→worker→parent

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime/debug"
 	"time"
 
 	"github.com/zzet/gortex/internal/graph"
@@ -13,6 +14,34 @@ import (
 // errExtractTimeout is the sentinel returned when a file's extraction
 // exceeds IndexConfig.MaxExtractMillis.
 var errExtractTimeout = errors.New("extraction exceeded time budget")
+
+// extractorPanicError wraps a recovered extractor panic so callers can
+// tell a parser crash (quarantine the file, keep indexing) apart from
+// an ordinary extraction error. The original panic value and a stack
+// trace ride along for diagnostics.
+type extractorPanicError struct {
+	file  string
+	value any
+	stack []byte
+}
+
+func (e *extractorPanicError) Error() string {
+	return fmt.Sprintf("extractor panic on %s: %v", e.file, e.value)
+}
+
+// safeExtract runs ext.Extract guarded by a recover so a panic on a
+// single malformed file becomes an error instead of crashing the whole
+// indexing run. This is the in-process last line of defence behind the
+// subprocess crash-isolation pool (which only runs when enabled).
+func safeExtract(ext parser.Extractor, relPath string, src []byte) (result *parser.ExtractionResult, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = nil
+			err = &extractorPanicError{file: relPath, value: rec, stack: debug.Stack()}
+		}
+	}()
+	return ext.Extract(relPath, src)
+}
 
 // skippedFile records a file dropped by the size cap, kept so a
 // synthetic telemetry node can be emitted after the parse pass.
@@ -42,7 +71,7 @@ type walkedFile struct {
 func (idx *Indexer) extractWithTimeout(ext parser.Extractor, relPath string, src []byte) (*parser.ExtractionResult, error) {
 	budget := idx.config.MaxExtractMillis
 	if budget <= 0 {
-		return ext.Extract(relPath, src)
+		return safeExtract(ext, relPath, src)
 	}
 	type outcome struct {
 		result *parser.ExtractionResult
@@ -50,12 +79,7 @@ func (idx *Indexer) extractWithTimeout(ext parser.Extractor, relPath string, src
 	}
 	ch := make(chan outcome, 1)
 	go func() {
-		defer func() {
-			if rec := recover(); rec != nil {
-				ch <- outcome{err: fmt.Errorf("extractor panic: %v", rec)}
-			}
-		}()
-		r, err := ext.Extract(relPath, src)
+		r, err := safeExtract(ext, relPath, src)
 		ch <- outcome{result: r, err: err}
 	}()
 	timer := time.NewTimer(time.Duration(budget) * time.Millisecond)

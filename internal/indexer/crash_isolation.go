@@ -188,6 +188,17 @@ func (idx *Indexer) extractFile(
 			return timeoutSkipResult(relPath, lang, budget), true,
 				fmt.Errorf("extraction exceeded %dms budget: %s", budget, relPath)
 		}
+		// An extractor panic was recovered in-process: isolate the file
+		// like the subprocess pool does — emit a quarantine node so it
+		// stays visible, record the error, and let indexing continue
+		// rather than crashing the whole run.
+		var pe *extractorPanicError
+		if errors.As(eerr, &pe) {
+			idx.logger.Warn("indexer: recovered extractor panic; file isolated",
+				zap.String("file", relPath), zap.String("reason", fmt.Sprint(pe.value)))
+			return quarantineResult(relPath, lang, "extractor panic: "+fmt.Sprint(pe.value)),
+				true, eerr
+		}
 		if eerr != nil {
 			return nil, false, eerr
 		}

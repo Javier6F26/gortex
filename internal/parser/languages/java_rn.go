@@ -43,12 +43,19 @@ func extractJavaRNModuleNames(src []byte) map[string]string {
 
 		// @ReactModule(name=...) sits in the annotation band just before
 		// the class keyword — search the gap since the previous class.
-		if m := javaReactModuleNmRe.FindStringSubmatch(s[prevEnd:loc[0]]); m != nil {
+		// Clamp the lower bound: for a nested class the enclosing
+		// class's body span (recorded in prevEnd) extends past this
+		// class's start, so prevEnd > loc[0] and the slice would panic.
+		bandStart := min(prevEnd, loc[0])
+		if m := javaReactModuleNmRe.FindStringSubmatch(s[bandStart:loc[0]]); m != nil {
 			module = m[1]
 		}
 
 		out[className] = module
-		prevEnd = bodyEnd
+		// Track the furthest body end seen so a nested class (whose own
+		// body ends before its enclosing class's) can't rewind prevEnd
+		// and re-scan an outer class's annotations.
+		prevEnd = max(prevEnd, bodyEnd)
 	}
 	return out
 }
