@@ -121,6 +121,10 @@ type TrackParams struct {
 	Name    string `json:"name,omitempty"`
 	Project string `json:"project,omitempty"`
 	Ref     string `json:"ref,omitempty"`
+	// AsWorktree forces a linked git worktree of an already-tracked repo
+	// to be registered as an independent instance (the `--as-worktree`
+	// flag) rather than coalescing into the canonical checkout.
+	AsWorktree bool `json:"as_worktree,omitempty"`
 }
 
 // UntrackParams is the payload for ControlUntrack.

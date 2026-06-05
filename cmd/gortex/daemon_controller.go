@@ -69,7 +69,7 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	entry := config.RepoEntry{Path: absPath, Name: p.Name, Ref: p.Ref}
+	entry := config.RepoEntry{Path: absPath, Name: p.Name, Ref: p.Ref, AsWorktree: p.AsWorktree}
 	result, err := c.multiIndexer.TrackRepoCtx(ctx, entry)
 	if err != nil {
 		return nil, err
@@ -77,6 +77,13 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	if result == nil {
 		// Already tracked — idempotent.
 		return json.RawMessage(fmt.Sprintf(`{"status":"already_tracked","path":%q}`, absPath)), nil
+	}
+	// TrackRepoCtx may have derived a worktree-instance prefix that the
+	// by-value entry above can't see — read the prefix it actually
+	// registered under for the watcher attach and the response.
+	prefix := result.RepoPrefix
+	if prefix == "" {
+		prefix = config.ResolvePrefix(entry)
 	}
 
 	// Project association from TrackParams.Project isn't wired yet — the
@@ -90,7 +97,6 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	// here are logged but don't fail the track — an indexed-but-
 	// unwatched repo is still queryable, just stale if edited.
 	if c.multiWatcher != nil && c.configManager != nil {
-		prefix := config.ResolvePrefix(entry)
 		wcfg := c.configManager.GetRepoConfig(prefix).Watch
 		if err := c.multiWatcher.AddRepo(prefix, wcfg); err != nil {
 			c.logger.Warn("track: attach watcher failed",
@@ -110,7 +116,7 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	return json.Marshal(map[string]any{
 		"status":     "tracked",
 		"path":       absPath,
-		"prefix":     config.ResolvePrefix(entry),
+		"prefix":     prefix,
 		"file_count": result.FileCount,
 		"node_count": result.NodeCount,
 		"edge_count": result.EdgeCount,
