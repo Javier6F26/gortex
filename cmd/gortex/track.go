@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,8 +12,14 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/tui"
+)
+
+var (
+	trackName       string
+	trackAsWorktree bool
 )
 
 var trackCmd = &cobra.Command{
@@ -32,8 +39,28 @@ var untrackCmd = &cobra.Command{
 }
 
 func init() {
+	trackCmd.Flags().StringVar(&trackName, "name", "",
+		"Explicit repo prefix override (default: directory basename)")
+	trackCmd.Flags().BoolVar(&trackAsWorktree, "as-worktree", false,
+		"Track a linked git worktree as an independent instance even when its repo is already tracked elsewhere")
 	rootCmd.AddCommand(trackCmd)
 	rootCmd.AddCommand(untrackCmd)
+}
+
+// declaredWorkspace reads the `workspace:` slug from a repo's own
+// `.gortex.yaml`, or "" when the file is absent or declares none. Used by
+// the daemon-less track path to derive a stable worktree-instance prefix
+// the same way the daemon would.
+func declaredWorkspace(repoPath string) string {
+	cfgFile := filepath.Join(repoPath, ".gortex.yaml")
+	if _, err := os.Stat(cfgFile); err != nil {
+		return ""
+	}
+	cfg, err := config.Load(cfgFile)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.Workspace
 }
 
 func runTrack(cmd *cobra.Command, args []string) error {
@@ -64,14 +91,27 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
 		if err == nil {
 			defer func() { _ = c.Close() }()
-			resp, ctlErr := c.Control(daemon.ControlTrack, daemon.TrackParams{Path: absPath})
+			resp, ctlErr := c.Control(daemon.ControlTrack, daemon.TrackParams{
+				Path:       absPath,
+				Name:       trackName,
+				AsWorktree: trackAsWorktree,
+			})
 			if ctlErr != nil {
 				return ctlErr
 			}
 			if !resp.OK {
 				return fmt.Errorf("track rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
 			}
-			emitTrackSummary(w, absPath, trackResult{viaDaemon: true})
+			tr := trackResult{viaDaemon: true}
+			var meta struct {
+				Prefix string `json:"prefix"`
+				Status string `json:"status"`
+			}
+			if len(resp.Result) > 0 && json.Unmarshal(resp.Result, &meta) == nil {
+				tr.prefix = meta.Prefix
+				tr.alreadyTracked = meta.Status == "already_tracked"
+			}
+			emitTrackSummary(w, absPath, tr)
 			return nil
 		}
 	}
@@ -92,13 +132,26 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	}
 
 	entry := config.RepoEntry{Path: absPath}
+	switch {
+	case trackName != "":
+		entry.Name = trackName
+	case trackAsWorktree:
+		// The AsWorktree flag is not persisted, so pin the derived
+		// instance prefix as the entry Name now. The daemon reproduces it
+		// intrinsically for a declared-workspace worktree, but a forced
+		// (branch-tagged) instance must be recorded here to survive.
+		base := config.ResolvePrefix(entry)
+		if name, sep := indexer.WorktreeInstanceName(absPath, base, declaredWorkspace(absPath), true); sep {
+			entry.Name = name
+		}
+	}
 	if err := gc.AddRepo(entry); err != nil {
 		return err
 	}
 	if err := gc.Save(); err != nil {
 		return fmt.Errorf("saving global config: %w", err)
 	}
-	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos) + 1})
+	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos) + 1, prefix: config.ResolvePrefix(entry)})
 	return nil
 }
 
@@ -108,7 +161,8 @@ type trackResult struct {
 	viaDaemon      bool
 	configOnly     bool
 	alreadyTracked bool
-	repoCount      int // tracked repo count *after* this call (configOnly path)
+	repoCount      int    // tracked repo count *after* this call (configOnly path)
+	prefix         string // the prefix the repo was registered under (may differ from basename for worktree instances)
 }
 
 // emitTrackBanner prints the gortex mesh banner + subtitle indicating which
@@ -140,18 +194,25 @@ func emitTrackSummary(w io.Writer, absPath string, r trackResult) {
 	if !progress.IsTTY(w) {
 		// Preserve the legacy one-line output for non-TTY callers so
 		// scripts that grep this line keep working.
+		suffix := ""
+		if r.prefix != "" && r.prefix != filepath.Base(absPath) {
+			suffix = fmt.Sprintf(" as %q", r.prefix)
+		}
 		switch {
 		case r.viaDaemon:
-			_, _ = fmt.Fprintf(w, "[gortex] tracked %s (via daemon)\n", absPath)
+			_, _ = fmt.Fprintf(w, "[gortex] tracked %s%s (via daemon)\n", absPath, suffix)
 		case r.alreadyTracked:
 			_, _ = fmt.Fprintf(w, "[gortex] already tracked: %s\n", absPath)
 		case r.configOnly:
-			_, _ = fmt.Fprintf(w, "[gortex] tracked %s (config only — start daemon to index)\n", absPath)
+			_, _ = fmt.Fprintf(w, "[gortex] tracked %s%s (config only — start daemon to index)\n", absPath, suffix)
 		}
 		return
 	}
 
 	var stats []string
+	if r.prefix != "" && r.prefix != filepath.Base(absPath) {
+		stats = append(stats, progress.Stat("prefix", r.prefix, progress.StatGood))
+	}
 	switch {
 	case r.viaDaemon:
 		stats = append(stats, progress.Stat("via daemon", "", progress.StatGood))

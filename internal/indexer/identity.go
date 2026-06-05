@@ -115,6 +115,13 @@ func NormalizeRemoteURL(rawURL string) string {
 
 // DeduplicateRepos returns a deduplicated list of repo entries (last occurrence wins)
 // and warning messages for any duplicates detected by canonical identity.
+//
+// WARNING: dedup is keyed purely on git identity (remote URL / path), so
+// it treats a linked worktree of an already-tracked repo as a duplicate
+// of the canonical checkout. Do NOT wire this into the track / warmup
+// path: a worktree tracked as an independent instance (see
+// WorktreeInstanceName) shares the canonical's identity but is a
+// distinct, intentional entry. Currently unused — kept for reference.
 func DeduplicateRepos(entries []config.RepoEntry) ([]config.RepoEntry, []string) {
 	if len(entries) == 0 {
 		return entries, nil

@@ -87,6 +87,14 @@ type IndexResult struct {
 	DeletedFileCount int          `json:"deleted_file_count,omitempty"`
 	DurationMs       int64        `json:"duration_ms"`
 	Errors           []IndexError `json:"errors,omitempty"`
+	// RepoPrefix is the prefix the repo was actually registered under.
+	// It usually equals config.ResolvePrefix(entry), but a git worktree
+	// tracked as an independent instance gets a derived `<base>@<tag>`
+	// prefix that the caller cannot recompute from the (by-value) entry
+	// it passed in — callers that need to attach a watcher or report the
+	// outcome read it from here. Populated by the multi-repo track and
+	// reconcile paths; empty in single-repo mode.
+	RepoPrefix string `json:"repo_prefix,omitempty"`
 }
 
 // EdgeSanityViolated reports the post-reindex sanity-check failure: an

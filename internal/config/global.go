@@ -41,6 +41,13 @@ type RepoEntry struct {
 	// Project is the matching override for the project slug. Same
 	// precedence rules as Workspace.
 	Project string `mapstructure:"project" yaml:"project,omitempty"`
+	// AsWorktree is a transient track-time directive (the `--as-worktree`
+	// flag), never persisted: when set, a linked git worktree of an
+	// already-tracked repo is registered as an INDEPENDENT instance under
+	// a derived `<base>@<tag>` prefix instead of coalescing into the
+	// canonical checkout. The decision is recorded by persisting the
+	// derived prefix into Name, so this flag does not need to round-trip.
+	AsWorktree bool `mapstructure:"-" yaml:"-"`
 }
 
 // ProjectConfig defines a named project grouping repos.

@@ -659,7 +659,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 					skipped++
 					continue
 				}
-				prefix := strings.TrimPrefix(config.ResolvePrefix(entry), "/")
+				prefix := strings.TrimPrefix(indexer.EffectiveRepoPrefix(state.configManager, entry), "/")
 				absRootCapture := absRoot
 				helper := buildResolverLSPHelper(state.lspRouter, tsSpec, absRootCapture, poolSize, logger)
 				state.resolverLSPRegistry.Register(prefix, helper)
@@ -752,7 +752,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 					// back to the snapshot's per-repo FileMtimes when the
 					// backend doesn't implement the reader (memory) or
 					// hasn't seen this repo yet.
-					priorMtimes := priorMtimesFromStore(state.graph, entry, logger)
+					priorMtimes := priorMtimesFromStore(state.graph, state.configManager, entry, logger)
 					if len(priorMtimes) == 0 {
 						priorMtimes = priorMtimesForEntry(state.snapshotRepos, entry)
 					}
@@ -1016,7 +1016,7 @@ func publishReadinessPhase(state *daemonState, phase string, ready bool, extra m
 // mtimes for the repo (fresh cold start). When non-nil it short-
 // circuits the gob-snapshot lookup so the warm path is driven by
 // data the backend persisted itself.
-func priorMtimesFromStore(g graph.Store, entry config.RepoEntry, logger *zap.Logger) map[string]int64 {
+func priorMtimesFromStore(g graph.Store, cm *config.ConfigManager, entry config.RepoEntry, logger *zap.Logger) map[string]int64 {
 	reader, ok := g.(graph.FileMtimeReader)
 	if !ok {
 		if logger != nil {
@@ -1024,7 +1024,11 @@ func priorMtimesFromStore(g graph.Store, entry config.RepoEntry, logger *zap.Log
 		}
 		return nil
 	}
-	prefix := strings.TrimPrefix(config.ResolvePrefix(entry), "/")
+	// Key by the prefix the indexer actually registers the repo under —
+	// a worktree instance persists its mtimes under `<base>@<workspace>`,
+	// not the bare basename, so a plain ResolvePrefix would load the
+	// canonical checkout's mtimes and force a full re-index every restart.
+	prefix := strings.TrimPrefix(indexer.EffectiveRepoPrefix(cm, entry), "/")
 	if prefix == "" {
 		if logger != nil {
 			logger.Info("daemon: priorMtimesFromStore: empty prefix",

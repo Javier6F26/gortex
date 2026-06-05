@@ -69,7 +69,7 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	entry := config.RepoEntry{Path: absPath, Name: p.Name, Ref: p.Ref}
+	entry := config.RepoEntry{Path: absPath, Name: p.Name, Ref: p.Ref, AsWorktree: p.AsWorktree}
 	result, err := c.multiIndexer.TrackRepoCtx(ctx, entry)
 	if err != nil {
 		return nil, err
@@ -77,6 +77,13 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	if result == nil {
 		// Already tracked — idempotent.
 		return json.RawMessage(fmt.Sprintf(`{"status":"already_tracked","path":%q}`, absPath)), nil
+	}
+	// TrackRepoCtx may have derived a worktree-instance prefix that the
+	// by-value entry above can't see — read the prefix it actually
+	// registered under for the watcher attach and the response.
+	prefix := result.RepoPrefix
+	if prefix == "" {
+		prefix = config.ResolvePrefix(entry)
 	}
 
 	// Project association from TrackParams.Project isn't wired yet — the
@@ -90,7 +97,6 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	// here are logged but don't fail the track — an indexed-but-
 	// unwatched repo is still queryable, just stale if edited.
 	if c.multiWatcher != nil && c.configManager != nil {
-		prefix := config.ResolvePrefix(entry)
 		wcfg := c.configManager.GetRepoConfig(prefix).Watch
 		if err := c.multiWatcher.AddRepo(prefix, wcfg); err != nil {
 			c.logger.Warn("track: attach watcher failed",
@@ -110,7 +116,7 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	return json.Marshal(map[string]any{
 		"status":     "tracked",
 		"path":       absPath,
-		"prefix":     config.ResolvePrefix(entry),
+		"prefix":     prefix,
 		"file_count": result.FileCount,
 		"node_count": result.NodeCount,
 		"edge_count": result.EdgeCount,
@@ -419,20 +425,41 @@ func (c *realController) Reload(ctx context.Context) (json.RawMessage, error) {
 	}
 
 	var added, removed int
-	wantedPrefixes := make(map[string]bool)
 
+	// Match configured entries to currently-tracked instances by ROOT
+	// PATH, not by a recomputed prefix. A worktree tracked as an
+	// independent instance registers under a derived `<base>@<workspace>`
+	// prefix, so keying the diff on config.ResolvePrefix(entry) (the bare
+	// basename) would fail to recognise it as wanted and untrack it on
+	// every reload. The root path is the stable identity of a checkout.
+	trackedByRoot := make(map[string]string) // absolute RootPath → prefix
+	for prefix, meta := range c.multiIndexer.AllMetadata() {
+		if meta != nil {
+			trackedByRoot[meta.RootPath] = prefix
+		}
+	}
+
+	wantedPrefixes := make(map[string]bool)
 	for _, entry := range c.configManager.Global().Repos {
-		prefix := config.ResolvePrefix(entry)
-		wantedPrefixes[prefix] = true
-		if _, exists := c.multiIndexer.AllMetadata()[prefix]; exists {
+		abs, err := filepath.Abs(entry.Path)
+		if err != nil {
+			abs = entry.Path
+		}
+		if prefix, ok := trackedByRoot[abs]; ok {
+			// Already tracked (under whatever prefix it registered) — keep it.
+			wantedPrefixes[prefix] = true
 			continue
 		}
-		if _, err := c.multiIndexer.TrackRepoCtx(ctx, entry); err != nil {
+		res, trackErr := c.multiIndexer.TrackRepoCtx(ctx, entry)
+		if trackErr != nil {
 			c.logger.Warn("reload: track failed",
-				zap.String("path", entry.Path), zap.Error(err))
+				zap.String("path", entry.Path), zap.Error(trackErr))
 			continue
 		}
 		added++
+		if res != nil && res.RepoPrefix != "" {
+			wantedPrefixes[res.RepoPrefix] = true
+		}
 	}
 
 	for prefix := range c.multiIndexer.AllMetadata() {

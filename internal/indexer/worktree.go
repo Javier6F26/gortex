@@ -2,7 +2,10 @@ package indexer
 
 import (
 	"errors"
+	"fmt"
+	"hash/fnv"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -33,9 +36,11 @@ type WorktreeInfo struct {
 // repository, not a worktree. A main checkout or a non-git directory
 // likewise resolves to itself.
 //
-// Keying the index cache by MainRepoPath lets every worktree of one
-// repo share a base identity; combined with branch-keyed snapshots
-// each worktree still gets its own slot.
+// A worktree can be tracked either as part of its canonical repo (the
+// default) or, via WorktreeInstanceName, as an independent instance
+// keyed by its own working-directory path — letting one underlying
+// repository have multiple checkouts, each assigned to its own
+// workspace and indexed from its own branch / working tree.
 func ResolveWorktree(path string) WorktreeInfo {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -114,4 +119,93 @@ func WorktreeRootGone(rootPath string) bool {
 		return false
 	}
 	return errors.Is(err, os.ErrNotExist)
+}
+
+// WorktreeInstanceName decides the repo prefix that absPath should be
+// tracked under, given the base prefix it would otherwise take and the
+// workspace it declares (via its own `.gortex.yaml` or a global-config
+// override). It returns (name, separate): when separate is true the
+// caller must register absPath as an INDEPENDENT repo instance under
+// `name`, distinct from any canonical checkout that shares the same git
+// identity; when false the caller keeps its single-instance behaviour.
+//
+// A separate instance is created when either:
+//   - asWorktree is set (the explicit `--as-worktree` directive), or
+//   - absPath is a linked git worktree that declares a workspace which
+//     differs from its base prefix. An explicit workspace on a worktree
+//     is the signal that the checkout means to join a workspace other
+//     than the canonical's, so we honour it automatically.
+//
+// The instance name is `<basePrefix>@<tag>`, where the tag is the
+// declared workspace when present, else the checked-out branch, else a
+// short hash of the path. The result is deterministic for a given
+// (path, declared-workspace) pair so it is stable across daemon
+// restarts. The tag is sanitised so the name never contains '/', which
+// would break the `<prefix>/<relpath>` node-ID layout.
+func WorktreeInstanceName(absPath, basePrefix, declaredWorkspace string, asWorktree bool) (string, bool) {
+	separate := asWorktree
+	if !separate && declaredWorkspace != "" && declaredWorkspace != basePrefix {
+		separate = ResolveWorktree(absPath).IsWorktree
+	}
+	if !separate {
+		return basePrefix, false
+	}
+
+	tag := ""
+	if declaredWorkspace != "" && declaredWorkspace != basePrefix {
+		tag = declaredWorkspace
+	}
+	if tag == "" {
+		tag = worktreeBranch(absPath)
+	}
+	if t := sanitizeInstanceTag(tag); t != "" {
+		return basePrefix + "@" + t, true
+	}
+	return basePrefix + "@" + shortPathHash(absPath), true
+}
+
+// worktreeBranch returns the short branch name checked out at absPath, or
+// "" when the path is not a git working tree or is in detached-HEAD
+// state. Used to disambiguate a forced worktree instance that declares
+// no workspace of its own.
+func worktreeBranch(absPath string) string {
+	cmd := exec.Command("git", "-C", absPath, "rev-parse", "--abbrev-ref", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	b := strings.TrimSpace(string(out))
+	if b == "" || b == "HEAD" { // detached HEAD has no branch name
+		return ""
+	}
+	return b
+}
+
+// sanitizeInstanceTag normalises a disambiguator (a workspace slug or a
+// branch name) into a token safe to embed in a repo prefix. A repo
+// prefix is the leading "<prefix>/" segment of every node ID, so the
+// token must never contain '/'; any character outside [A-Za-z0-9._-] is
+// folded to '-'. Leading/trailing '-' are trimmed; empty input maps to "".
+func sanitizeInstanceTag(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// shortPathHash returns a short, stable hash of a filesystem path. It is
+// the last-resort disambiguator when a forced worktree instance has
+// neither a declared workspace nor a resolvable branch — two different
+// checkouts under the same name still get distinct prefixes.
+func shortPathHash(absPath string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(filepath.Clean(absPath)))
+	return fmt.Sprintf("%08x", h.Sum32())
 }

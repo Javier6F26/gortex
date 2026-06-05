@@ -643,6 +643,7 @@ func (mi *MultiIndexer) indexSingleRepo(entry config.RepoEntry) (map[string]*Ind
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", absPath, err)
 	}
+	result.RepoPrefix = prefix
 
 	identity, _ := DetectIdentity(absPath)
 
@@ -690,40 +691,60 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 		err    error
 	}
 
-	// Pre-scan: build tracked repo module map from go.mod files.
-	// This enables cross-repo dependency detection via GoModExtractor.
+	// Resolve each repo's prefix serially first: git-worktree instancing,
+	// the derived-name persistence, and the cross-batch collision guard
+	// must be deterministic, not raced across the parallel index
+	// goroutines below. The same loop builds the tracked-module map used
+	// for cross-repo dependency detection.
+	type resolvedRepo struct {
+		entry    config.RepoEntry
+		prefix   string
+		cfg      *config.Config
+		absPath  string
+		identity *RepoIdentity
+	}
 	trackedModules := make(map[string]string)
+	resolved := make([]resolvedRepo, 0, len(repos))
+	seenPrefix := make(map[string]string, len(repos)) // prefix → absPath
+	var resolveErrors []string
 	for _, entry := range repos {
-		prefix := config.ResolvePrefix(entry)
-		absPath, _ := filepath.Abs(entry.Path)
+		absPath, err := filepath.Abs(entry.Path)
+		if err != nil {
+			resolveErrors = append(resolveErrors, fmt.Sprintf("resolving path %s: %v", entry.Path, err))
+			continue
+		}
+		identity, _ := DetectIdentity(absPath)
+		e := entry
+		prefix, cfg := mi.resolveTrackPrefix(&e, absPath, identity)
+		// Two distinct checkouts can still land on the same derived prefix
+		// (e.g. two worktrees declaring the same workspace). resolveTrackPrefix
+		// only sees already-tracked repos, so guard against collisions within
+		// this batch too.
+		if prev, ok := seenPrefix[prefix]; ok && prev != absPath {
+			prefix += "-" + shortPathHash(absPath)
+			e.Name = prefix
+		}
+		seenPrefix[prefix] = absPath
+		resolved = append(resolved, resolvedRepo{entry: e, prefix: prefix, cfg: cfg, absPath: absPath, identity: identity})
 		if mod := readGoModModule(absPath); mod != "" {
 			trackedModules[prefix] = mod
 			mi.logger.Debug("tracked repo module", zap.String("repo", prefix), zap.String("module", mod))
 		}
 	}
 
-	resultCh := make(chan repoResult, len(repos))
+	resultCh := make(chan repoResult, len(resolved))
 	var wg sync.WaitGroup
 
-	for _, entry := range repos {
+	for _, rr := range resolved {
 		wg.Add(1)
-		go func(e config.RepoEntry) {
+		go func(r resolvedRepo) {
 			defer wg.Done()
 
-			prefix := config.ResolvePrefix(e)
-			absPath, err := filepath.Abs(e.Path)
-			if err != nil {
-				resultCh <- repoResult{prefix: prefix, err: fmt.Errorf("resolving path %s: %w", e.Path, err)}
-				return
-			}
-
-			mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
-			cfg := mi.configMgr.GetRepoConfig(prefix)
-			idx := mi.newPerRepoIndexer(cfg.Index)
-			idx.SetRepoPrefix(prefix)
-			entryCopy := e
-			idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, cfg, prefix))
-			idx.SetProjectID(resolveProjectID(&entryCopy, cfg, prefix))
+			idx := mi.newPerRepoIndexer(r.cfg.Index)
+			idx.SetRepoPrefix(r.prefix)
+			entryCopy := r.entry
+			idx.SetWorkspaceID(resolveWorkspaceID(&entryCopy, r.cfg, r.prefix))
+			idx.SetProjectID(resolveProjectID(&entryCopy, r.cfg, r.prefix))
 			idx.SetTrackedRepoModules(trackedModules)
 			// Defer the per-repo cross-cutting passes (ResolveAll,
 			// semantic enrich, contract extract+commit) so they don't
@@ -733,29 +754,28 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 			// the loop via mi.RunGlobalGraphPasses().
 			idx.SetDeferResolve(true)
 
-			result, err := idx.Index(absPath)
+			result, err := idx.Index(r.absPath)
 			if err != nil {
-				resultCh <- repoResult{prefix: prefix, err: fmt.Errorf("indexing %s: %w", absPath, err)}
+				resultCh <- repoResult{prefix: r.prefix, err: fmt.Errorf("indexing %s: %w", r.absPath, err)}
 				return
 			}
-
-			identity, _ := DetectIdentity(absPath)
+			result.RepoPrefix = r.prefix
 
 			meta := &RepoMetadata{
-				RepoPrefix:    prefix,
-				RootPath:      absPath,
-				Identity:      identity,
+				RepoPrefix:    r.prefix,
+				RootPath:      r.absPath,
+				Identity:      r.identity,
 				LastIndexTime: time.Now(),
 				FileCount:     result.FileCount,
 				NodeCount:     result.NodeCount,
 				EdgeCount:     result.EdgeCount,
 				ParseErrors:   result.Errors,
 				FileMtimes:    idx.FileMtimes(),
-				IsWorktree:    ResolveWorktree(absPath).IsWorktree,
+				IsWorktree:    ResolveWorktree(r.absPath).IsWorktree,
 			}
 
-			resultCh <- repoResult{prefix: prefix, result: result, idx: idx, meta: meta}
-		}(entry)
+			resultCh <- repoResult{prefix: r.prefix, result: result, idx: idx, meta: meta}
+		}(rr)
 	}
 
 	go func() {
@@ -764,7 +784,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	}()
 
 	results := make(map[string]*IndexResult)
-	var indexErrors []string
+	indexErrors := resolveErrors
 
 	mi.mu.Lock()
 	for rr := range resultCh {
@@ -927,6 +947,100 @@ func (mi *MultiIndexer) TrackRepo(entry config.RepoEntry) (*IndexResult, error) 
 	return mi.TrackRepoCtx(context.Background(), entry)
 }
 
+// resolveTrackPrefix determines the repo prefix that absPath should be
+// registered under and loads the per-repo `.gortex.yaml` config keyed to
+// that prefix. It is the single place that decides whether a git
+// worktree of an already-tracked repo becomes an INDEPENDENT instance
+// (see WorktreeInstanceName); the track and reconcile paths both call it
+// before their "already tracked?" check so a worktree that joins a
+// different workspace than the canonical no longer silently coalesces
+// into it.
+//
+// When a separate instance is created the derived `<base>@<tag>` prefix
+// is written back into entry.Name so it is persisted to config and
+// reproduced deterministically on the next daemon warmup. entry is
+// mutated in place; callers pass a pointer to the value they will add to
+// the global config.
+func (mi *MultiIndexer) resolveTrackPrefix(entry *config.RepoEntry, absPath string, identity *RepoIdentity) (string, *config.Config) {
+	base := config.ResolvePrefix(*entry)
+	if base == "" || base == "." {
+		if identity != nil {
+			base = identity.RepoPrefix
+		}
+	}
+	if mi.configMgr == nil {
+		return base, config.Default()
+	}
+
+	// Load the repo's `.gortex.yaml` under the base prefix first so we can
+	// read its declared workspace before deciding the final prefix.
+	mi.configMgr.LoadWorkspaceConfig(base, absPath)
+	cfg := mi.configMgr.GetRepoConfig(base)
+
+	// An explicit Name already pins the prefix — honour it verbatim. This
+	// is also the warm-restart fast path: once a worktree instance has
+	// been persisted with its derived Name, every later load short-circuits
+	// here without re-deriving.
+	if entry.Name != "" {
+		return base, cfg
+	}
+
+	declaredWS := entry.Workspace
+	if declaredWS == "" && cfg != nil {
+		declaredWS = cfg.Workspace
+	}
+
+	name, separate := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree)
+	if !separate {
+		return base, cfg
+	}
+
+	// Guard against two different checkouts colliding on the same derived
+	// name (e.g. two worktrees that both declare workspace `x`): keep the
+	// first, suffix the rest with a path hash.
+	prefix := name
+	mi.mu.RLock()
+	existing, ok := mi.repos[prefix]
+	mi.mu.RUnlock()
+	if ok && existing != nil && existing.RootPath != absPath {
+		prefix = name + "-" + shortPathHash(absPath)
+	}
+
+	entry.Name = prefix // persist the decision so warmup reproduces it
+	mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
+	return prefix, mi.configMgr.GetRepoConfig(prefix)
+}
+
+// EffectiveRepoPrefix returns the prefix a repo entry is tracked under,
+// accounting for git-worktree instancing — the same value
+// resolveTrackPrefix registers, minus the (rare) collision-guard suffix
+// it cannot reproduce without the live registry. Warm-restart keying
+// (the snapshot-store mtime lookup, the resolve-time LSP helper
+// registry) uses this instead of config.ResolvePrefix so a disk-backed
+// reconcile finds the worktree instance's own persisted state rather
+// than the canonical checkout's. For a plain repo it equals
+// config.ResolvePrefix(entry). cm may be nil (then only an explicit
+// RepoEntry.Workspace override can trigger instancing).
+func EffectiveRepoPrefix(cm *config.ConfigManager, entry config.RepoEntry) string {
+	base := config.ResolvePrefix(entry)
+	if base == "" || base == "." || entry.Name != "" {
+		return base
+	}
+	absPath, err := filepath.Abs(entry.Path)
+	if err != nil {
+		return base
+	}
+	declaredWS := entry.Workspace
+	if declaredWS == "" && cm != nil {
+		cm.LoadWorkspaceConfig(base, absPath)
+		if cfg := cm.GetRepoConfig(base); cfg != nil {
+			declaredWS = cfg.Workspace
+		}
+	}
+	name, _ := WorktreeInstanceName(absPath, base, declaredWS, entry.AsWorktree)
+	return name
+}
+
 // TrackRepoCtx is TrackRepo with a context, allowing callers to pipe progress
 // reporters (via progress.WithReporter) through to the underlying Index call.
 func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry) (*IndexResult, error) {
@@ -949,10 +1063,17 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 		return nil, fmt.Errorf("detecting identity for %s: %w", absPath, err)
 	}
 
-	prefix := config.ResolvePrefix(entry)
-	if prefix == "" || prefix == "." {
-		prefix = identity.RepoPrefix
-	}
+	// Resolve the prefix (honouring git-worktree instancing) and load the
+	// per-repo `.gortex.yaml` BEFORE the already-tracked check, so a
+	// worktree that joins a different workspace than the canonical gets
+	// its own `<base>@<tag>` prefix instead of coalescing into it. cfg is
+	// keyed to the final prefix; entry.Name is set when a separate
+	// instance is created so the decision persists to config. Loading the
+	// `.gortex.yaml` here also gives GetRepoConfig the workspace / project
+	// slugs declared inside the repo (without it every repo would fall
+	// back to `workspace = repoPrefix`, making shared-workspace cross-repo
+	// matching impossible to express).
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity)
 
 	// Check if already tracked.
 	mi.mu.RLock()
@@ -980,17 +1101,6 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	}
 	willBeMultiRepo := len(mi.repos)+1 >= 2 || totalConfigured >= 2
 
-	// Lazy-load the per-repo `.gortex.yaml` so GetRepoConfig sees the
-	// workspace / project slugs declared inside the repo. Without
-	// this the production code path never reads the file and every
-	// repo silently falls back to `workspace = repoPrefix`, making
-	// shared-workspace cross-repo matching impossible to express. Idempotent
-	// — repeated calls just re-cache the parse.
-	if mi.configMgr != nil {
-		mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
-	}
-
-	cfg := mi.configMgr.GetRepoConfig(prefix)
 	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
@@ -1010,6 +1120,7 @@ func (mi *MultiIndexer) TrackRepoCtx(ctx context.Context, entry config.RepoEntry
 	if err != nil {
 		return nil, fmt.Errorf("indexing %s: %w", absPath, err)
 	}
+	result.RepoPrefix = prefix
 
 	mi.mu.Lock()
 	mi.repos[prefix] = &RepoMetadata{
@@ -1075,10 +1186,12 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 		return nil, fmt.Errorf("detecting identity for %s: %w", absPath, err)
 	}
 
-	prefix := config.ResolvePrefix(entry)
-	if prefix == "" || prefix == "." {
-		prefix = identity.RepoPrefix
-	}
+	// Resolve the prefix (honouring git-worktree instancing) and load the
+	// per-repo `.gortex.yaml` before the already-tracked check. Mirrors
+	// TrackRepoCtx so a worktree instance keeps its derived prefix on the
+	// reconcile path too; config can change between sessions and warmup-
+	// time reconcile runs after a daemon restart.
+	prefix, cfg := mi.resolveTrackPrefix(&entry, absPath, identity)
 
 	// Already tracked — nothing to do.
 	mi.mu.RLock()
@@ -1091,7 +1204,9 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	// Fall back to full TrackRepoCtx when we have no prior mtimes:
 	// there's nothing meaningful to reconcile against, and
 	// IncrementalReindex would treat every file as stale, producing
-	// the same duplicate-writes problem we're fixing.
+	// the same duplicate-writes problem we're fixing. entry.Name is
+	// already pinned by resolveTrackPrefix, so the fallback reproduces
+	// the same prefix.
 	if len(priorMtimes) == 0 {
 		return mi.TrackRepoCtx(ctx, entry)
 	}
@@ -1102,14 +1217,6 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	}
 	willBeMultiRepo := len(mi.repos)+1 >= 2 || totalConfigured >= 2
 
-	// Pick up `.gortex.yaml` workspace/project declarations on
-	// reconcile too — config can change between sessions, and warmup-
-	// time reconcile is the path that runs after a daemon restart.
-	if mi.configMgr != nil {
-		mi.configMgr.LoadWorkspaceConfig(prefix, absPath)
-	}
-
-	cfg := mi.configMgr.GetRepoConfig(prefix)
 	idx := mi.newPerRepoIndexer(cfg.Index)
 	if willBeMultiRepo {
 		idx.SetRepoPrefix(prefix)
@@ -1157,6 +1264,7 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	if err != nil {
 		return nil, fmt.Errorf("reconciling %s: %w", absPath, err)
 	}
+	result.RepoPrefix = prefix
 
 	mi.mu.Lock()
 	mi.repos[prefix] = &RepoMetadata{
@@ -1544,13 +1652,25 @@ func (mi *MultiIndexer) ResolveFilePath(prefixedPath string) string {
 	mi.mu.RLock()
 	defer mi.mu.RUnlock()
 
+	// Longest matching prefix wins. With worktree instances two prefixes
+	// can share a leading segment (`oas-orm` vs `oas-orm@task-ws`); map
+	// iteration order is random, so a plain first-match could resolve a
+	// `oas-orm@task-ws/...` path against the shorter `oas-orm` root. The
+	// "/"-boundary check already keeps the two disjoint, but ranking by
+	// length makes that robust regardless of any future prefix shapes.
+	var bestPrefix, bestRoot string
 	for prefix, meta := range mi.repos {
-		if strings.HasPrefix(prefixedPath, prefix+"/") {
-			relPath := strings.TrimPrefix(prefixedPath, prefix+"/")
-			return filepath.Join(meta.RootPath, relPath)
+		if meta == nil {
+			continue
+		}
+		if strings.HasPrefix(prefixedPath, prefix+"/") && len(prefix) > len(bestPrefix) {
+			bestPrefix, bestRoot = prefix, meta.RootPath
 		}
 	}
-	return ""
+	if bestPrefix == "" {
+		return ""
+	}
+	return filepath.Join(bestRoot, strings.TrimPrefix(prefixedPath, bestPrefix+"/"))
 }
 
 // RepoPrefixes returns the set of registered repo prefixes. The returned

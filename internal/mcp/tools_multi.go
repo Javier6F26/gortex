@@ -21,6 +21,7 @@ func (s *Server) registerMultiRepoTools() {
 			mcp.WithDescription("Add a repository to the tracked workspace at runtime. Indexes immediately and persists to config."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path to repository")),
 			mcp.WithString("name", mcp.Description("Optional repo prefix override")),
+			mcp.WithBoolean("as_worktree", mcp.Description("Track a linked git worktree as an independent instance (derived `<base>@<workspace>` prefix) even when its repo is already tracked elsewhere. Auto-detected when the worktree's .gortex.yaml declares a different workspace; set this to force it.")),
 		),
 		s.handleTrackRepository,
 	)
@@ -90,6 +91,9 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	if name, ok := req.GetArguments()["name"].(string); ok && name != "" {
 		entry.Name = name
 	}
+	if asWT, ok := req.GetArguments()["as_worktree"].(bool); ok {
+		entry.AsWorktree = asWT
+	}
 
 	result, trackErr := s.multiIndexer.TrackRepoCtx(s.progressCtx(ctx, req), entry)
 	if trackErr != nil {
@@ -112,10 +116,14 @@ func (s *Server) handleTrackRepository(ctx context.Context, req mcp.CallToolRequ
 	// Re-run analysis after adding a new repo.
 	s.RunAnalysis()
 
+	prefix := result.RepoPrefix
+	if prefix == "" {
+		prefix = config.ResolvePrefix(entry)
+	}
 	return s.respondJSONOrTOON(ctx, req, map[string]any{
 		"status":     "tracked",
 		"path":       path,
-		"prefix":     config.ResolvePrefix(entry),
+		"prefix":     prefix,
 		"file_count": result.FileCount,
 		"node_count": result.NodeCount,
 		"edge_count": result.EdgeCount,
