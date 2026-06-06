@@ -1,4 +1,5 @@
 <div align="center">
+![Gortex](assets/wall.png)
 
 # Gortex
 
