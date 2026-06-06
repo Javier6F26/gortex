@@ -146,6 +146,28 @@ func TestName(t *testing.T) {
 	}
 }
 
+func TestComplete_SendsReasoningEffort(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OPENAI_API_KEY", "k")
+	p, _ := New(llm.RemoteConfig{Model: "o4-mini", BaseURL: srv.URL, Effort: "high"})
+	defer func() { _ = p.Close() }()
+	if _, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["reasoning_effort"] != "high" {
+		t.Errorf("reasoning_effort=%v want high", gotBody["reasoning_effort"])
+	}
+}
+
 // TestComplete_HollowResponseRetriesThenSucceeds proves an HTTP 200
 // with an empty choices array is treated as a transient truncation:
 // the first hollow answer is retried and the second, good answer wins.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // writer.go centralises every write `gortex init` performs. Going
@@ -169,15 +170,22 @@ func MergeJSON(w io.Writer, path string, mutate func(root map[string]any, existe
 	root := make(map[string]any)
 	var backupPath string
 
+	var backupData []byte
 	if data, err := os.ReadFile(path); err == nil {
 		existed = true
-		if err := json.Unmarshal(data, &root); err != nil {
-			// Don't silently overwrite the user's file even if it's
-			// malformed — keep a timestamped backup for recovery.
-			backupPath = path + ".bak"
-			// Intentionally ignore: backup is best-effort.
-			_ = os.WriteFile(backupPath, data, 0o644)
-			root = make(map[string]any)
+		switch {
+		case len(strings.TrimSpace(string(data))) == 0:
+			// An empty (or whitespace-only) file is an empty object, not
+			// malformed — no backup, nothing to preserve.
+		default:
+			if err := json.Unmarshal(data, &root); err != nil {
+				// Don't silently overwrite the user's file even if it's
+				// malformed — keep a backup for recovery. The backup is
+				// written only on the real write path below, so a DryRun
+				// never touches disk.
+				backupPath, backupData = path+".bak", data
+				root = make(map[string]any)
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return FileAction{}, fmt.Errorf("read %s: %w", path, err)
@@ -204,6 +212,11 @@ func MergeJSON(w io.Writer, path string, mutate func(root map[string]any, existe
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return FileAction{}, fmt.Errorf("marshal %s: %w", path, err)
+	}
+	if backupPath != "" {
+		// Best-effort backup of the malformed original, just before we
+		// overwrite it (never under DryRun — that returned above).
+		_ = os.WriteFile(backupPath, backupData, 0o644)
 	}
 	if err := AtomicWriteFile(path, out, 0o644); err != nil {
 		return FileAction{}, err

@@ -88,14 +88,14 @@ func TestGlobalConfig_MergeLLMInto_LocalWinsPerField(t *testing.T) {
 
 func TestGlobalConfig_MergeLLMInto_PerProviderSubBlocks(t *testing.T) {
 	gc := &GlobalConfig{LLM: llm.Config{
-		Anthropic: llm.RemoteConfig{Model: "claude-sonnet-4-6", APIKeyEnv: "ANTHROPIC_API_KEY"},
+		Anthropic: llm.AnthropicConfig{RemoteConfig: llm.RemoteConfig{Model: "claude-sonnet-4-6", APIKeyEnv: "ANTHROPIC_API_KEY"}},
 		Ollama:    llm.OllamaConfig{Host: "http://localhost:11434"},
 	}}
 
 	// Repo selects a different provider and overrides only one field.
 	got := gc.MergeLLMInto(llm.Config{
 		Provider:  "anthropic",
-		Anthropic: llm.RemoteConfig{Model: "claude-opus-4-7"},
+		Anthropic: llm.AnthropicConfig{RemoteConfig: llm.RemoteConfig{Model: "claude-opus-4-7"}},
 	})
 	assert.Equal(t, "anthropic", got.Provider)
 	assert.Equal(t, "claude-opus-4-7", got.Anthropic.Model)       // local wins

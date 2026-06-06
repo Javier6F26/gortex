@@ -144,6 +144,13 @@ type ApplyOpts struct {
 	// merge (e.g. a custom autoApprove list the user edited). Does
 	// not bypass the "skip if already configured" fast path.
 	Force bool
+
+	// ForceDetect makes an adapter render its artifacts even when the
+	// target tool isn't detected on this machine. Used by the
+	// skill-render drift fence (`gortex agents render`) to exercise
+	// every adapter regardless of which agents are installed; never set
+	// during a normal `gortex init`.
+	ForceDetect bool
 }
 
 // ActionKind tags what happened (or would happen) for a single file.

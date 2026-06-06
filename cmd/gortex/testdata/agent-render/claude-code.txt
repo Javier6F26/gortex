@@ -1,0 +1,29 @@
+=== root/.claude/settings.json ===
+{
+  "permissions": {
+    "allow": [
+      "mcp__gortex__*"
+    ]
+  }
+}
+=== root/.mcp.json ===
+{
+  "mcpServers": {
+    "gortex": {
+      "command": "gortex",
+      "args": [
+        "mcp",
+        "--index", ".",
+        "--watch"
+      ],
+      "env": {
+        "GORTEX_INDEX_WORKERS": "${GORTEX_WORKERS:-8}"
+      }
+    }
+  }
+}
+=== root/CLAUDE.md ===
+<!-- gortex:communities:start -->
+- [example-community](.claude/skills/example/SKILL.md) — example routing block
+
+<!-- gortex:communities:end -->

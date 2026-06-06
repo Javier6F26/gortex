@@ -1,0 +1,22 @@
+=== root/.continue/mcpServers/gortex.json ===
+{
+  "mcpServers": {
+    "gortex": {
+      "args": [
+        "mcp",
+        "--index",
+        ".",
+        "--watch"
+      ],
+      "command": "gortex",
+      "env": {
+        "GORTEX_INDEX_WORKERS": "8"
+      }
+    }
+  }
+}
+=== root/.continue/rules/gortex-communities.md ===
+<!-- gortex:communities:start -->
+- [example-community](.claude/skills/example/SKILL.md) — example routing block
+
+<!-- gortex:communities:end -->

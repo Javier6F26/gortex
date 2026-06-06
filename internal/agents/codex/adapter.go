@@ -67,7 +67,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	res := &agents.Result{Name: Name, DocsURL: DocsURL}
 	detected, _ := a.Detect(env)
 	res.Detected = detected
-	if !detected {
+	if !detected && !opts.ForceDetect {
 		internalutil.Logf(env.Stderr, "[gortex init] skip Codex setup (codex not detected)")
 		return res, nil
 	}

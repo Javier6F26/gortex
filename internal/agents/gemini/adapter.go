@@ -58,7 +58,7 @@ func configPath(env agents.Env) string {
 
 func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	p := &agents.Plan{Files: []agents.FileAction{
-		{Path: configPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
+		{Path: configPath(env), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers", "hooks"}},
 	}}
 	if env.Mode != agents.ModeGlobal && env.SkillsRouting != "" {
 		p.Files = append(p.Files, agents.FileAction{
@@ -73,7 +73,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	res := &agents.Result{Name: Name, DocsURL: DocsURL}
 	detected, _ := a.Detect(env)
 	res.Detected = detected
-	if !detected {
+	if !detected && !opts.ForceDetect {
 		internalutil.Logf(env.Stderr, "[gortex init] skip Gemini CLI setup (gemini not detected)")
 		return res, nil
 	}
@@ -83,7 +83,12 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	internalutil.Logf(env.Stderr, "[gortex init] setting up Gemini CLI integration...")
 
 	action, err := agents.MergeJSON(env.Stderr, configPath(env), func(root map[string]any, _ bool) (bool, error) {
-		return agents.UpsertMCPServer(root, "gortex", agents.DefaultGortexMCPEntry(), opts), nil
+		mcp := agents.UpsertMCPServer(root, "gortex", agents.DefaultGortexMCPEntry(), opts)
+		// Install SessionStart + AfterTool lifecycle hooks alongside the
+		// MCP registration so Gemini gets the same orientation and
+		// stale-index hints Claude does.
+		hk := agents.UpsertGeminiHooks(root, Name, opts)
+		return mcp || hk, nil
 	}, opts)
 	if err != nil {
 		return res, err

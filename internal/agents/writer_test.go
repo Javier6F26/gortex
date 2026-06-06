@@ -3,6 +3,7 @@ package agents
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,53 @@ func TestWriteIfNotExistsCreatesAndSkips(t *testing.T) {
 // transitions the MCP installer relies on: fresh file, merge into
 // existing, and no-op on re-run. This is the behavioural contract
 // golden tests will compare against byte-for-byte.
+// TestMergeJSON_DryRunNeverWritesBackup guards the regression where a
+// dry-run over a malformed (or empty) existing file still dropped a
+// .bak sibling on disk — dry-run must touch nothing.
+func TestMergeJSON_DryRunNeverWritesBackup(t *testing.T) {
+	dir := t.TempDir()
+	add := func(root map[string]any, _ bool) (bool, error) {
+		return UpsertMCPServer(root, "gortex", DefaultGortexMCPEntry(), ApplyOpts{}), nil
+	}
+
+	// A malformed existing file under dry-run.
+	mal := filepath.Join(dir, "malformed.json")
+	if err := os.WriteFile(mal, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeJSON(io.Discard, mal, add, ApplyOpts{DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mal + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("dry-run must not write a .bak (err=%v)", err)
+	}
+
+	// An empty file is treated as an empty object, not malformed: no
+	// backup even on a real write.
+	empty := filepath.Join(dir, "empty.json")
+	if err := os.WriteFile(empty, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeJSON(io.Discard, empty, add, ApplyOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(empty + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("an empty file must not be treated as malformed / backed up (err=%v)", err)
+	}
+
+	// A genuinely malformed file on the real write path still gets a .bak.
+	mal2 := filepath.Join(dir, "malformed2.json")
+	if err := os.WriteFile(mal2, []byte("garbage{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MergeJSON(io.Discard, mal2, add, ApplyOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(mal2 + ".bak"); err != nil {
+		t.Errorf("a real merge over a malformed file should keep a .bak: %v", err)
+	}
+}
+
 func TestMergeJSONCreatesMergesAndSkipsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp.json")

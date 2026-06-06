@@ -56,7 +56,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	}
 	detected, _ := a.Detect(env)
 	res.Detected = detected
-	if !detected {
+	if !detected && !opts.ForceDetect {
 		internalutil.Logf(env.Stderr, "[gortex init] skip Continue.dev setup (Continue not detected)")
 		return res, nil
 	}

@@ -23,9 +23,11 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"empty", Config{}, false},
 		{"local with model", Config{Provider: "local", Local: LocalConfig{Model: "/m.gguf"}}, true},
 		{"local no model", Config{Provider: "local"}, false},
-		{"anthropic with model", Config{Provider: "anthropic", Anthropic: RemoteConfig{Model: "claude"}}, true},
+		{"anthropic with model", Config{Provider: "anthropic", Anthropic: AnthropicConfig{RemoteConfig: RemoteConfig{Model: "claude"}}}, true},
 		{"anthropic no model", Config{Provider: "anthropic"}, false},
 		{"openai with model", Config{Provider: "openai", OpenAI: RemoteConfig{Model: "gpt"}}, true},
+		{"azure with deployment", Config{Provider: "azure", Azure: AzureConfig{Deployment: "gpt4o"}}, true},
+		{"azure no deployment", Config{Provider: "azure"}, false},
 		{"ollama with model", Config{Provider: "ollama", Ollama: OllamaConfig{Model: "qwen"}}, true},
 		{"ollama no model", Config{Provider: "ollama"}, false},
 		{"claudecli no model", Config{Provider: "claudecli"}, true},
@@ -39,6 +41,12 @@ func TestConfig_IsEnabled(t *testing.T) {
 		{"deepseek no model", Config{Provider: "deepseek"}, false},
 		{"codex no model", Config{Provider: "codex"}, true},
 		{"codex with model", Config{Provider: "codex", Codex: CodexConfig{Model: "gpt-5-codex"}}, true},
+		{"copilot no model", Config{Provider: "copilot"}, true},
+		{"cursor no model", Config{Provider: "cursor"}, true},
+		{"opencode no model", Config{Provider: "opencode"}, true},
+		{"custom with model", Config{Provider: "mygw", Custom: map[string]CustomProvider{"mygw": {BaseURL: "https://x/v1", Model: "m"}}}, true},
+		{"custom no model", Config{Provider: "mygw", Custom: map[string]CustomProvider{"mygw": {BaseURL: "https://x/v1"}}}, false},
+		{"custom name not registered", Config{Provider: "mygw"}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +74,9 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	if c.OpenAI.Model != defaultOpenAIModel || c.OpenAI.APIKeyEnv != defaultOpenAIKeyEnv || c.OpenAI.BaseURL != defaultOpenAIBaseURL {
 		t.Errorf("openai defaults wrong: %+v", c.OpenAI)
 	}
+	if c.Azure.APIVersion != defaultAzureAPIVersion || c.Azure.EndpointEnv != defaultAzureEndpointEnv || c.Azure.APIKeyEnv != defaultAzureKeyEnv {
+		t.Errorf("azure defaults wrong: %+v", c.Azure)
+	}
 	if c.Ollama.Host != defaultOllamaHost {
 		t.Errorf("ollama host=%q want %q", c.Ollama.Host, defaultOllamaHost)
 	}
@@ -74,6 +85,9 @@ func TestConfig_ApplyDefaults(t *testing.T) {
 	}
 	if c.Codex.Binary != defaultCodexBinary {
 		t.Errorf("codex binary=%q want %q", c.Codex.Binary, defaultCodexBinary)
+	}
+	if c.Copilot.Binary != defaultCopilotBinary || c.Cursor.Binary != defaultCursorBinary || c.Opencode.Binary != defaultOpencodeBinary {
+		t.Errorf("cli provider binary defaults wrong: copilot=%q cursor=%q opencode=%q", c.Copilot.Binary, c.Cursor.Binary, c.Opencode.Binary)
 	}
 	if c.Gemini.Model != defaultGeminiModel || c.Gemini.APIKeyEnv != defaultGeminiKeyEnv || c.Gemini.BaseURL != defaultGeminiBaseURL {
 		t.Errorf("gemini defaults wrong: %+v", c.Gemini)
@@ -114,6 +128,198 @@ func TestConfig_MergeEnv_DeepSeekModel(t *testing.T) {
 	c := Config{}.MergeEnv()
 	if c.DeepSeek.Model != "deepseek-reasoner" {
 		t.Errorf("deepseek model=%q", c.DeepSeek.Model)
+	}
+}
+
+func TestConfig_CustomProvider_ActiveModelAndWithModel(t *testing.T) {
+	base := Config{
+		Provider: "mygw",
+		Custom: map[string]CustomProvider{
+			"mygw":  {BaseURL: "https://x/v1", Model: "base-model"},
+			"other": {BaseURL: "https://y/v1", Model: "other-model"},
+		},
+	}
+	if got := base.ActiveModel(); got != "base-model" {
+		t.Errorf("ActiveModel=%q want base-model", got)
+	}
+	routed := base.WithModel("routed-model")
+	if got := routed.ActiveModel(); got != "routed-model" {
+		t.Errorf("WithModel/ActiveModel round-trip failed: %q", got)
+	}
+	// Copy-on-write: the base config and other providers are untouched.
+	if base.Custom["mygw"].Model != "base-model" {
+		t.Errorf("WithModel mutated the base config's custom map: %q", base.Custom["mygw"].Model)
+	}
+	if routed.Custom["other"].Model != "other-model" {
+		t.Errorf("WithModel must not disturb other custom providers: %q", routed.Custom["other"].Model)
+	}
+}
+
+func TestConfig_MergedWith_CustomProviders(t *testing.T) {
+	global := Config{
+		Provider: "mygw",
+		Custom: map[string]CustomProvider{
+			"mygw":   {BaseURL: "https://global/v1", Model: "global-model"},
+			"shared": {BaseURL: "https://global/v1", Model: "global-shared"},
+		},
+	}
+	local := Config{
+		Custom: map[string]CustomProvider{
+			"shared": {BaseURL: "https://local/v1", Model: "local-shared"},
+			"local":  {BaseURL: "https://local/v1", Model: "local-only"},
+		},
+	}
+	got := local.MergedWith(global)
+	if got.Custom["mygw"].Model != "global-model" {
+		t.Error("global-only custom provider should be filled in")
+	}
+	if got.Custom["local"].Model != "local-only" {
+		t.Error("local-only custom provider should survive")
+	}
+	if got.Custom["shared"].Model != "local-shared" {
+		t.Errorf("local must win for a name in both, got %q", got.Custom["shared"].Model)
+	}
+}
+
+func TestConfig_Anthropic_CachingThinking_EnvAndMerge(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "anthropic")
+	t.Setenv("GORTEX_LLM_ANTHROPIC_PROMPT_CACHING", "1")
+	t.Setenv("GORTEX_LLM_ANTHROPIC_THINKING_MODE", "auto")
+	c := Config{}.MergeEnv()
+	if !c.Anthropic.PromptCaching {
+		t.Error("GORTEX_LLM_ANTHROPIC_PROMPT_CACHING should enable caching")
+	}
+	if c.Anthropic.ThinkingMode != "auto" {
+		t.Errorf("thinking_mode=%q want auto", c.Anthropic.ThinkingMode)
+	}
+
+	// MergedWith fills the Anthropic-only knobs (and the embedded model)
+	// from global; local wins where set.
+	global := Config{
+		Provider: "anthropic",
+		Anthropic: AnthropicConfig{
+			RemoteConfig:  RemoteConfig{Model: "claude-sonnet", APIKeyEnv: "ANTHROPIC_API_KEY"},
+			PromptCaching: true,
+			CacheTTL:      "1h",
+			ThinkingMode:  "manual",
+		},
+	}
+	local := Config{Anthropic: AnthropicConfig{ThinkingMode: "adaptive"}}
+	got := local.MergedWith(global)
+	if got.Anthropic.Model != "claude-sonnet" {
+		t.Errorf("embedded model not merged: %q", got.Anthropic.Model)
+	}
+	if !got.Anthropic.PromptCaching || got.Anthropic.CacheTTL != "1h" {
+		t.Errorf("caching knobs not merged: %+v", got.Anthropic)
+	}
+	if got.Anthropic.ThinkingMode != "adaptive" {
+		t.Errorf("thinking_mode=%q want adaptive (local wins)", got.Anthropic.ThinkingMode)
+	}
+}
+
+func TestConfig_Effort_EnvAndMerge(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "anthropic")
+	t.Setenv("GORTEX_LLM_EFFORT", "high")
+	c := Config{}.MergeEnv()
+	if c.Anthropic.Effort != "high" {
+		t.Errorf("GORTEX_LLM_EFFORT should target the active provider, got anthropic.effort=%q", c.Anthropic.Effort)
+	}
+
+	global := Config{Provider: "openai", OpenAI: RemoteConfig{Effort: "medium"}}
+	local := Config{}
+	if got := local.MergedWith(global); got.OpenAI.Effort != "medium" {
+		t.Errorf("effort should merge from global, got %q", got.OpenAI.Effort)
+	}
+}
+
+func TestConfig_IsBuiltinProvider(t *testing.T) {
+	for _, name := range []string{"openai", "azure", "copilot", " Anthropic ", "BEDROCK"} {
+		if !IsBuiltinProvider(name) {
+			t.Errorf("IsBuiltinProvider(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"mygw", "groq", ""} {
+		if IsBuiltinProvider(name) {
+			t.Errorf("IsBuiltinProvider(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestConfig_MergeEnv_AzureDeploymentEndpointVersion(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "azure")
+	t.Setenv("GORTEX_LLM_MODEL", "gpt4o-routed")
+	t.Setenv("GORTEX_LLM_AZURE_ENDPOINT", "https://r.openai.azure.com")
+	t.Setenv("GORTEX_LLM_AZURE_DEPLOYMENT", "gpt4o-deploy")
+	t.Setenv("GORTEX_LLM_AZURE_API_VERSION", "2025-01-01-preview")
+	c := Config{}.MergeEnv()
+	// GORTEX_LLM_MODEL targets the active provider — for azure that's
+	// the deployment (the routing key). The dedicated
+	// GORTEX_LLM_AZURE_DEPLOYMENT then overrides it.
+	if c.Azure.Deployment != "gpt4o-deploy" {
+		t.Errorf("azure deployment=%q want gpt4o-deploy", c.Azure.Deployment)
+	}
+	if c.Azure.Endpoint != "https://r.openai.azure.com" {
+		t.Errorf("azure endpoint=%q", c.Azure.Endpoint)
+	}
+	if c.Azure.APIVersion != "2025-01-01-preview" {
+		t.Errorf("azure api_version=%q", c.Azure.APIVersion)
+	}
+}
+
+func TestConfig_MergeEnv_CLIProviderBinaryAndModel(t *testing.T) {
+	t.Setenv("GORTEX_LLM_PROVIDER", "copilot")
+	t.Setenv("GORTEX_LLM_MODEL", "claude-opus-4.1")
+	t.Setenv("GORTEX_LLM_COPILOT_BINARY", "/opt/gh/copilot")
+	t.Setenv("GORTEX_LLM_CURSOR_BINARY", "/opt/cursor/cursor-agent")
+	t.Setenv("GORTEX_LLM_OPENCODE_BINARY", "/opt/oc/opencode")
+	c := Config{}.MergeEnv()
+	if c.Copilot.Model != "claude-opus-4.1" {
+		t.Errorf("copilot model=%q — GORTEX_LLM_MODEL should target the active provider", c.Copilot.Model)
+	}
+	if c.Copilot.Binary != "/opt/gh/copilot" {
+		t.Errorf("copilot binary=%q", c.Copilot.Binary)
+	}
+	if c.Cursor.Binary != "/opt/cursor/cursor-agent" {
+		t.Errorf("cursor binary=%q", c.Cursor.Binary)
+	}
+	if c.Opencode.Binary != "/opt/oc/opencode" {
+		t.Errorf("opencode binary=%q", c.Opencode.Binary)
+	}
+}
+
+func TestConfig_MergedWith_CLIProviders(t *testing.T) {
+	global := Config{
+		Provider: "opencode",
+		Opencode: CLIConfig{Binary: "/usr/local/bin/opencode", Args: []string{"--mode", "ask"}, TimeoutSeconds: 90},
+	}
+	local := Config{Opencode: CLIConfig{Model: "anthropic/claude-sonnet-4-6"}}
+	got := local.MergedWith(global)
+	if got.Opencode.Binary != "/usr/local/bin/opencode" {
+		t.Errorf("binary=%q — global should fill", got.Opencode.Binary)
+	}
+	if got.Opencode.Model != "anthropic/claude-sonnet-4-6" {
+		t.Errorf("model=%q — local should win", got.Opencode.Model)
+	}
+	if len(got.Opencode.Args) != 2 || got.Opencode.TimeoutSeconds != 90 {
+		t.Errorf("args/timeout not filled from global: %+v", got.Opencode)
+	}
+}
+
+func TestConfig_MergedWith_Azure(t *testing.T) {
+	global := Config{
+		Provider: "azure",
+		Azure:    AzureConfig{Endpoint: "https://r.openai.azure.com", APIVersion: "2024-10-21", APIKeyEnv: "AZURE_OPENAI_API_KEY"},
+	}
+	local := Config{Azure: AzureConfig{Deployment: "gpt4o"}}
+	got := local.MergedWith(global)
+	if got.Provider != "azure" {
+		t.Errorf("provider=%q want azure", got.Provider)
+	}
+	if got.Azure.Deployment != "gpt4o" {
+		t.Errorf("deployment=%q want gpt4o (local should win)", got.Azure.Deployment)
+	}
+	if got.Azure.Endpoint != "https://r.openai.azure.com" || got.Azure.APIVersion != "2024-10-21" {
+		t.Errorf("azure block not filled from global: %+v", got.Azure)
 	}
 }
 
@@ -197,9 +403,13 @@ func TestConfig_ActiveModelAndWithModel(t *testing.T) {
 	}{
 		{"anthropic", Config{Provider: "anthropic"}},
 		{"openai", Config{Provider: "openai"}},
+		{"azure", Config{Provider: "azure"}},
 		{"ollama", Config{Provider: "ollama"}},
 		{"claudecli", Config{Provider: "claudecli"}},
 		{"codex", Config{Provider: "codex"}},
+		{"copilot", Config{Provider: "copilot"}},
+		{"cursor", Config{Provider: "cursor"}},
+		{"opencode", Config{Provider: "opencode"}},
 		{"gemini", Config{Provider: "gemini"}},
 		{"bedrock", Config{Provider: "bedrock"}},
 		{"deepseek", Config{Provider: "deepseek"}},
@@ -216,7 +426,7 @@ func TestConfig_ActiveModelAndWithModel(t *testing.T) {
 }
 
 func TestConfig_WithModel_EmptyIsNoOp(t *testing.T) {
-	c := Config{Provider: "anthropic", Anthropic: RemoteConfig{Model: "claude-sonnet-4-6"}}
+	c := Config{Provider: "anthropic", Anthropic: AnthropicConfig{RemoteConfig: RemoteConfig{Model: "claude-sonnet-4-6"}}}
 	if got := c.WithModel("").ActiveModel(); got != "claude-sonnet-4-6" {
 		t.Errorf("WithModel(\"\") must be a no-op, got %q", got)
 	}
@@ -225,7 +435,7 @@ func TestConfig_WithModel_EmptyIsNoOp(t *testing.T) {
 func TestConfig_WithModel_DoesNotTouchOtherProviders(t *testing.T) {
 	c := Config{
 		Provider:  "anthropic",
-		Anthropic: RemoteConfig{Model: "claude-sonnet-4-6"},
+		Anthropic: AnthropicConfig{RemoteConfig: RemoteConfig{Model: "claude-sonnet-4-6"}},
 		OpenAI:    RemoteConfig{Model: "gpt-4o"},
 	}
 	got := c.WithModel("claude-haiku-4-5")
@@ -280,7 +490,7 @@ func TestConfig_MergedWith_ClaudeCLI(t *testing.T) {
 }
 
 func TestConfig_ApplyDefaults_Idempotent(t *testing.T) {
-	once := Config{Provider: "anthropic", Anthropic: RemoteConfig{Model: "m"}}.ApplyDefaults()
+	once := Config{Provider: "anthropic", Anthropic: AnthropicConfig{RemoteConfig: RemoteConfig{Model: "m"}}}.ApplyDefaults()
 	twice := once.ApplyDefaults()
 	if !reflect.DeepEqual(once, twice) {
 		t.Fatalf("ApplyDefaults not idempotent:\n once=%+v\n twice=%+v", once, twice)
@@ -317,7 +527,7 @@ func TestConfig_MergedWith(t *testing.T) {
 		Provider:  "local",
 		MaxSteps:  16,
 		Local:     LocalConfig{Model: "/g.gguf", Template: "chatml", Ctx: 4096},
-		Anthropic: RemoteConfig{APIKeyEnv: "ANTHROPIC_API_KEY"},
+		Anthropic: AnthropicConfig{RemoteConfig: RemoteConfig{APIKeyEnv: "ANTHROPIC_API_KEY"}},
 	}
 	local := Config{Local: LocalConfig{Model: "/repo.gguf"}} // overrides only the model
 

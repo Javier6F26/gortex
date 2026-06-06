@@ -41,6 +41,7 @@ func (a *Adapter) Plan(env agents.Env) (*agents.Plan, error) {
 	kiDir := filepath.Join(env.Home, ".gemini", "antigravity", "knowledge", "gortex-workflow")
 	return &agents.Plan{Files: []agents.FileAction{
 		{Path: filepath.Join(env.Home, ".gemini", "antigravity", "mcp_config.json"), Action: agents.ActionWouldMerge, Keys: []string{"mcpServers"}},
+		{Path: filepath.Join(env.Home, ".gemini", "settings.json"), Action: agents.ActionWouldMerge, Keys: []string{"hooks"}},
 		{Path: filepath.Join(kiDir, "metadata.json"), Action: agents.ActionWouldCreate},
 		{Path: filepath.Join(kiDir, "artifacts", "gortex-instructions.md"), Action: agents.ActionWouldCreate},
 	}}, nil
@@ -50,7 +51,7 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 	res := &agents.Result{Name: Name, DocsURL: DocsURL}
 	detected, _ := a.Detect(env)
 	res.Detected = detected
-	if !detected {
+	if !detected && !opts.ForceDetect {
 		return res, nil
 	}
 	if env.Home == "" {
@@ -67,6 +68,20 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 		return res, err
 	}
 	res.Files = append(res.Files, mcpAction)
+
+	// 1b. Lifecycle hooks — Antigravity reads Gemini CLI's
+	//     ~/.gemini/settings.json hooks, so install SessionStart +
+	//     AfterTool there (the handler is agent-agnostic). If the Gemini
+	//     adapter already added a gortex hook, UpsertGeminiHooks is a
+	//     no-op, so the two adapters never double-register.
+	hooksPath := filepath.Join(env.Home, ".gemini", "settings.json")
+	hooksAction, err := agents.MergeJSON(env.Stderr, hooksPath, func(root map[string]any, _ bool) (bool, error) {
+		return agents.UpsertGeminiHooks(root, Name, opts), nil
+	}, opts)
+	if err != nil {
+		return res, err
+	}
+	res.Files = append(res.Files, hooksAction)
 
 	// 2. Knowledge Item — kept as a secondary artifact. Teaches
 	//    Antigravity *how to use* Gortex via run_command, which is
