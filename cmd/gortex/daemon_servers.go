@@ -18,6 +18,7 @@ var (
 	daemonServerAddAuthToken    string
 	daemonServerAddAuthTokenEnv string
 	daemonServerAddWorkspaces   []string
+	daemonServerAddReadOnly     bool
 )
 
 var daemonServerCmd = &cobra.Command{
@@ -70,6 +71,7 @@ func init() {
 	daemonServerAddCmd.Flags().StringVar(&daemonServerAddAuthToken, "auth-token", "", "literal bearer token (consider --auth-token-env instead)")
 	daemonServerAddCmd.Flags().StringVar(&daemonServerAddAuthTokenEnv, "auth-token-env", "", "env-var name the daemon reads at request time")
 	daemonServerAddCmd.Flags().StringSliceVar(&daemonServerAddWorkspaces, "workspaces", nil, "pre-declared workspace slugs (comma-separated)")
+	daemonServerAddCmd.Flags().BoolVar(&daemonServerAddReadOnly, "read-only", false, "mark this remote read-only (no write tools routed to it)")
 	_ = daemonServerAddCmd.MarkFlagRequired("url")
 
 	daemonServerCmd.AddCommand(daemonServerAddCmd)
@@ -94,6 +96,7 @@ func runDaemonServerAdd(_ *cobra.Command, args []string) error {
 		AuthTokenEnv: daemonServerAddAuthTokenEnv,
 		Workspaces:   daemonServerAddWorkspaces,
 		Default:      daemonServerAddDefault,
+		ReadOnly:     daemonServerAddReadOnly,
 	}
 	if err := cfg.AddServer(entry); err != nil {
 		return err

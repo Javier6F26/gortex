@@ -62,6 +62,8 @@ type Handler struct {
 	overlays      *daemon.OverlayManager // nil when overlay support is off
 	router        *daemon.Router         // nil when single-server (no servers.toml)
 	streamable    *streamable.Transport  // nil when the MCP 2026 Streamable HTTP path is off
+	readOnly      bool                   // self-advertised /v1/health write posture
+	capabilities  []string               // self-advertised federation caps; nil => baseline
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.
@@ -233,14 +235,33 @@ func (h *Handler) peekRouteContext(body []byte, r *http.Request) (scope, cwd str
 
 // --- /health ---
 
-// HealthResponse is the JSON structure for the /health endpoint.
+const (
+	// APIVersion is the major version of the /v1 HTTP contract this
+	// server speaks. A federation peer refuses to federate across an
+	// incompatible major.
+	APIVersion = 1
+	// SchemaVersion is the major version of the graph schema (node/edge
+	// shape) this server exposes. Federation refuses across an
+	// incompatible major schema.
+	SchemaVersion = 1
+)
+
+// HealthResponse is the JSON structure for the /health endpoint. The
+// schema_version / api_version / read_only / capabilities fields let a
+// federation peer negotiate compatibility and posture before it routes
+// any query; a remote that does not advertise read_only is treated as
+// read-only (fail-safe) by the consumer.
 type HealthResponse struct {
-	Status        string  `json:"status"`
-	Indexed       bool    `json:"indexed"`
-	Nodes         int     `json:"nodes"`
-	Edges         int     `json:"edges"`
-	Version       string  `json:"version"`
-	UptimeSeconds float64 `json:"uptime_seconds"`
+	Status        string   `json:"status"`
+	Indexed       bool     `json:"indexed"`
+	Nodes         int      `json:"nodes"`
+	Edges         int      `json:"edges"`
+	Version       string   `json:"version"`
+	UptimeSeconds float64  `json:"uptime_seconds"`
+	SchemaVersion int      `json:"schema_version"`
+	APIVersion    int      `json:"api_version"`
+	ReadOnly      bool     `json:"read_only"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -252,9 +273,32 @@ func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Edges:         stats.TotalEdges,
 		Version:       h.version,
 		UptimeSeconds: time.Since(h.startTime).Seconds(),
+		SchemaVersion: SchemaVersion,
+		APIVersion:    APIVersion,
+		ReadOnly:      h.readOnly,
+		Capabilities:  h.advertisedCapabilities(),
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }
+
+// advertisedCapabilities returns the federation capability set this
+// server exposes. The baseline is whatever registerRoutes always mounts
+// (the SSE event stream); SetCapabilities lets a richer build (e.g. the
+// full-node /v1/subgraph endpoint) extend it.
+func (h *Handler) advertisedCapabilities() []string {
+	if h.capabilities != nil {
+		return h.capabilities
+	}
+	return []string{"events"}
+}
+
+// SetReadOnly records the server's self-advertised write posture, echoed
+// in /v1/health.read_only. v1 denies all remote writes regardless, but a
+// remote that advertises read_only:true makes its intent explicit.
+func (h *Handler) SetReadOnly(ro bool) { h.readOnly = ro }
+
+// SetCapabilities overrides the advertised federation capability set.
+func (h *Handler) SetCapabilities(caps []string) { h.capabilities = caps }
 
 // --- /tools ---
 
