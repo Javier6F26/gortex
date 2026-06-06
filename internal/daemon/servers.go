@@ -405,11 +405,22 @@ func (c *ServerClient) resolveAuthToken() string {
 // decoded struct) keeps this client agnostic to the per-tool
 // response shapes.
 func (c *ServerClient) ProxyTool(toolName string, body []byte) ([]byte, int, error) {
+	return c.ProxyToolCtx(context.Background(), toolName, body)
+}
+
+// ProxyToolCtx is the context-aware successor to ProxyTool. The
+// outbound request is built with http.NewRequestWithContext so a
+// caller's deadline / cancellation propagates to the in-flight HTTP
+// call, instead of being bounded only by the client's coarse timeout.
+// The federation read fan-out derives a short per-remote deadline from
+// this ctx so a slow or dead remote can never block the query hot path
+// for the full HTTP-client timeout.
+func (c *ServerClient) ProxyToolCtx(ctx context.Context, toolName string, body []byte) ([]byte, int, error) {
 	u, err := url.JoinPath(c.BaseURL, "v1", "tools", toolName)
 	if err != nil {
 		return nil, 0, fmt.Errorf("join proxy URL: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("build proxy request: %w", err)
 	}

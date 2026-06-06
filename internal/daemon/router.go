@@ -151,7 +151,7 @@ func (r *Router) RouteToolCall(ctx context.Context, toolName string, body []byte
 	if err != nil {
 		return nil, 0, err
 	}
-	return cli.ProxyTool(toolName, body)
+	return cli.ProxyToolCtx(ctx, toolName, body)
 }
 
 // callLocal invokes the local executor or returns an error if the
