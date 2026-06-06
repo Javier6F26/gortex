@@ -51,9 +51,18 @@ type Session struct {
 	SymHistory   any
 	TokenStats   any
 
-	// mu protects ClientName / ClientVersion / ClientNameSource which
-	// can be updated by the dispatcher mid-session when the MCP
-	// initialize frame arrives.
+	// remoteOverrides is the per-session enable/disable layer over the
+	// global roster: slug -> enabled. An absent slug means "no
+	// override" (the global Enabled state wins). It is ephemeral by
+	// construction — freed when the *Session is dropped on disconnect
+	// via either teardown path (Remove for an AF_UNIX session,
+	// RemoveByID for a detached /mcp session) — so no explicit cleanup
+	// is needed. Guarded by mu.
+	remoteOverrides map[string]bool
+
+	// mu protects ClientName / ClientVersion / ClientNameSource and
+	// remoteOverrides, which can be updated by the dispatcher and the
+	// proxy-toggle tools mid-session.
 	mu sync.RWMutex
 }
 
@@ -74,6 +83,51 @@ func (s *Session) SetClientInfo(name, version string) {
 		s.ClientVersion = version
 	}
 	s.mu.Unlock()
+}
+
+// SetRemoteOverride sets a per-session enable/disable override for a
+// remote slug. It wins over the remote's global Enabled state for the
+// lifetime of this session only.
+func (s *Session) SetRemoteOverride(slug string, enabled bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.remoteOverrides == nil {
+		s.remoteOverrides = make(map[string]bool)
+	}
+	s.remoteOverrides[slug] = enabled
+	s.mu.Unlock()
+}
+
+// ClearRemoteOverride removes a per-session override so the remote
+// reverts to its global Enabled state.
+func (s *Session) ClearRemoteOverride(slug string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.remoteOverrides, slug)
+	s.mu.Unlock()
+}
+
+// RemoteOverrides returns a copy of the per-session override map under
+// the read lock, so callers can iterate without racing a concurrent
+// toggle. nil when no override has been set.
+func (s *Session) RemoteOverrides() map[string]bool {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.remoteOverrides) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(s.remoteOverrides))
+	for k, v := range s.remoteOverrides {
+		out[k] = v
+	}
+	return out
 }
 
 // SnapshotClientInfo returns the current client name/version pair
