@@ -1,5 +1,7 @@
 <div align="center">
-![Gortex](assets/wall.png)
+<p align="center">
+  <img src="(assets/wall.png" alt="Gortex" width="500">
+</p>
 
 # Gortex
 
