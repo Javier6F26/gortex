@@ -29,9 +29,9 @@ and the gortex server load on startup to wire up local-fast-path vs
 proxy routing.
 
 The file holds one [[server]] block per reachable Gortex server: a
-local socket, a remote HTTPS endpoint, etc. Changes take effect on
-the next daemon/server start; run "gortex daemon restart" after
-adding or removing entries on a running daemon.`,
+local socket, a remote HTTPS endpoint, etc. Adding or removing an entry
+is applied to a running daemon live (no restart); if the daemon is down
+the change simply takes effect on its next start.`,
 }
 
 var daemonServerAddCmd = &cobra.Command{
@@ -105,9 +105,7 @@ func runDaemonServerAdd(_ *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[gortex] added server %q (%s) to %s\n", slug, daemonServerAddURL, daemon.ServersConfigPath())
-	if daemon.IsRunning() {
-		fmt.Fprintln(os.Stderr, "[gortex] note: run `gortex daemon restart` to apply changes to the running daemon")
-	}
+	proxyApplyToRunningDaemon()
 	return nil
 }
 
@@ -132,9 +130,7 @@ func runDaemonServerRemove(_ *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "[gortex] removed server %q from %s\n", slug, daemon.ServersConfigPath())
-	if daemon.IsRunning() {
-		fmt.Fprintln(os.Stderr, "[gortex] note: run `gortex daemon restart` to apply changes to the running daemon")
-	}
+	proxyApplyToRunningDaemon()
 	return nil
 }
 
