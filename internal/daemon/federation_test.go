@@ -240,7 +240,7 @@ func TestFederator_MergeSubGraphOrigins(t *testing.T) {
 }
 
 // TestFederator_LocalOnlyUnchanged asserts no enabled remotes leaves the
-// local response byte-for-byte unchanged (R-MIG-6 pure-local).
+// local response byte-for-byte unchanged in the pure-local path.
 func TestFederator_LocalOnlyUnchanged(t *testing.T) {
 	local := envelope(`{"nodes":[{"id":"shared::Sym"}],"edges":[],"total_nodes":1,"total_edges":0}`)
 	out := testFederator().Augment(context.Background(), "find_usages", []byte(`{}`), local, nil)

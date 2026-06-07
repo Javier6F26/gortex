@@ -89,8 +89,8 @@ type CrossRepoResolver struct {
 	// the caller's file actually imports the candidate's repo. Without
 	// it, `FindNodesByName` spanning a multi-repo graph resolves short
 	// common names (`len`, `string`, `Language`, `set`) to whichever
-	// repo sorts first — the name-collision false positives M3's
-	// analyzer surfaced. Built once per Resolve* pass, torn down after.
+	// repo sorts first — the name-collision false positives the analyzer
+	// surfaced. Built once per Resolve* pass, torn down after.
 	reachableReposByFile map[string]map[string]struct{}
 	// depModuleIndex bridges Go imports to dep::<module> contract
 	// nodes from the caller's go.mod. Same shape and rationale as
@@ -113,7 +113,7 @@ type CrossRepoResolver struct {
 	// workspace_membership.go.
 	workspaceMembers WorkspaceMembership
 
-	// Federation Option-B (spec-08; off by default). When edgesEnabled
+	// Cross-daemon proxy-edge minting (off by default). When edgesEnabled
 	// and prober != nil, a function call that local resolution leaves
 	// unresolved is, as a last resort, stitched to a proxy node standing
 	// in for a symbol a remote daemon owns — but only on positive remote
@@ -901,10 +901,10 @@ func (cr *CrossRepoResolver) resolveEdge(e *graph.Edge, stats *CrossRepoStats, b
 		stats.Unresolved++
 	default:
 		cr.resolveFunctionCall(e, target, stats)
-		// Last-resort federation stitch (spec-08): only when local
-		// resolution left the edge unresolved, Option B is on, and a
-		// prober is wired. The evidence gate inside tryRemoteStitch
-		// refuses to probe on a bare name (R-FED-6).
+		// Last-resort cross-daemon proxy-edge stitch: only when local
+		// resolution left the edge unresolved, proxy-edge minting is on,
+		// and a prober is wired. The evidence gate inside tryRemoteStitch
+		// refuses to probe on a bare name.
 		if e.To == oldTo && cr.edgesEnabled && cr.prober != nil {
 			cr.tryRemoteStitch(e, target, stats)
 		}

@@ -64,7 +64,7 @@ type Router struct {
 	clients      map[string]*ServerClient
 	localExecute LocalExecutor
 	// federator augments a LOCAL read result with enabled remotes'
-	// results (Option C). nil disables federation entirely.
+	// results via the read-only fan-out. nil disables federation entirely.
 	federator *Federator
 }
 
@@ -278,9 +278,10 @@ func (r *Router) callLocal(ctx context.Context, toolName string, body []byte) ([
 }
 
 // callLocalFederated runs the local executor and, for an allowlisted
-// read tool, augments the result with the enabled remotes' results
-// (Option C) — the post-step that lives on the LOCAL path only. The
-// verbatim remote-route path is never federated (no fan-out recursion).
+// read tool, augments the result with the enabled remotes' results via
+// the read-only fan-out — the post-step that lives on the LOCAL path
+// only. The verbatim remote-route path is never federated (no fan-out
+// recursion).
 func (r *Router) callLocalFederated(ctx context.Context, toolName string, body []byte, route RouteContext) ([]byte, int, error) {
 	out, status, err := r.callLocal(ctx, toolName, body)
 	if err != nil || r.federator == nil {

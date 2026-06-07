@@ -404,7 +404,7 @@ type Config struct {
 	Embedding EmbeddingConfig `mapstructure:"embedding" yaml:"embedding,omitempty"`
 	MCP       MCPConfig       `mapstructure:"mcp"      yaml:"mcp,omitempty"`
 	Guards    GuardsConfig    `mapstructure:"guards"   yaml:"guards,omitempty"`
-	// Federation tunes the read-only cross-daemon fan-out (Option C):
+	// Federation tunes the read-only cross-daemon fan-out:
 	// per-remote deadline, global budget, circuit breaker, and the
 	// opt-in name-keyed fallback. Zero values fall back to defaults.
 	Federation FederationConfig `mapstructure:"federation" yaml:"federation,omitempty"`
@@ -969,13 +969,13 @@ type FederationConfig struct {
 	BreakerThreshold   int  `mapstructure:"breaker_threshold" yaml:"breaker_threshold,omitempty"`
 	BreakerCooldownMs  int  `mapstructure:"breaker_cooldown_ms" yaml:"breaker_cooldown_ms,omitempty"`
 	NameKeyedFallback  bool `mapstructure:"name_keyed_fallback" yaml:"name_keyed_fallback,omitempty"`
-	// Edges is the Option-B cross-daemon edge-minting block. Off by
-	// default — federation stays Option-C (read-only fan-out) only.
+	// Edges is the cross-daemon proxy-edge minting block. Off by
+	// default — federation stays read-only fan-out only.
 	Edges FederationEdgesConfig `mapstructure:"edges" yaml:"edges,omitempty"`
 }
 
-// FederationEdgesConfig is the `federation.edges` block — Option B
-// cross-daemon proxy-node edges (spec-08 / R-FED-5). Research-grade and
+// FederationEdgesConfig is the `federation.edges` block — the
+// cross-daemon proxy-node edge feature. Research-grade and
 // off by default; none of the mint/hydrate paths run unless IsEnabled().
 type FederationEdgesConfig struct {
 	// Enabled turns on proxy-node minting + lazy hydration.
@@ -983,13 +983,13 @@ type FederationEdgesConfig struct {
 	// TTLMs is the proxy-node neighbour-cache TTL in ms (default 5m).
 	TTLMs int `mapstructure:"ttl_ms" yaml:"ttl_ms,omitempty"`
 	// MaxProxyNodes is the hard heap bound across all remotes (default
-	// 5000); overflow refuses the mint (R-NFR-2).
+	// 5000); overflow refuses the mint.
 	MaxProxyNodes int `mapstructure:"max_proxy_nodes" yaml:"max_proxy_nodes,omitempty"`
 	// HydrateDepth is the neighbour rings pulled per access (default 1).
 	HydrateDepth int `mapstructure:"hydrate_depth" yaml:"hydrate_depth,omitempty"`
 }
 
-// IsEnabled reports whether Option-B edges are on, honouring the
+// IsEnabled reports whether proxy edges are on, honouring the
 // GORTEX_FEDERATION_EDGES env override (1/true) over the config field.
 func (c FederationEdgesConfig) IsEnabled() bool {
 	if v := strings.TrimSpace(os.Getenv("GORTEX_FEDERATION_EDGES")); v != "" {

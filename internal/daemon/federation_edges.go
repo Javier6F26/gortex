@@ -18,12 +18,13 @@ import (
 	"github.com/zzet/gortex/internal/resolver"
 )
 
-// WireRemoteStitch activates federation Option-B end-to-end when the
-// edges feature is enabled and the router carries a federator: it installs
-// the evidence prober on the MultiIndexer (so cross-repo resolution mints
-// proxy edges) and returns a ProxyHydrator for the read path. Returns nil
-// (a no-op) when the feature is off, the router has no federator, or there
-// is no MultiIndexer — leaving the daemon Option-C-only.
+// WireRemoteStitch activates cross-daemon proxy-edge minting end-to-end
+// when the edges feature is enabled and the router carries a federator: it
+// installs the evidence prober on the MultiIndexer (so cross-repo
+// resolution mints proxy edges) and returns a ProxyHydrator for the read
+// path. Returns nil (a no-op) when the feature is off, the router has no
+// federator, or there is no MultiIndexer — leaving the daemon on the
+// read-only fan-out only.
 func WireRemoteStitch(router *Router, mi *indexer.MultiIndexer, g graph.Store, cfg config.FederationEdgesConfig, logger *zap.Logger) *ProxyHydrator {
 	if !cfg.IsEnabled() || router == nil || router.federator == nil || mi == nil || g == nil {
 		return nil
@@ -39,7 +40,7 @@ func WireRemoteStitch(router *Router, mi *indexer.MultiIndexer, g graph.Store, c
 }
 
 // ProxyEdgeProber implements resolver.RemoteDeclarationProber for the
-// Option-B mint path: it asks each enabled remote that advertises the
+// proxy-edge mint path: it asks each enabled remote that advertises the
 // `subgraph` capability whether it owns a declaration of `name`, via the
 // existing find_declaration tool over POST /v1/tools/find_declaration.
 // It reuses the Federator's shared client cache, health cache, and
@@ -67,9 +68,9 @@ func NewProxyEdgeProber(fed *Federator, remotes func() []ServerEntry, timeout ti
 
 // ProbeDeclaration asks each subgraph-capable enabled remote whether it
 // owns a declaration of name, returning the first positive hit (cheapest,
-// deterministic by roster order; design.md §6.4 lean). importHint is
-// already the positive evidence the resolver required to call us at all
-// (R-FED-6); the remote confirmation is the second half.
+// deterministic by roster order). importHint is already the positive
+// evidence the resolver required to call us at all; the remote
+// confirmation is the second half.
 func (p *ProxyEdgeProber) ProbeDeclaration(ctx context.Context, name, importHint string) (resolver.RemoteDecl, bool) {
 	if p == nil || p.fed == nil || name == "" || importHint == "" {
 		return resolver.RemoteDecl{}, false
@@ -84,9 +85,9 @@ func (p *ProxyEdgeProber) ProbeDeclaration(ctx context.Context, name, importHint
 		if err != nil {
 			continue
 		}
-		// R-NFR-4: only probe remotes that advertise the subgraph
-		// capability; otherwise Option B is skipped for this remote and
-		// the read path stays Option-C.
+		// Only probe remotes that advertise the subgraph capability;
+		// otherwise proxy-edge minting is skipped for this remote and
+		// the read path stays on the read-only fan-out.
 		h, herr := p.fed.health.get(ctx, cli, p.timeout)
 		if herr != nil || !h.HasCapability("subgraph") {
 			continue
@@ -150,7 +151,7 @@ type remoteSubGraph struct {
 }
 
 // GetSubGraph fetches a node's FULL neighbour ring from a remote's
-// GET /v1/subgraph (Option-B hydration). depth defaults to 1.
+// GET /v1/subgraph (proxy-edge hydration). depth defaults to 1.
 func (c *ServerClient) GetSubGraph(ctx context.Context, id string, depth int) (*remoteSubGraph, error) {
 	base, err := url.JoinPath(c.BaseURL, "v1", "subgraph")
 	if err != nil {
@@ -225,7 +226,7 @@ func NewProxyHydrator(g graph.Store, clientFor func(ServerEntry) (*ServerClient,
 // mints any newly-referenced proxy nodes (origin-namespaced), adds the
 // edges with honest provenance, refreshes FetchedAt, and returns the
 // number of edges added. No-op when the ring is fresh (within ttl) and
-// already populated (R-NFR-3). Bounded by ctx and the proxy budget.
+// already populated. Bounded by ctx and the proxy budget.
 func (h *ProxyHydrator) Hydrate(ctx context.Context, proxyID string) (int, error) {
 	if h == nil || h.graph == nil {
 		return 0, nil
@@ -307,7 +308,7 @@ func (h *ProxyHydrator) Hydrate(ctx context.Context, proxyID string) (int, error
 
 // EvictRemote marks every proxy node owned by slug stale (resets
 // FetchedAt) so the next access re-hydrates against fresh remote data.
-// Called on a graph_invalidated frame from that remote (R-NFR-3). The
+// Called on a graph_invalidated frame from that remote. The
 // graph.Store has no node-removal primitive that targets the origin
 // namespace cleanly, so staleness is expressed as a forced re-hydrate
 // rather than a hard delete — same observable outcome (fresh data on the

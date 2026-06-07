@@ -61,7 +61,7 @@ func TestStitch_NoImportHint_NeverProbes(t *testing.T) {
 	cr.ResolveAll()
 
 	if p.calls != 0 {
-		t.Errorf("with no import hint the prober must NOT be called (R-FED-6); calls=%d", p.calls)
+		t.Errorf("with no import hint the prober must NOT be called; calls=%d", p.calls)
 	}
 	if edge.To != "unresolved::Helper" {
 		t.Errorf("edge must stay unresolved; got %q", edge.To)
@@ -88,7 +88,7 @@ func TestStitch_ImportHint_RemoteMiss_NoMint(t *testing.T) {
 }
 
 // (c) import hint + remote hit -> proxy minted, edge rewritten with honest
-// provenance (R-FED-5).
+// provenance.
 func TestStitch_ImportHint_RemoteHit_Mints(t *testing.T) {
 	g, edge := stitchFixture(true)
 	cr := NewCrossRepo(g)
@@ -115,7 +115,7 @@ func TestStitch_ImportHint_RemoteHit_Mints(t *testing.T) {
 	}
 }
 
-// (d) budget exceeded -> mint refused, edge stays unresolved (R-NFR-2).
+// (d) budget exceeded -> mint refused, edge stays unresolved.
 func TestStitch_BudgetExceeded_Refuses(t *testing.T) {
 	g, edge := stitchFixture(true)
 	// Pre-seed one proxy node so a budget of 1 is already full.

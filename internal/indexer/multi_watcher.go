@@ -61,8 +61,8 @@ func NewMultiWatcher(
 	// Break same-named import collisions in favour of the importer's
 	// own package-manager workspace member.
 	mw.resolver.SetWorkspaceMembership(mi.workspaceMembershipResolver())
-	// Federation Option-B: mint proxy edges on incremental re-resolution
-	// too, when the daemon installed a prober (flag on).
+	// Cross-daemon proxy-edge minting: mint proxy edges on incremental
+	// re-resolution too, when the daemon installed a prober (flag on).
 	mi.applyRemoteStitch(mw.resolver)
 
 	for prefix, cfg := range configs {

@@ -136,7 +136,7 @@ func (f *Federator) Augment(ctx context.Context, tool string, body, localResult 
 	merged, origins := f.merge(tool, localTool, results)
 	meta.Origins = origins
 
-	// Opt-in name-keyed fallback (OFF by default, D-15): a bare-name
+	// Opt-in name-keyed fallback (OFF by default): a bare-name
 	// search on each remote, rendered in a SEPARATE name_hits section
 	// tagged text_matched — never merged into the primary id-keyed
 	// results (name hits have different native ids that ID-dedup cannot

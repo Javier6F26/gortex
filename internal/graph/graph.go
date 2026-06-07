@@ -2587,9 +2587,9 @@ func (g *Graph) Stats() GraphStats {
 	totalNodes := 0
 	for _, s := range g.shards {
 		for _, n := range s.nodes {
-			// Federation Option-B proxy nodes stand in for symbols a
-			// remote daemon owns; they are never counted in local stats
-			// (R-FED-7). Inert until edge-minting is enabled.
+			// Cross-daemon proxy-edge nodes stand in for symbols a
+			// remote daemon owns; they are never counted in local
+			// stats. Inert until edge-minting is enabled.
 			if IsProxyNode(n) {
 				continue
 			}

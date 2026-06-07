@@ -284,7 +284,7 @@ type Server struct {
 	// leaves it nil so the live server is used.
 	resourcesNotifier resourcesUpdatedNotifier
 
-	// proxyHydrate is the federation Option-B lazy hydration hook (spec-08).
+	// proxyHydrate is the cross-daemon proxy-edge lazy hydration hook.
 	// nil unless the daemon installed one (federation.edges on); the
 	// traversal tools call it to pull a proxy node's neighbour ring before
 	// crossing into it. See proxy_hydrate.go.
@@ -1176,7 +1176,7 @@ func (s *Server) ProjectScope() string { return s.scopeProject }
 // resolves to no tracked repo. Used as a QueryOptions.WorkspaceID
 // sentinel: it can never equal a real node's WorkspaceID/RepoPrefix,
 // so every node is rejected and the session fails closed instead of
-// widening to the global graph (SI-3).
+// widening to the global graph.
 const unresolvedWorkspacePrefix = "\x00gortex-unresolved-workspace:"
 
 // sessionScope resolves the workspace/project boundary for the current

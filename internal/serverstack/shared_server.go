@@ -187,7 +187,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 
 	s := &SharedServer{}
 
-	// Cross-process store lock (D-21): a writable, on-disk lifecycle
+	// Cross-process store lock: a writable, on-disk lifecycle
 	// acquires an advisory flock on store.sqlite.lock and fails fast if
 	// another process owns the store. SQLite's in-process writeMu +
 	// busy_timeout serialise in-process writers only; nothing else stops

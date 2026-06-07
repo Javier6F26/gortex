@@ -55,10 +55,11 @@ type MultiIndexer struct {
 	logger    *zap.Logger
 	mu        sync.RWMutex
 
-	// stitchProber / proxyBudget wire federation Option-B (spec-08): when
-	// set by the daemon entry point (flag on), every CrossRepoResolver
+	// stitchProber / proxyBudget wire the cross-daemon proxy-edge feature:
+	// when set by the daemon entry point (flag on), every CrossRepoResolver
 	// this MultiIndexer builds mints proxy edges to remote-owned symbols
-	// on positive evidence. A nil prober is Option-C-only (the default).
+	// on positive evidence. A nil prober keeps the resolvers on read-only
+	// federation (the default).
 	stitchProber resolver.RemoteDeclarationProber
 	proxyBudget  int
 
@@ -2347,10 +2348,10 @@ func (mi *MultiIndexer) Graph() graph.Store {
 	return mi.graph
 }
 
-// SetRemoteStitch enables federation Option-B proxy-edge minting on every
+// SetRemoteStitch enables cross-daemon proxy-edge minting on every
 // CrossRepoResolver this MultiIndexer constructs. Called once by the
 // daemon entry point when federation.edges.enabled; a nil prober leaves
-// the resolvers Option-C-only.
+// the resolvers on read-only federation.
 func (mi *MultiIndexer) SetRemoteStitch(prober resolver.RemoteDeclarationProber, budget int) {
 	mi.mu.Lock()
 	defer mi.mu.Unlock()
@@ -2358,7 +2359,7 @@ func (mi *MultiIndexer) SetRemoteStitch(prober resolver.RemoteDeclarationProber,
 	mi.proxyBudget = budget
 }
 
-// applyRemoteStitch wires the Option-B mint into a freshly built resolver
+// applyRemoteStitch wires the proxy-edge mint into a freshly built resolver
 // when a prober is installed.
 func (mi *MultiIndexer) applyRemoteStitch(cr *resolver.CrossRepoResolver) {
 	mi.mu.RLock()

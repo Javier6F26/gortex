@@ -2,8 +2,8 @@ package graph
 
 import "testing"
 
-// TestStats_ExcludesProxyNodes asserts federation Option-B proxy nodes
-// are never counted in Graph.Stats (R-FED-7).
+// TestStats_ExcludesProxyNodes asserts cross-daemon federation proxy nodes
+// are never counted in Graph.Stats.
 func TestStats_ExcludesProxyNodes(t *testing.T) {
 	g := New()
 	g.AddNode(&Node{ID: "local/a.go::Foo", Kind: KindFunction, Name: "Foo", Language: "go"})

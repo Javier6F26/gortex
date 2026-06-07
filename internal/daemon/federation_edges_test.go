@@ -57,13 +57,13 @@ func TestProbeDeclaration_Hit(t *testing.T) {
 }
 
 func TestProbeDeclaration_NoSubgraphCap_Skipped(t *testing.T) {
-	// The remote advertises no `subgraph` capability, so Option B is
-	// skipped for it (R-NFR-4) even though it would have the declaration.
+	// The remote advertises no `subgraph` capability, so proxy-edge minting is
+	// skipped for it even though it would have the declaration.
 	remote := declRemote(t, helperDeclJSON, []string{"events"})
 	p := proberFor([]ServerEntry{{Slug: "remoteB", URL: remote.URL}})
 
 	if _, ok := p.ProbeDeclaration(context.Background(), "Helper", "extmod"); ok {
-		t.Error("a remote without the subgraph cap must not yield a hit (R-NFR-4)")
+		t.Error("a remote without the subgraph cap must not yield a hit")
 	}
 }
 

@@ -81,7 +81,7 @@ var proxyRemoveCmd = &cobra.Command{
 
 func init() {
 	// proxy add reuses the daemon-server-add flag vars + logic so the
-	// two surfaces stay in lockstep (D-27 canonical form).
+	// two surfaces stay in lockstep on this canonical form.
 	proxyAddCmd.Flags().BoolVar(&daemonServerAddDefault, "default", false, "mark this remote as the default")
 	proxyAddCmd.Flags().StringVar(&daemonServerAddAuthToken, "auth-token", "", "literal bearer token (prefer --auth-token-env)")
 	proxyAddCmd.Flags().StringVar(&daemonServerAddAuthTokenEnv, "auth-token-env", "", "env-var name the daemon reads at request time")

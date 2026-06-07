@@ -291,10 +291,10 @@ type Node struct {
 	// reconstructing the path from repo_prefix + file_path.
 	AbsoluteFilePath string `json:"absolute_file_path,omitempty"`
 
-	// Origin marks a node minted by federation Option B as standing in
-	// for a symbol another daemon owns. "" on every locally-indexed
-	// node; "remote:<slug>" on a proxy node. Written ONLY by the
-	// Option-B mint path; the read-only fan-out (Option C) carries
+	// Origin marks a node minted by the cross-daemon proxy-edge feature
+	// as standing in for a symbol another daemon owns. "" on every
+	// locally-indexed node; "remote:<slug>" on a proxy node. Written ONLY
+	// by the proxy-edge mint path; the read-only fan-out carries
 	// provenance in the response, never here. Excluded from
 	// graph_stats / BM25 / communities / analyzers (see IsProxyNode).
 	Origin string `json:"origin,omitempty"`

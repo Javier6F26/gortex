@@ -14,7 +14,7 @@ import (
 // RemoteDeclarationProber is satisfied by the daemon's Federator. It asks
 // each enabled remote whether it owns a declaration matching name,
 // passing the caller's import/module hint so a bare-name probe is never
-// issued (R-FED-6). Returns the first positive hit or ok=false. The
+// issued. Returns the first positive hit or ok=false. The
 // implementation lives in internal/daemon (keeps internal/resolver pure —
 // no HTTP here); it bounds its own per-remote deadline (ProxyToolCtx).
 type RemoteDeclarationProber interface {
@@ -32,23 +32,23 @@ type RemoteDecl struct {
 	Line        int
 }
 
-// EnableRemoteStitch wires the Option-B mint path: a prober and the
+// EnableRemoteStitch wires the proxy-edge mint path: a prober and the
 // proxy-node heap bound. Called by the daemon entry point only when
 // federation.edges.enabled. A nil prober (or budget <= 0 with no prober)
-// leaves the resolver in its default Option-C-only behaviour.
+// leaves the resolver in its default read-only fan-out behaviour.
 func (cr *CrossRepoResolver) EnableRemoteStitch(prober RemoteDeclarationProber, proxyBudget int) {
 	cr.prober = prober
 	cr.proxyBudget = proxyBudget
 	cr.edgesEnabled = prober != nil
 }
 
-// tryRemoteStitch is the gated Option-B mint. It runs only after local
+// tryRemoteStitch is the gated proxy-edge mint. It runs only after local
 // resolution fails (the caller checks e.To == oldTo). On a confirmed
 // remote declaration it mints an origin-namespaced proxy node and
 // rewrites the edge to it with honest provenance (text_matched, never
-// lsp_resolved — R-FED-5). Returns true when it stitched.
+// lsp_resolved). Returns true when it stitched.
 func (cr *CrossRepoResolver) tryRemoteStitch(e *graph.Edge, name string, stats *CrossRepoStats) bool {
-	// 1. EVIDENCE GATE (R-FED-6): never mint on a bare name. The caller
+	// 1. EVIDENCE GATE: never mint on a bare name. The caller
 	// file must import something for a remote target to be plausible.
 	importHint := cr.importHintFor(e)
 	if importHint == "" {
@@ -60,7 +60,7 @@ func (cr *CrossRepoResolver) tryRemoteStitch(e *graph.Edge, name string, stats *
 	}
 
 	// 2. MINT the proxy node (origin-namespaced so it can never alias a
-	// local id), bounded by the heap budget (R-NFR-2).
+	// local id), bounded by the heap budget.
 	pid := graph.ProxyNodeID(decl.Slug, decl.RemoteID)
 	if cr.graph.GetNode(pid) == nil {
 		if cr.proxyBudgetExceeded() {
@@ -84,7 +84,7 @@ func (cr *CrossRepoResolver) tryRemoteStitch(e *graph.Edge, name string, stats *
 		})
 	}
 
-	// 3. REWRITE the edge to the proxy with honest provenance (R-FED-5).
+	// 3. REWRITE the edge to the proxy with honest provenance.
 	e.To = pid
 	e.CrossRepo = true
 	e.Origin = graph.OriginTextMatched
@@ -139,7 +139,7 @@ func importHintName(to string) string {
 }
 
 // proxyBudgetExceeded reports whether the graph already holds the maximum
-// number of proxy nodes (R-NFR-2). Counts on demand; mints are rare
+// number of proxy nodes. Counts on demand; mints are rare
 // (gated behind the evidence rule + the off-by-default flag).
 func (cr *CrossRepoResolver) proxyBudgetExceeded() bool {
 	if cr.proxyBudget <= 0 {

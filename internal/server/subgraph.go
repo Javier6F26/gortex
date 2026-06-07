@@ -19,7 +19,7 @@ const subgraphMaxDepth = 2
 
 // SubGraphResponse is the /v1/subgraph payload: FULL nodes (Meta /
 // QualName / EndLine intact, unlike the brief /v1/graph projection) for a
-// node and its neighbour ring, used by federation Option-B proxy-node
+// node and its neighbour ring, used by cross-daemon proxy-edge proxy-node
 // hydration.
 type SubGraphResponse struct {
 	Root  *graph.Node   `json:"root"`

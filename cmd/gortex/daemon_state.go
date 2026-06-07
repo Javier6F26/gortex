@@ -34,9 +34,9 @@ type daemonState struct {
 	multiIndexer  *indexer.MultiIndexer
 	configManager *config.ConfigManager
 	mcpServer     *gortexmcp.Server
-	// proxyHydrator lazily fills federation Option-B proxy nodes from the
-	// owning remote's /v1/subgraph. nil unless federation.edges is on
-	// (spec-08); the read path hydrates a proxy target before traversing it.
+	// proxyHydrator lazily fills cross-daemon proxy-edge nodes from the
+	// owning remote's /v1/subgraph. nil unless federation.edges is on;
+	// the read path hydrates a proxy target before traversing it.
 	proxyHydrator *daemon.ProxyHydrator
 	// snapshotRepos carries per-repo FileMtimes restored from a daemon
 	// snapshot. Populated by buildDaemonState; consumed by

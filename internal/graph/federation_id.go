@@ -2,7 +2,7 @@ package graph
 
 import "strings"
 
-// IsProxyNode reports whether n is a federation Option-B proxy node —
+// IsProxyNode reports whether n is a cross-daemon proxy-edge node —
 // identified by its struct fields, NOT its ID shape. Distinct from
 // IsStub(id) (the stdlib/builtin/module string predicate): a proxy node
 // is keyed under the "remote:<slug>~..." origin namespace, which IsStub

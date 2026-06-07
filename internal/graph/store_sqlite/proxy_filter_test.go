@@ -7,7 +7,7 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// TestProxyNodes_NeverReachDisk validates D-29: federation Option-B proxy
+// TestProxyNodes_NeverReachDisk validates that cross-daemon proxy-edge
 // nodes (and their edges) are dropped at the single durable write boundary
 // (AddNode / AddBatch), so a warm restart over the store never sees them,
 // while every real node round-trips intact.
@@ -44,10 +44,10 @@ func TestProxyNodes_NeverReachDisk(t *testing.T) {
 	defer func() { _ = s2.Close() }()
 
 	if s2.GetNode(proxy.ID) != nil {
-		t.Error("proxy node must not be persisted (D-29)")
+		t.Error("proxy node must not be persisted")
 	}
 	if s2.GetNode(graph.ProxyNodeID("remoteC", "rc/y.go::Baz")) != nil {
-		t.Error("proxy node added via AddNode must not be persisted (D-29)")
+		t.Error("proxy node added via AddNode must not be persisted")
 	}
 	if s2.GetNode(real.ID) == nil {
 		t.Error("the real node must round-trip intact")

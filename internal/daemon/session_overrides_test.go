@@ -29,7 +29,8 @@ func TestSession_RemoteOverride_SetGetClear(t *testing.T) {
 }
 
 // TestSession_RemoteOverrides_PerSessionIsolation asserts an override on
-// one session never leaks into another (R-RMT-2 ephemerality).
+// one session never leaks into another (overrides are ephemeral and
+// scoped to a single session).
 func TestSession_RemoteOverrides_PerSessionIsolation(t *testing.T) {
 	a := &Session{ID: "a"}
 	b := &Session{ID: "b"}

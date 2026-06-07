@@ -6,10 +6,10 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
-// SetProxyHydrator installs the federation Option-B lazy hydration hook.
+// SetProxyHydrator installs the cross-daemon proxy-edge lazy hydration hook.
 // The daemon wires it to ProxyHydrator.Hydrate when federation.edges is
 // enabled; nil (the default) makes hydrateProxyTargets a no-op, so
-// pure-local and Option-C-only installs pay nothing.
+// pure-local and read-only-fan-out-only installs pay nothing.
 func (s *Server) SetProxyHydrator(h func(ctx context.Context, proxyID string) (int, error)) {
 	s.proxyHydrate = h
 }

@@ -28,9 +28,9 @@ func resolveFederationConfig() daemon.FederationConfig {
 	}
 }
 
-// resolveFederationEdgesConfig loads the federation.edges (Option-B) block
-// from the active config. Returns the zero value (feature off) on a load
-// error.
+// resolveFederationEdgesConfig loads the federation.edges (cross-daemon
+// proxy-edge) block from the active config. Returns the zero value
+// (feature off) on a load error.
 func resolveFederationEdgesConfig() config.FederationEdgesConfig {
 	cfg, err := config.Load(cfgFile)
 	if err != nil || cfg == nil {
