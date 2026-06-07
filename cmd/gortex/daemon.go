@@ -298,8 +298,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if token == "" {
 			token = os.Getenv("GORTEX_DAEMON_HTTP_TOKEN")
 		}
-		if !isLocalhostBind(daemonHTTPAddr) && token == "" {
-			return fmt.Errorf("--http-addr %q is non-localhost; --http-auth-token (or $GORTEX_DAEMON_HTTP_TOKEN) is required", daemonHTTPAddr)
+		if err := httpTokenRequirementError(daemonHTTPAddr, token); err != nil {
+			return err
 		}
 		// Resolve the expected token per request so $GORTEX_DAEMON_HTTP_TOKEN
 		// can be rotated without restarting the daemon. The flag, when set,
