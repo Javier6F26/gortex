@@ -100,7 +100,7 @@ func printDaemonSearchSymbols(cmd *cobra.Command, raw json.RawMessage) error {
 			ID       string `json:"id"`
 			Kind     string `json:"kind"`
 			FilePath string `json:"file_path"`
-			Line     int    `json:"line"`
+			Line     int    `json:"start_line"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
