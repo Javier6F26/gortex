@@ -242,6 +242,15 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	} else if scfgErr != nil {
 		logger.Warn("daemon: servers.toml load error (running single-server)", zap.Error(scfgErr))
 	}
+	// Bridge the session proxy-toggle MCP tools to the daemon's
+	// per-session overrides + the live router roster. The router
+	// accessor is dynamic so a ControlProxy swap is reflected.
+	if state.mcpServer != nil {
+		state.mcpServer.SetRemoteOverrideSink(&sessionRemoteOverrideSink{
+			sessions: srv.Sessions(),
+			router:   disp.Router,
+		})
+	}
 	srv.MCPDispatcher = disp
 
 	// Optional MCP 2026 Streamable HTTP transport. Off by default

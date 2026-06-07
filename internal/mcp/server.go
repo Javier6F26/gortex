@@ -323,6 +323,14 @@ type Server struct {
 	// second SetOverlayManager call doesn't double-register them.
 	registerOverlayToolsOnce sync.Once
 
+	// remoteOverrides bridges the session proxy-toggle tools
+	// (proxy_enable / proxy_disable / proxy_status) to the daemon's
+	// per-session remote-override state. nil in embedded mode (no
+	// per-connection daemon session). registerProxyToolsOnce gates the
+	// tool registration the way the overlay family is gated.
+	remoteOverrides        RemoteOverrideSink
+	registerProxyToolsOnce sync.Once
+
 	// lazy owns the deferred-tool catalog backing the tools_search
 	// discovery tool. Tools whose names are not in hotEagerTools land
 	// here instead of in the live MCP server; tools_search returns
