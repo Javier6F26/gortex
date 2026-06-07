@@ -23,6 +23,7 @@ import (
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/server"
+	"github.com/zzet/gortex/internal/server/hub"
 	"github.com/zzet/gortex/internal/tui"
 )
 
@@ -274,6 +275,14 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 	srv.MCPDispatcher = disp
 
+	// Event hub feeding the /v1 REST surface's graph-change SSE stream
+	// (/v1/events). Created lazily when the HTTP surface is enabled below
+	// and fed from the MultiWatcher once warmup attaches it — without this
+	// the daemon's /v1/events would only ever emit the "watch mode not
+	// active" frame even while the daemon is actively re-indexing changed
+	// files, leaving the REST surface short of the former `gortex server`.
+	var v1EventHub *hub.Hub
+
 	// Optional MCP 2026 Streamable HTTP transport. Off by default
 	// (--http-addr unset) so a fresh `gortex daemon start` keeps
 	// the unix-socket-only behaviour every existing client already
@@ -330,6 +339,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if router != nil {
 			v1.SetRouter(router)
 		}
+		// Wire a graph-change event hub so /v1/events streams real events.
+		// The hub is fed from the MultiWatcher once warmup attaches it
+		// below; until then it has no source and /v1/events keepalives.
+		v1EventHub = hub.New()
+		v1.SetEventHub(v1EventHub)
 
 		srv.HTTPHandler = composeDaemonHTTPHandler(streamH, v1, tokenFn, daemonHTTPCORSOrigin)
 		srv.HTTPAddr = daemonHTTPAddr
@@ -463,6 +477,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// was actively re-indexing changed files.
 		if state.mcpServer != nil && mw != nil {
 			state.mcpServer.SetWatcher(mw)
+		}
+		// Drive the /v1/events SSE stream from the MultiWatcher. The hub is
+		// the only consumer of mw.Events() (SetWatcher reads History(), not
+		// the channel), so this can't starve any other reader. No-op when
+		// the HTTP surface is disabled (v1EventHub stays nil).
+		if v1EventHub != nil && mw != nil {
+			go v1EventHub.Run(mw.Events())
 		}
 		// Community detection and process discovery only run when a
 		// repo is tracked or indexed via MCP — a daemon coming up off
