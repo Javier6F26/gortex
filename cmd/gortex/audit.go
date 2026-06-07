@@ -1,40 +1,31 @@
-// audit.go — `gortex audit` command. Produces a one-letter
-// repo-level health grade (A-F) plus a shields.io-style SVG badge
-// suitable for embedding in a README. Grade is derived from the
-// graph's complexity-axis health score — the same arithmetic the
-// MCP `analyze kind=health_score` analyzer uses, restricted to the
-// axes available without external enrichment (no coverage profile,
-// no blame data, no session history required).
-//
-// The simplification matters: the badge has to work on a
-// freshly-indexed repo with zero enrichment. Coverage + blame
-// axes add fidelity when present but require multi-step setup;
-// gating the badge on them would make the README shield
-// effectively unreachable.
+// audit.go — `gortex audit` command. Produces a one-letter repo-level
+// health grade (A-F) plus a shields.io-style SVG badge suitable for
+// embedding in a README. The grade is computed by the daemon's
+// audit_health tool (complexity-axis health score); this command renders
+// the badge / JSON / text and writes the badge file locally.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 
-	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
+	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/tui"
 )
+
+// auditReport / symbolScore alias the daemon's report types so the
+// renderers below read unchanged.
+type auditReport = gortexmcp.AuditReport
+type symbolScore = gortexmcp.AuditSymbolScore
 
 var (
 	auditPath   string
@@ -46,11 +37,9 @@ var (
 var auditCmd = &cobra.Command{
 	Use:   "audit",
 	Short: "Compute a repo-level A-F health grade + emit a README-ready SVG badge",
-	Long: `Indexes the target repo and reports a single A-F grade based
-on graph-topology complexity. Designed for the README shield:
-the grade reflects how well-structured the indexed code is, on
-the axes available without external enrichment (fan-in /
-fan-out / community-crossings per callable symbol).
+	Long: `Reports a single A-F grade for the repo the daemon owns, based on
+graph-topology complexity (fan-in / fan-out per callable symbol). Designed
+for the README shield. Requires a running daemon that tracks the repo.
 
 Output modes:
 
@@ -65,12 +54,12 @@ Examples:
   gortex audit                          # write .gortex/badge.svg
   gortex audit --format text            # "A · 87.4" on stdout
   gortex audit --format json --out -    # JSON on stdout
-  gortex audit --path /tmp/myrepo       # audit a different tree`,
+  gortex audit --path /tmp/myrepo       # audit a different tracked tree`,
 	RunE: runAudit,
 }
 
 func init() {
-	auditCmd.Flags().StringVar(&auditPath, "path", ".", "repository path to audit")
+	auditCmd.Flags().StringVar(&auditPath, "path", ".", "repository path to audit (the daemon must track it)")
 	auditCmd.Flags().BoolVar(&auditBadge, "badge", true, "write an SVG shield (alias of --format svg)")
 	auditCmd.Flags().StringVar(&auditOut, "out", "", "output path (default: .gortex/badge.svg for svg, stdout for json/text)")
 	auditCmd.Flags().StringVar(&auditFormat, "format", "svg", "svg | json | text")
@@ -82,38 +71,17 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve path: %w", err)
 	}
-
 	w := cmd.ErrOrStderr()
 	emitAuditBanner(w, abs)
 
-	// Index the repo with a spinner so the user sees progress instead of a
-	// silent multi-second pause on larger trees. Indexer logs are silenced
-	// on TTY (the spinner already renders the same stage transitions).
-	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-	cfg := config.Config{}
-	logger := loggerForSpinner(cmd, zap.NewNop())
-	idx := indexer.New(g, reg, cfg.Index, logger)
-
-	sp := newAuditSpinner(w)
-	if sp != nil {
-		sp.Start("Indexing repository")
-		sp.Set("", abs)
-	} else {
-		_, _ = fmt.Fprintf(w, "[audit] indexing %s...\n", abs)
+	out, err := requireDaemonTool(auditPath, "audit_health", map[string]any{})
+	if err != nil {
+		return err
 	}
-	if _, ierr := idx.Index(abs); ierr != nil {
-		if sp != nil {
-			sp.Fail(ierr)
-		}
-		return fmt.Errorf("index: %w", ierr)
+	var report auditReport
+	if err := json.Unmarshal(out, &report); err != nil {
+		return fmt.Errorf("decode audit report: %w", err)
 	}
-	if sp != nil {
-		sp.Done()
-	}
-
-	report := computeAuditReport(g)
 
 	// On non-TTY (or --no-progress / non-svg formats), preserve the legacy
 	// summary line so script parsers keep working.
@@ -142,7 +110,6 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[audit] wrote %s\n", out)
-		// README snippet so the user can paste it.
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(),
 			"![gortex audit](%s) · grade %s · score %.1f\n",
 			filepath.ToSlash(filepath.Clean(strings.TrimPrefix(out, abs+string(filepath.Separator)))),
@@ -168,148 +135,9 @@ func runAudit(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// auditReport is the per-repo summary the badge / json output
-// renders. Keeps the structured data separate from rendering so
-// tests can pin the math without screen-scraping SVG.
-type auditReport struct {
-	SymbolCount int     `json:"symbol_count"`
-	MeanScore   float64 `json:"mean_score"`
-	Grade       string  `json:"grade"`
-	// Distribution per grade band — the badge surfaces the
-	// headline; this is the deep-dive for the JSON path.
-	GradeCounts map[string]int `json:"grade_counts"`
-	// Per-symbol scores sorted ascending so the worst-scored
-	// symbols can be cited without re-walking the graph.
-	WorstSymbols []symbolScore `json:"worst_symbols,omitempty"`
-}
-
-type symbolScore struct {
-	ID    string  `json:"id"`
-	Score float64 `json:"score"`
-	Grade string  `json:"grade"`
-	File  string  `json:"file"`
-	Line  int     `json:"line"`
-}
-
-// computeAuditReport walks the graph and produces the per-repo
-// grade. Complexity-axis-only math matching the multi-axis
-// `analyze kind=health_score` analyzer's complexity component, so
-// the badge grade is comparable to (a subset of) what the full
-// analyzer would produce on the same graph.
-//
-// raw       = fan_in*2 + fan_out*1.5 + crossings*3   (per symbol)
-// complexity_health = 100 / (1 + raw/20)
-// mean      = mean across callable symbols
-// grade     = scoreGrade(mean)
-//
-// We can't easily compute community crossings from the CLI without
-// the analysis package's community detector. Approximation: skip
-// the crossings term — at the repo scale a small constant bias
-// across all symbols doesn't change the rank or grade meaningfully.
-func computeAuditReport(g *graph.Graph) auditReport {
-	type entry struct {
-		id, file string
-		line     int
-		score    float64
-	}
-	var entries []entry
-	for _, n := range g.AllNodes() {
-		if n == nil {
-			continue
-		}
-		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
-			continue
-		}
-		fanIn := 0
-		fanOut := 0
-		for _, e := range g.GetInEdges(n.ID) {
-			if e.Kind == graph.EdgeCalls || e.Kind == graph.EdgeReferences {
-				fanIn++
-			}
-		}
-		for _, e := range g.GetOutEdges(n.ID) {
-			if e.Kind == graph.EdgeCalls {
-				fanOut++
-			}
-		}
-		raw := float64(fanIn)*2.0 + float64(fanOut)*1.5
-		complexity := 100.0 / (1.0 + raw/20.0)
-		entries = append(entries, entry{
-			id:    n.ID,
-			file:  n.FilePath,
-			line:  n.StartLine,
-			score: complexity,
-		})
-	}
-
-	report := auditReport{
-		SymbolCount: len(entries),
-		GradeCounts: map[string]int{},
-	}
-	if len(entries) == 0 {
-		report.Grade = scoreGradeForAudit(0)
-		return report
-	}
-
-	var sum float64
-	for _, e := range entries {
-		sum += e.score
-	}
-	report.MeanScore = math.Round((sum/float64(len(entries)))*10) / 10
-	report.Grade = scoreGradeForAudit(report.MeanScore)
-
-	for _, e := range entries {
-		report.GradeCounts[scoreGradeForAudit(e.score)]++
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].score != entries[j].score {
-			return entries[i].score < entries[j].score
-		}
-		if entries[i].file != entries[j].file {
-			return entries[i].file < entries[j].file
-		}
-		return entries[i].line < entries[j].line
-	})
-	// Top-5 worst — enough for "what to look at first" without
-	// dragging in the full population.
-	limit := min(5, len(entries))
-	report.WorstSymbols = make([]symbolScore, 0, limit)
-	for i := range limit {
-		e := entries[i]
-		report.WorstSymbols = append(report.WorstSymbols, symbolScore{
-			ID:    e.id,
-			Score: math.Round(e.score*10) / 10,
-			Grade: scoreGradeForAudit(e.score),
-			File:  e.file,
-			Line:  e.line,
-		})
-	}
-	return report
-}
-
-// scoreGradeForAudit mirrors the MCP analyzer's scoreGrade — kept
-// duplicated so the audit command doesn't take an mcp dependency.
-// Keep in sync with internal/mcp/tools_analyze_health_score.go.
-func scoreGradeForAudit(score float64) string {
-	switch {
-	case score >= 85:
-		return "A"
-	case score >= 70:
-		return "B"
-	case score >= 55:
-		return "C"
-	case score >= 40:
-		return "D"
-	default:
-		return "F"
-	}
-}
-
-// renderAuditJSON is the structured-output form of the report.
+// renderAuditJSON is the structured-output form of the report. Hand-built
+// so the field order is stable regardless of map iteration.
 func renderAuditJSON(r auditReport) string {
-	// Hand-built so the field order in the output is stable
-	// regardless of map iteration. Tests pin specific lines.
 	var b strings.Builder
 	fmt.Fprintf(&b, "{\n  \"symbol_count\": %d,\n  \"mean_score\": %.1f,\n  \"grade\": %q,\n",
 		r.SymbolCount, r.MeanScore, r.Grade)
@@ -335,18 +163,12 @@ func renderAuditJSON(r auditReport) string {
 	return b.String()
 }
 
-// renderBadgeSVG produces a shields.io-style two-cell badge. Left
-// cell ("gortex audit") in slate grey; right cell shows the grade
-// in the tier-mapped colour. Plain SVG (no external font deps);
-// width auto-sized for a 1-char grade.
+// renderBadgeSVG produces a shields.io-style two-cell badge.
 func renderBadgeSVG(r auditReport) string {
 	label := "gortex audit"
 	grade := r.Grade
 	colour := gradeColour(grade)
 
-	// Hand-tuned widths — shields.io renders at 100% scale and
-	// expects a tight bounding box. 78px left + 26px right is
-	// readable at the typical README zoom.
 	labelW := 78
 	gradeW := 26
 	totalW := labelW + gradeW
@@ -379,19 +201,7 @@ func renderBadgeSVG(r auditReport) string {
 	)
 }
 
-// newAuditSpinner returns a fresh mesh spinner bound to w when stderr is a
-// TTY (and --no-progress isn't set). Returns nil otherwise; the caller falls
-// back to a one-line "indexing ..." print.
-func newAuditSpinner(w io.Writer) *progress.Spinner {
-	if noProgress || !progress.IsTTY(w) {
-		return nil
-	}
-	return progress.NewSpinner(w)
-}
-
-// emitAuditBanner prints the gortex mesh banner + subtitle naming the repo
-// under audit. TTY-only so non-TTY callers (CI badges, scripts) keep their
-// minimal stderr trail.
+// emitAuditBanner prints the gortex banner naming the repo under audit.
 func emitAuditBanner(w io.Writer, repoPath string) {
 	if !progress.IsTTY(w) || noProgress {
 		return
@@ -402,7 +212,7 @@ func emitAuditBanner(w io.Writer, repoPath string) {
 	}
 	banner := tui.Banner{
 		Title:    "gortex audit",
-		Subtitle: "Computing complexity-axis health grade for " + filepath.Base(repoPath) + ".",
+		Subtitle: "Complexity-axis health grade for " + filepath.Base(repoPath) + ".",
 	}.Render()
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, banner)
@@ -410,11 +220,8 @@ func emitAuditBanner(w io.Writer, repoPath string) {
 	_, _ = fmt.Fprintln(w)
 }
 
-// emitAuditGradeCard renders the celebratory result panel: a big colour-tiered
-// grade chip, stat strip with symbol count + mean score, and a one-line
-// breakdown of the per-grade distribution. The shields.io SVG is still
-// written to .gortex/badge.svg by the caller — this is just the on-screen
-// reward.
+// emitAuditGradeCard renders the result panel: a colour-tiered grade chip,
+// stat strip, and per-grade distribution.
 func emitAuditGradeCard(w io.Writer, r auditReport) {
 	gradeStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -448,25 +255,21 @@ func emitAuditGradeCard(w io.Writer, r auditReport) {
 	_, _ = fmt.Fprintln(w)
 }
 
-// auditGradeBG maps an A-F letter to the same shields.io tier colour the SVG
-// uses, so the on-screen card and the rendered badge agree visually.
+// Coverage-grade badge colours — the shields.io standard palette, shared
+// by the terminal badge background (auditGradeBG) and the SVG/markdown
+// badge colour (gradeColour).
+const (
+	badgeBrightGreen = "#4c1"
+	badgeGreen       = "#97ca00"
+	badgeYellow      = "#dfb317"
+	badgeOrange      = "#fe7d37"
+	badgeRed         = "#e05d44"
+)
+
 func auditGradeBG(grade string) lipgloss.Color {
-	switch grade {
-	case "A":
-		return lipgloss.Color("#4c1") // brightgreen
-	case "B":
-		return lipgloss.Color("#97ca00") // green
-	case "C":
-		return lipgloss.Color("#dfb317") // yellow
-	case "D":
-		return lipgloss.Color("#fe7d37") // orange
-	default:
-		return lipgloss.Color("#e05d44") // red
-	}
+	return lipgloss.Color(gradeColour(grade))
 }
 
-// gradeBlurb returns the short human prefix shown next to the score in the
-// card's stat strip.
 func gradeBlurb(grade string) string {
 	switch grade {
 	case "A":
@@ -482,8 +285,6 @@ func gradeBlurb(grade string) string {
 	}
 }
 
-// auditStatSeverity colour-codes the blurb chip per grade band so the card
-// telegraphs urgency without re-reading the letter.
 func auditStatSeverity(grade string) progress.StatSeverity {
 	switch grade {
 	case "A", "B":
@@ -497,19 +298,17 @@ func auditStatSeverity(grade string) progress.StatSeverity {
 	}
 }
 
-// gradeColour returns the shields.io standard tier colour per
-// grade. A=brightgreen, B=green, C=yellow, D=orange, F=red.
 func gradeColour(grade string) string {
 	switch grade {
 	case "A":
-		return "#4c1" // brightgreen
+		return badgeBrightGreen
 	case "B":
-		return "#97ca00" // green
+		return badgeGreen
 	case "C":
-		return "#dfb317" // yellow
+		return badgeYellow
 	case "D":
-		return "#fe7d37" // orange
+		return badgeOrange
 	default:
-		return "#e05d44" // red
+		return badgeRed
 	}
 }

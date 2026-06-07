@@ -1,45 +1,35 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/zzet/gortex/internal/blame"
-	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/docs"
-	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 var (
-	docsOut         string
-	docsSince       time.Duration
-	docsTop         int
-	docsInclude     []string
-	docsFormat      string
-	docsPathPrefix  string
-	docsWorkspace   string
-	docsIncludeRun  bool
+	docsOut        string
+	docsSince      time.Duration
+	docsTop        int
+	docsInclude    []string
+	docsFormat     string
+	docsPathPrefix string
+	docsWorkspace  string
+	docsIncludeRun bool
 )
 
 var docsCmd = &cobra.Command{
 	Use:   "docs [path]",
 	Short: "Generate a docs bundle (recent changes + ownership + stale code + blame)",
 	Long: `Produce a markdown (or JSON) bundle of the four "living changelog"
-sections: recent file changes (requires --watch on the daemon), per-
-author ownership, stale code older than 365 days, and an on-demand
-blame re-run.
+sections: recent file changes, per-author ownership, stale code older than
+365 days, and an on-demand blame re-run.
 
-The current working directory is indexed first. Without --watch on
-the indexer the recent-changes section will be empty — point this at
-the running daemon's watcher when you need that data.`,
+Runs generate_docs against the daemon that owns the repo; requires a
+running daemon that tracks it. With --out the daemon writes the bundle to
+the given path, otherwise it is printed to stdout.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runDocs,
 }
@@ -58,95 +48,42 @@ func init() {
 }
 
 func runDocs(cmd *cobra.Command, args []string) error {
-	logger := newLogger()
-	defer func() { _ = logger.Sync() }()
-
-	path := "."
+	repoPath := "."
 	if len(args) == 1 {
-		path = args[0]
+		repoPath = args[0]
 	}
 
-	cfg, err := config.Load(cfgFile)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	toolArgs := map[string]any{
+		"format":      docsFormat,
+		"since":       docsSince.String(),
+		"top":         docsTop,
+		"include":     strings.Join(docsInclude, ","),
+		"path_prefix": docsPathPrefix,
+		"workspace":   docsWorkspace,
+		"run_blame":   docsIncludeRun,
 	}
 
-	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, logger)
-
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %q: %w", path, err)
-	}
-	idx.ResolveAll()
-
-	// Blame enrichment (so ownership / stale tables have data). The
-	// flag controls whether we *re-run* blame; we always *try* to
-	// enrich at least once so the tables aren't empty.
-	if _, err := blame.EnrichGraph(g, path); err != nil {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex docs] blame enrichment skipped: %v\n", err)
-	}
-
-	bundle, err := docs.Generate(docs.Deps{
-		Graph: g,
-		Blame: docsBlameRunner(g, path),
-	}, docs.Options{
-		Since:        docsSince,
-		Top:          docsTop,
-		Sections:     normalizeSections(docsInclude),
-		PathPrefix:   docsPathPrefix,
-		WorkspaceID:  docsWorkspace,
-		IncludeBlame: docsIncludeRun,
-	})
-	if err != nil {
-		return fmt.Errorf("generate docs bundle: %w", err)
-	}
-
-	var body string
-	switch strings.ToLower(docsFormat) {
-	case "json":
-		data, err := docs.RenderJSON(bundle)
+	// The daemon writes the file, so it needs an absolute path (its cwd
+	// is not the user's).
+	writeToDisk := docsOut != "" && docsOut != "-"
+	var absOut string
+	if writeToDisk {
+		a, err := filepath.Abs(docsOut)
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve output path: %w", err)
 		}
-		body = string(data) + "\n"
-	default:
-		body = docs.RenderMarkdown(bundle)
+		absOut = a
+		toolArgs["output_path"] = absOut
 	}
 
-	if docsOut == "" || docsOut == "-" {
-		_, err = cmd.OutOrStdout().Write([]byte(body))
+	out, err := requireDaemonTool(repoPath, "generate_docs", toolArgs)
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(docsOut, []byte(body), 0o644); err != nil {
-		return fmt.Errorf("write %q: %w", docsOut, err)
+	if writeToDisk {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex docs] daemon wrote the bundle to %s\n", absOut)
+		return nil
 	}
-	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex docs] wrote %d bytes to %s\n", len(body), docsOut)
-	return nil
-}
-
-func normalizeSections(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		for _, part := range strings.Split(s, ",") {
-			p := strings.TrimSpace(strings.ToLower(part))
-			if p != "" {
-				out = append(out, p)
-			}
-		}
-	}
-	return out
-}
-
-// docsBlameRunner returns a closure that re-runs blame across the
-// indexed repo. Called by docs.Generate only when IncludeBlame is true.
-func docsBlameRunner(g *graph.Graph, repoRoot string) docs.BlameRunner {
-	return func() (int, map[string]int, error) {
-		n, err := blame.EnrichGraph(g, repoRoot)
-		if err != nil {
-			return 0, nil, err
-		}
-		return n, map[string]int{"": n}, nil
-	}
+	_, err = cmd.OutOrStdout().Write(out)
+	return err
 }

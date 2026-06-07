@@ -2,11 +2,8 @@ package mcp
 
 import (
 	"context"
-	"sort"
 
 	"github.com/mark3labs/mcp-go/mcp"
-
-	"github.com/zzet/gortex/internal/workspace"
 )
 
 // These are unconditionally registered (single-project mode degrades
@@ -77,17 +74,9 @@ func (s *Server) buildListReposPayload(ctx context.Context) map[string]any {
 			"repos":     names,
 		}
 	}
-	bind := s.bind
-	out := map[string]any{}
-	if bind == nil {
-		out["mode"] = "unbound"
-		out["repos"] = []string{}
-		return out
-	}
-	out["mode"] = bind.Mode.String()
-	out["root"] = bind.Root
-	out["repos"] = bind.MemberNames()
-	return out
+	// No session workspace (embedded single-repo server, or a control
+	// client): there is no workspace boundary to report.
+	return map[string]any{"mode": "unbound", "repos": []string{}}
 }
 
 // handleWorkspaceInfo implements `workspace_info`. Returns enough
@@ -117,38 +106,9 @@ func (s *Server) buildWorkspaceInfoPayload(ctx context.Context) map[string]any {
 			"isolation_bounds": sessWS,
 		}
 	}
-	bind := s.bind
-	if bind == nil {
-		return map[string]any{
-			"mode":  "unbound",
-			"repos": []map[string]string{},
-		}
-	}
-
-	members := make([]map[string]string, 0, len(bind.Members))
-	for _, m := range bind.Members {
-		members = append(members, map[string]string{
-			"name": m.Name,
-			"path": m.Path,
-		})
-	}
-
-	excludes := append([]string(nil), bind.Marker.Exclude...)
-	sort.Strings(excludes)
-
-	unknownKeys := make([]string, 0, len(bind.Marker.Unknown))
-	for k := range bind.Marker.Unknown {
-		unknownKeys = append(unknownKeys, k)
-	}
-	sort.Strings(unknownKeys)
-
+	// No session workspace: embedded single-repo / control client.
 	return map[string]any{
-		"mode":             bind.Mode.String(),
-		"root":             bind.Root,
-		"marker":           workspace.MarkerFile,
-		"excludes":         excludes,
-		"unknown_keys":     unknownKeys,
-		"members":          members,
-		"isolation_bounds": bind.Root,
+		"mode":  "unbound",
+		"repos": []map[string]string{},
 	}
 }

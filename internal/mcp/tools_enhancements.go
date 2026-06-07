@@ -2751,6 +2751,7 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 
 func (s *Server) handleGetSymbolHistory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolID := req.GetString("id", "")
+	symbolID = s.resolveSymbolID(ctx, symbolID)
 
 	if symbolID != "" {
 		// Single symbol history

@@ -61,7 +61,10 @@ type Handler struct {
 	activity      *activityBuffer        // ring buffer of recent graph events
 	overlays      *daemon.OverlayManager // nil when overlay support is off
 	router        *daemon.Router         // nil when single-server (no servers.toml)
+	decision      *daemon.ProxyDecision  // shared peek→route→outcome helper; nil until SetRouter
 	streamable    *streamable.Transport  // nil when the MCP 2026 Streamable HTTP path is off
+	readOnly      bool                   // self-advertised /v1/health write posture
+	capabilities  []string               // self-advertised federation caps; nil => baseline
 }
 
 // NewHandler creates an HTTP handler that dispatches to MCP tools.
@@ -128,6 +131,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/tools/", h.handleToolCall)
 	h.mux.HandleFunc("GET /v1/stats", h.handleStats)
 	h.mux.HandleFunc("GET /v1/graph", h.handleGetGraph)
+	h.mux.HandleFunc("GET /v1/subgraph", h.handleSubGraph)
 	h.mux.HandleFunc("GET /v1/events", h.handleEvents)
 	h.mux.HandleFunc("GET /v1/activity", h.handleActivity)
 	h.mux.HandleFunc("GET /v1/caveats", h.handleCaveats)
@@ -165,7 +169,10 @@ func (h *Handler) SetOverlayManager(m *daemon.OverlayManager) { h.overlays = m }
 // remote workspaces proxy via daemon.ServerClient.ProxyTool, local
 // ones fall through to the in-process MCP tool dispatch. Nil
 // disables routing (the legacy single-server behaviour).
-func (h *Handler) SetRouter(r *daemon.Router) { h.router = r }
+func (h *Handler) SetRouter(r *daemon.Router) {
+	h.router = r
+	h.decision = daemon.NewProxyDecision(func() *daemon.Router { return h.router })
+}
 
 // Router returns the currently-wired router (or nil). Exposed so
 // composite wire-ups can share a single router instance across the
@@ -233,14 +240,33 @@ func (h *Handler) peekRouteContext(body []byte, r *http.Request) (scope, cwd str
 
 // --- /health ---
 
-// HealthResponse is the JSON structure for the /health endpoint.
+const (
+	// APIVersion is the major version of the /v1 HTTP contract this
+	// server speaks. A federation peer refuses to federate across an
+	// incompatible major.
+	APIVersion = 1
+	// SchemaVersion is the major version of the graph schema (node/edge
+	// shape) this server exposes. Federation refuses across an
+	// incompatible major schema.
+	SchemaVersion = 1
+)
+
+// HealthResponse is the JSON structure for the /health endpoint. The
+// schema_version / api_version / read_only / capabilities fields let a
+// federation peer negotiate compatibility and posture before it routes
+// any query; a remote that does not advertise read_only is treated as
+// read-only (fail-safe) by the consumer.
 type HealthResponse struct {
-	Status        string  `json:"status"`
-	Indexed       bool    `json:"indexed"`
-	Nodes         int     `json:"nodes"`
-	Edges         int     `json:"edges"`
-	Version       string  `json:"version"`
-	UptimeSeconds float64 `json:"uptime_seconds"`
+	Status        string   `json:"status"`
+	Indexed       bool     `json:"indexed"`
+	Nodes         int      `json:"nodes"`
+	Edges         int      `json:"edges"`
+	Version       string   `json:"version"`
+	UptimeSeconds float64  `json:"uptime_seconds"`
+	SchemaVersion int      `json:"schema_version"`
+	APIVersion    int      `json:"api_version"`
+	ReadOnly      bool     `json:"read_only"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -252,9 +278,34 @@ func (h *Handler) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		Edges:         stats.TotalEdges,
 		Version:       h.version,
 		UptimeSeconds: time.Since(h.startTime).Seconds(),
+		SchemaVersion: SchemaVersion,
+		APIVersion:    APIVersion,
+		ReadOnly:      h.readOnly,
+		Capabilities:  h.advertisedCapabilities(),
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }
+
+// advertisedCapabilities returns the federation capability set this
+// server exposes. The baseline is whatever registerRoutes always mounts
+// (the SSE event stream); SetCapabilities lets a richer build (e.g. the
+// full-node /v1/subgraph endpoint) extend it.
+func (h *Handler) advertisedCapabilities() []string {
+	if h.capabilities != nil {
+		return h.capabilities
+	}
+	// Baseline: the SSE event stream and the full-node /v1/subgraph
+	// endpoint are always mounted by registerRoutes.
+	return []string{"events", "subgraph"}
+}
+
+// SetReadOnly records the server's self-advertised write posture, echoed
+// in /v1/health.read_only. v1 denies all remote writes regardless, but a
+// remote that advertises read_only:true makes its intent explicit.
+func (h *Handler) SetReadOnly(ro bool) { h.readOnly = ro }
+
+// SetCapabilities overrides the advertised federation capability set.
+func (h *Handler) SetCapabilities(caps []string) { h.capabilities = caps }
 
 // --- /tools ---
 
@@ -318,24 +369,26 @@ func (h *Handler) handleToolCall(w http.ResponseWriter, r *http.Request) {
 	// the proxied response verbatim. Only the proxy short-circuits
 	// — local routing reuses the legacy code so downstream features
 	// (combo / frecency / session state) keep working unchanged.
-	if h.router != nil {
+	if h.router != nil && h.decision != nil {
 		scope, cwd := h.peekRouteContext(body, r)
-		out, status, rerr := h.router.RouteToolCall(r.Context(), toolName, body, daemon.RouteContext{
-			ScopeOverride: scope,
-			Cwd:           cwd,
-		})
-		if rerr == nil && status > 0 {
-			// Proxied to a remote server; relay the upstream
-			// response.
+		outcome := h.decision.Decide(r.Context(), daemon.RouteInputs{
+			ToolName: toolName,
+			Body:     body,
+			Cwd:      cwd,
+			Scope:    scope,
+		}, nil)
+		if outcome.Proxied {
+			// Proxied to a remote server (or a gate refusal); relay
+			// the response verbatim.
 			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			_, _ = w.Write(out)
+			w.WriteHeader(outcome.Status)
+			_, _ = w.Write(outcome.Out)
 			return
 		}
-		if rerr != nil && !errors.Is(rerr, daemon.ErrRouteUnresolved) {
+		if outcome.Err != nil && !errors.Is(outcome.Err, daemon.ErrRouteUnresolved) {
 			h.logger.Warn("router: proxy failed, falling back to local",
 				zap.String("tool", toolName),
-				zap.Error(rerr))
+				zap.Error(outcome.Err))
 		}
 		// Either ErrRouteUnresolved (no remote claims this scope) or
 		// the local-fast path — both fall through to the in-process

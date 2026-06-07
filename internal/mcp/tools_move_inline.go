@@ -68,7 +68,7 @@ type moveTouchedFile struct {
 }
 
 func (s *Server) handleMoveSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1058,7 +1058,7 @@ type inlineRefusal struct {
 }
 
 func (s *Server) handleInlineSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}

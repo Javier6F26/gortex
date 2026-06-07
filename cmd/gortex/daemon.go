@@ -22,6 +22,8 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/server"
+	"github.com/zzet/gortex/internal/server/hub"
 	"github.com/zzet/gortex/internal/tui"
 )
 
@@ -39,6 +41,7 @@ var (
 	daemonStatusInterval      time.Duration
 	daemonHTTPAddr            string
 	daemonHTTPAuthToken       string
+	daemonHTTPCORSOrigin      string
 	daemonBackend             string
 	daemonBackendPath         string
 	daemonBackendBufferPoolMB uint64
@@ -100,10 +103,12 @@ func init() {
 		"also expose the MCP 2026 Streamable HTTP transport on this TCP address (e.g. 127.0.0.1:7411); empty disables")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
+	daemonStartCmd.Flags().StringVar(&daemonHTTPCORSOrigin, "cors-origin", "*",
+		"allowed CORS origin for the HTTP surface (use '*' for any); applies to both /mcp and /v1 when --http-addr is set")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
 		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
-		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/store/<backend>.store")
+		"path to the on-disk backend's store file (its parent directory is created if absent). Defaults to ~/.gortex/store/store.sqlite; ignored when --backend is memory")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
 		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
@@ -206,37 +211,77 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// vector index is persisted by the backend itself. Warm
 		// restart reads everything it needs from the on-disk store —
 		// no gob+gzip round-trip required.
-		if state.mcpServer != nil {
+		// Run the shared stack's teardown chain — flushes the savings
+		// store and closes the backend handle (checkpointing the sqlite
+		// WAL) so the daemon shuts down cleanly.
+		if state.shared != nil {
+			_ = state.shared.Close()
+		} else if state.mcpServer != nil {
 			_ = state.mcpServer.FlushSavings()
 		}
 		return nil
 	}
 	srv.Controller = controller
 	disp := newMCPDispatcher(state.mcpServer, state.multiIndexer, logger)
+	// The local executor + the dispatcher's SetRouter are handed to the
+	// controller so ControlProxy can build/publish/tear-down the router
+	// live (gortex proxy on/off/add/remove) without a daemon restart.
+	localExec := newLocalToolExecutor(state.mcpServer, logger)
+	controller.localExecute = localExec
+	controller.publishRouter = disp.SetRouter
 	// Wire the multi-server router into the daemon dispatcher when
 	// servers.toml exists. Local-only
 	// daemons (no servers.toml) leave router=nil and dispatch flows
 	// straight to the in-process MCP server unchanged.
 	if scfg, scfgErr := daemon.LoadServersConfig(""); scfgErr == nil && scfg != nil && len(scfg.Server) > 0 {
 		rosters := daemon.NewWorkspaceRosterCache(60 * time.Second)
-		var localSlug string
-		if def := scfg.DefaultServer(); def != nil {
-			localSlug = def.Slug
-		}
+		// Local identity is a reserved sentinel, never DefaultServer().Slug:
+		// a remote marked default=true must still be proxied to, not
+		// treated as the daemon's own graph.
 		router := daemon.NewRouter(daemon.RouterConfig{
 			Servers:      scfg,
 			Rosters:      rosters,
-			LocalSlug:    localSlug,
-			LocalExecute: newLocalToolExecutor(state.mcpServer, logger),
+			LocalSlug:    daemon.LocalServerSentinel,
+			LocalExecute: localExec,
 			Logger:       logger,
+			Federation:   resolveFederationConfig(),
 		})
 		disp.SetRouter(router)
+		controller.liveRouter = router
 		logger.Info("daemon: multi-server router wired",
-			zap.Int("servers", len(scfg.Server)), zap.String("local_slug", localSlug))
+			zap.Int("servers", len(scfg.Server)), zap.String("local_slug", daemon.LocalServerSentinel))
+		// Cross-daemon proxy-edge minting: when federation.edges is on,
+		// install the evidence prober on the indexer's resolver (so
+		// cross-repo resolution mints proxy edges) and keep the hydrator
+		// for the read path. No-op when the flag is off.
+		if hyd := daemon.WireRemoteStitch(router, state.multiIndexer, state.graph, resolveFederationEdgesConfig(), logger); hyd != nil {
+			state.proxyHydrator = hyd
+			if state.mcpServer != nil {
+				state.mcpServer.SetProxyHydrator(hyd.Hydrate)
+			}
+			logger.Info("daemon: federation proxy edges enabled (proxy minting + hydration)")
+		}
 	} else if scfgErr != nil {
 		logger.Warn("daemon: servers.toml load error (running single-server)", zap.Error(scfgErr))
 	}
+	// Bridge the session proxy-toggle MCP tools to the daemon's
+	// per-session overrides + the live router roster. The router
+	// accessor is dynamic so a ControlProxy swap is reflected.
+	if state.mcpServer != nil {
+		state.mcpServer.SetRemoteOverrideSink(&sessionRemoteOverrideSink{
+			sessions: srv.Sessions(),
+			router:   disp.Router,
+		})
+	}
 	srv.MCPDispatcher = disp
+
+	// Event hub feeding the /v1 REST surface's graph-change SSE stream
+	// (/v1/events). Created lazily when the HTTP surface is enabled below
+	// and fed from the MultiWatcher once warmup attaches it — without this
+	// the daemon's /v1/events would only ever emit the "watch mode not
+	// active" frame even while the daemon is actively re-indexing changed
+	// files, leaving the REST surface short of the former `gortex server`.
+	var v1EventHub *hub.Hub
 
 	// Optional MCP 2026 Streamable HTTP transport. Off by default
 	// (--http-addr unset) so a fresh `gortex daemon start` keeps
@@ -253,8 +298,18 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if token == "" {
 			token = os.Getenv("GORTEX_DAEMON_HTTP_TOKEN")
 		}
-		if !isLocalhostBind(daemonHTTPAddr) && token == "" {
-			return fmt.Errorf("--http-addr %q is non-localhost; --http-auth-token (or $GORTEX_DAEMON_HTTP_TOKEN) is required", daemonHTTPAddr)
+		if err := httpTokenRequirementError(daemonHTTPAddr, token); err != nil {
+			return err
+		}
+		// Resolve the expected token per request so $GORTEX_DAEMON_HTTP_TOKEN
+		// can be rotated without restarting the daemon. The flag, when set,
+		// is fixed for the process lifetime and wins; otherwise the env var
+		// is re-read on every request.
+		tokenFn := func() string {
+			if daemonHTTPAuthToken != "" {
+				return daemonHTTPAuthToken
+			}
+			return os.Getenv("GORTEX_DAEMON_HTTP_TOKEN")
 		}
 		// Router was already wired into the dispatcher above; reuse
 		// it here so the streamable transport sees the same proxy
@@ -263,11 +318,39 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if r := disp.Router(); r != nil {
 			router = r
 		}
-		srv.HTTPHandler = buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, token)
+		streamH := buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, tokenFn)
+
+		// Mount the /v1 REST surface (the former `gortex server`) on the
+		// same listener so a single daemon process serves both the MCP
+		// Streamable transport and the REST API that gortex-cloud and the
+		// web UI consume. The daemon already owns every dependency the
+		// handler needs — the MCP server, graph, config manager, overlay
+		// manager, and federation router — so this is pure composition.
+		v1 := server.NewHandler(state.mcpServer.MCPServer(), state.graph, version, logger)
+		if state.configManager != nil {
+			v1.SetConfigManager(state.configManager)
+		}
+		if id, idErr := resolveServerID(platform.DataDir()); idErr == nil {
+			v1.SetServerID(id)
+		}
+		if state.overlays != nil {
+			v1.SetOverlayManager(state.overlays)
+		}
+		if router != nil {
+			v1.SetRouter(router)
+		}
+		// Wire a graph-change event hub so /v1/events streams real events.
+		// The hub is fed from the MultiWatcher once warmup attaches it
+		// below; until then it has no source and /v1/events keepalives.
+		v1EventHub = hub.New()
+		v1.SetEventHub(v1EventHub)
+
+		srv.HTTPHandler = composeDaemonHTTPHandler(streamH, v1, tokenFn, daemonHTTPCORSOrigin)
 		srv.HTTPAddr = daemonHTTPAddr
-		logger.Info("daemon: streamable HTTP transport configured",
+		logger.Info("daemon: HTTP surface configured (/mcp + /v1)",
 			zap.String("addr", daemonHTTPAddr),
-			zap.Bool("authenticated", token != ""))
+			zap.Bool("authenticated", token != ""),
+			zap.String("cors_origin", daemonHTTPCORSOrigin))
 	}
 
 	// Opt-in pprof endpoint. No-op unless GORTEX_DAEMON_PPROF_ADDR is
@@ -394,6 +477,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// was actively re-indexing changed files.
 		if state.mcpServer != nil && mw != nil {
 			state.mcpServer.SetWatcher(mw)
+		}
+		// Drive the /v1/events SSE stream from the MultiWatcher. The hub is
+		// the only consumer of mw.Events() (SetWatcher reads History(), not
+		// the channel), so this can't starve any other reader. No-op when
+		// the HTTP surface is disabled (v1EventHub stays nil).
+		if v1EventHub != nil && mw != nil {
+			go v1EventHub.Run(mw.Events())
 		}
 		// Community detection and process discovery only run when a
 		// repo is tracked or indexed via MCP — a daemon coming up off

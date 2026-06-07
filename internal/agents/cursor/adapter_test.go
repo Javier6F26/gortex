@@ -80,18 +80,14 @@ func TestCursorGlobalWritesProxyEntry(t *testing.T) {
 	if len(args) == 0 || args[0] != "mcp" {
 		t.Fatalf("args[0] = %v, want \"mcp\"; full args=%v", args, args)
 	}
-	sawProxy := false
-	for _, a := range args {
-		s, _ := a.(string)
-		if s == "--index" {
-			t.Errorf("global cursor entry must not pass --index: %v", args)
-		}
-		if s == "--proxy" {
-			sawProxy = true
-		}
+	// Canonical shape is bare ["mcp"] — no --index, no --proxy.
+	if len(args) != 1 {
+		t.Errorf("global cursor entry must emit canonical [mcp], got %v", args)
 	}
-	if !sawProxy {
-		t.Errorf("global cursor entry must use --proxy: %v", args)
+	for _, a := range args {
+		if s, _ := a.(string); s == "--index" || s == "--proxy" {
+			t.Errorf("global cursor entry must not pass %q: %v", s, args)
+		}
 	}
 }
 

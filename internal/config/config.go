@@ -2,10 +2,12 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 
@@ -402,6 +404,10 @@ type Config struct {
 	Embedding EmbeddingConfig `mapstructure:"embedding" yaml:"embedding,omitempty"`
 	MCP       MCPConfig       `mapstructure:"mcp"      yaml:"mcp,omitempty"`
 	Guards    GuardsConfig    `mapstructure:"guards"   yaml:"guards,omitempty"`
+	// Federation tunes the read-only cross-daemon fan-out:
+	// per-remote deadline, global budget, circuit breaker, and the
+	// opt-in name-keyed fallback. Zero values fall back to defaults.
+	Federation FederationConfig `mapstructure:"federation" yaml:"federation,omitempty"`
 	// Architecture is the declarative layer / allow-deny DSL. Empty
 	// by default; the flat Guards list above keeps working when it is
 	// unset.
@@ -955,6 +961,67 @@ type QueryConfig struct {
 // rerank.SignalSemantic, …) and overrides the tuned defaults
 // returned by rerank.DefaultWeights(). Missing keys keep the
 // default weight; setting a key to 0 disables that signal.
+// FederationConfig is the .gortex.yaml `federation:` block. All knobs are
+// optional; an unset field uses the daemon's built-in default.
+type FederationConfig struct {
+	PerRemoteTimeoutMs int  `mapstructure:"per_remote_timeout_ms" yaml:"per_remote_timeout_ms,omitempty"`
+	BudgetMs           int  `mapstructure:"budget_ms" yaml:"budget_ms,omitempty"`
+	BreakerThreshold   int  `mapstructure:"breaker_threshold" yaml:"breaker_threshold,omitempty"`
+	BreakerCooldownMs  int  `mapstructure:"breaker_cooldown_ms" yaml:"breaker_cooldown_ms,omitempty"`
+	NameKeyedFallback  bool `mapstructure:"name_keyed_fallback" yaml:"name_keyed_fallback,omitempty"`
+	// Edges is the cross-daemon proxy-edge minting block. Off by
+	// default — federation stays read-only fan-out only.
+	Edges FederationEdgesConfig `mapstructure:"edges" yaml:"edges,omitempty"`
+}
+
+// FederationEdgesConfig is the `federation.edges` block — the
+// cross-daemon proxy-node edge feature. Research-grade and
+// off by default; none of the mint/hydrate paths run unless IsEnabled().
+type FederationEdgesConfig struct {
+	// Enabled turns on proxy-node minting + lazy hydration.
+	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	// TTLMs is the proxy-node neighbour-cache TTL in ms (default 5m).
+	TTLMs int `mapstructure:"ttl_ms" yaml:"ttl_ms,omitempty"`
+	// MaxProxyNodes is the hard heap bound across all remotes (default
+	// 5000); overflow refuses the mint.
+	MaxProxyNodes int `mapstructure:"max_proxy_nodes" yaml:"max_proxy_nodes,omitempty"`
+	// HydrateDepth is the neighbour rings pulled per access (default 1).
+	HydrateDepth int `mapstructure:"hydrate_depth" yaml:"hydrate_depth,omitempty"`
+}
+
+// IsEnabled reports whether proxy edges are on, honouring the
+// GORTEX_FEDERATION_EDGES env override (1/true) over the config field.
+func (c FederationEdgesConfig) IsEnabled() bool {
+	if v := strings.TrimSpace(os.Getenv("GORTEX_FEDERATION_EDGES")); v != "" {
+		return v == "1" || strings.EqualFold(v, "true")
+	}
+	return c.Enabled
+}
+
+// TTL is the proxy-node neighbour-cache TTL (default 5m).
+func (c FederationEdgesConfig) TTL() time.Duration {
+	if c.TTLMs > 0 {
+		return time.Duration(c.TTLMs) * time.Millisecond
+	}
+	return 5 * time.Minute
+}
+
+// MaxNodes is the proxy-node heap bound across all remotes (default 5000).
+func (c FederationEdgesConfig) MaxNodes() int {
+	if c.MaxProxyNodes > 0 {
+		return c.MaxProxyNodes
+	}
+	return 5000
+}
+
+// Depth is the neighbour rings pulled per hydration (default 1).
+func (c FederationEdgesConfig) Depth() int {
+	if c.HydrateDepth > 0 {
+		return c.HydrateDepth
+	}
+	return 1
+}
+
 type SearchConfig struct {
 	// Weights overrides per-signal scoring weights. Canonical names:
 	// bm25, semantic, fan_in, hits, fan_out, churn, co_change,

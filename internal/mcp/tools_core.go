@@ -172,6 +172,15 @@ func (s *Server) returnSubGraph(ctx context.Context, req mcp.CallToolRequest, sg
 	// format below surfaces an openable path. The canonical graph nodes
 	// are copied, never mutated.
 	sg.Nodes = s.withAbsPaths(sg.Nodes)
+	// Diagram formats render the subgraph directly — one place serves
+	// every traversal tool (callers/dependencies/usages/...), so a
+	// `gortex query ... --format mermaid|dot` gets a real diagram.
+	switch req.GetString("format", "") {
+	case "mermaid":
+		return mcp.NewToolResultText(sg.ToMermaid()), nil
+	case "dot":
+		return mcp.NewToolResultText(sg.ToDot()), nil
+	}
 	if isCompact(req) {
 		return mcp.NewToolResultText(compactSubGraph(sg)), nil
 	}
@@ -1108,7 +1117,7 @@ func (s *Server) handleReindexRepository(ctx context.Context, req mcp.CallToolRe
 }
 
 func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1864,7 +1873,7 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 }
 
 func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1885,7 +1894,7 @@ func (s *Server) handleGetDependencies(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (s *Server) handleGetDependents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1906,7 +1915,7 @@ func (s *Server) handleGetDependents(ctx context.Context, req mcp.CallToolReques
 }
 
 func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1920,6 +1929,7 @@ func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest
 		WorkspaceID: scopeWS,
 		ProjectID:   scopeProj,
 	}
+	s.hydrateProxyTargets(ctx, id)
 	sg := s.engineFor(ctx).GetCallChain(id, opts)
 
 	// Apply repo/project/ref filter.
@@ -1930,11 +1940,12 @@ func (s *Server) handleGetCallChain(ctx context.Context, req mcp.CallToolRequest
 	sg = filterSubGraph(sg, allowed)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
+	annotateProxyFreshness(sg)
 	return s.returnSubGraph(ctx, req, sg)
 }
 
 func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -1949,6 +1960,7 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 		ProjectID:    scopeProj,
 		ExcludeTests: req.GetBool("exclude_tests", false),
 	}
+	s.hydrateProxyTargets(ctx, id)
 	sg := s.engineFor(ctx).GetCallers(id, opts)
 	sg.FilterByMinTier(minTier)
 	enrichSubGraphEdges(sg)
@@ -1956,6 +1968,7 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
+	annotateProxyFreshness(sg)
 	return s.returnSubGraph(ctx, req, sg)
 }
 
@@ -1990,7 +2003,7 @@ func annotateCallerConcurrency(r graph.Reader, sg *query.SubGraph, seedID string
 }
 
 func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -2037,7 +2050,7 @@ func (s *Server) handleFindOverrides(ctx context.Context, req mcp.CallToolReques
 }
 
 func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -2077,7 +2090,7 @@ func (s *Server) handleFindImplementations(ctx context.Context, req mcp.CallTool
 }
 
 func (s *Server) handleGetClassHierarchy(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}
@@ -2104,7 +2117,7 @@ func (s *Server) handleGetClassHierarchy(ctx context.Context, req mcp.CallToolRe
 }
 
 func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}

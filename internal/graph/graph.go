@@ -2586,8 +2586,14 @@ func (g *Graph) Stats() GraphStats {
 	byLang := make(map[string]int)
 	totalNodes := 0
 	for _, s := range g.shards {
-		totalNodes += len(s.nodes)
 		for _, n := range s.nodes {
+			// Cross-daemon proxy-edge nodes stand in for symbols a
+			// remote daemon owns; they are never counted in local
+			// stats. Inert until edge-minting is enabled.
+			if IsProxyNode(n) {
+				continue
+			}
+			totalNodes++
 			byKind[string(n.Kind)]++
 			if n.Language != "" {
 				byLang[n.Language]++

@@ -112,10 +112,18 @@ func mcpEntriesEqual(a, b any) bool {
 // Homebrew or `go install` get a stable path, and installers that
 // run `go build -o /tmp/...` don't bake the transient path into
 // long-lived configs.
+// gortexMCPArgs is the one canonical args list every adapter emits.
+// Both project and global configs use it: the daemon resolves the active
+// workspace per session from the request handshake, so no cwd-relative
+// flag (--index/--watch) and no proxy flag (--proxy) is needed. `gortex
+// mcp` proxies to (and auto-starts) the daemon and falls back to an
+// embedded server on its own.
+func gortexMCPArgs() []string { return []string{"mcp"} }
+
 func DefaultGortexMCPEntry() map[string]any {
 	return map[string]any{
 		"command": "gortex",
-		"args":    []string{"mcp", "--index", ".", "--watch"},
+		"args":    gortexMCPArgs(),
 		"env":     map[string]string{"GORTEX_INDEX_WORKERS": "8"},
 	}
 }
@@ -132,10 +140,9 @@ func DefaultGortexMCPEntry() map[string]any {
 // home directory. If no daemon is running, `gortex mcp --proxy` exits
 // with a clear "no daemon" error rather than silently falling back
 // to a broken indexer.
+// GlobalGortexMCPEntry is now identical to DefaultGortexMCPEntry — the
+// canonical `["mcp"]` shape carries no cwd-relative or proxy flag. Kept
+// as a named function so existing call sites compile.
 func GlobalGortexMCPEntry() map[string]any {
-	return map[string]any{
-		"command": "gortex",
-		"args":    []string{"mcp", "--proxy"},
-		"env":     map[string]string{"GORTEX_INDEX_WORKERS": "8"},
-	}
+	return DefaultGortexMCPEntry()
 }

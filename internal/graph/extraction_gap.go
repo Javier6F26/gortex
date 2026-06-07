@@ -127,11 +127,26 @@ var zeroEdgeMessages = map[ZeroEdgeClass]string{
 		"unverified, not as proof the symbol is unused.",
 }
 
+// zeroEdgeNotFoundMessage is the caveat text when the queried id is not in
+// the graph at all — almost always a mistyped id or one missing its repo
+// prefix, rather than a true extraction gap.
+const zeroEdgeNotFoundMessage = "no symbol with this id is in the graph — the id is " +
+	"probably mistyped or missing its repo prefix (ids look like " +
+	"<repo>/<path>::<symbol>, e.g. gortex/internal/x.go::Foo). Run a symbol search to " +
+	"get the exact id; treat this empty result as unverified, not as proof of no usages."
+
 // CaveatForZeroEdge builds the structured caveat for an empty graph
 // query result on symbolID. It returns nil when the symbol has
 // incoming usage edges (ZeroEdgeNone) — a non-empty result carries no
 // caveat — so callers can attach the return value unconditionally.
 func CaveatForZeroEdge(g Store, symbolID string) *ZeroEdgeCaveat {
+	// A target that is not even in the graph is the most common cause of a
+	// "0 usages" surprise — usually a mistyped id or one missing its repo
+	// prefix. Keep the untrustworthy extraction-gap class so safety gates
+	// still trip, but point the message at the id rather than the extractor.
+	if g != nil && symbolID != "" && g.GetNode(symbolID) == nil {
+		return &ZeroEdgeCaveat{Class: ZeroEdgePossibleExtractionGap, Message: zeroEdgeNotFoundMessage}
+	}
 	class := ClassifyZeroEdge(g, symbolID)
 	if class == ZeroEdgeNone {
 		return nil

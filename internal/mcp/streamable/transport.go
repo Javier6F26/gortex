@@ -491,15 +491,18 @@ func (t *Transport) tryRouteToolCall(r *http.Request, state SessionState, frame 
 	if err != nil {
 		return nil, 0, false
 	}
-	out, status, rerr := t.router.RouteToolCall(r.Context(),
-		envelope.Params.Name, body, daemon.RouteContext{
-			ScopeOverride: scope,
-			Cwd:           cwd,
-		})
-	if rerr != nil || status == 0 {
+	decision := daemon.NewProxyDecision(func() *daemon.Router { return t.router })
+	outcome := decision.Decide(r.Context(), daemon.RouteInputs{
+		ToolName: envelope.Params.Name,
+		Body:     body,
+		Cwd:      cwd,
+		Scope:    scope,
+	}, nil)
+	if !outcome.Proxied {
 		// Local route — let the in-process MCP server handle it.
 		return nil, 0, false
 	}
+	out, status := outcome.Out, outcome.Status
 	// The router returned an /v1/tools/<name>-shaped response;
 	// translate it into a JSON-RPC `result` frame so the client
 	// sees the same envelope every other tool/call produces.

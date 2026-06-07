@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -26,14 +27,22 @@ type mcpDispatcher struct {
 	srv          *gortexmcp.Server
 	multiIndexer *indexer.MultiIndexer
 	logger       *zap.Logger
-	router       *daemon.Router
+	// router is held behind an atomic.Pointer so ControlProxy can
+	// publish a freshly-built (or torn-down) router live without
+	// racing a concurrent dispatch read.
+	router atomic.Pointer[daemon.Router]
+	// decision is the shared peek→route→outcome helper; it reads the
+	// router through the atomic accessor so a live swap is reflected.
+	decision *daemon.ProxyDecision
 }
 
 func newMCPDispatcher(srv *gortexmcp.Server, mi *indexer.MultiIndexer, logger *zap.Logger) *mcpDispatcher {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &mcpDispatcher{srv: srv, multiIndexer: mi, logger: logger}
+	d := &mcpDispatcher{srv: srv, multiIndexer: mi, logger: logger}
+	d.decision = daemon.NewProxyDecision(func() *daemon.Router { return d.router.Load() })
+	return d
 }
 
 // SetRouter wires the hybrid-read router into the daemon's MCP
@@ -41,12 +50,12 @@ func newMCPDispatcher(srv *gortexmcp.Server, mi *indexer.MultiIndexer, logger *z
 // a `workspace` arg or a session cwd that resolves to a non-local
 // server are proxied; all other frames flow through the local
 // MCPServer.HandleMessage path unchanged.
-func (d *mcpDispatcher) SetRouter(r *daemon.Router) { d.router = r }
+func (d *mcpDispatcher) SetRouter(r *daemon.Router) { d.router.Store(r) }
 
 // Router returns the currently-wired router (or nil). Exposed so the
 // HTTP-side Streamable transport can share the same router instance
 // without rebuilding it from servers.toml a second time.
-func (d *mcpDispatcher) Router() *daemon.Router { return d.router }
+func (d *mcpDispatcher) Router() *daemon.Router { return d.router.Load() }
 
 // Dispatch implements daemon.MCPDispatcher. It hands the raw JSON-RPC
 // frame to MCPServer.HandleMessage and returns the response bytes.
@@ -96,7 +105,7 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// frames (initialize, tools/list, notifications) flow through
 	// the local MCPServer below; routing them across a federation
 	// would change semantics that are intentionally machine-local.
-	if d.router != nil {
+	if d.router.Load() != nil {
 		if proxied, ok := d.tryProxyToolCall(ctx, sess, frame); ok {
 			return proxied, nil
 		}
@@ -156,10 +165,11 @@ func (d *mcpDispatcher) cwdReachable(cwd string) bool {
 	if d.isCWDTracked(cwd) {
 		return true
 	}
-	if d.router == nil {
+	rtr := d.router.Load()
+	if rtr == nil {
 		return false
 	}
-	lookup := d.router.LookupForCwd(cwd, "")
+	lookup := rtr.LookupForCwd(cwd, "")
 	switch lookup.Source {
 	case "scope-override", "config-yaml", "roster":
 		return true
@@ -219,15 +229,18 @@ func (d *mcpDispatcher) tryProxyToolCall(ctx context.Context, sess *daemon.Sessi
 	if err != nil {
 		return nil, false
 	}
-	out, status, rerr := d.router.RouteToolCall(ctx, peek.Params.Name, body, daemon.RouteContext{
-		Cwd:           sess.CWD,
-		ScopeOverride: scope,
-	})
-	if rerr != nil || status == 0 {
+	outcome := d.decision.Decide(ctx, daemon.RouteInputs{
+		ToolName: peek.Params.Name,
+		Body:     body,
+		Cwd:      sess.CWD,
+		Scope:    scope,
+	}, sess)
+	if !outcome.Proxied {
 		// ErrRouteUnresolved or some other failure — let the local
 		// HandleMessage path take over (the same body works there).
 		return nil, false
 	}
+	out, status := outcome.Out, outcome.Status
 	if status >= 400 {
 		// Surface the upstream error as a JSON-RPC error so the
 		// client sees a structured failure instead of a 4xx that

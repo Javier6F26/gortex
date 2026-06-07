@@ -8,8 +8,25 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/mcp/streamable"
+	"github.com/zzet/gortex/internal/server"
 	"go.uber.org/zap"
 )
+
+// composeDaemonHTTPHandler combines the daemon's two HTTP surfaces onto a
+// single listener: the MCP Streamable transport (streamH, serving /mcp
+// and /healthz with its own auth) under the catch-all, and the /v1 REST
+// API (v1, the former `gortex server`) under /v1/ behind a bearer-auth
+// wrapper. CORS, when an origin is set, wraps the whole mux so browser
+// clients (the web UI) can reach either surface cross-origin.
+func composeDaemonHTTPHandler(streamH, v1 http.Handler, tokenFn func() string, corsOrigin string) http.Handler {
+	top := http.NewServeMux()
+	top.Handle("/", streamH)
+	top.Handle("/v1/", server.WithAuthFunc(v1, tokenFn))
+	if corsOrigin != "" {
+		return server.WithCORS(top, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
+	}
+	return top
+}
 
 // daemonStreamableDispatcher bridges streamable.Transport (which has
 // its own session model keyed by `Mcp-Session-Id`) to the daemon's
@@ -167,7 +184,7 @@ func (s *observingStore) Len() int { return s.inner.Len() }
 // session bridge into a single http.Handler the daemon can mount on
 // /mcp. Pulled out so cmd/gortex/daemon.go stays terse: one call
 // returns the handler ready to assign to daemon.Server.HTTPHandler.
-func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.SessionRegistry, router *daemon.Router, logger *zap.Logger, authToken string) http.Handler {
+func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.SessionRegistry, router *daemon.Router, logger *zap.Logger, tokenFn func() string) http.Handler {
 	bridge := newDaemonStreamableDispatcher(disp, reg, logger)
 	store := streamable.NewMemoryStore(daemon.DefaultOverlayIdleTTL)
 	wrapped := wrapStreamableStoreWithCleanup(store, bridge.onSessionEnded)
@@ -196,24 +213,31 @@ func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.Session
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok","transport":"streamable-http","spec":"mcp-2026-03-26"}`))
 	})
-	var h http.Handler = mux
-	if authToken != "" {
-		h = bearerAuthMiddleware(h, authToken)
-	}
-	return h
+	// Always wrap: the middleware resolves the token per request, so a
+	// request with no configured token is served unauthenticated and the
+	// token can be rotated (added/changed/removed) without a restart.
+	return bearerAuthMiddleware(mux, tokenFn)
 }
 
-// bearerAuthMiddleware gates every request behind a bearer token.
-// /healthz is exempt so liveness probes don't need a token. Matches
-// the auth shape used by the `gortex server` HTTP surface.
-func bearerAuthMiddleware(next http.Handler, token string) http.Handler {
+// bearerAuthMiddleware gates every request behind a bearer token resolved
+// per request via tokenFn (so the token can rotate without a restart).
+// When tokenFn returns "", the request is served unauthenticated.
+// /healthz is exempt so liveness probes don't need a token.
+func bearerAuthMiddleware(next http.Handler, tokenFn func() string) http.Handler {
+	if tokenFn == nil {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		got := r.Header.Get("Authorization")
-		if got != "Bearer "+token {
+		token := tokenFn()
+		if token == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer "+token {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="gortex"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

@@ -55,6 +55,14 @@ type MultiIndexer struct {
 	logger    *zap.Logger
 	mu        sync.RWMutex
 
+	// stitchProber / proxyBudget wire the cross-daemon proxy-edge feature:
+	// when set by the daemon entry point (flag on), every CrossRepoResolver
+	// this MultiIndexer builds mints proxy edges to remote-owned symbols
+	// on positive evidence. A nil prober keeps the resolvers on read-only
+	// federation (the default).
+	stitchProber resolver.RemoteDeclarationProber
+	proxyBudget  int
+
 	// deferGlobalPasses, when set, propagates SetDeferGlobalPasses(true)
 	// to every per-repo Indexer constructed by this MultiIndexer. Batch
 	// callers (warmup, ReconcileAll) flip it on around their loop and
@@ -825,6 +833,7 @@ func (mi *MultiIndexer) indexMultiRepo(repos []config.RepoEntry) (map[string]*In
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
+	mi.applyRemoteStitch(cr)
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 
@@ -2337,6 +2346,28 @@ func parseTopicContractID(id string) (broker, name string, ok bool) {
 // Graph returns the underlying shared graph.
 func (mi *MultiIndexer) Graph() graph.Store {
 	return mi.graph
+}
+
+// SetRemoteStitch enables cross-daemon proxy-edge minting on every
+// CrossRepoResolver this MultiIndexer constructs. Called once by the
+// daemon entry point when federation.edges.enabled; a nil prober leaves
+// the resolvers on read-only federation.
+func (mi *MultiIndexer) SetRemoteStitch(prober resolver.RemoteDeclarationProber, budget int) {
+	mi.mu.Lock()
+	defer mi.mu.Unlock()
+	mi.stitchProber = prober
+	mi.proxyBudget = budget
+}
+
+// applyRemoteStitch wires the proxy-edge mint into a freshly built resolver
+// when a prober is installed.
+func (mi *MultiIndexer) applyRemoteStitch(cr *resolver.CrossRepoResolver) {
+	mi.mu.RLock()
+	prober, budget := mi.stitchProber, mi.proxyBudget
+	mi.mu.RUnlock()
+	if prober != nil {
+		cr.EnableRemoteStitch(prober, budget)
+	}
 }
 
 // Search returns the shared search backend.

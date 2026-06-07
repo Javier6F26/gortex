@@ -1,20 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
-
-	"github.com/zzet/gortex/internal/config"
-	"github.com/zzet/gortex/internal/exporter"
-	"github.com/zzet/gortex/internal/graph"
-	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 )
 
 var (
@@ -34,17 +26,12 @@ var (
 var exportCmd = &cobra.Command{
 	Use:   "export [path]",
 	Short: "Export the graph to Cypher (Neo4j/Memgraph) or GraphML (yEd/Gephi/Cytoscape)",
-	Long: `Export the in-memory graph to a portable file for visualization or
-external query. The current working directory is indexed first; pass [path] to
-index a specific repo. The graph is not persisted between runs — each export
-re-indexes.
+	Long: `Export the graph the daemon owns to a portable file for visualization or
+external query. Runs export_graph against the daemon that tracks the repo
+(requires a running daemon).
 
 Loading a Cypher export into Neo4j:
   cypher-shell -u neo4j -p <password> -f graph.cypher
-
-Loading a Cypher export into Memgraph (Docker):
-  docker run -it -p 7687:7687 -p 3000:3000 memgraph/memgraph-platform
-  # then in Memgraph Lab → Query Modules → Run query: load the file
 
 Loading a GraphML export into Gephi: File → Open → graph.graphml
 `,
@@ -75,165 +62,82 @@ func init() {
 	rootCmd.AddCommand(exportCmd)
 }
 
-func runExport(_ *cobra.Command, args []string) error {
-	logger := newLogger()
-	defer func() { _ = logger.Sync() }()
-
-	path := "."
+func runExport(cmd *cobra.Command, args []string) error {
+	repoPath := "."
 	if len(args) == 1 {
-		path = args[0]
+		repoPath = args[0]
 	}
-
-	cfg, err := config.Load(cfgFile)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
-	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
-
-	idx := indexer.New(g, reg, cfg.Index, logger)
-
-	indexStart := time.Now()
-	if _, err := idx.IndexCtx(context.Background(), path); err != nil {
-		return fmt.Errorf("index %q: %w", path, err)
-	}
-	idx.ResolveAll()
-	indexDuration := time.Since(indexStart)
-
-	stats := g.Stats()
-	_, _ = fmt.Fprintf(os.Stderr, "[gortex export] indexed %s: %d nodes, %d edges in %dms\n",
-		path, stats.TotalNodes, stats.TotalEdges, indexDuration.Milliseconds())
-
-	opts := exporter.Options{
-		Repo:          exportRepo,
-		Languages:     exportLanguages,
-		DropSynthetic: exportDropSynthetic,
-	}
-	for _, k := range exportKinds {
-		opts.Kinds = append(opts.Kinds, graph.NodeKind(strings.ToLower(strings.TrimSpace(k))))
-	}
-
 	format := strings.ToLower(exportFormat)
-	mermaidOpts := exporter.MermaidOpts{
-		Scope:          exportMermaidScope,
-		MaxCommunities: exportMermaidMaxComm,
-		MinCommunity:   exportMermaidMinComm,
-		Kinds:          opts.Kinds,
-		Languages:      opts.Languages,
+
+	toolArgs := map[string]any{
+		"format":          format,
+		"repo":            exportRepo,
+		"kinds":           strings.Join(exportKinds, ","),
+		"languages":       strings.Join(exportLanguages, ","),
+		"no_synthetic":    exportDropSynthetic,
+		"scope":           exportMermaidScope,
+		"min_community":   exportMermaidMinComm,
+		"max_communities": exportMermaidMaxComm,
 	}
 
-	// Mermaid multi-file (scope=all + --out-dir) path: writes one
-	// file per scope into out-dir.
-	if format == "mermaid" && exportOutDir != "" {
-		exportStart := time.Now()
-		scopes := []string{"architecture", "communities", "processes"}
-		if exportMermaidScope != "all" {
-			scopes = []string{exportMermaidScope}
+	// The daemon writes any output files, so paths must be absolute (its
+	// cwd is not the user's).
+	switch {
+	case format == "mermaid" && exportOutDir != "":
+		abs, err := filepath.Abs(exportOutDir)
+		if err != nil {
+			return fmt.Errorf("resolve out-dir: %w", err)
 		}
-		if err := os.MkdirAll(exportOutDir, 0o755); err != nil {
-			return fmt.Errorf("mkdir out-dir: %w", err)
+		toolArgs["output_dir"] = abs
+		if _, err := requireDaemonTool(repoPath, "export_graph", toolArgs); err != nil {
+			return err
 		}
-		var total exporter.Stats
-		for _, sc := range scopes {
-			scopeOpts := mermaidOpts
-			scopeOpts.Scope = sc
-			path := exportOutDir + "/" + sc + ".mermaid"
-			f, err := os.Create(path)
-			if err != nil {
-				return fmt.Errorf("create %q: %w", path, err)
-			}
-			st, err := exporter.WriteMermaid(f, g, scopeOpts)
-			_ = f.Close()
-			if err != nil {
-				return fmt.Errorf("write mermaid %s: %w", sc, err)
-			}
-			total.NodesWritten += st.NodesWritten
-			total.EdgesWritten += st.EdgesWritten
-			total.BytesWritten += st.BytesWritten
-		}
-		_, _ = fmt.Fprintf(os.Stderr,
-			"[gortex export] mermaid: wrote %d files under %s (%d bytes) in %dms\n",
-			len(scopes), exportOutDir, total.BytesWritten, time.Since(exportStart).Milliseconds())
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex export] daemon wrote mermaid files under %s\n", abs)
 		return nil
-	}
 
-	out, closeFn, err := openOutput(exportOut)
-	if err != nil {
-		return fmt.Errorf("open output: %w", err)
-	}
-	defer closeFn()
+	case exportOut != "":
+		abs, err := filepath.Abs(exportOut)
+		if err != nil {
+			return fmt.Errorf("resolve output path: %w", err)
+		}
+		toolArgs["output_path"] = abs
+		if _, err := requireDaemonTool(repoPath, "export_graph", toolArgs); err != nil {
+			return err
+		}
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex export] daemon wrote the export to %s\n", abs)
+		printLoadInstructions(format, exportOut)
+		return nil
 
-	exportStart := time.Now()
-	var exportStats exporter.Stats
-	switch format {
-	case "cypher":
-		exportStats, err = exporter.WriteCypher(out, g, opts)
-	case "graphml":
-		exportStats, err = exporter.WriteGraphML(out, g, opts)
-	case "mermaid":
-		exportStats, err = exporter.WriteMermaid(out, g, mermaidOpts)
 	default:
-		return fmt.Errorf("unknown format %q (expected cypher | graphml | mermaid)", exportFormat)
+		out, err := requireDaemonTool(repoPath, "export_graph", toolArgs)
+		if err != nil {
+			return err
+		}
+		_, err = cmd.OutOrStdout().Write(out)
+		return err
 	}
-	if err != nil {
-		return fmt.Errorf("export: %w", err)
-	}
-	exportDuration := time.Since(exportStart)
-
-	dest := exportOut
-	if dest == "" {
-		dest = "stdout"
-	}
-	_, _ = fmt.Fprintf(os.Stderr,
-		"[gortex export] wrote %d nodes, %d edges (%d bytes) to %s in %dms\n",
-		exportStats.NodesWritten, exportStats.EdgesWritten, exportStats.BytesWritten,
-		dest, exportDuration.Milliseconds(),
-	)
-
-	// Print load-instructions for the format the user picked. The output
-	// file itself is kept comment-free for portability with Memgraph's
-	// .cypherl loader, so we surface the docs here instead.
-	if exportOut != "" {
-		printLoadInstructions(strings.ToLower(exportFormat), exportOut)
-	}
-	return nil
 }
 
 func printLoadInstructions(format, path string) {
 	w := os.Stderr
 	switch format {
 	case "cypher":
-		_, _ = fmt.Fprintf(w,"\n[gortex export] To load into Memgraph (recommended for ad-hoc exploration):\n")
-		_, _ = fmt.Fprintf(w,"    docker run -p 7687:7687 -p 3000:3000 memgraph/memgraph-platform\n")
-		_, _ = fmt.Fprintf(w,"    # then in Memgraph Lab (http://localhost:3000) → Datasets → Import\n")
-		_, _ = fmt.Fprintf(w,"    # OR via mgconsole:  cat %s | mgconsole\n", path)
-		_, _ = fmt.Fprintf(w,"    # First, create an id index for fast edge MATCHes:\n")
-		_, _ = fmt.Fprintf(w,"    #   CREATE INDEX ON :GortexNode(id);\n")
-		_, _ = fmt.Fprintf(w,"\n[gortex export] To load into Neo4j:\n")
-		_, _ = fmt.Fprintf(w,"    cypher-shell -u neo4j -p <pw> -f %s\n", path)
-		_, _ = fmt.Fprintf(w,"    # First, create the index:\n")
-		_, _ = fmt.Fprintf(w,"    #   CREATE INDEX FOR (n:GortexNode) ON (n.id);\n")
-		_, _ = fmt.Fprintf(w,"\n[gortex export] To wipe a previous export before re-loading:\n")
-		_, _ = fmt.Fprintf(w,"    MATCH (n:GortexNode) DETACH DELETE n;\n")
+		_, _ = fmt.Fprintf(w, "\n[gortex export] To load into Memgraph (recommended for ad-hoc exploration):\n")
+		_, _ = fmt.Fprintf(w, "    docker run -p 7687:7687 -p 3000:3000 memgraph/memgraph-platform\n")
+		_, _ = fmt.Fprintf(w, "    # then in Memgraph Lab (http://localhost:3000) → Datasets → Import\n")
+		_, _ = fmt.Fprintf(w, "    # OR via mgconsole:  cat %s | mgconsole\n", path)
+		_, _ = fmt.Fprintf(w, "    # First, create an id index for fast edge MATCHes:\n")
+		_, _ = fmt.Fprintf(w, "    #   CREATE INDEX ON :GortexNode(id);\n")
+		_, _ = fmt.Fprintf(w, "\n[gortex export] To load into Neo4j:\n")
+		_, _ = fmt.Fprintf(w, "    cypher-shell -u neo4j -p <pw> -f %s\n", path)
+		_, _ = fmt.Fprintf(w, "    # First, create the index:\n")
+		_, _ = fmt.Fprintf(w, "    #   CREATE INDEX FOR (n:GortexNode) ON (n.id);\n")
+		_, _ = fmt.Fprintf(w, "\n[gortex export] To wipe a previous export before re-loading:\n")
+		_, _ = fmt.Fprintf(w, "    MATCH (n:GortexNode) DETACH DELETE n;\n")
 	case "graphml":
-		_, _ = fmt.Fprintf(w,"\n[gortex export] Open %s in:\n", path)
-		_, _ = fmt.Fprintf(w,"    Gephi:     File → Open\n")
-		_, _ = fmt.Fprintf(w,"    yEd:       File → Open\n")
-		_, _ = fmt.Fprintf(w,"    Cytoscape: File → Import → Network from File\n")
+		_, _ = fmt.Fprintf(w, "\n[gortex export] Open %s in:\n", path)
+		_, _ = fmt.Fprintf(w, "    Gephi:     File → Open\n")
+		_, _ = fmt.Fprintf(w, "    yEd:       File → Open\n")
+		_, _ = fmt.Fprintf(w, "    Cytoscape: File → Import → Network from File\n")
 	}
-}
-
-// openOutput returns a writer for path, or os.Stdout when path is empty.
-// The returned closer is always non-nil (it's a no-op for stdout).
-func openOutput(path string) (*os.File, func(), error) {
-	if path == "" {
-		return os.Stdout, func() {}, nil
-	}
-	f, err := os.Create(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	return f, func() { _ = f.Close() }, nil
 }

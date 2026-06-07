@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/progress"
 )
 
 var osUserHomeDir = os.UserHomeDir
@@ -20,18 +21,18 @@ var osUserHomeDir = os.UserHomeDir
 // ---- styles ------------------------------------------------------------
 
 var (
-	tuiAccent      = lipgloss.NewStyle().Foreground(lipgloss.Color("#5FD67A"))
-	tuiTitle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F4F3EF"))
-	tuiSub         = lipgloss.NewStyle().Foreground(lipgloss.Color("#969699"))
-	tuiHeading     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#969699"))
-	tuiCount       = lipgloss.NewStyle().Foreground(lipgloss.Color("#5A5A60"))
-	tuiKey         = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F4F3EF"))
-	tuiVal         = lipgloss.NewStyle().Foreground(lipgloss.Color("#969699"))
-	tuiSelected    = lipgloss.NewStyle().Foreground(lipgloss.Color("#5FD67A")).Bold(true)
-	tuiHint        = lipgloss.NewStyle().Foreground(lipgloss.Color("#5A5A60"))
-	tuiErrInline   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F06E64"))
-	tuiKeybindKey  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F4F3EF"))
-	tuiKeybindHint = lipgloss.NewStyle().Foreground(lipgloss.Color("#5A5A60"))
+	tuiAccent      = lipgloss.NewStyle().Foreground(progress.ColorAccent)
+	tuiTitle       = lipgloss.NewStyle().Bold(true).Foreground(progress.ColorFg)
+	tuiSub         = lipgloss.NewStyle().Foreground(progress.ColorFgDim)
+	tuiHeading     = lipgloss.NewStyle().Bold(true).Foreground(progress.ColorFgDim)
+	tuiCount       = lipgloss.NewStyle().Foreground(progress.ColorMuted)
+	tuiKey         = lipgloss.NewStyle().Bold(true).Foreground(progress.ColorFg)
+	tuiVal         = lipgloss.NewStyle().Foreground(progress.ColorFgDim)
+	tuiSelected    = lipgloss.NewStyle().Foreground(progress.ColorAccent).Bold(true)
+	tuiHint        = lipgloss.NewStyle().Foreground(progress.ColorMuted)
+	tuiErrInline   = lipgloss.NewStyle().Foreground(progress.ColorErr)
+	tuiKeybindKey  = lipgloss.NewStyle().Bold(true).Foreground(progress.ColorFg)
+	tuiKeybindHint = lipgloss.NewStyle().Foreground(progress.ColorMuted)
 )
 
 // ---- repo item / delegate ---------------------------------------------
@@ -320,7 +321,7 @@ func (m statusTUI) headerRightCol() string {
 	st := m.status
 	state := tuiAccent.Render("ready")
 	if !st.Ready {
-		state = lipgloss.NewStyle().Foreground(lipgloss.Color("#E8C66B")).Render("warming")
+		state = lipgloss.NewStyle().Foreground(progress.ColorWarn).Render("warming")
 	}
 	row1 := tuiTitle.Render("gortex daemon")
 	row2 := strings.Join([]string{

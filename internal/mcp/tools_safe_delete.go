@@ -83,7 +83,7 @@ const (
 const cascadeIterationCap = 50
 
 func (s *Server) handleSafeDeleteSymbol(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	id, err := req.RequireString("id")
+	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
 		return mcp.NewToolResultError("id is required"), nil
 	}

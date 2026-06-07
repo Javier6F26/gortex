@@ -31,6 +31,7 @@ func (s *Server) registerWikiTools() {
 			mcp.WithBoolean("no_docs", mcp.Description("Skip docs bundle inside the wiki")),
 			mcp.WithBoolean("force", mcp.Description("Suppress 'already exists' diagnostics (writer is always idempotent)")),
 			mcp.WithBoolean("wikilinks", mcp.Description("Use [[wikilink]] style links")),
+			mcp.WithBoolean("enhance", mcp.Description("Enrich narrative sections via the daemon's configured LLM provider (no-op when no provider is configured)")),
 		),
 		s.handleGenerateWiki,
 	)
@@ -91,6 +92,13 @@ func (s *Server) handleGenerateWiki(ctx context.Context, req mcp.CallToolRequest
 		if err == nil {
 			docsMarkdown = docs.RenderMarkdown(bundle)
 		}
+	}
+
+	// LLM narrative enhancement reuses the daemon's already-constructed
+	// provider; a no-op when no provider is configured.
+	if boolArgValue(args, "enhance") && s.llmService != nil && s.llmService.Enabled() {
+		opts.Enhance = true
+		opts.Enhancer = wiki.NewClaudeCLIEnhancer(s.llmService.Provider(), wiki.NewEnhanceCache(wiki.DefaultEnhanceCacheDir()))
 	}
 
 	gen := wiki.New(wiki.Inputs{

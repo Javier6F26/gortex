@@ -401,10 +401,10 @@ func emitHumanSummary(w io.Writer, results []*agents.Result, opts agents.ApplyOp
 	})
 }
 
-// ensureProjectMarker creates `.gortex/` at the repo root so that
-// `workspace.Resolve` recognises this directory as a single-project
-// entry point. Idempotent: a no-op if the directory already exists.
-// Reports first-time creation to stderr.
+// ensureProjectMarker creates `.gortex/` at the repo root to hold the
+// project's Gortex config (`.gortex.yaml` and friends). Idempotent: a
+// no-op if the directory already exists. Reports first-time creation to
+// stderr.
 func ensureProjectMarker(root string, w io.Writer) error {
 	dir := filepath.Join(root, workspace.IndexDir)
 	existed := true
@@ -418,7 +418,7 @@ func ensureProjectMarker(root string, w io.Writer) error {
 		return err
 	}
 	if !existed {
-		_, _ = fmt.Fprintf(w, "[gortex init] created %s/ to bind this directory as a Gortex single-project root\n", workspace.IndexDir)
+		_, _ = fmt.Fprintf(w, "[gortex init] created %s/ to hold this project's Gortex config\n", workspace.IndexDir)
 	}
 	return nil
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -84,74 +83,63 @@ func runTrack(cmd *cobra.Command, args []string) error {
 
 	emitTrackBanner(w, absPath, daemon.IsRunning())
 
-	// Daemon-first: if a daemon is running, it's the source of truth for
-	// tracked repos and it'll index immediately. Falls through to the
-	// config-only behavior below when no daemon is listening.
-	if daemon.IsRunning() {
-		c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
-		if err == nil {
-			defer func() { _ = c.Close() }()
-			resp, ctlErr := c.Control(daemon.ControlTrack, daemon.TrackParams{
-				Path:       absPath,
-				Name:       trackName,
-				AsWorktree: trackAsWorktree,
-			})
-			if ctlErr != nil {
-				return ctlErr
-			}
-			if !resp.OK {
-				return fmt.Errorf("track rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
-			}
-			tr := trackResult{viaDaemon: true}
-			var meta struct {
-				Prefix string `json:"prefix"`
-				Status string `json:"status"`
-			}
-			if len(resp.Result) > 0 && json.Unmarshal(resp.Result, &meta) == nil {
-				tr.prefix = meta.Prefix
-				tr.alreadyTracked = meta.Status == "already_tracked"
-			}
-			emitTrackSummary(w, absPath, tr)
-			return nil
-		}
-	}
-
-	// Standalone fallback: update the config file directly. The daemon
-	// (if later started) will pick this up on its next startup.
+	// 1. Config write FIRST. Registering a repo is a config operation
+	//    that always succeeds with no daemon, so `gortex track` is
+	//    offline-safe — the durable source of truth is written before any
+	//    daemon contact.
 	gc, err := config.LoadGlobal()
 	if err != nil {
 		return fmt.Errorf("loading global config: %w", err)
 	}
-
+	already := false
 	for _, existing := range gc.Repos {
-		existingAbs, _ := filepath.Abs(existing.Path)
-		if existingAbs == absPath {
-			emitTrackSummary(w, absPath, trackResult{alreadyTracked: true, repoCount: len(gc.Repos)})
+		if existingAbs, _ := filepath.Abs(existing.Path); existingAbs == absPath {
+			already = true
+			break
+		}
+	}
+	var prefix string
+	if already {
+		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
+	} else {
+		entry := config.RepoEntry{Path: absPath}
+		switch {
+		case trackName != "":
+			entry.Name = trackName
+		case trackAsWorktree:
+			// The AsWorktree flag is not persisted, so pin the derived
+			// instance prefix as the entry Name now. The daemon reproduces
+			// it intrinsically for a declared-workspace worktree, but a
+			// forced (branch-tagged) instance must be recorded here.
+			base := config.ResolvePrefix(entry)
+			if name, sep := indexer.WorktreeInstanceName(absPath, base, declaredWorkspace(absPath), true); sep {
+				entry.Name = name
+			}
+		}
+		if err := gc.AddRepo(entry); err != nil {
+			return err
+		}
+		if err := gc.Save(); err != nil {
+			return fmt.Errorf("saving global config: %w", err)
+		}
+		prefix = config.ResolvePrefix(entry)
+	}
+
+	// 2. Best-effort daemon: bring it up (single-flight) and hand it the
+	//    repo so indexing starts now. Spawn / control failure is
+	//    NON-FATAL — the config write above already persisted the repo,
+	//    so we degrade to the offline summary instead of erroring.
+	if ensureDaemonReady(daemon.ParseAutostart()) != daemonUnavailable {
+		if err := notifyDaemonTrack(absPath); err == nil {
+			emitTrackSummary(w, absPath, trackResult{viaDaemon: true, prefix: prefix, alreadyTracked: already})
 			return nil
 		}
 	}
 
-	entry := config.RepoEntry{Path: absPath}
-	switch {
-	case trackName != "":
-		entry.Name = trackName
-	case trackAsWorktree:
-		// The AsWorktree flag is not persisted, so pin the derived
-		// instance prefix as the entry Name now. The daemon reproduces it
-		// intrinsically for a declared-workspace worktree, but a forced
-		// (branch-tagged) instance must be recorded here to survive.
-		base := config.ResolvePrefix(entry)
-		if name, sep := indexer.WorktreeInstanceName(absPath, base, declaredWorkspace(absPath), true); sep {
-			entry.Name = name
-		}
-	}
-	if err := gc.AddRepo(entry); err != nil {
-		return err
-	}
-	if err := gc.Save(); err != nil {
-		return fmt.Errorf("saving global config: %w", err)
-	}
-	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos) + 1, prefix: config.ResolvePrefix(entry)})
+	// 3. Daemon unavailable (autostart off, spawn failed/timed out, or
+	//    the control hop failed). The repo is tracked on disk; tell the
+	//    user the daemon will pick it up later — success, not error.
+	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos), prefix: prefix, alreadyTracked: already})
 	return nil
 }
 
@@ -169,6 +157,30 @@ type trackResult struct {
 // path will be tracked and whether a daemon will pick it up immediately. Only
 // emitted when stderr is a TTY — non-TTY runs (CI scripts) stay quiet so
 // existing piped output still parses.
+// notifyDaemonTrack hands the repo to a running daemon via the control
+// socket. It returns an error when the daemon can't be reached or rejects
+// the request; the caller treats that as non-fatal because the config
+// write already persisted the repo.
+func notifyDaemonTrack(absPath string) error {
+	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = c.Close() }()
+	resp, err := c.Control(daemon.ControlTrack, daemon.TrackParams{
+		Path:       absPath,
+		Name:       trackName,
+		AsWorktree: trackAsWorktree,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("track rejected: %s %s", resp.ErrorCode, resp.ErrorMsg)
+	}
+	return nil
+}
+
 func emitTrackBanner(w io.Writer, absPath string, daemonUp bool) {
 	if !progress.IsTTY(w) {
 		return

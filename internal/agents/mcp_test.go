@@ -22,17 +22,11 @@ func TestGlobalGortexMCPEntryUsesProxy(t *testing.T) {
 	if len(args) == 0 || args[0] != "mcp" {
 		t.Fatalf("args[0] = %v, want mcp; full args=%v", args, args)
 	}
-	wantProxy := false
-	for _, a := range args {
-		if a == "--index" {
-			t.Errorf("global entry must not pass --index (resolves to launch cwd, breaks Cursor global config): args=%v", args)
-		}
-		if a == "--proxy" {
-			wantProxy = true
-		}
-	}
-	if !wantProxy {
-		t.Errorf("global entry must use --proxy so an absent daemon fails fast instead of silently binding to $HOME: args=%v", args)
+	// The canonical shape is bare ["mcp"]: no cwd-relative --index/--watch
+	// (the daemon resolves the workspace per session) and no --proxy
+	// (gortex mcp proxies to / auto-starts the daemon on its own).
+	if len(args) != 1 || args[0] != "mcp" {
+		t.Errorf("global entry must emit canonical [mcp], got %v", args)
 	}
 }
 
@@ -133,7 +127,7 @@ func TestUpsertMCPServerWithMigrationIdempotent(t *testing.T) {
 		"mcpServers": map[string]any{
 			"gortex": map[string]any{
 				"command": "gortex",
-				"args":    []any{"mcp", "--proxy"},
+				"args":    []any{"mcp"},
 				"env":     map[string]any{"GORTEX_INDEX_WORKERS": "8"},
 			},
 		},

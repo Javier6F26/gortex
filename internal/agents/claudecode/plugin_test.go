@@ -124,8 +124,8 @@ func TestEmitPluginBundle_MCPJSONShape(t *testing.T) {
 		t.Errorf(".mcp.json command = %v, want gortex", got)
 	}
 	args, ok := gx["args"].([]any)
-	if !ok || len(args) != 2 || args[0] != "mcp" || args[1] != "--proxy" {
-		t.Errorf(".mcp.json args = %v, want [mcp --proxy]", args)
+	if !ok || len(args) != 1 || args[0] != "mcp" {
+		t.Errorf(".mcp.json args = %v, want [mcp]", args)
 	}
 }
 

@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/search/rerank"
@@ -37,6 +38,12 @@ type SubGraph struct {
 	// or the depth at which the budget / depth cap halted expansion.
 	// Zero — and omitted — for traversals that don't track depth.
 	StoppedAtDepth int `json:"stopped_at_depth,omitempty"`
+	// LastSynced is the time the stalest federation proxy node in this
+	// result was last pulled from its owning remote. Set only when the
+	// traversal crossed into a remote-owned proxy node; omitted (and nil)
+	// for a purely-local result, so a caller can see how fresh the
+	// remote-derived part of the answer is.
+	LastSynced *time.Time `json:"last_synced,omitempty"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.

@@ -24,18 +24,34 @@ func WithAuth(h http.Handler, token string) http.Handler {
 	if token == "" {
 		return h
 	}
-	expectedHeader := []byte("Bearer " + token)
-	expectedToken := []byte(token)
+	return WithAuthFunc(h, func() string { return token })
+}
+
+// WithAuthFunc is WithAuth with a per-request token source: tokenFn is
+// resolved on every request, so an operator can rotate the expected token
+// (e.g. update $GORTEX_DAEMON_HTTP_TOKEN) without restarting the server.
+// A tokenFn that returns "" serves the request unauthenticated, identical
+// to a static empty token — so the token can also be added or removed at
+// runtime, not only changed.
+func WithAuthFunc(h http.Handler, tokenFn func() string) http.Handler {
+	if tokenFn == nil {
+		return h
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := tokenFn()
+		if token == "" {
+			h.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodOptions {
 			h.ServeHTTP(w, r)
 			return
 		}
-		if authMatches([]byte(r.Header.Get("Authorization")), expectedHeader) {
+		if authMatches([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) {
 			h.ServeHTTP(w, r)
 			return
 		}
-		if q := r.URL.Query().Get("token"); q != "" && tokenMatches([]byte(q), expectedToken) {
+		if q := r.URL.Query().Get("token"); q != "" && tokenMatches([]byte(q), []byte(token)) {
 			h.ServeHTTP(w, r)
 			return
 		}

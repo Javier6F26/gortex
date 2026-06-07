@@ -63,7 +63,7 @@ const (
 const pluginMCPJSON = `{
   "gortex": {
     "command": "gortex",
-    "args": ["mcp", "--proxy"]
+    "args": ["mcp"]
   }
 }
 `

@@ -282,6 +282,7 @@ func (mi *MultiIndexer) RunGlobalResolve() {
 	cr.SetCrossWorkspaceDepLookup(mi.crossWorkspaceLookup())
 	cr.SetNpmAliasResolver(mi.npmAliasResolver())
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
+	mi.applyRemoteStitch(cr)
 	cr.ResolveAll()
 	mi.ReconcileContractEdges()
 }

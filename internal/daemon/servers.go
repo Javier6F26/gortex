@@ -48,7 +48,34 @@ type ServerEntry struct {
 	// workspace context disambiguates" pick. Conflict (multiple
 	// entries marked Default=true) is rejected at load time.
 	Default bool `toml:"default,omitempty"`
+
+	// Enabled gates whether the daemon federates/proxies to this
+	// remote. Pointer-bool so absent-in-TOML (nil) is distinguished
+	// from an explicit false: absent ⇒ enabled (default-on, so a
+	// pre-existing roster that has no `enabled` key keeps working).
+	// `gortex proxy off <slug>` writes `enabled = false`; `on` deletes
+	// the key (back to default-on) — it never writes `enabled = true`
+	// so a hand-edited roster without the key stays clean.
+	Enabled *bool `toml:"enabled,omitempty"`
+
+	// ReadOnly marks the remote as accepting only read tools; the
+	// federation write-gate refuses to route a mutating tool to it.
+	// In v1 every remote is effectively read-only regardless; this
+	// field is the persisted intent and the surface for
+	// `--read-only`. An unadvertised capability is treated as
+	// read-only at runtime (fail-safe).
+	ReadOnly bool `toml:"read_only,omitempty"`
+
+	// Namespace is the origin-namespaced node-ID keying prefix used
+	// when minting proxy nodes for this remote. Keying field only —
+	// reserved here so the struct is edited exactly once.
+	Namespace string `toml:"namespace,omitempty"`
 }
+
+// IsEnabled reports the effective enabled state of the remote: a nil
+// Enabled (absent from TOML) means enabled, preserving backward
+// compatibility with rosters written before the key existed.
+func (e ServerEntry) IsEnabled() bool { return e.Enabled == nil || *e.Enabled }
 
 // ServersConfig is the on-disk schema for `~/.gortex/servers.toml`.
 type ServersConfig struct {
@@ -219,6 +246,9 @@ func (c *ServersConfig) Validate() error {
 		if s.Slug == "" {
 			return fmt.Errorf("server[%d]: slug is required", i)
 		}
+		if s.Slug == LocalServerSentinel {
+			return fmt.Errorf("server[%d]: slug %q is reserved for the local daemon's own graph", i, s.Slug)
+		}
 		if seenSlug[s.Slug] {
 			return fmt.Errorf("server[%d]: duplicate slug %q", i, s.Slug)
 		}
@@ -277,6 +307,33 @@ func (c *ServersConfig) DefaultServer() *ServerEntry {
 		}
 	}
 	return &c.Server[0]
+}
+
+// SetEnabled flips a remote's enabled state in the roster. enabled=true
+// CLEARS the key (back to default-on) rather than writing
+// `enabled = true`, so a hand-edited roster without the key stays
+// minimal and the default-on contract is the single source of truth;
+// enabled=false writes an explicit false. It returns whether the value
+// actually changed and errors on an unknown slug.
+func (c *ServersConfig) SetEnabled(slug string, enabled bool) (changed bool, err error) {
+	if c == nil {
+		return false, fmt.Errorf("no server roster loaded")
+	}
+	for i := range c.Server {
+		if c.Server[i].Slug != slug {
+			continue
+		}
+		was := c.Server[i].IsEnabled()
+		if enabled {
+			// Clear the key: nil ⇒ default-on.
+			c.Server[i].Enabled = nil
+		} else {
+			v := false
+			c.Server[i].Enabled = &v
+		}
+		return was != enabled, nil
+	}
+	return false, fmt.Errorf("unknown server slug %q", slug)
 }
 
 // ServerClient is the daemon-side HTTP client targeting one
@@ -351,11 +408,22 @@ func (c *ServerClient) resolveAuthToken() string {
 // decoded struct) keeps this client agnostic to the per-tool
 // response shapes.
 func (c *ServerClient) ProxyTool(toolName string, body []byte) ([]byte, int, error) {
+	return c.ProxyToolCtx(context.Background(), toolName, body)
+}
+
+// ProxyToolCtx is the context-aware successor to ProxyTool. The
+// outbound request is built with http.NewRequestWithContext so a
+// caller's deadline / cancellation propagates to the in-flight HTTP
+// call, instead of being bounded only by the client's coarse timeout.
+// The federation read fan-out derives a short per-remote deadline from
+// this ctx so a slow or dead remote can never block the query hot path
+// for the full HTTP-client timeout.
+func (c *ServerClient) ProxyToolCtx(ctx context.Context, toolName string, body []byte) ([]byte, int, error) {
 	u, err := url.JoinPath(c.BaseURL, "v1", "tools", toolName)
 	if err != nil {
 		return nil, 0, fmt.Errorf("join proxy URL: %w", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, u, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, 0, fmt.Errorf("build proxy request: %w", err)
 	}
@@ -566,6 +634,15 @@ func scanWorkspaceField(data []byte) string {
 			// Could be a struct shape (e.g. `workspace:\n  auto_detect: true`)
 			// — that's the legacy config.WorkspaceConfig shape, now
 			// migrated to `multi:` instead. Skip.
+			continue
+		}
+		// A workspace slug may never collide with the reserved local
+		// sentinel, nor contain ~ or / (which would alias path/home
+		// expansion and the proxy-node origin segment). A rejected slug
+		// degrades to "no workspace" so routing falls back to local
+		// rather than re-opening the localSlug foot-gun from the
+		// workspace side.
+		if v == LocalServerSentinel || strings.ContainsAny(v, "~/") {
 			continue
 		}
 		return v

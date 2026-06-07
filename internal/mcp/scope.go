@@ -6,8 +6,6 @@ import (
 	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
-
-	"github.com/zzet/gortex/internal/workspace"
 )
 
 // ToolScope is the per-tool scope kind. Wire-format encodes this on
@@ -26,18 +24,18 @@ import (
 //     `repo: <list>` (non-empty, including the `["*"]` sentinel).
 //     Missing, empty, or non-list = protocol error.
 //
-// Single-project mode degrades these; see ResolveScopedRepos.
+// The active workspace boundary is enforced at the graph level by the
+// daemon's per-session scope (sessionScope / nodeInSessionScope); this
+// layer validates the wire shape of `repo` per the tool's declared scope.
 type ToolScope int
 
 const (
-	// ScopeRepo — `repo: <string>` required (workspace mode); defaults
-	// to the bound project in single-project mode.
+	// ScopeRepo — `repo: <string>` required.
 	ScopeRepo ToolScope = iota + 1
 	// ScopeWorkspace — no `repo` parameter. Operates against the
 	// active workspace as a unit.
 	ScopeWorkspace
-	// ScopeFanOut — `repo: <list>` required; `["*"]` resolves to all
-	// auto-discovered, non-excluded members of the active workspace.
+	// ScopeFanOut — `repo: <list>` required.
 	ScopeFanOut
 )
 
@@ -56,9 +54,6 @@ func (s ToolScope) String() string {
 }
 
 // FanOutAllSentinel is the wire-format `["*"]` sentinel.
-// Server-side, it expands to every auto-discovered,
-// non-excluded member of the active workspace and
-// nothing else (workspace-isolation invariant).
 const FanOutAllSentinel = "*"
 
 // scopeRegistry is the per-Server tool-name → scope map. Populated as
@@ -121,39 +116,29 @@ func (r *scopeRegistry) allTools() []string {
 // member names the handler should query.
 type ScopedRepos struct {
 	Kind ToolScope
-	// Repos is the resolved set the handler should target. Always
-	// non-empty when the call is valid. For ScopeWorkspace it carries
-	// every active workspace member (so handlers can present a
-	// degenerate one-member workspace uniformly in single-project
-	// mode). For ScopeRepo it contains exactly one name. For
-	// ScopeFanOut it contains the explicit subset, with `["*"]`
-	// already expanded.
+	// Repos is the resolved set the handler should target. For
+	// ScopeRepo it contains exactly one name. For ScopeFanOut it
+	// contains the explicit subset. ScopeWorkspace carries none (the
+	// handler reports the session's resolved workspace itself).
 	Repos []string
 }
 
 // ResolveScopedRepos validates a request against the tool's declared
-// scope and the active workspace bind. Returns the concrete repo list
-// to query, or a structured protocol error suitable for the caller to
-// surface verbatim.
-//
-// The bind argument is the active server bind. nil means "no bind has
-// been established yet"; callers should pass through the request
-// (legacy single-repo mode) — this preserves byte-for-byte
-// backwards-compat for repos that have never been touched by the new
-// handshake.
+// scope and returns the concrete repo list to query, or a structured
+// protocol error suitable for the caller to surface verbatim.
 //
 // The repo argument is the union value the wire-format slice decoded
 // from the request: nil means "absent", a string means "single-repo
 // shape", a slice means "fan-out shape". Callers wrap their
 // `req.GetArguments()["repo"]` once and forward to us.
-func ResolveScopedRepos(scope ToolScope, bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallToolResult) {
+func ResolveScopedRepos(scope ToolScope, repo any) (*ScopedRepos, *mcp.CallToolResult) {
 	switch scope {
 	case ScopeRepo:
-		return resolveRepoScope(bind, repo)
+		return resolveRepoScope(repo)
 	case ScopeWorkspace:
-		return resolveWorkspaceScope(bind, repo)
+		return resolveWorkspaceScope(repo)
 	case ScopeFanOut:
-		return resolveFanOutScope(bind, repo)
+		return resolveFanOutScope(repo)
 	default:
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
@@ -162,24 +147,14 @@ func ResolveScopedRepos(scope ToolScope, bind *workspace.Bind, repo any) (*Scope
 	}
 }
 
-// resolveRepoScope: scope=repo. Wire-format shape: `repo: <string>`.
-//
-//   - Workspace mode: `repo` REQUIRED. Missing or list = protocol
-//     error. Unknown name = protocol error.
-//   - Single-project mode: `repo` defaults to the bound project when
-//     omitted; explicit `repo` must match the bound project (otherwise
-//     reject — mode degradation.
-func resolveRepoScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallToolResult) {
+// resolveRepoScope: scope=repo. Wire-format shape: `repo: <string>`
+// REQUIRED. Missing or list = protocol error.
+func resolveRepoScope(repo any) (*ScopedRepos, *mcp.CallToolResult) {
 	switch v := repo.(type) {
 	case nil:
-		// Default to the bound project in single-project mode.
-		if bind != nil && bind.Mode == workspace.ModeSingleProject {
-			return &ScopedRepos{Kind: ScopeRepo, Repos: []string{bind.Members[0].Name}}, nil
-		}
-		// Workspace mode (or no bind): absent `repo` is a protocol error.
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
-			Message:   `scope "repo" requires a string "repo" parameter; in workspace mode, name the project explicitly`,
+			Message:   `scope "repo" requires a string "repo" parameter; name the project explicitly`,
 			Data:      map[string]any{"scope": "repo", "expected": "string"},
 		})
 	case string:
@@ -189,9 +164,6 @@ func resolveRepoScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallTo
 				Message:   `"repo" must not be the empty string`,
 				Data:      map[string]any{"scope": "repo"},
 			})
-		}
-		if bind != nil && !bind.HasMember(v) {
-			return nil, unknownRepoError(bind, v)
 		}
 		return &ScopedRepos{Kind: ScopeRepo, Repos: []string{v}}, nil
 	case []any, []string:
@@ -209,10 +181,10 @@ func resolveRepoScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallTo
 	}
 }
 
-// resolveWorkspaceScope: scope=workspace. Wire-format shape: `repo`
-// MUST NOT appear. Single-project mode degrades to a one-member
-// degenerate workspace.
-func resolveWorkspaceScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallToolResult) {
+// resolveWorkspaceScope: scope=workspace. Wire-format shape: `repo` MUST
+// NOT appear. The concrete member set is reported by the handler from
+// the session's resolved workspace, not derived here.
+func resolveWorkspaceScope(repo any) (*ScopedRepos, *mcp.CallToolResult) {
 	if repo != nil {
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
@@ -220,28 +192,14 @@ func resolveWorkspaceScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.C
 			Data:      map[string]any{"scope": "workspace"},
 		})
 	}
-	if bind == nil {
-		// No bind established — return an empty list; degenerates
-		// gracefully in legacy single-repo mode where there's no
-		// workspace concept.
-		return &ScopedRepos{Kind: ScopeWorkspace}, nil
-	}
-	return &ScopedRepos{Kind: ScopeWorkspace, Repos: bind.MemberNames()}, nil
+	return &ScopedRepos{Kind: ScopeWorkspace}, nil
 }
 
 // resolveFanOutScope: scope=fan-out. Wire-format shape:
-// `repo: <non-empty list>`. `["*"]` expands to every workspace member.
-//
-//   - Workspace mode: `repo` REQUIRED and must be a non-empty list.
-//     Unknown member name = protocol error (Q1 resolution).
-//   - Single-project mode: `repo` defaults to `[bound project]` when
-//     omitted; `["*"]` resolves to the same one-member set.
-func resolveFanOutScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.CallToolResult) {
+// `repo: <non-empty list>`.
+func resolveFanOutScope(repo any) (*ScopedRepos, *mcp.CallToolResult) {
 	switch v := repo.(type) {
 	case nil:
-		if bind != nil && bind.Mode == workspace.ModeSingleProject {
-			return &ScopedRepos{Kind: ScopeFanOut, Repos: []string{bind.Members[0].Name}}, nil
-		}
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
 			Message:   `scope "fan-out" requires a non-empty list "repo"; for breadth use ["*"], for a subset name them explicitly`,
@@ -265,9 +223,9 @@ func resolveFanOutScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.Call
 			}
 			names = append(names, s)
 		}
-		return resolveFanOutNames(bind, names)
+		return resolveFanOutNames(names)
 	case []string:
-		return resolveFanOutNames(bind, v)
+		return resolveFanOutNames(v)
 	default:
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
@@ -276,10 +234,10 @@ func resolveFanOutScope(bind *workspace.Bind, repo any) (*ScopedRepos, *mcp.Call
 	}
 }
 
-// resolveFanOutNames is the inner stage of fan-out resolution. Splits
-// the `["*"]` sentinel from the named-subset path; rejects empty
-// lists; rejects unknown names.
-func resolveFanOutNames(bind *workspace.Bind, names []string) (*ScopedRepos, *mcp.CallToolResult) {
+// resolveFanOutNames is the inner stage of fan-out resolution. Rejects
+// empty lists and a mixed `["*", "x"]` shape; the `["*"]` sentinel is
+// expanded by the handler against the session's resolved workspace.
+func resolveFanOutNames(names []string) (*ScopedRepos, *mcp.CallToolResult) {
 	if len(names) == 0 {
 		return nil, NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeInvalidArgument,
@@ -297,31 +255,7 @@ func resolveFanOutNames(bind *workspace.Bind, names []string) (*ScopedRepos, *mc
 			})
 		}
 	}
-	if len(names) == 1 && names[0] == FanOutAllSentinel {
-		if bind == nil {
-			return nil, NewStructuredErrorResult(StructuredError{
-				ErrorCode: ErrCodeInvalidArgument,
-				Message:   `["*"] requires an active workspace bind`,
-			})
-		}
-		members := bind.MemberNames()
-		if len(members) == 0 {
-			return nil, NewStructuredErrorResult(StructuredError{
-				ErrorCode: ErrCodeInvalidArgument,
-				Message:   `["*"] resolved to an empty workspace; nothing to query`,
-			})
-		}
-		return &ScopedRepos{Kind: ScopeFanOut, Repos: members}, nil
-	}
 
-	// Named subset: every entry must be a known workspace member.
-	if bind != nil {
-		for _, n := range names {
-			if !bind.HasMember(n) {
-				return nil, unknownRepoError(bind, n)
-			}
-		}
-	}
 	// Deduplicate while preserving first-seen order so the handler's
 	// fan-out is stable for caching / logging.
 	seen := make(map[string]struct{}, len(names))
@@ -334,24 +268,4 @@ func resolveFanOutNames(bind *workspace.Bind, names []string) (*ScopedRepos, *mc
 		out = append(out, n)
 	}
 	return &ScopedRepos{Kind: ScopeFanOut, Repos: out}, nil
-}
-
-// unknownRepoError builds the canonical "name not in workspace" error
-// for the dispatcher. Reused by ScopeRepo and ScopeFanOut so the wire
-// shape is identical regardless of which scope rejected the call.
-func unknownRepoError(bind *workspace.Bind, name string) *mcp.CallToolResult {
-	available := []string{}
-	if bind != nil {
-		available = bind.MemberNames()
-	}
-	return NewStructuredErrorResult(StructuredError{
-		ErrorCode: ErrCodeRepoNotTracked,
-		Message: fmt.Sprintf(
-			`"repo" %q is not a member of the active workspace; valid members: %v`, name, available),
-		Retriable: false,
-		Data: map[string]any{
-			"requested": name,
-			"available": available,
-		},
-	})
 }

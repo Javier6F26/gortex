@@ -27,9 +27,7 @@ const ProjectMCPJSON = `{
     "gortex": {
       "command": "gortex",
       "args": [
-        "mcp",
-        "--index", ".",
-        "--watch"
+        "mcp"
       ],
       "env": {
         "GORTEX_INDEX_WORKERS": "${GORTEX_WORKERS:-8}"

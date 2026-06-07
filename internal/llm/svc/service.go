@@ -96,6 +96,17 @@ func (s *Service) Enabled() bool {
 	return s != nil && s.provider != nil && s.backend != nil
 }
 
+// Provider returns the underlying LLM provider, or nil when none was
+// constructed. Lets callers that need raw completion (e.g. the wiki
+// narrative enhancer) reuse the service's already-built provider instead
+// of constructing a second one.
+func (s *Service) Provider() llm.Provider {
+	if s == nil {
+		return nil
+	}
+	return s.provider
+}
+
 // ProviderErr returns the error from provider construction, if any.
 // Enabled() is false whenever this is non-nil; the daemon entrypoint
 // surfaces it as a startup warning so a misconfigured `llm:` block

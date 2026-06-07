@@ -210,8 +210,10 @@ func detectClientName() string {
 //  3. The first non-empty editor workspace env var (CURSOR_WORKSPACE,
 //     CLAUDE_CODE_WORKSPACE, WINDSURF_WORKSPACE, KIRO_WORKSPACE,
 //     CODEX_WORKSPACE, ANTIGRAVITY_WORKSPACE, VSCODE_WORKSPACE).
-//  4. Fall through to whatever Getwd() returned — the daemon (or the
-//     embedded handshake) will surface a clear entry-point error.
+//  4. Fall through to whatever Getwd() returned — the daemon resolves
+//     it per session (ScopeForCWD) and surfaces a clear repo_not_tracked
+//     error when the cwd maps to no tracked repo, isolating the session
+//     to nothing rather than the whole graph.
 func resolveLaunchCWD() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -263,26 +265,7 @@ func isAmbiguousLaunchCWD(p string) bool {
 	return errP == nil && errH == nil && resP == resH
 }
 
-// shouldTryProxy returns true when `gortex mcp` should attempt to
-// proxy through the daemon before falling back to embedded mode.
-//
-// The rule: proxy when stdin is a pipe (we were spawned by an MCP
-// client) and the user hasn't passed --no-daemon. Users running
-// `gortex mcp` in a terminal expect the embedded behavior they've
-// always had.
-func shouldTryProxy(forceNoDaemon, forceProxy bool) bool {
-	if forceNoDaemon {
-		return false
-	}
-	if forceProxy {
-		return true
-	}
-	// Stdin is a character device when it's a terminal. A pipe or socket
-	// means we're being fed bytes by a parent process — almost always an
-	// MCP client.
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice == 0
-}
+// The former shouldTryProxy stdin-TTY heuristic was removed: `gortex mcp`
+// is now daemon-first via resolveDaemonDecision (ensure-daemon → relay,
+// with an embedded fallback) regardless of whether stdin is a terminal
+// or a pipe.
