@@ -18,7 +18,6 @@ import (
 	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/server/hub"
 	"github.com/zzet/gortex/internal/serverstack"
-	"github.com/zzet/gortex/internal/workspace"
 )
 
 var (
@@ -121,39 +120,9 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
 
-	// Two-entry-point handshake. The MCP server binds at
-	// either the workspace root (`.gortex/workspace.toml` present in
-	// cwd) or a single-project root (`.gortex/` directory in cwd).
-	// Anywhere else fails the handshake with a clear message naming
-	// both supported entry points — there is no walk-up.
-	cwd, cwdErr := resolveLaunchCWD()
-	if cwdErr != nil {
-		return fmt.Errorf("resolving cwd for MCP handshake: %w", cwdErr)
-	}
-	bind, bindErr := workspace.Resolve(cwd)
-	if bindErr != nil {
-		fmt.Fprintf(os.Stderr, "[gortex] MCP handshake failed: %v\n", bindErr)
-		if home, _ := os.UserHomeDir(); home != "" && cwd == home {
-			fmt.Fprintf(os.Stderr,
-				"[gortex] hint: the MCP process was launched with cwd=%s. "+
-					"Likely a user-level (global) MCP config that invokes `gortex mcp --index .`. "+
-					"Run `gortex install` to migrate that entry to the daemon-proxy shape, "+
-					"or replace its args with `[\"mcp\", \"--proxy\"]` and start the daemon "+
-					"(`gortex daemon start --detach`).\n", cwd)
-		}
-		return bindErr
-	}
-	for _, w := range workspace.FormatMarkerWarnings(bind.Marker) {
-		fmt.Fprintf(os.Stderr, "[gortex] %s\n", w)
-	}
-	switch bind.Mode {
-	case workspace.ModeWorkspace:
-		fmt.Fprintf(os.Stderr, "[gortex] workspace mode: %s (%d members)\n",
-			bind.Root, len(bind.Members))
-	case workspace.ModeSingleProject:
-		fmt.Fprintf(os.Stderr, "[gortex] single-project mode: %s\n", bind.Root)
-	}
-
+	// The embedded server runs in single-repo mode over --index: it
+	// indexes that tree and serves the whole graph (no marker handshake,
+	// no .gortex/workspace.toml). Multi-repo scoping is the daemon's job.
 	cfg, err := config.Load(cfgFile)
 	if err != nil {
 		return err
@@ -209,7 +178,6 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	cm := ss.ConfigMgr
 	mi := ss.MultiIndexer
 	srv := ss.MCP
-	srv.SetBind(bind)
 
 	// Persist the resolved active project so the MCP server and
 	// set_active_project agree on the default scope.
