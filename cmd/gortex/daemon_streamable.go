@@ -8,8 +8,25 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/mcp/streamable"
+	"github.com/zzet/gortex/internal/server"
 	"go.uber.org/zap"
 )
+
+// composeDaemonHTTPHandler combines the daemon's two HTTP surfaces onto a
+// single listener: the MCP Streamable transport (streamH, serving /mcp
+// and /healthz with its own auth) under the catch-all, and the /v1 REST
+// API (v1, the former `gortex server`) under /v1/ behind a bearer-auth
+// wrapper. CORS, when an origin is set, wraps the whole mux so browser
+// clients (the web UI) can reach either surface cross-origin.
+func composeDaemonHTTPHandler(streamH, v1 http.Handler, token, corsOrigin string) http.Handler {
+	top := http.NewServeMux()
+	top.Handle("/", streamH)
+	top.Handle("/v1/", server.WithAuth(v1, token))
+	if corsOrigin != "" {
+		return server.WithCORS(top, server.CORSOptions{AllowOrigins: []string{corsOrigin}})
+	}
+	return top
+}
 
 // daemonStreamableDispatcher bridges streamable.Transport (which has
 // its own session model keyed by `Mcp-Session-Id`) to the daemon's

@@ -22,6 +22,7 @@ import (
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/progress"
+	"github.com/zzet/gortex/internal/server"
 	"github.com/zzet/gortex/internal/tui"
 )
 
@@ -39,6 +40,7 @@ var (
 	daemonStatusInterval      time.Duration
 	daemonHTTPAddr            string
 	daemonHTTPAuthToken       string
+	daemonHTTPCORSOrigin      string
 	daemonBackend             string
 	daemonBackendPath         string
 	daemonBackendBufferPoolMB uint64
@@ -100,6 +102,8 @@ func init() {
 		"also expose the MCP 2026 Streamable HTTP transport on this TCP address (e.g. 127.0.0.1:7411); empty disables")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",
 		"bearer token required on every Streamable HTTP request (default: read $GORTEX_DAEMON_HTTP_TOKEN; empty allows unauthenticated localhost binds)")
+	daemonStartCmd.Flags().StringVar(&daemonHTTPCORSOrigin, "cors-origin", "*",
+		"allowed CORS origin for the HTTP surface (use '*' for any); applies to both /mcp and /v1 when --http-addr is set")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
 		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
@@ -284,11 +288,34 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if r := disp.Router(); r != nil {
 			router = r
 		}
-		srv.HTTPHandler = buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, token)
+		streamH := buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, token)
+
+		// Mount the /v1 REST surface (the former `gortex server`) on the
+		// same listener so a single daemon process serves both the MCP
+		// Streamable transport and the REST API that gortex-cloud and the
+		// web UI consume. The daemon already owns every dependency the
+		// handler needs — the MCP server, graph, config manager, overlay
+		// manager, and federation router — so this is pure composition.
+		v1 := server.NewHandler(state.mcpServer.MCPServer(), state.graph, version, logger)
+		if state.configManager != nil {
+			v1.SetConfigManager(state.configManager)
+		}
+		if id, idErr := resolveServerID(platform.DataDir()); idErr == nil {
+			v1.SetServerID(id)
+		}
+		if state.overlays != nil {
+			v1.SetOverlayManager(state.overlays)
+		}
+		if router != nil {
+			v1.SetRouter(router)
+		}
+
+		srv.HTTPHandler = composeDaemonHTTPHandler(streamH, v1, token, daemonHTTPCORSOrigin)
 		srv.HTTPAddr = daemonHTTPAddr
-		logger.Info("daemon: streamable HTTP transport configured",
+		logger.Info("daemon: HTTP surface configured (/mcp + /v1)",
 			zap.String("addr", daemonHTTPAddr),
-			zap.Bool("authenticated", token != ""))
+			zap.Bool("authenticated", token != ""),
+			zap.String("cors_origin", daemonHTTPCORSOrigin))
 	}
 
 	// Opt-in pprof endpoint. No-op unless GORTEX_DAEMON_PPROF_ADDR is
