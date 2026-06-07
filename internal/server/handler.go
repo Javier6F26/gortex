@@ -131,6 +131,7 @@ func (h *Handler) registerRoutes() {
 	h.mux.HandleFunc("POST /v1/tools/", h.handleToolCall)
 	h.mux.HandleFunc("GET /v1/stats", h.handleStats)
 	h.mux.HandleFunc("GET /v1/graph", h.handleGetGraph)
+	h.mux.HandleFunc("GET /v1/subgraph", h.handleSubGraph)
 	h.mux.HandleFunc("GET /v1/events", h.handleEvents)
 	h.mux.HandleFunc("GET /v1/activity", h.handleActivity)
 	h.mux.HandleFunc("GET /v1/caveats", h.handleCaveats)
@@ -293,7 +294,9 @@ func (h *Handler) advertisedCapabilities() []string {
 	if h.capabilities != nil {
 		return h.capabilities
 	}
-	return []string{"events"}
+	// Baseline: the SSE event stream and the full-node /v1/subgraph
+	// endpoint are always mounted by registerRoutes.
+	return []string{"events", "subgraph"}
 }
 
 // SetReadOnly records the server's self-advertised write posture, echoed
