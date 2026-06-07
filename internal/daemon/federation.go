@@ -190,6 +190,12 @@ func (f *Federator) fanOut(ctx context.Context, tool string, body []byte, remote
 		meta.RemotesFailed = append(meta.RemotesFailed, RemoteFailure{Slug: slug, Reason: reason})
 		meta.Degraded = true
 		mu.Unlock()
+		// Name the failing remote in the logs, not only the JSON block,
+		// so a degraded fan-out is visible to operators.
+		f.logger.Warn("federation: remote degraded",
+			zap.String("tool", tool),
+			zap.String("target_slug", slug),
+			zap.String("reason", reason))
 	}
 
 	for _, rem := range remotes {
@@ -197,6 +203,12 @@ func (f *Federator) fanOut(ctx context.Context, tool string, body []byte, remote
 		mu.Lock()
 		meta.RemotesQueried = append(meta.RemotesQueried, rem.Slug)
 		mu.Unlock()
+		// Audit every remote-routed fan-out call (cross-daemon access
+		// record), mirroring the single-remote proxy-routing audit line.
+		f.logger.Info("federation: remote-routed call",
+			zap.String("tool", tool),
+			zap.String("target_slug", rem.Slug),
+			zap.String("via", "fan-out"))
 
 		if f.breaker.isOpen(rem.Slug) {
 			fail(rem.Slug, "circuit_open")
