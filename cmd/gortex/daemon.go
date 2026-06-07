@@ -107,7 +107,7 @@ func init() {
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
 		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
-		"directory where the on-disk backend persists its store. Required when --backend != memory. Default: ~/.gortex/store/<backend>.store")
+		"path to the on-disk backend's store file (its parent directory is created if absent). Defaults to ~/.gortex/store/store.sqlite; ignored when --backend is memory")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
 		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
