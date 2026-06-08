@@ -714,6 +714,36 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 	return OriginTextMatched
 }
 
+// EdgeTierScore maps an edge's Origin provenance tier to a 0..1 confidence
+// weight, falling back to the edge kind when Origin is unstamped. It is the one
+// shared provenance→confidence mapping consumed by the dataflow and callpath
+// path-confidence rankers, so a path's confidence means the same thing across
+// flow_between, taint_paths and trace_path.
+func EdgeTierScore(origin string, kind EdgeKind) float64 {
+	switch origin {
+	case OriginLSPResolved:
+		return 1
+	case OriginLSPDispatch:
+		return 0.95
+	case OriginASTResolved:
+		return 0.9
+	case OriginASTInferred:
+		return 0.7
+	case OriginTextMatched:
+		return 0.4
+	}
+	// Unstamped: fall back to the kind tier. value_flow is intra-procedural
+	// and cheap to ground; arg_of / returns_to are cross-call and start lower
+	// until the resolver lifts them.
+	switch kind {
+	case EdgeValueFlow:
+		return 0.85
+	case EdgeArgOf, EdgeReturnsTo:
+		return 0.7
+	}
+	return 0.5
+}
+
 // Provenance-attenuation weights for graph centrality (HITS /
 // PageRank) and the rerank provenance signal. Code intelligence
 // enriched by LSP providers (gopls, clangd, tsserver) materialises a
