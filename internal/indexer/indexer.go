@@ -4227,6 +4227,12 @@ func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map
 		&contracts.WebSocketExtractor{},
 		&contracts.EnvVarExtractor{},
 	}
+	// Config-driven event bus: only registered when the user declared
+	// boundaries (index.event_bus / CODEGRAPH_EVENT_CONFIG), so the default
+	// extractor set is unchanged.
+	if b := idx.eventBusBoundaries(); len(b) > 0 {
+		extractors = append(extractors, &contracts.EventBusExtractor{Boundaries: b})
+	}
 	byLang := make(map[string][]contracts.Extractor)
 	for _, ex := range extractors {
 		for _, lang := range ex.SupportedLanguages() {

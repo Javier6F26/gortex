@@ -572,6 +572,49 @@ type IndexConfig struct {
 	// by default. Configured under `index.fallback_chunkers` in
 	// .gortex.yaml.
 	FallbackChunkers []FallbackChunkerSpec `mapstructure:"fallback_chunkers" yaml:"fallback_chunkers,omitempty"`
+
+	// EventBus declares producer/consumer boundaries for a bespoke event
+	// bus / SSE flow purely in config — no code change. Each spec matches
+	// call sites / decorators / interface bases and Gortex synthesizes real
+	// traversable provider↔consumer contract pairs (with dispatch guards)
+	// for the bus, so find_usages / trace_path / analyze pubsub all work on
+	// it. Empty by default. Configured under `index.event_bus` in
+	// .gortex.yaml; the CODEGRAPH_EVENT_CONFIG env var (a JSON list)
+	// overrides it for drop-in compatibility with pygraph/tsgraph.
+	EventBus []EventBusBoundarySpec `mapstructure:"event_bus" yaml:"event_bus,omitempty"`
+}
+
+// EventBusBoundarySpec declares one producer or consumer boundary of a
+// user-defined event bus / SSE flow. The schema is language-neutral and
+// drop-in compatible with pygraph/tsgraph's CODEGRAPH_EVENT_CONFIG entries.
+type EventBusBoundarySpec struct {
+	// Name groups producers and consumers of the same logical bus. A
+	// producer and consumer with the same Name + topic pair into an edge.
+	Name string `mapstructure:"name" yaml:"name"`
+	// Type is "producer" or "consumer".
+	Type string `mapstructure:"type" yaml:"type"`
+	// Callee is a dotted call suffix matched against producer/consumer call
+	// sites (e.g. "bus.publish", "producer.send"). Matched as a suffix so
+	// "self.producer.send(" matches "producer.send".
+	Callee string `mapstructure:"callee" yaml:"callee,omitempty"`
+	// CalleePattern is a looser substring match on the callee for SSE / hook
+	// forms (e.g. "EventSource", "useEventStream"). Alias: HookPattern.
+	CalleePattern string `mapstructure:"callee_pattern" yaml:"callee_pattern,omitempty"`
+	// HookPattern is an alias for CalleePattern (tsgraph compatibility).
+	HookPattern string `mapstructure:"hook_pattern" yaml:"hook_pattern,omitempty"`
+	// Decorator names a decorator that marks the decorated function as a
+	// consumer (e.g. "kafka_consumer"); the topic is read from its args.
+	Decorator string `mapstructure:"decorator" yaml:"decorator,omitempty"`
+	// Interface names a class base; every method of a class extending it is
+	// a consumer (paired on the bus wildcard topic).
+	Interface string `mapstructure:"interface" yaml:"interface,omitempty"`
+	// TopicArg names the argument carrying the topic / url that keys the
+	// producer↔consumer join: a positional index ("0") or a kwarg name
+	// ("topic"). Defaults to "topic".
+	TopicArg string `mapstructure:"topic_arg" yaml:"topic_arg,omitempty"`
+	// Guards, when true, extracts the consumer's first if/elif dispatch
+	// chain (field==value rules) onto the contract for routing queries.
+	Guards bool `mapstructure:"guards" yaml:"guards,omitempty"`
 }
 
 // GrammarSpec declares a user-supplied tree-sitter grammar to load at
