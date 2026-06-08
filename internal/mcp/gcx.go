@@ -1677,6 +1677,65 @@ func encodeChangeImpact(result map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// encodeAPIImpact emits the fused route report as three GCX sections:
+// api_impact.routes (one row per route), api_impact.consumers and
+// api_impact.mismatches (one row each, carrying the route id so they regroup).
+func encodeAPIImpact(reports []apiImpactReport) ([]byte, error) {
+	var buf bytes.Buffer
+	routeEnc := newGCX(&buf, "api_impact.routes",
+		[]string{"route", "method", "path", "handler", "repo", "response_success", "response_error", "middleware", "risk", "direct_consumers", "affected_callers", "affected_flows", "test_files", "warning", "contract_risk_upgrade"},
+		"count", fmt.Sprintf("%d", len(reports)),
+	)
+	for _, r := range reports {
+		mw := strings.Join(r.Middleware, ",")
+		if mw == "" {
+			mw = r.MiddlewareDetection
+		}
+		if err := routeEnc.WriteRow(
+			r.Route, r.Method, r.Path, r.Handler, r.Repo,
+			strings.Join(r.ResponseShape.Success, ","),
+			strings.Join(r.ResponseShape.Error, ","),
+			mw,
+			r.ImpactSummary.RiskLevel,
+			r.ImpactSummary.DirectConsumers,
+			r.ImpactSummary.AffectedCallers,
+			r.ImpactSummary.AffectedFlows,
+			strings.Join(r.ImpactSummary.TestFilesToRun, ","),
+			r.ImpactSummary.Warning,
+			r.ImpactSummary.ContractRiskUpgrade,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := routeEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	consEnc := newGCX(&buf, "api_impact.consumers",
+		[]string{"route", "name", "file", "repo", "accesses", "attribution_note"})
+	for _, r := range reports {
+		for _, c := range r.Consumers {
+			if err := consEnc.WriteRow(r.Route, c.Name, c.File, c.Repo, strings.Join(c.Accesses, ","), c.AttributionNote); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := consEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	mmEnc := newGCX(&buf, "api_impact.mismatches",
+		[]string{"route", "consumer", "field", "reason", "confidence"})
+	for _, r := range reports {
+		for _, m := range r.Mismatches {
+			if err := mmEnc.WriteRow(r.Route, m.Consumer, m.Field, m.Reason, m.Confidence); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return buf.Bytes(), mmEnc.Close()
+}
+
 // encodeCheckGuards emits one row per guard violation. The empty case
 // (no rules / no violations) still produces a valid envelope so agents
 // can rely on the GCX1 header to differentiate from an error payload —

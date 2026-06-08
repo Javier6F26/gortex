@@ -396,6 +396,7 @@ The ` + "`analyze`" + ` MCP tool is a unified dispatcher. Supported ` + "`kind`"
 |---------------------------------------|------------------------------------------|
 | Manually tracking API routes/services | ` + "`contracts`" + ` (default ` + "`action: \"list\"`" + `) — lists HTTP, gRPC, GraphQL, topic, WebSocket, env, OpenAPI; filter by ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 | Guessing if APIs match across repos   | ` + "`contracts`" + ` with ` + "`action: \"check\"`" + ` — detects orphan providers/consumers and mismatches; scope with ` + "`repo`" + ` / ` + "`project`" + ` / ` + "`ref`" + ` |
+| Assessing what breaks before editing a route handler | ` + "`api_impact(route|file)`" + ` — one fused report: response shape, consumers + accessed fields, response-shape mismatches, middleware, execution flows, blast radius (callers + tests to run), fused risk |
 
 ### CPG-lite Dataflow
 
