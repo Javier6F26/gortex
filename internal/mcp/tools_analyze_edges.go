@@ -343,6 +343,76 @@ func (s *Server) handleAnalyzeFieldWriters(ctx context.Context, req mcp.CallTool
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
+// handleAnalyzeIndirectMutations lists fields mutated *indirectly* — via a
+// method call on the field (s.counter.Increment()) or a sibling call on the
+// receiver (s.helper()) — surfacing the `via` method for each. These are the
+// accesses_field edges tagged Meta["indirect"]=true synthesized by the
+// receiver-mutation fixpoint. With `id` it scopes to one field.
+func (s *Server) handleAnalyzeIndirectMutations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	idFilter := strings.TrimSpace(stringArg(args, "id"))
+	limit := 20
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	type mutator struct {
+		Function string `json:"function"`
+		Via      string `json:"via,omitempty"`
+		File     string `json:"file,omitempty"`
+		Line     int    `json:"line,omitempty"`
+	}
+	type fieldRow struct {
+		Field     string    `json:"field"`
+		Mutations int       `json:"mutations"`
+		Mutators  []mutator `json:"mutators,omitempty"`
+	}
+	byField := map[string]*fieldRow{}
+
+	for e := range edgesByKinds(s.graph, graph.EdgeAccessesField) {
+		if e.Meta == nil {
+			continue
+		}
+		if ind, _ := e.Meta["indirect"].(bool); !ind {
+			continue
+		}
+		if idFilter != "" && e.To != idFilter {
+			continue
+		}
+		via, _ := e.Meta["via"].(string)
+		row, ok := byField[e.To]
+		if !ok {
+			row = &fieldRow{Field: e.To}
+			byField[e.To] = row
+		}
+		row.Mutations++
+		row.Mutators = append(row.Mutators, mutator{Function: e.From, Via: via, File: e.FilePath, Line: e.Line})
+	}
+
+	rows := make([]*fieldRow, 0, len(byField))
+	for _, r := range byField {
+		sort.Slice(r.Mutators, func(i, j int) bool { return r.Mutators[i].Function < r.Mutators[j].Function })
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Mutations != rows[j].Mutations {
+			return rows[i].Mutations > rows[j].Mutations
+		}
+		return rows[i].Field < rows[j].Field
+	})
+	truncated := false
+	if idFilter == "" && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		"fields":    rows,
+		"total":     len(rows),
+		"truncated": truncated,
+	})
+}
+
 // ---------------------------------------------------------------------------
 // annotation_users — for an annotation node id (or list all when no
 // id), surface annotated symbols.

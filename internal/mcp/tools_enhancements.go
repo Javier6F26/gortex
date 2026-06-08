@@ -756,6 +756,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeGoroutineSpawns(ctx, req)
 	case "field_writers":
 		return s.handleAnalyzeFieldWriters(ctx, req)
+	case "indirect_mutations":
+		return s.handleAnalyzeIndirectMutations(ctx, req)
 	case "race_writes":
 		return s.handleAnalyzeRaceWrites(ctx, req)
 	case "unclosed_channels":
