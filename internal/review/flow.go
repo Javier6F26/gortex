@@ -1,0 +1,386 @@
+package review
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/zzet/gortex/internal/analysis"
+	"github.com/zzet/gortex/internal/astquery"
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/tokens"
+)
+
+// Options configures a hybrid review run. The deterministic rulepack matches are
+// an INPUT — the caller runs the review analyzer and hands the matches in — so
+// internal/review never imports the analyze/mcp layer. A nil graph, an empty
+// scope, or a disabled LLM are all tolerated: Run is total and degrades to the
+// deterministic findings.
+type Options struct {
+	// RepoRoot is the repository root the change is read from. May be empty for
+	// the pasted-diff (off-disk) path, in which case Diff must be set.
+	RepoRoot string
+	// Scope selects the git diff range: "staged", "all", "compare", or
+	// "unstaged" (default). Ignored when Diff is set.
+	Scope string
+	// BaseRef is the comparison base for Scope == "compare".
+	BaseRef string
+	// Diff, when non-empty, is raw unified-diff text reviewed off-disk instead
+	// of shelling out to git (the pasted-diff path and the test seam).
+	Diff string
+	// RulepackMatches are the pre-computed deterministic review-rule hits the
+	// caller produced (analyze review category). They are merged into the report
+	// as rulepack findings; the flow never re-runs the detectors.
+	RulepackMatches []astquery.Match
+	// Impact is the per-changed-symbol blast-radius analysis (symbol id →
+	// result), used to rank per-file risk. Optional.
+	Impact map[string]*analysis.ImpactResult
+	// Rules resolves the review rule governing each changed file. Optional; when
+	// nil the prompt carries no per-file rule grounding and rulepack findings
+	// fall back to the match's own severity.
+	Rules *RuleResolver
+	// TokenBudget bounds the review pack handed to the LLM and the relocation /
+	// compaction loop. <= 0 means no budget.
+	TokenBudget int
+	// UseLLM gates the MAIN/RELOCATE LLM phases. When false (or gen is nil) the
+	// report carries only the deterministic rulepack findings.
+	UseLLM bool
+	// MaxLLMTokens caps the freeform generation request. Defaults to a sane
+	// value when <= 0.
+	MaxLLMTokens int
+}
+
+const defaultMaxLLMTokens = 2048
+
+// Run executes the hybrid PLAN → MAIN → RELOCATE → COMPRESS review flow and
+// returns a ReviewReport. It is total: a nil/disabled/garbage LLM yields a report
+// with just the deterministic rule findings and a verdict, never an error. Only a
+// failure to assemble the deterministic substrate (e.g. an unreadable git diff on
+// the on-disk path) surfaces as an error.
+func Run(ctx context.Context, g graph.Store, gen LLMGen, opts Options) (*ReviewReport, error) {
+	plan, err := planReview(g, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	// MAIN + RELOCATE: ask the LLM for findings and ground each to an exact line.
+	// Disabled or failing — the slice is simply empty.
+	llmFindings, dropped, truncated := mainAndRelocate(ctx, g, gen, opts, plan)
+
+	// COMPRESS: merge the deterministic + LLM findings, dedup, rank per-file
+	// risk, and resolve the worst-of verdict.
+	report := compress(opts, plan, llmFindings, dropped, truncated)
+	return report, nil
+}
+
+// reviewPlan is the deterministic substrate the PLAN phase assembles: the change
+// view, the diff→symbol map, the tiered review pack, the per-file resolved rules,
+// and the deterministic rule findings carried in by the caller.
+type reviewPlan struct {
+	view        *ChangeView
+	diff        *analysis.DiffResult
+	pack        *ReviewPack
+	rules       map[string]config.ReviewRule
+	ruleFinds   []Finding
+	changedFile map[string]bool
+}
+
+// planReview is the PLAN phase: it decides what to review by assembling the
+// deterministic grounding once — the change view (from pasted diff or git), the
+// diff→symbol map, the tiered review pack, the per-file rule resolution, and the
+// deterministic rule findings translated from the caller's matches.
+func planReview(g graph.Store, opts Options) (*reviewPlan, error) {
+	view, diff, err := buildSubstrate(g, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	changedFiles := map[string]bool{}
+	if diff != nil {
+		for _, f := range diff.ChangedFiles {
+			changedFiles[cleanPath(f)] = true
+		}
+		for _, cs := range diff.ChangedSymbols {
+			changedFiles[cleanPath(cs.FilePath)] = true
+		}
+	}
+	if view != nil {
+		for f := range view.ByFile {
+			changedFiles[cleanPath(f)] = true
+		}
+	}
+
+	rules := resolveRules(opts.Rules, changedFiles)
+	ruleFinds := ruleFindings(opts.RulepackMatches, opts.Rules)
+
+	// The pack is built from a flat impact over the changed symbols so the
+	// caller's per-symbol impact map (used for risk ranking) need not be a
+	// single ImpactResult. A nil pack still renders an empty section.
+	pack := BuildReviewPack(g, view, diff, mergedImpact(opts.Impact), opts.TokenBudget)
+
+	return &reviewPlan{
+		view:        view,
+		diff:        diff,
+		pack:        pack,
+		rules:       rules,
+		ruleFinds:   ruleFinds,
+		changedFile: changedFiles,
+	}, nil
+}
+
+// buildSubstrate produces the change view and diff→symbol map for the run,
+// preferring the pasted-diff text when present (off-disk / test path) and
+// otherwise shelling out via the landed git substrate.
+func buildSubstrate(g graph.Store, opts Options) (*ChangeView, *analysis.DiffResult, error) {
+	if strings.TrimSpace(opts.Diff) != "" {
+		view := ChangeViewFromDiff(opts.RepoRoot, opts.Diff)
+		// A pasted diff has no graph-backed symbol map; synthesize a minimal
+		// DiffResult from the changed file set so the pack and risk ranking have
+		// something to work with.
+		return view, diffFromView(view), nil
+	}
+
+	view, err := BuildChangeView(g, opts.RepoRoot, opts.Scope, opts.BaseRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	diff, err := analysis.MapGitDiff(g, opts.RepoRoot, opts.Scope, opts.BaseRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	return view, diff, nil
+}
+
+// diffFromView synthesizes a file-only DiffResult from a pasted-diff ChangeView
+// so the pack/risk machinery has a changed-file set even without the graph.
+func diffFromView(view *ChangeView) *analysis.DiffResult {
+	if view == nil {
+		return nil
+	}
+	files := make([]string, 0, len(view.ByFile))
+	for f := range view.ByFile {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return &analysis.DiffResult{ChangedFiles: files}
+}
+
+// resolveRules grounds each changed file to its governing review rule via the
+// resolver. Files with no resolver, or that resolve to nothing, are omitted.
+func resolveRules(resolver *RuleResolver, changedFiles map[string]bool) map[string]config.ReviewRule {
+	out := map[string]config.ReviewRule{}
+	if resolver == nil {
+		return out
+	}
+	for file := range changedFiles {
+		if rule, ok := resolver.RuleFor(file); ok {
+			out[file] = rule
+		}
+	}
+	return out
+}
+
+// ruleFindings translates the caller's deterministic rule matches into findings,
+// applying the per-file rule's severity floor and rule label.
+func ruleFindings(matches []astquery.Match, resolver *RuleResolver) []Finding {
+	out := make([]Finding, 0, len(matches))
+	for _, m := range matches {
+		rule := config.ReviewRule{}
+		if resolver != nil {
+			if r, ok := resolver.RuleFor(cleanPath(m.File)); ok {
+				rule = r
+			}
+		}
+		out = append(out, ruleFindingFromMatch(m, rule))
+	}
+	return out
+}
+
+// mainAndRelocate is the MAIN + RELOCATE phases. MAIN builds the rule-grounded
+// prompt and asks the LLM for free-text findings; RELOCATE grounds each to an
+// exact line via the deterministic tiers plus the LLM fallback, dropping any that
+// stay unresolved. Returns the anchored findings, the dropped count, and whether
+// a token bound trimmed candidates.
+func mainAndRelocate(ctx context.Context, g graph.Store, gen LLMGen, opts Options, plan *reviewPlan) (findings []Finding, dropped int, truncated bool) {
+	if !opts.UseLLM || gen == nil {
+		return nil, 0, false
+	}
+
+	prompt := buildReviewPrompt(promptInput{
+		Rules:         plan.rules,
+		Pack:          plan.pack,
+		Deterministic: plan.ruleFinds,
+	})
+
+	maxTok := opts.MaxLLMTokens
+	if maxTok <= 0 {
+		maxTok = defaultMaxLLMTokens
+	}
+	out, err := gen(ctx, prompt, maxTok)
+	if err != nil {
+		// A failing LLM is not an error for the flow — degrade to deterministic.
+		return nil, 0, false
+	}
+
+	cands := parseCandidates(out)
+	cands, truncated = boundCandidates(cands, opts.TokenBudget)
+
+	for _, c := range cands {
+		rule := ruleForFile(opts.Rules, c.File)
+		f := candidateToFinding(c, rule)
+		anchor := LocateFinding(ctx, gen, plan.view, &f, c.Snippet)
+		if !anchor.Located() {
+			dropped++
+			continue
+		}
+		findings = append(findings, f)
+	}
+	return findings, dropped, truncated
+}
+
+// compress is the COMPRESS phase: it merges the deterministic rule findings with
+// the relocated LLM findings, deduplicates overlapping findings (same file+line+
+// category), ranks per-file risk, computes the worst-of verdict, and assembles
+// the report with its statistics. The dedup + budget bound is the seam a later
+// rolling-summary compaction hangs off; it is a real bound today, not a stub.
+func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int, truncated bool) *ReviewReport {
+	merged := make([]Finding, 0, len(plan.ruleFinds)+len(llmFindings))
+	merged = append(merged, plan.ruleFinds...)
+	merged = append(merged, llmFindings...)
+
+	merged = dedupeFindings(merged)
+	sortFindings(merged)
+
+	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged)
+	verdict := computeVerdict(merged, fileRisk)
+
+	bySeverity := map[string]int{}
+	for _, f := range merged {
+		bySeverity[string(f.Severity)]++
+	}
+
+	return &ReviewReport{
+		Verdict:  verdict,
+		Findings: merged,
+		FileRisk: fileRisk,
+		Summary:  summarize(verdict, merged, fileRisk),
+		Stats: ReviewStats{
+			Rulepack:     len(plan.ruleFinds),
+			LLM:          len(llmFindings),
+			Dropped:      dropped,
+			Total:        len(merged),
+			BySeverity:   bySeverity,
+			Truncated:    truncated || (plan.pack != nil && plan.pack.Truncated),
+			LLMRequested: opts.UseLLM,
+		},
+	}
+}
+
+// dedupeFindings drops later findings that overlap an earlier one on the same
+// (file, line, category). The deterministic rule findings are appended first, so
+// a duplicate LLM finding is the one dropped — the precise rulepack location wins.
+func dedupeFindings(findings []Finding) []Finding {
+	seen := map[string]bool{}
+	out := findings[:0:0]
+	for _, f := range findings {
+		key := f.File + "|" + itoaInt(f.Line) + "|" + strings.ToLower(strings.TrimSpace(f.Category))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, f)
+	}
+	return out
+}
+
+// sortFindings orders findings worst-severity-first, then by file and line, for a
+// deterministic report.
+func sortFindings(findings []Finding) {
+	sort.SliceStable(findings, func(i, j int) bool {
+		si, sj := severityRank(findings[i].Severity), severityRank(findings[j].Severity)
+		if si != sj {
+			return si > sj
+		}
+		if findings[i].File != findings[j].File {
+			return findings[i].File < findings[j].File
+		}
+		return findings[i].Line < findings[j].Line
+	})
+}
+
+// summarize produces the one-line report headline.
+func summarize(verdict Verdict, findings []Finding, fileRisk []FileRisk) string {
+	if len(findings) == 0 {
+		return fmt.Sprintf("%s: no findings across %d changed file(s)", verdict, len(fileRisk))
+	}
+	return fmt.Sprintf("%s: %d finding(s) across %d changed file(s)", verdict, len(findings), len(fileRisk))
+}
+
+// boundCandidates trims LLM candidates so their combined snippet+message token
+// cost stays within the token budget. This is the COMPRESS-phase bound that keeps
+// the relocation loop within budget; it returns the kept candidates and whether
+// any were trimmed. A budget <= 0 means no bound.
+func boundCandidates(cands []reviewCandidate, tokenBudget int) ([]reviewCandidate, bool) {
+	if tokenBudget <= 0 || len(cands) == 0 {
+		return cands, false
+	}
+	kept := cands[:0:0]
+	used := 0
+	truncated := false
+	for _, c := range cands {
+		cost := tokens.Count(c.Snippet) + tokens.Count(c.Message)
+		if used+cost > tokenBudget && len(kept) > 0 {
+			truncated = true
+			continue
+		}
+		kept = append(kept, c)
+		used += cost
+	}
+	return kept, truncated
+}
+
+// ruleForFile resolves the review rule for a file, returning a zero rule when no
+// resolver or no match.
+func ruleForFile(resolver *RuleResolver, file string) config.ReviewRule {
+	if resolver == nil {
+		return config.ReviewRule{}
+	}
+	if r, ok := resolver.RuleFor(cleanPath(file)); ok {
+		return r
+	}
+	return config.ReviewRule{}
+}
+
+// mergedImpact folds the caller's per-symbol impact map into a single
+// ImpactResult for the review pack's caller/outline tiers. The per-symbol map is
+// retained separately for per-file risk ranking. A nil/empty map yields nil so
+// the pack carries no caller tier.
+func mergedImpact(impact map[string]*analysis.ImpactResult) *analysis.ImpactResult {
+	if len(impact) == 0 {
+		return nil
+	}
+	out := &analysis.ImpactResult{ByDepth: map[int][]analysis.ImpactEntry{}}
+	seen := map[string]bool{}
+	for _, ir := range impact {
+		if ir == nil {
+			continue
+		}
+		for depth, entries := range ir.ByDepth {
+			for _, e := range entries {
+				key := fmt.Sprintf("%d|%s", depth, e.ID)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				out.ByDepth[depth] = append(out.ByDepth[depth], e)
+			}
+		}
+	}
+	return out
+}
+
+func itoaInt(n int) string {
+	return fmt.Sprintf("%d", n)
+}
