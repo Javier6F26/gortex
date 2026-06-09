@@ -1872,3 +1872,59 @@ func indexNodes(nodes []*graph.Node) map[string]*graph.Node {
 	}
 	return m
 }
+
+// encodePRRisk emits the pr_risk report as two GCX sections:
+//   - pr_risk.summary (one row): the composite score, risk label, supporting
+//     counts (total_affected / uncovered / community_span / changed_symbols)
+//     and the joined security hits.
+//   - pr_risk.priorities (one row per axis): the ordered review_priorities —
+//     axis, 0-100 score, and the human-readable reason.
+//
+// The map shape is whatever prRiskPayload built, so JSON and GCX stay a single
+// source of truth for field names.
+func encodePRRisk(result map[string]any) ([]byte, error) {
+	var buf bytes.Buffer
+
+	score, _ := result["score"].(float64)
+	risk, _ := result["risk"].(string)
+	totalAffected, _ := result["total_affected"].(int)
+	uncovered, _ := result["uncovered_symbols"].(int)
+	communitySpan, _ := result["community_span"].(int)
+	changedSymbols, _ := result["changed_symbols"].(int)
+	hits, _ := result["security_hits"].([]string)
+
+	sumEnc := newGCX(&buf, "pr_risk.summary",
+		[]string{"score", "risk", "total_affected", "uncovered_symbols", "community_span", "changed_symbols", "security_hits"},
+	)
+	if err := sumEnc.WriteRow(
+		roundFloat(score),
+		risk,
+		totalAffected,
+		uncovered,
+		communitySpan,
+		changedSymbols,
+		strings.Join(hits, ","),
+	); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	prEnc := newGCX(&buf, "pr_risk.priorities", []string{"axis", "score", "reason"})
+	if priorities, ok := result["review_priorities"].([]map[string]any); ok {
+		for _, p := range priorities {
+			axis, _ := p["axis"].(string)
+			pscore, _ := p["score"].(float64)
+			reason, _ := p["reason"].(string)
+			if err := prEnc.WriteRow(axis, roundFloat(pscore), reason); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := prEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}

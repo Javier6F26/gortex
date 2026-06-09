@@ -1001,6 +1001,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerGraphQueryTool()
 	s.registerNavTool()
 	s.registerFindDeclarationTool()
+	s.registerPRRiskTool()
 	s.registerResources()
 	s.registerPrompts()
 
