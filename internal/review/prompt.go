@@ -24,6 +24,11 @@ type promptInput struct {
 	// deterministic rulepack. They are handed to the model as established facts
 	// so it complements rather than duplicates them.
 	Deterministic []Finding
+	// Deep, when true, grounds the prompt in the reference-only planner tool
+	// catalogue — the deep path tells the model which graph analyses already
+	// characterised the change so it can reason about them. The catalogue is
+	// reference-only context, never a callable tool surface.
+	Deep bool
 }
 
 // reviewCandidate is one finding the model is asked to emit, as parsed back out
@@ -47,6 +52,15 @@ func buildReviewPrompt(in promptInput) string {
 
 	b.WriteString("You are a precise code reviewer. Review the change below and report ")
 	b.WriteString("correctness, security, and idiomatic issues you are confident about.\n\n")
+
+	// Deep path: ground the model in the reference-only planner catalogue so it
+	// reasons about the graph analyses that already characterised the change.
+	if in.Deep {
+		if cat := renderPlannerCatalogue(); cat != "" {
+			b.WriteString(cat)
+			b.WriteByte('\n')
+		}
+	}
 
 	// Rule grounding: the convention that governs each changed file.
 	if len(in.Rules) > 0 {

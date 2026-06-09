@@ -144,6 +144,10 @@ type reviewPlan struct {
 	rules       map[string]config.ReviewRule
 	ruleFinds   []Finding
 	changedFile map[string]bool
+	// depth is the adaptive review depth this changeset classified into. It
+	// gates whether the LLM MAIN phase runs at all (quick skips it) and whether
+	// the prompt carries the reference-only planner catalogue (deep only).
+	depth Depth
 }
 
 // planReview is the PLAN phase: it decides what to review by assembling the
@@ -179,6 +183,11 @@ func planReview(g graph.Store, opts Options) (*reviewPlan, error) {
 	// single ImpactResult. A nil pack still renders an empty section.
 	pack := BuildReviewPack(g, view, diff, mergedImpact(opts.Impact), opts.TokenBudget)
 
+	// Classify the adaptive review depth from the change size. A zero-value
+	// ReviewConfig falls back to the built-in default thresholds, so a caller
+	// that configures none gets the default ladder.
+	depth := ClassifyDepth(ChangedLinesFromDiff(diff), ChangedFilesFromDiff(diff), opts.Config)
+
 	return &reviewPlan{
 		view:        view,
 		diff:        diff,
@@ -186,6 +195,7 @@ func planReview(g graph.Store, opts Options) (*reviewPlan, error) {
 		rules:       rules,
 		ruleFinds:   ruleFinds,
 		changedFile: changedFiles,
+		depth:       depth,
 	}, nil
 }
 
@@ -212,8 +222,11 @@ func buildSubstrate(g graph.Store, opts Options) (*ChangeView, *analysis.DiffRes
 	return view, diff, nil
 }
 
-// diffFromView synthesizes a file-only DiffResult from a pasted-diff ChangeView
-// so the pack/risk machinery has a changed-file set even without the graph.
+// diffFromView synthesizes a DiffResult from a pasted-diff ChangeView so the
+// pack/risk machinery has a changed-file set even without the graph, and so the
+// adaptive-depth classifier can size the change. The synthesized hunks span the
+// contiguous runs of added new-side lines per file — enough for the
+// changed-line count even though the graph-backed symbol map is absent.
 func diffFromView(view *ChangeView) *analysis.DiffResult {
 	if view == nil {
 		return nil
@@ -223,7 +236,43 @@ func diffFromView(view *ChangeView) *analysis.DiffResult {
 		files = append(files, f)
 	}
 	sort.Strings(files)
-	return &analysis.DiffResult{ChangedFiles: files}
+
+	var hunks []analysis.DiffHunk
+	for _, f := range files {
+		hunks = append(hunks, addedLineHunks(f, view.ByFile[f])...)
+	}
+	return &analysis.DiffResult{ChangedFiles: files, Hunks: hunks}
+}
+
+// addedLineHunks groups a file change's added new-side lines into contiguous
+// hunks (by new-side line number) so the synthesized DiffResult carries a
+// faithful changed-line span for the depth classifier.
+func addedLineHunks(file string, fc *FileChange) []analysis.DiffHunk {
+	if fc == nil {
+		return nil
+	}
+	added := make([]int, 0, len(fc.Lines))
+	for _, l := range fc.Lines {
+		if l.Added && l.NewLine > 0 {
+			added = append(added, l.NewLine)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	sort.Ints(added)
+	var hunks []analysis.DiffHunk
+	start, prev := added[0], added[0]
+	for _, n := range added[1:] {
+		if n == prev+1 {
+			prev = n
+			continue
+		}
+		hunks = append(hunks, analysis.DiffHunk{FilePath: file, StartLine: start, EndLine: prev})
+		start, prev = n, n
+	}
+	hunks = append(hunks, analysis.DiffHunk{FilePath: file, StartLine: start, EndLine: prev})
+	return hunks
 }
 
 // resolveRules grounds each changed file to its governing review rule via the
@@ -266,11 +315,21 @@ func mainAndRelocate(ctx context.Context, g graph.Store, gen LLMGen, opts Option
 	if !opts.UseLLM || gen == nil {
 		return nil, 0, false
 	}
+	// Adaptive depth gating: when the caller opted into depth thresholds, a
+	// quick changeset skips the LLM MAIN phase entirely — the deterministic
+	// rules alone review it, no model call. Standard and deep both run the LLM
+	// pass; only deep grounds the prompt in the reference-only planner
+	// catalogue. With no thresholds configured the gate is inert and the flow
+	// runs its pre-adaptive single pass.
+	if depthConfigured(opts.Config) && plan.depth == DepthQuick {
+		return nil, 0, false
+	}
 
 	prompt := buildReviewPrompt(promptInput{
 		Rules:         plan.rules,
 		Pack:          plan.pack,
 		Deterministic: plan.ruleFinds,
+		Deep:          plan.depth == DepthDeep,
 	})
 
 	maxTok := opts.MaxLLMTokens
@@ -333,6 +392,7 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 		Findings: merged,
 		FileRisk: fileRisk,
 		Summary:  summarize(verdict, merged, fileRisk),
+		Depth:    plan.depth.String(),
 		Stats: ReviewStats{
 			Rulepack:     len(plan.ruleFinds),
 			LLM:          len(llmFindings),
@@ -342,6 +402,7 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 			Truncated:    truncated || (plan.pack != nil && plan.pack.Truncated),
 			LLMRequested: opts.UseLLM,
 			Gate:         gateStats,
+			Depth:        plan.depth.String(),
 		},
 	}
 }

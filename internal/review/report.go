@@ -16,6 +16,9 @@ type ReviewReport struct {
 	FileRisk []FileRisk  `json:"file_risk"`
 	Summary  string      `json:"summary"`
 	Stats    ReviewStats `json:"stats"`
+	// Depth is the adaptive review depth this changeset was classified into
+	// (quick | standard | deep). It gates whether the LLM phase ran.
+	Depth string `json:"depth"`
 	// Cost is the per-review token + USD accounting. Set only when the
 	// review ran through a usage-aware LLM seam (RunWithUsage); nil for
 	// the deterministic-only or legacy Run path.
@@ -42,6 +45,7 @@ type ReviewStats struct {
 	Truncated    bool           `json:"truncated"`     // a budget bound dropped some candidates
 	LLMRequested bool           `json:"llm_requested"` // the LLM phase was asked to run
 	Gate         GateStats      `json:"gate"`          // confidence / severity / category / cap suppression summary
+	Depth        string         `json:"depth"`         // adaptive review depth: quick | standard | deep
 }
 
 // computeVerdict is the worst-of verdict over the report's findings and per-file
