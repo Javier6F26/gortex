@@ -57,6 +57,11 @@ type Agent struct {
 	tools    map[string]Tool
 	names    []string       // sorted, stable iteration order
 	specs    []llm.ToolSpec // sorted by name; handed to the provider
+
+	// lastUsage is the summed token usage of the most recent Run — the
+	// per-step provider usage accumulated across the tool-calling loop.
+	// Zero for a provider that does not report usage. Read via LastUsage.
+	lastUsage llm.TokenUsage
 }
 
 // New builds an Agent over a provider and a tool set. The synthetic
@@ -108,6 +113,7 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 		{Role: llm.RoleUser, Content: userQuestion},
 	}
 	seen := map[string]struct{}{}
+	a.lastUsage = llm.TokenUsage{}
 
 	for step := range maxSteps {
 		resp, gerr := a.provider.Complete(ctx, llm.CompletionRequest{
@@ -119,6 +125,7 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 		if gerr != nil {
 			return "", transcript, fmt.Errorf("step %d generate: %w", step, gerr)
 		}
+		a.lastUsage.Add(resp.Usage)
 
 		raw := strings.TrimSpace(resp.Text)
 		call, perr := parseToolCall(raw)
@@ -171,6 +178,16 @@ func (a *Agent) Run(ctx context.Context, systemExtras, userQuestion string, maxS
 		)
 	}
 	return "", transcript, fmt.Errorf("agent: exceeded %d steps without final_answer", maxSteps)
+}
+
+// LastUsage returns the token usage summed across the steps of the most
+// recent Run. Zero before the first Run, or when the provider does not
+// report usage (subprocess / not-yet-decoded HTTP providers).
+func (a *Agent) LastUsage() llm.TokenUsage {
+	if a == nil {
+		return llm.TokenUsage{}
+	}
+	return a.lastUsage
 }
 
 // systemPrompt assembles the agent's system message: the tool-call

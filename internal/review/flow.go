@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/astquery"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/tokens"
 )
 
@@ -72,6 +74,49 @@ func Run(ctx context.Context, g graph.Store, gen LLMGen, opts Options) (*ReviewR
 	// COMPRESS: merge the deterministic + LLM findings, dedup, rank per-file
 	// risk, and resolve the worst-of verdict.
 	report := compress(opts, plan, llmFindings, dropped, truncated)
+	return report, nil
+}
+
+// LLMGenWithUsage is the usage-aware variant of the LLMGen seam: it
+// returns the provider's token usage for the call alongside the text.
+// A flow driven through RunWithUsage threads this so the report can
+// carry a real per-review CostBreakdown. Like LLMGen it is a plain func
+// so internal/review stays free of an llm/svc import; a nil seam means
+// the LLM tier is disabled.
+type LLMGenWithUsage func(ctx context.Context, prompt string, maxTokens int) (string, llm.TokenUsage, error)
+
+// RunWithUsage executes the same hybrid review flow as Run but threads a
+// usage-aware LLM seam so the returned report carries a CostBreakdown:
+// the summed token usage of every LLM call, the USD estimate from price,
+// the elapsed LLM time, and per-finding GenTokens (output tokens
+// distributed by finding-body weight). A nil seam — or a provider that
+// reports no usage — yields a zero, Estimated:false cost block rather
+// than omitting it. The plain Run path is unchanged.
+func RunWithUsage(ctx context.Context, g graph.Store, gen LLMGenWithUsage, price llm.ProviderPricing, opts Options) (*ReviewReport, error) {
+	var total llm.TokenUsage
+	var elapsed time.Duration
+	// Adapt the usage-aware seam down to the plain LLMGen the flow uses,
+	// accumulating usage + elapsed time on every call so the cost block
+	// reflects the whole review (MAIN + every RELOCATE fallback call).
+	var plain LLMGen
+	if gen != nil {
+		plain = func(ctx context.Context, prompt string, maxTokens int) (string, error) {
+			t0 := time.Now()
+			text, usage, err := gen(ctx, prompt, maxTokens)
+			elapsed += time.Since(t0)
+			total.Add(usage)
+			return text, err
+		}
+	}
+
+	report, err := Run(ctx, g, plain, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	AttributeFindingTokens(report.Findings, total)
+	cost := CostFromUsage(total, price, elapsed.Milliseconds())
+	report.Cost = &cost
 	return report, nil
 }
 

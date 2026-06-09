@@ -20,6 +20,7 @@ import (
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/agent"
 	"github.com/zzet/gortex/internal/llm/provider"
+	"github.com/zzet/gortex/internal/savings"
 )
 
 // errServiceUnavailable is returned by operational methods when no
@@ -275,6 +276,12 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 	answer.ElapsedMs = time.Since(t0).Milliseconds()
 	answer.Answer = answerText
 
+	// Token accounting: the agent summed per-step provider usage over the
+	// loop. Stamp it on the answer and price it against the answer's
+	// model. Zero/Estimated:false for providers that don't report usage.
+	answer.Usage = ag.LastUsage()
+	answer.Cost = estimateRunCost(answer.Usage, answer.Model)
+
 	steps := 0
 	for _, st := range transcript {
 		if st.Kind == "call" || st.Kind == "final" {
@@ -295,6 +302,19 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 		answer.Error = runErr.Error()
 	}
 	return answer, runErr
+}
+
+// estimateRunCost prices a run's token usage against the savings pricing
+// table for the given model. Input and output tokens are both billed at
+// the model's listed input rate (the table carries a single per-model
+// rate); an unknown model or zero usage yields zero. The cost is an
+// estimate — the table is a list-price approximation, not a billed total.
+func estimateRunCost(u llm.TokenUsage, model string) float64 {
+	if model == "" || u.IsZero() {
+		return 0
+	}
+	billable := int64(u.InputTokens + u.OutputTokens)
+	return savings.CostAvoided(billable, model)
 }
 
 // promptSimple — tight system-prompt extras for single-hop /

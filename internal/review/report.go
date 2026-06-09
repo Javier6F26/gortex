@@ -16,6 +16,10 @@ type ReviewReport struct {
 	FileRisk []FileRisk  `json:"file_risk"`
 	Summary  string      `json:"summary"`
 	Stats    ReviewStats `json:"stats"`
+	// Cost is the per-review token + USD accounting. Set only when the
+	// review ran through a usage-aware LLM seam (RunWithUsage); nil for
+	// the deterministic-only or legacy Run path.
+	Cost *CostBreakdown `json:"cost,omitempty"`
 }
 
 // FileRisk ranks one changed file by its impact-derived risk tier and the number
