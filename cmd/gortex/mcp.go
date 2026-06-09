@@ -12,6 +12,7 @@ import (
 
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/savings"
@@ -232,6 +233,12 @@ func runMCP(cmd *cobra.Command, args []string) error {
 		} else {
 			fmt.Fprintf(os.Stderr, "[gortex] server: id persistence disabled: %v\n", err)
 		}
+		// Conversation-log inspector: enable the /v1/conversations* routes
+		// (opt-in sink) with the route-scoped DNS-rebind guard cooperating
+		// with this server's auth token.
+		serverHandler.SetConversationDir(conversationlog.DirFromEnv())
+		authTokenForGuard := authToken
+		serverHandler.SetConversationGuard(nil, func() string { return authTokenForGuard })
 		handler := server.WithAuth(serverHandler, authToken)
 		corsOpts := server.CORSOptions{AllowOrigins: []string{mcpCORSOrigin}}
 		handler = server.WithCORS(handler, corsOpts)

@@ -19,6 +19,7 @@ import (
 
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/agent"
+	"github.com/zzet/gortex/internal/llm/conversationlog"
 	"github.com/zzet/gortex/internal/llm/provider"
 	"github.com/zzet/gortex/internal/savings"
 )
@@ -60,6 +61,11 @@ type Service struct {
 	// routedMu; closed by Close.
 	routedMu        sync.Mutex
 	routedProviders map[string]llm.Provider
+
+	// convLog records the exact request/response of each completion as
+	// JSONL when a conversation-log directory is configured. Opt-in
+	// (records raw LLM I/O): a nil/disabled logger is a no-op.
+	convLog *conversationlog.Logger
 }
 
 // NewService constructs the service and its provider. Provider
@@ -77,6 +83,7 @@ func NewService(cfg llm.Config, backend llm.Backend) *Service {
 		rerankCache:     newAssistCache(256),
 		verifyCache:     newAssistCache(256),
 		routedProviders: map[string]llm.Provider{},
+		convLog:         conversationlog.New(conversationlog.DirFromEnv()),
 	}
 	if cfg.IsEnabled() && backend != nil {
 		p, err := provider.New(cfg)
@@ -88,6 +95,75 @@ func NewService(cfg llm.Config, backend llm.Backend) *Service {
 		}
 	}
 	return s
+}
+
+// SetConversationDir enables (or disables) the conversation-log sink at
+// runtime. A non-empty dir turns recording on; "" turns it off. This is
+// the opt-in wiring point used by the daemon/server when the operator
+// configures a conversation-log location.
+func (s *Service) SetConversationDir(dir string) {
+	if s == nil {
+		return
+	}
+	if s.convLog != nil {
+		_ = s.convLog.Close()
+	}
+	s.convLog = conversationlog.New(dir)
+}
+
+// ConversationDir returns the active conversation-log directory ("" when
+// the sink is off).
+func (s *Service) ConversationDir() string {
+	if s == nil || s.convLog == nil {
+		return ""
+	}
+	return s.convLog.Dir()
+}
+
+// recordConversation appends one Record to the conversation-log sink
+// when it is enabled. The labels (session/repo/file/phase) ride on the
+// context via conversationlog.WithMeta. A nil/disabled logger is a
+// no-op; recording never disturbs the completion.
+func (s *Service) recordConversation(ctx context.Context, req []llm.Message, resp string, usage llm.TokenUsage, model string, elapsedMs int64, callErr error) {
+	if s == nil || s.convLog == nil || !s.convLog.Enabled() {
+		return
+	}
+	meta := conversationlog.MetaFromContext(ctx)
+	rec := conversationlog.Record{
+		Session:   meta.Session,
+		Repo:      meta.Repo,
+		File:      meta.File,
+		Phase:     meta.Phase,
+		Provider:  s.ProviderName(),
+		Model:     model,
+		Request:   req,
+		Response:  resp,
+		ElapsedMs: elapsedMs,
+	}
+	if usage.IsZero() {
+		// No provider usage available — estimate from char counts so the
+		// inspector still shows a magnitude, flagged as an estimate.
+		rec.InputTokens = estimateTokens(req)
+		rec.OutputTokens = len(resp) / 4
+		rec.Estimated = true
+	} else {
+		rec.InputTokens = usage.InputTokens
+		rec.OutputTokens = usage.OutputTokens
+	}
+	if callErr != nil {
+		rec.Error = callErr.Error()
+	}
+	s.convLog.Record(rec)
+}
+
+// estimateTokens approximates the prompt token count from message
+// content lengths (char/4) when no provider usage is available.
+func estimateTokens(msgs []llm.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n / 4
 }
 
 // Enabled reports whether the service can do real work — a provider
@@ -141,6 +217,9 @@ func (s *Service) Close() error {
 	}
 	s.routedProviders = map[string]llm.Provider{}
 	s.routedMu.Unlock()
+	if s.convLog != nil {
+		_ = s.convLog.Close()
+	}
 	if s.provider == nil {
 		return nil
 	}
@@ -194,11 +273,14 @@ func (s *Service) Generate(ctx context.Context, prompt string, maxTokens int) (s
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
+	messages := []llm.Message{{Role: llm.RoleUser, Content: prompt}}
+	t0 := time.Now()
 	resp, err := s.provider.Complete(ctx, llm.CompletionRequest{
-		Messages:  []llm.Message{{Role: llm.RoleUser, Content: prompt}},
+		Messages:  messages,
 		MaxTokens: maxTokens,
 		Shape:     llm.ShapeFreeform,
 	})
+	s.recordConversation(ctx, messages, resp.Text, resp.Usage, s.cfg.ActiveModel(), time.Since(t0).Milliseconds(), err)
 	if err != nil {
 		return "", err
 	}
@@ -281,6 +363,16 @@ func (s *Service) RunAgent(ctx context.Context, opts llm.RunAgentOptions) (*llm.
 	// model. Zero/Estimated:false for providers that don't report usage.
 	answer.Usage = ag.LastUsage()
 	answer.Cost = estimateRunCost(answer.Usage, answer.Model)
+
+	// Record the agent turn to the conversation-log sink when enabled:
+	// the framed prompt (system extras + question) in, the final answer
+	// out, with the run's summed token usage.
+	s.recordConversation(ctx,
+		[]llm.Message{
+			{Role: llm.RoleSystem, Content: systemExtras},
+			{Role: llm.RoleUser, Content: opts.Question},
+		},
+		answerText, answer.Usage, answer.Model, answer.ElapsedMs, runErr)
 
 	steps := 0
 	for _, st := range transcript {
