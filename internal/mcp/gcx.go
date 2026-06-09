@@ -2309,6 +2309,52 @@ func encodeReview(result map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// encodePRReviewContext renders the deterministic PR-review rollup into GCX1:
+// a one-row summary (verdict + changed-file / changed-symbol counts), a gates
+// row-section (one row per evaluated section with its status + detail), and a
+// diff_context row-section carrying each changed symbol's risk + fan counts.
+// The append-only section layout keeps the encoder forward compatible — a new
+// section adds a row-section, never reorders an existing one.
+func encodePRReviewContext(out prReviewContext) ([]byte, error) {
+	var buf bytes.Buffer
+
+	sumEnc := newGCX(&buf, "pr_review_context.summary",
+		[]string{"verdict", "changed_files", "changed_symbols"},
+	)
+	if err := sumEnc.WriteRow(out.Verdict, len(out.ChangedFiles), out.ChangedSymbols); err != nil {
+		return nil, err
+	}
+	if err := sumEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	gateEnc := newGCX(&buf, "pr_review_context.gates",
+		[]string{"name", "status", "detail"},
+	)
+	for _, g := range out.Gates {
+		if err := gateEnc.WriteRow(g.Name, g.Status, g.Detail); err != nil {
+			return nil, err
+		}
+	}
+	if err := gateEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	dcEnc := newGCX(&buf, "pr_review_context.diff_context",
+		[]string{"id", "kind", "risk", "callers", "callees", "signature"},
+	)
+	for _, sym := range out.DiffContext {
+		if err := dcEnc.WriteRow(sym.ID, sym.Kind, sym.Risk, len(sym.Callers), len(sym.Callees), sym.Signature); err != nil {
+			return nil, err
+		}
+	}
+	if err := dcEnc.Close(); err != nil {
+		return nil, err
+	}
+
+	return buf.Bytes(), nil
+}
+
 // encodeReviewPack renders the packaged review envelope into GCX1: a one-row
 // summary (verdict + the gate rollups), a changed-symbol classification
 // row-section, a per-file risk row-section, a findings row-section, and a guards

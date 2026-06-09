@@ -998,6 +998,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerKnowledgeGapsTool()
 	s.registerSurprisingConnectionsTool()
 	s.registerReviewQuestionsTool()
+	s.registerPRReviewContextTool()
 	s.registerArchitectureTool()
 	s.registerReplayEpisodeTool()
 	s.registerSafeDeleteSymbolTool()
