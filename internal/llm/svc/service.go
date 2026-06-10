@@ -287,6 +287,54 @@ func (s *Service) Generate(ctx context.Context, prompt string, maxTokens int) (s
 	return resp.Text, nil
 }
 
+// GenerateWithUsage is the usage-aware variant of Generate: it returns
+// the provider's token accounting for the call alongside the generated
+// text. The review flow threads this so its CostBreakdown reflects a real
+// per-call token split; a provider that does not surface usage yields a
+// zero TokenUsage (the caller's cost block is then zero / not Estimated).
+func (s *Service) GenerateWithUsage(ctx context.Context, prompt string, maxTokens int) (string, llm.TokenUsage, error) {
+	if s.provider == nil {
+		return "", llm.TokenUsage{}, errServiceUnavailable
+	}
+	if maxTokens <= 0 {
+		maxTokens = 1024
+	}
+	messages := []llm.Message{{Role: llm.RoleUser, Content: prompt}}
+	t0 := time.Now()
+	resp, err := s.provider.Complete(ctx, llm.CompletionRequest{
+		Messages:  messages,
+		MaxTokens: maxTokens,
+		Shape:     llm.ShapeFreeform,
+	})
+	s.recordConversation(ctx, messages, resp.Text, resp.Usage, s.cfg.ActiveModel(), time.Since(t0).Milliseconds(), err)
+	if err != nil {
+		return "", llm.TokenUsage{}, err
+	}
+	return resp.Text, resp.Usage, nil
+}
+
+// Pricing returns the active provider's USD-per-1M-token rate card so a
+// usage-aware caller (the review cost block) can price its token usage. A
+// user-registered custom provider carries its own pricing; for a built-in
+// provider the active model is matched against the savings rate table (a
+// single per-model input rate, applied to both the input and output
+// fields since the table carries no separate output rate). An unknown
+// model or a disabled service yields a zero rate card — the cost block is
+// still emitted, just with a zero USD estimate.
+func (s *Service) Pricing() llm.ProviderPricing {
+	if s == nil || s.provider == nil {
+		return llm.ProviderPricing{}
+	}
+	if cp, ok := s.cfg.Custom[s.cfg.ProviderName()]; ok {
+		return cp.Pricing
+	}
+	rate := savings.ModelRate(s.cfg.ActiveModel())
+	if rate <= 0 {
+		return llm.ProviderPricing{}
+	}
+	return llm.ProviderPricing{Input: rate, Output: rate}
+}
+
 // RunAgent runs the structured tool-calling agent loop. The agent
 // issues tool calls against the configured Backend and synthesizes a
 // final answer via the final_answer tool.

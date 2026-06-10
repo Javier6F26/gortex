@@ -13,6 +13,8 @@ import (
 
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/astquery"
+	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/review"
 	"github.com/zzet/gortex/internal/semantic/lsp"
@@ -581,16 +583,18 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	// caller's use_llm and the service actually being enabled. nil disables the
 	// LLM phases entirely — review.Run then carries only rulepack findings.
 	useLLM := requestBoolDefault(req, "use_llm", false)
-	gen := s.reviewLLMGen(useLLM)
+	gen := s.reviewLLMGenWithUsage(useLLM)
 
 	suppStore, suppRepoKey := s.reviewSuppressions()
-	report, err := review.Run(ctx, s.graph, gen, review.Options{
+	report, err := review.RunWithUsage(ctx, s.graph, gen, s.reviewPricing(), review.Options{
 		RepoRoot:        repoRoot,
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,
 		RulepackMatches: rulepack,
 		Impact:          impact,
+		Rules:           s.reviewRuleResolver(repoRoot),
+		Config:          s.reviewConfig(repo),
 		UseLLM:          useLLM && gen != nil,
 		TokenBudget:     intArg(req.GetArguments(), "max_tokens", 0),
 		Suppressions:    suppStore,
@@ -702,25 +706,84 @@ func (s *Server) reviewImpact(changed []analysis.ChangedSymbol) map[string]*anal
 	return out
 }
 
-// reviewLLMGen returns the LLM re-location seam for the review flow: a closure
-// over the optional LLM service's Generate, or nil when the LLM phase is not
-// engaged (caller opted out, no service, or the service is disabled). A nil gen
-// makes review.Run skip the MAIN/RELOCATE phases entirely.
-func (s *Server) reviewLLMGen(useLLM bool) review.LLMGen {
+// reviewLLMGenWithUsage returns the usage-aware LLM seam the review flow runs
+// through so the report carries a per-review CostBreakdown: a closure over the
+// optional LLM service's usage-aware Generate, or nil when the LLM phase is not
+// engaged (caller opted out, no service, or the service is disabled). A nil
+// seam disables the MAIN/RELOCATE phases, and still yields a zero
+// (un-Estimated) cost block from RunWithUsage.
+func (s *Server) reviewLLMGenWithUsage(useLLM bool) review.LLMGenWithUsage {
 	if !useLLM {
 		return nil
 	}
-	// Test-only seam: a non-nil override stands in for the real provider so
-	// the LLM review phase can be driven without constructing a backend.
+	// Test-only seam: a non-nil usage-aware override stands in for the real
+	// provider so the cost-bearing review path can be driven without a backend.
+	if s.reviewLLMGenWithUsageOverride != nil {
+		return s.reviewLLMGenWithUsageOverride()
+	}
+	// Backward-compatible test seam: a test that only set the plain
+	// reviewLLMGenOverride (no usage) still drives the LLM phase — adapt it up
+	// to the usage-aware shape, reporting zero usage (so the cost block is a
+	// zero, un-Estimated breakdown, exactly as a no-usage provider would).
 	if s.reviewLLMGenOverride != nil {
-		return s.reviewLLMGenOverride()
+		plain := s.reviewLLMGenOverride()
+		if plain == nil {
+			return nil
+		}
+		return func(ctx context.Context, prompt string, maxTokens int) (string, llm.TokenUsage, error) {
+			text, err := plain(ctx, prompt, maxTokens)
+			return text, llm.TokenUsage{}, err
+		}
 	}
 	if s.llmService == nil || !s.llmService.Enabled() {
 		return nil
 	}
-	return func(ctx context.Context, prompt string, maxTokens int) (string, error) {
-		return s.llmService.Generate(ctx, prompt, maxTokens)
+	return func(ctx context.Context, prompt string, maxTokens int) (string, llm.TokenUsage, error) {
+		return s.llmService.GenerateWithUsage(ctx, prompt, maxTokens)
 	}
+}
+
+// reviewPricing resolves the rate card the review cost block prices token usage
+// against: the test override when set, else the active LLM provider's pricing,
+// else a zero card (a zero USD estimate, never an omitted cost block).
+func (s *Server) reviewPricing() llm.ProviderPricing {
+	if s.reviewPricingOverride != nil {
+		return *s.reviewPricingOverride
+	}
+	if s.llmService != nil {
+		return s.llmService.Pricing()
+	}
+	return llm.ProviderPricing{}
+}
+
+// reviewConfig loads the repo's `review:` block (the gate / depth / rule
+// knobs). A nil config manager — the legacy / test-without-config path —
+// yields a zero ReviewConfig, which is a pass-through: the gate drops nothing
+// and the depth classifier falls back to its built-in default ladder, so
+// today's behaviour is preserved exactly.
+func (s *Server) reviewConfig(repo string) config.ReviewConfig {
+	if s.configManager == nil {
+		return config.ReviewConfig{}
+	}
+	cfg := s.configManager.GetRepoConfig(repo)
+	if cfg == nil {
+		return config.ReviewConfig{}
+	}
+	return cfg.Review
+}
+
+// reviewRuleResolver builds the 4-layer review rule resolver rooted at the
+// repo. An empty repoRoot skips the repo-local / project layers, leaving the
+// global + embedded layers — so the resolver always resolves (the embedded
+// `**` catch-all guarantees it). A construction error (a malformed rule file)
+// degrades to nil: the flow then carries no per-file rule grounding rather than
+// failing the whole review.
+func (s *Server) reviewRuleResolver(repoRoot string) *review.RuleResolver {
+	resolver, err := review.NewRuleResolver("", repoRoot)
+	if err != nil {
+		return nil
+	}
+	return resolver
 }
 
 // reviewPayload projects a ReviewReport onto the review tool's wire shape: the
@@ -731,11 +794,15 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 	fileRisk := make([]map[string]any, 0)
 	verdict := ""
 	summary := ""
+	depth := ""
 	var stats any = map[string]any{}
+	var cost map[string]any
 	if report != nil {
 		verdict = string(report.Verdict)
 		summary = report.Summary
 		stats = report.Stats
+		depth = report.Depth
+		cost = reviewCostMap(report.Cost)
 		for _, f := range report.Findings {
 			line := f.Line
 			if line == 0 {
@@ -766,13 +833,45 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 		}
 	}
 
-	return map[string]any{
+	payload := map[string]any{
 		"verdict":   verdict,
 		"summary":   summary,
 		"comments":  commentRows,
 		"file_risk": fileRisk,
 		"total":     len(commentRows),
 		"stats":     stats,
+		"depth":     depth,
+	}
+	// The gate suppression summary rides on stats.Gate; lift it to the top
+	// level too so an agent can read "N findings suppressed" without decoding
+	// the whole stats block.
+	if report != nil {
+		payload["gate"] = report.Stats.Gate
+	}
+	// The per-review cost block is present only when the review ran through the
+	// usage-aware seam (it always does now), so include it whenever non-nil.
+	if cost != nil {
+		payload["cost"] = cost
+	}
+	return payload
+}
+
+// reviewCostMap projects a CostBreakdown onto the review response's wire shape:
+// the token split, the USD estimate, whether the estimate is grounded in a real
+// usage report, and the LLM wall-clock. A nil cost (the deterministic-only Run
+// path) yields nil so the cost key is simply omitted.
+func reviewCostMap(cost *review.CostBreakdown) map[string]any {
+	if cost == nil {
+		return nil
+	}
+	return map[string]any{
+		"input_tokens":       cost.InputTokens,
+		"output_tokens":      cost.OutputTokens,
+		"cache_read_tokens":  cost.CacheReadTokens,
+		"cache_write_tokens": cost.CacheWriteTokens,
+		"usd":                cost.USD,
+		"estimated":          cost.Estimated,
+		"elapsed_ms":         cost.ElapsedMs,
 	}
 }
 
@@ -804,6 +903,15 @@ type reviewEnvelope struct {
 	VerificationCommand string                    `json:"verification_command"`
 	Receipt             analysis.ReviewReceipt    `json:"receipt"`
 	Pack                *review.ReviewPack        `json:"pack,omitempty"`
+	// Depth is the adaptive review depth the changeset classified into
+	// (quick | standard | deep) — set from the review report.
+	Depth string `json:"depth"`
+	// Gate is the confidence / severity / category / cap suppression summary
+	// the gate produced over the merged findings.
+	Gate review.GateStats `json:"gate"`
+	// Cost is the per-review token + USD accounting. Nil only when no
+	// usage-aware seam ran (cannot happen on the live path now).
+	Cost *review.CostBreakdown `json:"cost,omitempty"`
 }
 
 // reviewPreview is the cost-bounded speculative-edit preview run for a single
@@ -888,15 +996,17 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 
 	// The review report (deterministic rulepack always; LLM phase gated).
 	useLLM := requestBoolDefault(req, "use_llm", false)
-	gen := s.reviewLLMGen(useLLM)
+	gen := s.reviewLLMGenWithUsage(useLLM)
 	suppStore, suppRepoKey := s.reviewSuppressions()
-	report, err := review.Run(ctx, s.graph, gen, review.Options{
+	report, err := review.RunWithUsage(ctx, s.graph, gen, s.reviewPricing(), review.Options{
 		RepoRoot:        repoRoot,
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,
 		RulepackMatches: rulepack,
 		Impact:          impact,
+		Rules:           s.reviewRuleResolver(repoRoot),
+		Config:          s.reviewConfig(repo),
 		UseLLM:          useLLM && gen != nil,
 		TokenBudget:     intArg(req.GetArguments(), "max_tokens", 0),
 		Suppressions:    suppStore,
@@ -950,6 +1060,9 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 		TestTargets:         testTargets,
 		VerificationCommand: verCmd,
 		Receipt:             receipt,
+		Depth:               report.Depth,
+		Gate:                report.Stats.Gate,
+		Cost:                report.Cost,
 	}
 	if requestBoolDefault(req, "include_pack", false) {
 		env.Pack = s.buildReviewPack(diff, impact, intArg(req.GetArguments(), "max_tokens", 0))
@@ -1273,6 +1386,11 @@ func reviewPackPayload(env reviewEnvelope) map[string]any {
 		"verification_command": env.VerificationCommand,
 		"receipt":              env.Receipt,
 		"total":                len(findings),
+		"depth":                env.Depth,
+		"gate":                 env.Gate,
+	}
+	if cost := reviewCostMap(env.Cost); cost != nil {
+		payload["cost"] = cost
 	}
 	if env.Contracts != nil {
 		payload["contracts"] = env.Contracts

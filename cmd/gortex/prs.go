@@ -25,6 +25,9 @@ var (
 	prsFormat    string
 	prsWorktrees bool
 	prsBundleOut string
+	prsTriage    bool
+	prsConflicts bool
+	prsUseLLM    bool
 )
 
 // Seams. The forge free functions and the daemon-tool relay are indirected
@@ -49,8 +52,15 @@ With a PR number, deep-dives that PR: fetches its changed files from the
 forge and joins them against the knowledge graph (via the daemon) to print
 the changed files, blast radius, and risk score.
 
-Listing needs a GitHub token (GH_TOKEN or GITHUB_TOKEN). The deep-dive also
-needs a running daemon that tracks the repo.`,
+--triage renders an AI-ranked review queue (highest-risk first) via the
+daemon's triage_prs tool; add --use-llm to re-rank it with one LLM pass.
+--conflicts renders merge-order conflict clusters — the graph communities
+touched by more than one open PR, with a suggested safe merge order — via
+the daemon's conflicts_prs tool. Both honour --format json (raw payload).
+When both flags are given, triage runs first, then conflicts.
+
+Listing needs a GitHub token (GH_TOKEN or GITHUB_TOKEN). The deep-dive,
+--triage, and --conflicts also need a running daemon that tracks the repo.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runPRs,
 }
@@ -83,6 +93,9 @@ func init() {
 	prsCmd.Flags().StringVar(&prsRepo, "repo", "", "repository path the forge / daemon must own (default: current directory)")
 	prsCmd.Flags().StringVar(&prsFormat, "format", "text", "output format: text or json")
 	prsCmd.Flags().BoolVar(&prsWorktrees, "worktrees", false, "annotate each PR whose head branch is checked out in a local worktree")
+	prsCmd.Flags().BoolVar(&prsTriage, "triage", false, "render an AI-ranked review queue (highest-risk first) via the daemon's triage_prs tool")
+	prsCmd.Flags().BoolVar(&prsConflicts, "conflicts", false, "render merge-order conflict clusters (PRs sharing a graph community) via the daemon's conflicts_prs tool")
+	prsCmd.Flags().BoolVar(&prsUseLLM, "use-llm", false, "when used with --triage, re-rank the queue with one LLM pass (passes use_llm:true to triage_prs)")
 
 	prsBundleCmd.Flags().StringVar(&prsRepo, "repo", "", "repository path the forge / daemon must own (default: current directory)")
 	prsBundleCmd.Flags().StringVarP(&prsBundleOut, "out", "o", "", "bundle output file (default: pr-<number>-bundle.json)")
@@ -104,6 +117,30 @@ func runPRs(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("invalid PR number %q", args[0])
 		}
 		return runPRDeepDive(cmd, repoPath, n)
+	}
+
+	// Triage / conflicts dashboards route through the daemon tools. When both
+	// flags are given, run triage first then conflicts (triage takes
+	// precedence as the primary review-queue view). A missing forge token is
+	// not an error: print the GH_TOKEN hint and exit 0, like the base
+	// dashboard, since both daemon tools self-serve from the forge.
+	if prsTriage || prsConflicts {
+		if !forgeAvailable(context.Background()) {
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(),
+				"no GitHub token found — set GH_TOKEN (or GITHUB_TOKEN) to triage pull requests")
+			return nil
+		}
+		if prsTriage {
+			if err := runPRTriage(cmd, repoPath); err != nil {
+				return err
+			}
+		}
+		if prsConflicts {
+			if err := runPRConflicts(cmd, repoPath); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	// Dashboard: `gortex prs`.

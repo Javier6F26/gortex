@@ -2262,8 +2262,9 @@ func encodeReview(result map[string]any) ([]byte, error) {
 	verdict, _ := result["verdict"].(string)
 	summary, _ := result["summary"].(string)
 	total, _ := result["total"].(int)
-	sumEnc := newGCX(&buf, "review.summary", []string{"verdict", "total", "summary"})
-	if err := sumEnc.WriteRow(verdict, total, summary); err != nil {
+	depth, _ := result["depth"].(string)
+	sumEnc := newGCX(&buf, "review.summary", []string{"verdict", "total", "depth", "summary"})
+	if err := sumEnc.WriteRow(verdict, total, depth, summary); err != nil {
 		return nil, err
 	}
 	if err := sumEnc.Close(); err != nil {
@@ -2424,15 +2425,16 @@ func encodeReviewPack(result map[string]any) ([]byte, error) {
 	summary, _ := result["summary"].(string)
 	verCmd, _ := result["verification_command"].(string)
 	total, _ := result["total"].(int)
+	depth, _ := result["depth"].(string)
 	guards, _ := result["guards"].([]analysis.GuardViolation)
 	breaking := 0
 	if ci, ok := result["contracts"].(*contractImpact); ok && ci != nil {
 		breaking = ci.Breaking
 	}
 	sumEnc := newGCX(&buf, "review_pack.summary",
-		[]string{"verdict", "findings", "guard_violations", "contract_breaking", "verification_command", "summary"},
+		[]string{"verdict", "findings", "depth", "guard_violations", "contract_breaking", "verification_command", "summary"},
 	)
-	if err := sumEnc.WriteRow(verdict, total, len(guards), breaking, verCmd, summary); err != nil {
+	if err := sumEnc.WriteRow(verdict, total, depth, len(guards), breaking, verCmd, summary); err != nil {
 		return nil, err
 	}
 	if err := sumEnc.Close(); err != nil {

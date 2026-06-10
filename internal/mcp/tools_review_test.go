@@ -15,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
+	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/parser"
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
@@ -331,6 +332,20 @@ type reviewOut struct {
 		Risk     string `json:"risk"`
 		Findings int    `json:"findings"`
 	} `json:"file_risk"`
+	Depth string `json:"depth"`
+	Gate  struct {
+		Input           int `json:"input"`
+		Kept            int `json:"kept"`
+		BelowConfidence int `json:"below_confidence"`
+		BelowSeverity   int `json:"below_severity"`
+	} `json:"gate"`
+	Cost *struct {
+		InputTokens  int     `json:"input_tokens"`
+		OutputTokens int     `json:"output_tokens"`
+		USD          float64 `json:"usd"`
+		Estimated    bool    `json:"estimated"`
+		ElapsedMs    int64   `json:"elapsed_ms"`
+	} `json:"cost"`
 }
 
 func decodeReview(t *testing.T, res *mcplib.CallToolResult) reviewOut {
@@ -402,6 +417,123 @@ func TestReview_UseLLMAddsFinding(t *testing.T) {
 		}
 	}
 	require.True(t, llmFound, "the stubbed LLM finding must join the report; got %+v", out.Comments)
+}
+
+// reviewServerWithConfig is indexedSiblingServer plus a ConfigManager whose
+// workspace config (keyed by the empty repo prefix the review handlers query
+// with no `repo` arg) carries the given `review:` block. It writes a
+// .gortex.yaml into the repo and loads it, so the same path the live daemon
+// uses (GetRepoConfig → cfg.Review) is exercised.
+func reviewServerWithConfig(t *testing.T, dir, reviewYAML string) *Server {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gortex.yaml"), []byte(reviewYAML), 0o644))
+
+	cm, err := config.NewConfigManager(filepath.Join(t.TempDir(), "global.yaml"))
+	require.NoError(t, err)
+	cm.LoadWorkspaceConfig("", dir)
+
+	srv := indexedSiblingServer(t, dir)
+	srv.configManager = cm
+	return srv
+}
+
+// TestReview_GateDropsBelowSeverity proves the repo's `review:` config is now
+// LIVE on the handler path: with min_severity: warning, a planted info-severity
+// LLM finding is dropped by the gate while the error-severity rulepack finding
+// survives, and the gate summary records the suppression.
+func TestReview_GateDropsBelowSeverity(t *testing.T) {
+	dir, file := reviewGitRepo(t)
+	srv := reviewServerWithConfig(t, dir, "review:\n  min_severity: warning\n")
+
+	// The stub gen returns one INFO-severity candidate anchored to a verbatim
+	// change line. With no gate it would join the report; min_severity:warning
+	// must drop it.
+	srv.reviewLLMGenWithUsageOverride = func() review.LLMGenWithUsage {
+		return func(_ context.Context, _ string, _ int) (string, llm.TokenUsage, error) {
+			out := `[{"file":"` + filepath.ToSlash(file) + `",` +
+				`"snippet":"err := errors.New(\"boom\")",` +
+				`"message":"style nit","severity":"info","category":"idiom"}]`
+			return out, llm.TokenUsage{}, nil
+		}
+	}
+
+	out := decodeReview(t, callReview(t, srv, map[string]any{
+		"base":    "base-ref",
+		"use_llm": true,
+	}))
+
+	// The info-severity LLM finding must be gated out.
+	for _, c := range out.Comments {
+		require.NotEqual(t, "info", c.Severity, "info finding must be dropped by min_severity:warning; got %+v", c)
+		require.NotEqual(t, "llm", c.Source, "the only LLM finding was info-severity and must be suppressed")
+	}
+	// The error-severity rulepack finding survives the floor.
+	require.GreaterOrEqual(t, out.Total, 1, "the error-severity rulepack finding must survive")
+	// The gate summary reports the suppression.
+	require.GreaterOrEqual(t, out.Gate.BelowSeverity, 1, "gate must count one below-severity drop")
+	require.GreaterOrEqual(t, out.Gate.Input, out.Gate.Kept+1, "gate input must exceed kept by the dropped finding")
+}
+
+// TestReview_DepthSkipsLLM proves the adaptive-depth thresholds from config are
+// now LIVE: with quick_max_lines high enough that the small changeset classifies
+// as quick, the LLM MAIN phase is skipped entirely — the usage seam is never
+// invoked — and the report records depth: quick.
+func TestReview_DepthSkipsLLM(t *testing.T) {
+	dir, file := reviewGitRepo(t)
+	srv := reviewServerWithConfig(t, dir, "review:\n  quick_max_lines: 1000\n")
+
+	called := false
+	srv.reviewLLMGenWithUsageOverride = func() review.LLMGenWithUsage {
+		return func(_ context.Context, _ string, _ int) (string, llm.TokenUsage, error) {
+			called = true
+			out := `[{"file":"` + filepath.ToSlash(file) + `",` +
+				`"snippet":"err := errors.New(\"boom\")",` +
+				`"message":"should not appear","severity":"warning","category":"idiom"}]`
+			return out, llm.TokenUsage{InputTokens: 10, OutputTokens: 5}, nil
+		}
+	}
+
+	out := decodeReview(t, callReview(t, srv, map[string]any{
+		"base":    "base-ref",
+		"use_llm": true,
+	}))
+
+	require.Equal(t, "quick", out.Depth, "a small change under quick_max_lines must classify quick")
+	require.False(t, called, "the quick depth must skip the LLM MAIN phase — the usage seam must not be called")
+	for _, c := range out.Comments {
+		require.NotEqual(t, "llm", c.Source, "no LLM finding may appear when the MAIN phase is skipped")
+	}
+}
+
+// TestReview_CostBlockFromUsageSeam proves the usage-aware seam now feeds the
+// response: a stubbed gen reporting token usage produces a cost block on the
+// review response, priced against the (overridden) rate card.
+func TestReview_CostBlockFromUsageSeam(t *testing.T) {
+	dir, file := reviewGitRepo(t)
+	srv := indexedSiblingServer(t, dir)
+
+	srv.reviewLLMGenWithUsageOverride = func() review.LLMGenWithUsage {
+		return func(_ context.Context, _ string, _ int) (string, llm.TokenUsage, error) {
+			out := `[{"file":"` + filepath.ToSlash(file) + `",` +
+				`"snippet":"err := errors.New(\"boom\")",` +
+				`"message":"prefer fmt.Errorf","severity":"warning","category":"idiom"}]`
+			return out, llm.TokenUsage{InputTokens: 1000, OutputTokens: 500}, nil
+		}
+	}
+	// Deterministic rate card: $3/1M input, $6/1M output.
+	srv.reviewPricingOverride = &llm.ProviderPricing{Input: 3.0, Output: 6.0}
+
+	out := decodeReview(t, callReview(t, srv, map[string]any{
+		"base":    "base-ref",
+		"use_llm": true,
+	}))
+
+	require.NotNil(t, out.Cost, "the usage-aware seam must populate a cost block")
+	require.Equal(t, 1000, out.Cost.InputTokens)
+	require.Equal(t, 500, out.Cost.OutputTokens)
+	require.True(t, out.Cost.Estimated, "a non-zero usage report is a grounded (estimated) cost")
+	// USD = 1000*3/1e6 + 500*6/1e6 = 0.003 + 0.003 = 0.006.
+	require.InDelta(t, 0.006, out.Cost.USD, 1e-9)
 }
 
 // TestReview_PastedDiff reviews a pasted unified diff off-disk (no git command).

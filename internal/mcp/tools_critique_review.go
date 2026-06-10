@@ -141,7 +141,7 @@ func (s *Server) handleCritiqueReview(ctx context.Context, req mcp.CallToolReque
 // critiqueLLMGen returns the critique pass's LLM seam: the test-only override
 // when set, else a closure over the LLM service's Generate when one is enabled,
 // else nil (the handler then returns the structured 'llm not configured'
-// result). Mirrors reviewLLMGen.
+// result). Mirrors the review tool's LLM seam.
 func (s *Server) critiqueLLMGen() review.LLMGen {
 	if s.critiqueLLMGenOverride != nil {
 		return s.critiqueLLMGenOverride()

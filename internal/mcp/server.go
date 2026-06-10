@@ -296,12 +296,28 @@ type Server struct {
 	// leaves it nil so the live server is used.
 	resourcesNotifier resourcesUpdatedNotifier
 
-	// reviewLLMGenOverride substitutes the review tool's LLM re-location
-	// seam. Test-only: production leaves it nil and reviewLLMGen builds the
-	// closure over llmService.Generate. A non-nil override is returned
-	// directly (gated on use_llm) so a test can drive the LLM review phase
-	// without constructing a real provider.
+	// reviewLLMGenOverride substitutes the review tool's plain (non-usage) LLM
+	// re-location seam. Test-only: production leaves it nil and
+	// reviewLLMGenWithUsage builds the closure over llmService.GenerateWithUsage.
+	// A non-nil override is adapted up to the usage-aware shape (reporting zero
+	// usage) so a test that only needs to drive the LLM review phase — without
+	// asserting cost — can still do so without constructing a real provider.
 	reviewLLMGenOverride func() review.LLMGen
+
+	// reviewLLMGenWithUsageOverride substitutes the review tool's usage-aware
+	// LLM seam (the one that feeds the per-review CostBreakdown). Test-only:
+	// production leaves it nil and reviewLLMGenWithUsage builds the closure
+	// over llmService.GenerateWithUsage. A non-nil override is returned
+	// directly (gated on use_llm) so a test can drive the cost-bearing review
+	// path — and assert the returned usage shows up in the response — without
+	// constructing a real provider.
+	reviewLLMGenWithUsageOverride func() review.LLMGenWithUsage
+
+	// reviewPricingOverride substitutes the rate card the review cost block
+	// prices token usage against. Test-only: production reads it from the LLM
+	// service (Pricing). A non-nil override lets a test assert a deterministic
+	// USD estimate from a stubbed usage seam.
+	reviewPricingOverride *llm.ProviderPricing
 
 	// critiqueLLMGenOverride substitutes the critique_review tool's LLM seam.
 	// Test-only: production leaves it nil and the handler builds the closure
