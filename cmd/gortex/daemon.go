@@ -132,7 +132,14 @@ func init() {
 // with GORTEX_DAEMON_CHILD=1 set, which the inner exec picks up and runs
 // the actual serve loop.
 func runDaemonStart(cmd *cobra.Command, _ []string) error {
-	if daemon.IsRunning() {
+	// An explicit start (user or supervisor) supersedes a prior `daemon stop` —
+	// clear the stay-down mark so autostart works again. The autostart-spawned
+	// child (GORTEX_DAEMON_CHILD=1) must NOT clear it: that would let an
+	// in-flight autostart erase a stop-intent the user wrote in the meantime.
+	if os.Getenv("GORTEX_DAEMON_CHILD") != "1" {
+		daemon.ClearStopIntent()
+	}
+	if isDaemonRunning() {
 		return fmt.Errorf("daemon already running (socket: %s)", daemon.SocketPath())
 	}
 	// IsRunning only probes the socket. A daemon that is mid-shutdown — or
@@ -747,6 +754,22 @@ func emitDaemonStartSummary(w io.Writer, pid int, elapsed time.Duration) {
 
 func runDaemonStop(cmd *cobra.Command, _ []string) error {
 	w := cmd.ErrOrStderr()
+	// Record the user's "stay down" intent so the autostart path (a live
+	// `gortex mcp` proxy relaunched by an editor) doesn't immediately respawn
+	// the daemon we're about to stop. A `daemon restart` re-clears it via the
+	// following start, so only a standalone stop is sticky.
+	if !daemonRestartActive {
+		if err := daemon.MarkStopIntent(); err != nil {
+			_, _ = fmt.Fprintf(w, "[gortex daemon] warning: could not record stop intent (%v); daemon may auto-respawn\n", err)
+		}
+		// If an OS supervisor (systemd --user / launchd) owns the daemon, stop
+		// it THROUGH the supervisor — a socket-level stop just kills the worker
+		// and the supervisor restarts it. `daemon restart` skips this and
+		// bounces via the supervisor instead.
+		if serviceActive() {
+			return serviceStop(w)
+		}
+	}
 	if !daemon.IsRunning() {
 		// The socket is gone, but a process may still be alive and holding
 		// the store lock — a daemon mid-shutdown, or one whose socket wedged.
@@ -890,6 +913,14 @@ func runDaemonRestart(cmd *cobra.Command, args []string) error {
 	defer func() { daemonRestartActive = false }()
 
 	emitDaemonRestartBanner(cmd.ErrOrStderr())
+
+	// When an OS supervisor owns the daemon, bounce it THROUGH the supervisor so
+	// the supervisor keeps ownership; a manual stop+start would orphan the new
+	// daemon from the unit (the unit reads inactive while a hand-started process
+	// holds the socket).
+	if serviceActive() {
+		return serviceRestart(cmd.ErrOrStderr())
+	}
 
 	// Stop is idempotent when not running and now blocks until the old
 	// process has fully exited — releasing the store's on-disk lock — before
