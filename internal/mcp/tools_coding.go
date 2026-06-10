@@ -111,9 +111,9 @@ func (s *Server) registerCodingTools() {
 
 	s.addTool(
 		mcp.NewTool("edit_symbol",
-			mcp.WithDescription("Edit a symbol's source code directly by ID — no Read needed. Gortex resolves the file and line range, finds the old_source fragment, replaces it with new_source, and writes the file. Eliminates the Read→Edit roundtrip for ~80% of edits. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading."),
+			mcp.WithDescription("Edit a symbol's source code directly by ID — no Read needed. Gortex resolves the file and line range, finds the old_source fragment, replaces it with new_source, and writes the file. Matching is line-ending tolerant: an LF-authored old_source matches a CRLF file (and vice versa), and new_source is written with the file's own line endings — the response carries eol_normalized:true when that fallback fired. Eliminates the Read→Edit roundtrip for ~80% of edits. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Symbol ID (e.g. server.go::NewServer)")),
-			mcp.WithString("old_source", mcp.Required(), mcp.Description("Exact source fragment to replace (must be unique within the symbol)")),
+			mcp.WithString("old_source", mcp.Required(), mcp.Description("Exact source fragment to replace (must be unique within the symbol). CRLF/LF line-ending differences against the file are tolerated.")),
 			mcp.WithString("new_source", mcp.Required(), mcp.Description("Replacement source fragment")),
 			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
 			mcp.WithBoolean("dry_run", mcp.Description("Validate the edit and return a unified-diff preview without writing (status: would_apply). Use to review the change before committing it.")),
@@ -137,9 +137,9 @@ func (s *Server) registerCodingTools() {
 
 	s.addTool(
 		mcp.NewTool("edit_file",
-			mcp.WithDescription("Edit any file (markdown, config, spec, template, source) by exact string replacement — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to validate the replacement without writing. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading. Complements edit_symbol for non-code files that have no symbol ID."),
+			mcp.WithDescription("Edit any file (markdown, config, spec, template, source) by exact string replacement — no Read needed. Accepts absolute paths or paths relative to the indexed repo root. Matching is line-ending tolerant: an LF-authored old_string matches a CRLF file (and vice versa), and new_string is written with the file's own line endings — the response carries eol_normalized:true when that fallback fired. Writes atomically (temp+rename) and re-indexes the file so the graph stays fresh. Pass dry_run=true to validate the replacement without writing. Pass base_sha to guard against stale writes: if the on-disk file no longer matches the SHA you observed at read time, the call fails with `base_sha mismatch — re-read and resubmit` and the file is untouched. On success the response carries new_sha so you can pipeline the next edit without re-reading. Complements edit_symbol for non-code files that have no symbol ID."),
 			mcp.WithString("path", mcp.Required(), mcp.Description("Absolute path, or repo-prefixed / repo-root-relative path")),
-			mcp.WithString("old_string", mcp.Required(), mcp.Description("Exact text to replace (must be unique unless replace_all=true)")),
+			mcp.WithString("old_string", mcp.Required(), mcp.Description("Exact text to replace (must be unique unless replace_all=true). CRLF/LF line-ending differences against the file are tolerated.")),
 			mcp.WithString("new_string", mcp.Required(), mcp.Description("Replacement text")),
 			mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence instead of requiring uniqueness (default: false)")),
 			mcp.WithBoolean("dry_run", mcp.Description("Validate the replacement and report what would change without writing (default: false)")),
@@ -2518,7 +2518,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 
 	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
 
-	if !strings.Contains(symbolSource, oldSource) {
+	if findEOLMatches(symbolSource, oldSource).count == 0 {
 		// Expand search to include preceding doc comments (agents often include
 		// them because get_symbol_source returns context_lines above the symbol).
 		expandedStart := node.StartLine - 1
@@ -2536,14 +2536,15 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	if !strings.Contains(symbolSource, oldSource) {
+	srcMatches := findEOLMatches(symbolSource, oldSource)
+	if srcMatches.count == 0 {
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"old_source not found within symbol %s (lines %d-%d). Use get_symbol_source to see the current code.",
 			id, node.StartLine, node.EndLine)), nil
 	}
 
 	// Verify old_source is unique within the symbol.
-	if strings.Count(symbolSource, oldSource) > 1 {
+	if srcMatches.count > 1 {
 		return mcp.NewToolResultError(
 			"old_source appears multiple times within the symbol. Provide a larger fragment to make it unique."), nil
 	}
@@ -2552,7 +2553,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 	// Find old_source within the symbol's line range only (not the whole file).
 	// Use the expanded start if doc comments were included.
 	effectiveStart := node.StartLine
-	if !strings.Contains(strings.Join(lines[node.StartLine-1:node.EndLine], "\n"), oldSource) {
+	if findEOLMatches(strings.Join(lines[node.StartLine-1:node.EndLine], "\n"), oldSource).count == 0 {
 		// Recalculate expanded start for offset computation.
 		expandedStart := node.StartLine - 1
 		for expandedStart > 0 {
@@ -2577,22 +2578,36 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		symbolEnd = len(fileStr)
 	}
 
-	// Find old_source within the symbol region.
-	offset := strings.Index(fileStr[symbolStart:symbolEnd], oldSource)
-	if offset < 0 {
+	// Find old_source within the symbol region (EOL-tolerant: an
+	// LF-authored fragment still matches a CRLF region). Spans are byte
+	// offsets into the raw region, so the splice below always lands on the
+	// real on-disk bytes.
+	regionMatches := findEOLMatches(fileStr[symbolStart:symbolEnd], oldSource)
+	if len(regionMatches.spans) == 0 {
 		return mcp.NewToolResultError("old_source not found in symbol region"), nil
 	}
+	span := regionMatches.spans[0]
 
 	// Build the new file content.
-	editStart := symbolStart + offset
-	editEnd := editStart + len(oldSource)
-	newContent := fileStr[:editStart] + newSource + fileStr[editEnd:]
+	editStart := symbolStart + span.start
+	editEnd := symbolStart + span.end
+	effectiveNew := newSource
+	if regionMatches.normalized {
+		// Rewrite new_source's terminators to the matched region's own
+		// style so the splice never introduces mixed line endings.
+		effectiveNew = adaptToDominantEOL(newSource, fileStr[editStart:editEnd])
+	}
+	newContent := fileStr[:editStart] + effectiveNew + fileStr[editEnd:]
+	if newContent == fileStr {
+		return mcp.NewToolResultError(
+			"old_source and new_source are identical after line-ending normalization"), nil
+	}
 	newContentBytes := []byte(newContent)
 
 	if dryRun {
 		// Validate everything but skip the write; return a unified-diff
 		// preview so the caller can review the change before committing.
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		preview := map[string]any{
 			"file":         node.FilePath,
 			"symbol":       id,
 			"lines_before": strings.Count(oldSource, "\n") + 1,
@@ -2602,7 +2617,11 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 			"dry_run":      true,
 			"diff":         unifiedDiff(node.FilePath, fileStr, newContent),
 			"new_sha":      gitBlobSHA(newContentBytes),
-		})
+		}
+		if regionMatches.normalized {
+			preview["eol_normalized"] = true
+		}
+		return s.respondJSONOrTOON(ctx, req, preview)
 	}
 
 	// Write the file.
@@ -2628,6 +2647,9 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 		"status":       "applied",
 		"reindexed":    reindexed,
 		"new_sha":      gitBlobSHA(newContentBytes),
+	}
+	if regionMatches.normalized {
+		resp["eol_normalized"] = true
 	}
 	if health := s.fileSyntaxHealth(node.FilePath, absPath); health != nil {
 		resp["syntax_health"] = health

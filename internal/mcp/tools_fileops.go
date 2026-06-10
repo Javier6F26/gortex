@@ -453,23 +453,40 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	fileStr := string(content)
 
-	count := strings.Count(fileStr, oldString)
+	matches := findEOLMatches(fileStr, oldString)
+	count := matches.count
 	if count == 0 {
 		return mcp.NewToolResultError(
 			"old_string not found in file. Use get_file_summary or get_editing_context to inspect the current content."), nil
 	}
 	if count > 1 && !replaceAll {
-		hint := matchLocationsHint(fileStr, oldString)
+		hint := matchSpansHint(fileStr, matches.spans)
 		return mcp.NewToolResultError(fmt.Sprintf(
 			"old_string matches %d locations%s. Provide a larger fragment for uniqueness or pass replace_all=true.", count, hint)), nil
 	}
 
 	var newContent string
 	var replacements int
-	if replaceAll {
+	switch {
+	case matches.normalized:
+		// The CRLF<->LF fallback matched: splice the real byte spans and
+		// write new_string with each region's own line terminators so the
+		// edit never introduces mixed endings.
+		limit := 1
+		replacements = 1
+		if replaceAll {
+			limit = -1
+			replacements = count
+		}
+		newContent = spliceSpansEOL(fileStr, matches.spans, newString, limit)
+		if newContent == fileStr {
+			return mcp.NewToolResultError(
+				"old_string and new_string are identical after line-ending normalization"), nil
+		}
+	case replaceAll:
 		newContent = strings.ReplaceAll(fileStr, oldString, newString)
 		replacements = count
-	} else {
+	default:
 		newContent = strings.Replace(fileStr, oldString, newString, 1)
 		replacements = 1
 	}
@@ -481,7 +498,7 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		// Dry-run: validate everything but skip the write + reindex.
 		// Returns the same shape so callers can branch on dry_run for a
 		// preview before committing.
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		preview := map[string]any{
 			"path":          relPath,
 			"status":        "would_apply",
 			"dry_run":       true,
@@ -490,7 +507,11 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 			"reindexed":     false,
 			"diff":          unifiedDiff(relPath, fileStr, newContent),
 			"new_sha":       newSHA,
-		})
+		}
+		if matches.normalized {
+			preview["eol_normalized"] = true
+		}
+		return s.respondJSONOrTOON(ctx, req, preview)
 	}
 
 	perm := os.FileMode(0o644)
@@ -513,6 +534,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		"bytes_written": len(newContentBytes),
 		"reindexed":     reindexed,
 		"new_sha":       newSHA,
+	}
+	if matches.normalized {
+		resp["eol_normalized"] = true
 	}
 	if health := s.fileSyntaxHealth(relPath, absPath); health != nil {
 		resp["syntax_health"] = health
@@ -613,46 +637,12 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
-// matchLocationsHint returns a brief " (lines X, Y, Z)" hint listing up to
-// three line numbers where oldString matches in fileStr. Empty when there
-// are zero matches. Helps an agent choose a more unique fragment without
-// re-reading the file.
+// matchLocationsHint returns a brief " (first match lines X, Y, Z)" hint
+// listing up to three line numbers where oldString matches in fileStr
+// (EOL-tolerant). Empty when there are zero matches. Helps an agent choose
+// a more unique fragment without re-reading the file.
 func matchLocationsHint(fileStr, oldString string) string {
-	if oldString == "" {
-		return ""
-	}
-	const maxHits = 3
-	lines := []int{}
-	offset := 0
-	for offset < len(fileStr) {
-		idx := strings.Index(fileStr[offset:], oldString)
-		if idx < 0 {
-			break
-		}
-		absIdx := offset + idx
-		// Line number = 1 + count of '\n' before absIdx.
-		line := 1 + strings.Count(fileStr[:absIdx], "\n")
-		lines = append(lines, line)
-		if len(lines) >= maxHits {
-			break
-		}
-		offset = absIdx + len(oldString)
-		if len(oldString) == 0 {
-			offset++
-		}
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	parts := make([]string, len(lines))
-	for i, l := range lines {
-		parts[i] = fmt.Sprintf("%d", l)
-	}
-	suffix := ""
-	if strings.Count(fileStr, oldString) > maxHits {
-		suffix = ", ..."
-	}
-	return fmt.Sprintf(" (first match lines %s%s)", strings.Join(parts, ", "), suffix)
+	return matchSpansHint(fileStr, findEOLMatches(fileStr, oldString).spans)
 }
 
 // handleReadFile returns the full content of a file as a string,

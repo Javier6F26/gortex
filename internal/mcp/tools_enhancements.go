@@ -2896,6 +2896,10 @@ type batchEditResult struct {
 	FilePath string `json:"path"`
 	Status   string `json:"status"` // "applied", "failed", "skipped"
 	Error    string `json:"error,omitempty"`
+	// EOLNormalized is true when the fragment only matched through the
+	// CRLF<->LF-tolerant fallback and the replacement was written with the
+	// file's own line terminators.
+	EOLNormalized bool `json:"eol_normalized,omitempty"`
 }
 
 // batchEditItemsSchema is the JSON Schema for one batch_edit item: a
@@ -2912,7 +2916,7 @@ func batchEditItemsSchema() map[string]any {
 				"properties": map[string]any{
 					"op":         map[string]any{"const": "edit_symbol", "description": "Operation kind (optional; inferred as edit_symbol when omitted and `id` is present)."},
 					"id":         map[string]any{"type": "string", "description": "Symbol ID, e.g. pkg/foo.go::Bar."},
-					"old_source": map[string]any{"type": "string", "description": "Exact fragment to replace within the symbol's source."},
+					"old_source": map[string]any{"type": "string", "description": "Exact fragment to replace within the symbol's source. CRLF/LF line-ending differences against the file are tolerated."},
 					"new_source": map[string]any{"type": "string", "description": "Replacement fragment."},
 				},
 				"required": []any{"id", "old_source", "new_source"},
@@ -2923,7 +2927,7 @@ func batchEditItemsSchema() map[string]any {
 				"properties": map[string]any{
 					"op":          map[string]any{"const": "edit_file", "description": "Operation kind. Required to select a file edit."},
 					"path":        map[string]any{"type": "string", "description": "File path (repo-relative or absolute)."},
-					"old_string":  map[string]any{"type": "string", "description": "Exact text to replace; must be unique unless replace_all is set."},
+					"old_string":  map[string]any{"type": "string", "description": "Exact text to replace; must be unique unless replace_all is set. CRLF/LF line-ending differences against the file are tolerated."},
 					"new_string":  map[string]any{"type": "string", "description": "Replacement text."},
 					"replace_all": map[string]any{"type": "boolean", "description": "Replace every occurrence instead of requiring uniqueness."},
 				},
@@ -3130,6 +3134,10 @@ func (s *Server) handleBatchEdit(ctx context.Context, req mcp.CallToolRequest) (
 // the file, and re-indexes. Semantics match the legacy single-op batch_edit.
 func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) batchEditResult {
 	res := batchEditResult{Op: "edit_symbol", SymbolID: edit.SymbolID}
+	if edit.OldSource == edit.NewSource {
+		res.Status, res.Error = "failed", "old_source and new_source are identical"
+		return res
+	}
 	node := s.engineFor(ctx).GetSymbol(edit.SymbolID)
 	if node == nil {
 		res.Status, res.Error = "failed", "symbol not found: "+edit.SymbolID
@@ -3157,23 +3165,61 @@ func (s *Server) applyBatchSymbolEdit(ctx context.Context, edit batchEditItem) b
 		return res
 	}
 	symbolSource := strings.Join(lines[node.StartLine-1:node.EndLine], "\n")
-	if !strings.Contains(symbolSource, edit.OldSource) {
+	effectiveStart := node.StartLine
+	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
+		// Expand the window upward over preceding doc comments and blank
+		// lines — mirrors handleEditSymbol (agents often include the doc
+		// comment because get_symbol_source returns context above the
+		// symbol).
+		expandedStart := node.StartLine - 1
+		for expandedStart > 0 {
+			trimmed := strings.TrimSpace(lines[expandedStart-1])
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") || trimmed == "" {
+				expandedStart--
+			} else {
+				break
+			}
+		}
+		if expandedStart < node.StartLine-1 {
+			expanded := strings.Join(lines[expandedStart:node.EndLine], "\n")
+			if findEOLMatches(expanded, edit.OldSource).count > 0 {
+				symbolSource = expanded
+				effectiveStart = expandedStart + 1
+			}
+		}
+	}
+	if findEOLMatches(symbolSource, edit.OldSource).count == 0 {
 		res.Status, res.Error = "failed", "old_source not found within symbol"
 		return res
 	}
 	symbolStart := 0
-	for i := 0; i < node.StartLine-1 && i < len(lines); i++ {
+	for i := 0; i < effectiveStart-1 && i < len(lines); i++ {
 		symbolStart += len(lines[i]) + 1
 	}
 	symbolEnd := min(symbolStart+len(symbolSource), len(fileStr))
-	offset := strings.Index(fileStr[symbolStart:symbolEnd], edit.OldSource)
-	if offset < 0 {
+	// EOL-tolerant region match: spans are byte offsets into the raw
+	// region, so the splice below always lands on the real on-disk bytes.
+	regionMatches := findEOLMatches(fileStr[symbolStart:symbolEnd], edit.OldSource)
+	if len(regionMatches.spans) == 0 {
 		res.Status, res.Error = "failed", "old_source not found in symbol region"
 		return res
 	}
-	editStart := symbolStart + offset
-	editEnd := editStart + len(edit.OldSource)
-	newContent := fileStr[:editStart] + edit.NewSource + fileStr[editEnd:]
+	span := regionMatches.spans[0]
+	editStart := symbolStart + span.start
+	editEnd := symbolStart + span.end
+	effectiveNew := edit.NewSource
+	if regionMatches.normalized {
+		// Rewrite new_source's terminators to the matched region's own
+		// style so the splice never introduces mixed line endings.
+		effectiveNew = adaptToDominantEOL(edit.NewSource, fileStr[editStart:editEnd])
+		res.EOLNormalized = true
+	}
+	newContent := fileStr[:editStart] + effectiveNew + fileStr[editEnd:]
+	if regionMatches.normalized && newContent == fileStr {
+		res.Status, res.Error = "failed", "old_source and new_source are identical after line-ending normalization"
+		return res
+	}
 	if writeErr := os.WriteFile(absPath, []byte(newContent), 0o644); writeErr != nil {
 		res.Status, res.Error = "failed", fmt.Sprintf("could not write file: %v", writeErr)
 		return res
@@ -3210,7 +3256,8 @@ func (s *Server) applyBatchFileEdit(edit batchEditItem) batchEditResult {
 		return res
 	}
 	fileStr := string(content)
-	count := strings.Count(fileStr, edit.OldString)
+	matches := findEOLMatches(fileStr, edit.OldString)
+	count := matches.count
 	if count == 0 {
 		res.Status, res.Error = "failed", "old_string not found in file"
 		return res
@@ -3218,13 +3265,28 @@ func (s *Server) applyBatchFileEdit(edit batchEditItem) batchEditResult {
 	if count > 1 && !edit.ReplaceAll {
 		res.Status, res.Error = "failed", fmt.Sprintf(
 			"old_string matches %d locations%s. Provide a larger fragment for uniqueness or set replace_all=true.",
-			count, matchLocationsHint(fileStr, edit.OldString))
+			count, matchSpansHint(fileStr, matches.spans))
 		return res
 	}
 	var newContent string
-	if edit.ReplaceAll {
+	switch {
+	case matches.normalized:
+		// The CRLF<->LF fallback matched: splice the real byte spans and
+		// write new_string with each region's own line terminators so the
+		// edit never introduces mixed endings.
+		limit := 1
+		if edit.ReplaceAll {
+			limit = -1
+		}
+		newContent = spliceSpansEOL(fileStr, matches.spans, edit.NewString, limit)
+		if newContent == fileStr {
+			res.Status, res.Error = "failed", "old_string and new_string are identical after line-ending normalization"
+			return res
+		}
+		res.EOLNormalized = true
+	case edit.ReplaceAll:
 		newContent = strings.ReplaceAll(fileStr, edit.OldString, edit.NewString)
-	} else {
+	default:
 		newContent = strings.Replace(fileStr, edit.OldString, edit.NewString, 1)
 	}
 	perm := os.FileMode(0o644)

@@ -134,8 +134,8 @@ Four additional push channels modeled on `subscribe_diagnostics` — per-session
 | `find_import_path` | Correct import path for a symbol |
 | `explain_change_impact` | Risk-tiered blast radius with affected processes. A zero-edge target carries the "likely unused" vs "possible extraction gap" caveat |
 | `get_recent_changes` | Files/symbols changed since timestamp |
-| `edit_symbol` | Edit a symbol's source directly by ID — no Read needed. Optional `base_sha` content-hash guard refuses the write when the on-disk SHA has drifted; every success carries `new_sha` so the next edit can pipeline without re-reading |
-| `edit_file` | Edit any file (markdown, config, spec, template, source) by exact string replacement — accepts absolute paths or repo-rooted paths. Same `base_sha` / `new_sha` drift guard. Kills Read-before-Edit for files not in the graph |
+| `edit_symbol` | Edit a symbol's source directly by ID — no Read needed. Line-ending tolerant: an LF-authored `old_source` matches a CRLF file (and vice versa) and the replacement adopts the file's endings (`eol_normalized: true` rides on the response). Optional `base_sha` content-hash guard refuses the write when the on-disk SHA has drifted; every success carries `new_sha` so the next edit can pipeline without re-reading |
+| `edit_file` | Edit any file (markdown, config, spec, template, source) by exact string replacement — accepts absolute paths or repo-rooted paths. Line-ending tolerant: an LF-authored `old_string` matches a CRLF file (and vice versa) and the replacement is written with the file's own endings (`eol_normalized: true` rides on the response). Same `base_sha` / `new_sha` drift guard. Kills Read-before-Edit for files not in the graph |
 | `write_file` | Create or overwrite any file — atomic temp+rename, re-indexes on write. Same `base_sha` / `new_sha` drift guard |
 | `rename_symbol` | Coordinated multi-file rename with all references |
 | `move_symbol` | Relocate a function / method / type / variable / const to another file. Cross-package moves rewrite every qualified reference, drop the source import, add the target import, synthesise the target file if missing. Go for now |
