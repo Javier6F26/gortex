@@ -15,6 +15,7 @@ import (
 	"github.com/zzet/gortex/internal/astquery"
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/gitcmd"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/review"
@@ -246,21 +247,13 @@ func (s *Server) handleSiblingDiffContext(ctx context.Context, req mcp.CallToolR
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" {
-		if s.indexer != nil {
-			if root := s.indexer.RootPath(); root != "" {
-				repoRoot = root
-			}
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	if repoRoot == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
 	}
 
 	// Enumerate the whole changeset.
-	diff, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+	diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
@@ -502,19 +495,9 @@ func (s *Server) rawFileDiff(ctx context.Context, repoRoot, scope, baseRef, file
 // siblingDiffArgs mirrors the analysis diff-arg selection but emits a context
 // window (unified=3) so the raw sibling diff carries readable surrounding lines.
 func siblingDiffArgs(scope, baseRef string) []string {
-	switch scope {
-	case "staged":
-		return []string{"diff", "--cached", "--unified=3"}
-	case "all":
-		return []string{"diff", "HEAD", "--unified=3"}
-	case "compare":
-		if baseRef == "" {
-			baseRef = "main"
-		}
-		return []string{"diff", baseRef + "...HEAD", "--unified=3"}
-	default: // unstaged
-		return []string{"diff", "--unified=3"}
-	}
+	// analysis.GitDiffArgs pins the a/ b/ header prefixes the diff parsers
+	// anchor on (diff.mnemonicPrefix / diff.noprefix would zero them out).
+	return analysis.GitDiffArgs(scope, baseRef, 3)
 }
 
 // siblingDiffPayload projects the ranked siblings onto the wire shape.
@@ -554,13 +537,7 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	// An on-disk review needs a working tree; a pasted-diff review does not.
 	if repoRoot == "" && diffText == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
@@ -571,11 +548,12 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	// diff there is no git changeset to scan, so both stay empty and review.Run
 	// degrades to the diff-window substrate.
 	var (
-		rulepack []astquery.Match
-		impact   map[string]*analysis.ImpactResult
+		rulepack     []astquery.Match
+		impact       map[string]*analysis.ImpactResult
+		changedFiles []string
 	)
 	if diffText == "" {
-		diff, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+		diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -585,6 +563,7 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 		}
 		rulepack = s.reviewRulepackMatches(ctx, diff.ChangedFiles, allowedRepos)
 		impact = s.reviewImpact(diff.ChangedSymbols)
+		changedFiles = diff.ChangedFiles
 	}
 
 	// LLM seam: a closure over the optional LLM service's Generate, gated on the
@@ -596,6 +575,8 @@ func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mc
 	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.RunWithUsage(ctx, s.graph, gen, s.reviewPricing(), review.Options{
 		RepoRoot:        repoRoot,
+		RepoPrefix:      repoPrefix,
+		CoverageKnown:   s.coverageKnownForDiff(repoPrefix, changedFiles),
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,
@@ -693,6 +674,87 @@ func (s *Server) reviewRulepackMatches(ctx context.Context, changedFiles []strin
 
 // reviewImpact builds the per-changed-symbol blast-radius map review.Run uses to
 // rank per-file risk. A symbol whose impact analysis is empty is omitted.
+// testPatternsByExt maps a source-file extension to the path fragments its
+// covering tests conventionally carry. Only languages with a recognizable
+// convention are probed; a diff touching none of them reads as
+// coverage-unknown.
+var testPatternsByExt = map[string][]string{
+	".go":  {"_test.go"},
+	".ts":  {".test.ts", ".spec.ts", "__tests__/"},
+	".tsx": {".test.ts", ".spec.ts", "__tests__/"},
+	".js":  {".test.js", ".spec.js", "__tests__/"},
+	".jsx": {".test.js", ".spec.js", "__tests__/"},
+	".py":  {"test_"},
+}
+
+// testFragmentsIndexed reports, per test-path fragment, whether the repo's
+// graph carries any non-file symbol whose path contains it. One scan,
+// cached for the daemon's lifetime — the index's exclude set only changes
+// with a reindex.
+func (s *Server) testFragmentsIndexed(repoPrefix string) map[string]bool {
+	if v, ok := s.testIndexProbe.Load(repoPrefix); ok {
+		return v.(map[string]bool)
+	}
+	fragments := map[string]bool{}
+	for _, pats := range testPatternsByExt {
+		for _, p := range pats {
+			fragments[p] = false
+		}
+	}
+	var nodes []*graph.Node
+	if repoPrefix != "" {
+		nodes = s.graph.GetRepoNodes(repoPrefix)
+	} else {
+		nodes = s.graph.AllNodes()
+	}
+	remaining := len(fragments)
+	for _, n := range nodes {
+		if n == nil || n.Kind == graph.KindFile || !analysis.IsTestFile(n.FilePath) {
+			continue
+		}
+		for p, seen := range fragments {
+			if !seen && strings.Contains(n.FilePath, p) {
+				fragments[p] = true
+				remaining--
+			}
+		}
+		if remaining == 0 {
+			break
+		}
+	}
+	s.testIndexProbe.Store(repoPrefix, fragments)
+	return fragments
+}
+
+// coverageKnownForDiff reports whether the graph can attest test coverage
+// for this changeset: every changed file whose language has a test
+// convention must have that convention present in the index. An index
+// config that excludes a language's test files (e.g. "**/*_test.go") makes
+// "no covering test" blindness, not a finding — the review then says
+// "coverage unknown" instead of "untested".
+func (s *Server) coverageKnownForDiff(repoPrefix string, changedFiles []string) bool {
+	fragments := s.testFragmentsIndexed(repoPrefix)
+	sawCode := false
+	for _, f := range changedFiles {
+		pats := testPatternsByExt[strings.ToLower(filepath.Ext(f))]
+		if len(pats) == 0 {
+			continue
+		}
+		sawCode = true
+		ok := false
+		for _, p := range pats {
+			if fragments[p] {
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return false
+		}
+	}
+	return sawCode
+}
+
 func (s *Server) reviewImpact(changed []analysis.ChangedSymbol) map[string]*analysis.ImpactResult {
 	if len(changed) == 0 {
 		return nil
@@ -834,9 +896,12 @@ func reviewPayload(report *review.ReviewReport) map[string]any {
 		}
 		for _, fr := range report.FileRisk {
 			fileRisk = append(fileRisk, map[string]any{
-				"file":     fr.File,
-				"risk":     fr.Risk,
-				"findings": fr.Findings,
+				"file":      fr.File,
+				"risk":      fr.Risk,
+				"findings":  fr.Findings,
+				"affected":  fr.Affected,
+				"symbols":   fr.Symbols,
+				"uncovered": fr.Uncovered,
 			})
 		}
 	}
@@ -964,13 +1029,7 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 	scope, baseRef := siblingDiffScope(req)
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 	if repoRoot == "" && diffText == "" {
 		return mcp.NewToolResultError("could not resolve a repository root for the changeset diff"), nil
 	}
@@ -984,7 +1043,7 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 		ids      []string
 	)
 	if diffText == "" {
-		d, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+		d, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -1008,6 +1067,8 @@ func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) 
 	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.RunWithUsage(ctx, s.graph, gen, s.reviewPricing(), review.Options{
 		RepoRoot:        repoRoot,
+		RepoPrefix:      repoPrefix,
+		CoverageKnown:   diff != nil && s.coverageKnownForDiff(repoPrefix, diff.ChangedFiles),
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,
@@ -1122,7 +1183,7 @@ func (s *Server) reviewChangeView(diff *analysis.DiffResult) (*review.ChangeView
 	if s.indexer != nil {
 		repoRoot = s.indexer.RootPath()
 	}
-	view, err := review.BuildChangeView(s.graph, repoRoot, "", "")
+	view, err := review.BuildChangeView(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), "", "")
 	if err != nil {
 		return nil, diff
 	}
@@ -1357,9 +1418,12 @@ func reviewPackPayload(env reviewEnvelope) map[string]any {
 	fileRisk := make([]map[string]any, 0, len(env.FileRisk))
 	for _, fr := range env.FileRisk {
 		fileRisk = append(fileRisk, map[string]any{
-			"file":     fr.File,
-			"risk":     fr.Risk,
-			"findings": fr.Findings,
+			"file":      fr.File,
+			"risk":      fr.Risk,
+			"findings":  fr.Findings,
+			"affected":  fr.Affected,
+			"symbols":   fr.Symbols,
+			"uncovered": fr.Uncovered,
 		})
 	}
 	findings := make([]map[string]any, 0, len(env.Findings))

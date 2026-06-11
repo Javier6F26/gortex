@@ -86,7 +86,7 @@ func (s *Server) handleCritiqueReview(ctx context.Context, req mcp.CallToolReque
 		})
 	}
 
-	repoRoot := s.prReviewRepoRoot(req)
+	repoRoot := s.prReviewRepoRoot(ctx, req)
 	diffText := strings.TrimSpace(req.GetString("diff", ""))
 
 	findings, err := s.critiqueFindingsFor(ctx, req, repoRoot)
@@ -181,8 +181,10 @@ func (s *Server) critiqueFindingsFor(ctx context.Context, req mcp.CallToolReques
 		rulepack []astquery.Match
 		impact   map[string]*analysis.ImpactResult
 	)
+	repoPrefix := s.diffJoinPrefix(repoRoot)
+	var changedFiles []string
 	if diffText == "" {
-		diff, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+		diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 		if err != nil {
 			return nil, err
 		}
@@ -192,11 +194,14 @@ func (s *Server) critiqueFindingsFor(ctx context.Context, req mcp.CallToolReques
 		}
 		rulepack = s.reviewRulepackMatches(ctx, diff.ChangedFiles, allowedRepos)
 		impact = s.reviewImpact(diff.ChangedSymbols)
+		changedFiles = diff.ChangedFiles
 	}
 
 	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.Run(ctx, s.graph, nil, review.Options{
 		RepoRoot:        repoRoot,
+		RepoPrefix:      repoPrefix,
+		CoverageKnown:   s.coverageKnownForDiff(repoPrefix, changedFiles),
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,

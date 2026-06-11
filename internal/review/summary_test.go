@@ -157,7 +157,7 @@ func TestRenderSummary_NilReport(t *testing.T) {
 		t.Errorf("nil report agent rendering must carry a zero cost line, got %q", agent)
 	}
 	human := RenderSummary(nil, AudienceHuman)
-	if !strings.Contains(human, "Verdict: APPROVE") || !strings.Contains(human, "No inline findings.") {
+	if !strings.Contains(human, "Verdict: APPROVE") || !strings.Contains(human, "No inline findings") {
 		t.Errorf("nil report human rendering must be an empty APPROVE packet, got %q", human)
 	}
 }

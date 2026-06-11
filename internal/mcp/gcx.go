@@ -2292,13 +2292,16 @@ func encodeReview(result map[string]any) ([]byte, error) {
 		return nil, err
 	}
 
-	riskEnc := newGCX(&buf, "review.file_risk", []string{"file", "risk", "findings"})
+	riskEnc := newGCX(&buf, "review.file_risk", []string{"file", "risk", "findings", "affected", "symbols", "uncovered"})
 	if risks, ok := result["file_risk"].([]map[string]any); ok {
 		for _, r := range risks {
 			file, _ := r["file"].(string)
 			risk, _ := r["risk"].(string)
 			findings, _ := r["findings"].(int)
-			if err := riskEnc.WriteRow(file, risk, findings); err != nil {
+			affected, _ := r["affected"].(int)
+			symbols, _ := r["symbols"].(int)
+			uncovered, _ := r["uncovered"].(int)
+			if err := riskEnc.WriteRow(file, risk, findings, affected, symbols, uncovered); err != nil {
 				return nil, err
 			}
 		}
@@ -2459,13 +2462,16 @@ func encodeReviewPack(result map[string]any) ([]byte, error) {
 		return nil, err
 	}
 
-	riskEnc := newGCX(&buf, "review_pack.file_risk", []string{"file", "risk", "findings"})
+	riskEnc := newGCX(&buf, "review_pack.file_risk", []string{"file", "risk", "findings", "affected", "symbols", "uncovered"})
 	if risks, ok := result["file_risk"].([]map[string]any); ok {
 		for _, r := range risks {
 			file, _ := r["file"].(string)
 			risk, _ := r["risk"].(string)
 			findings, _ := r["findings"].(int)
-			if err := riskEnc.WriteRow(file, risk, findings); err != nil {
+			affected, _ := r["affected"].(int)
+			symbols, _ := r["symbols"].(int)
+			uncovered, _ := r["uncovered"].(int)
+			if err := riskEnc.WriteRow(file, risk, findings, affected, symbols, uncovered); err != nil {
 				return nil, err
 			}
 		}

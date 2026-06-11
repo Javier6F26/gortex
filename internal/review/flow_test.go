@@ -235,9 +235,105 @@ func TestRankFileRiskUsesImpact(t *testing.T) {
 		"app/a.go::A": {Risk: analysis.RiskCritical},
 		"app/b.go::B": {Risk: analysis.RiskLow},
 	}
-	rows := rankFileRisk(diff, impact, nil)
+	rows := rankFileRisk(diff, impact, nil, "", true)
 	require.Len(t, rows, 2)
 	require.Equal(t, "app/a.go", rows[0].File, "the critical-risk file ranks first")
 	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk)
 	require.Equal(t, string(analysis.RiskLow), rows[1].Risk)
+}
+
+// TestRankFileRiskNormalizesRepoPrefix pins the multi-repo shape: changed
+// symbols carry graph-prefixed file paths while the diff's changed files are
+// repo-relative. The rollup must merge both onto one row per file (keyed
+// relative), carrying the symbol's impact tier — not emit a prefixed
+// impact-tier row plus a LOW diff-only duplicate.
+func TestRankFileRiskNormalizesRepoPrefix(t *testing.T) {
+	diff := &analysis.DiffResult{
+		ChangedSymbols: []analysis.ChangedSymbol{
+			{ID: "myrepo/app/a.go::A", FilePath: "myrepo/app/a.go", Line: 1},
+		},
+		ChangedFiles: []string{"app/a.go", "app/b.go"},
+	}
+	impact := map[string]*analysis.ImpactResult{
+		"myrepo/app/a.go::A": {Risk: analysis.RiskCritical},
+	}
+	rows := rankFileRisk(diff, impact, nil, "myrepo", true)
+	require.Len(t, rows, 2, "one row per file, prefixed and relative forms merged")
+	require.Equal(t, "app/a.go", rows[0].File)
+	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk)
+	require.Equal(t, "app/b.go", rows[1].File)
+}
+
+// TestRankFileRiskCoverageEvidence pins the per-file coverage rollup: the
+// widest blast radius among the file's changed symbols, the changed-symbol
+// count, and how many of them lack a covering test.
+func TestRankFileRiskCoverageEvidence(t *testing.T) {
+	diff := &analysis.DiffResult{
+		ChangedSymbols: []analysis.ChangedSymbol{
+			{ID: "app/a.go::A", FilePath: "app/a.go", Line: 1},
+			{ID: "app/a.go::B", FilePath: "app/a.go", Line: 20},
+		},
+		ChangedFiles: []string{"app/a.go"},
+	}
+	impact := map[string]*analysis.ImpactResult{
+		"app/a.go::A": {Risk: analysis.RiskCritical, TotalAffected: 42, TestFiles: []string{"app/a_test.go"}},
+		"app/a.go::B": {Risk: analysis.RiskLow, TotalAffected: 3},
+	}
+	rows := rankFileRisk(diff, impact, nil, "", true)
+	require.Len(t, rows, 1)
+	require.Equal(t, 42, rows[0].Affected, "the widest symbol's blast radius wins")
+	require.Equal(t, 2, rows[0].Symbols)
+	require.Equal(t, 1, rows[0].Uncovered, "B has no covering test")
+}
+
+// TestRankFileRiskCoverageUnknown pins the epistemic guard: when the graph
+// indexes no test symbols (coverageKnown false), no row may claim untested
+// symbols — blindness is not a finding. The risk tier itself stays.
+func TestRankFileRiskCoverageUnknown(t *testing.T) {
+	diff := &analysis.DiffResult{
+		ChangedSymbols: []analysis.ChangedSymbol{
+			{ID: "app/a.go::A", FilePath: "app/a.go", Line: 1},
+		},
+		ChangedFiles: []string{"app/a.go"},
+	}
+	impact := map[string]*analysis.ImpactResult{
+		"app/a.go::A": {Risk: analysis.RiskCritical, TotalAffected: 42},
+	}
+	rows := rankFileRisk(diff, impact, nil, "", false)
+	require.Len(t, rows, 1)
+	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk, "the blast-radius tier stays")
+	require.Equal(t, 42, rows[0].Affected, "blast radius is a graph fact, not a coverage claim")
+	require.Zero(t, rows[0].Symbols, "no coverage claims when the index carries no tests")
+	require.Zero(t, rows[0].Uncovered)
+}
+
+// TestSummarizeCoveragePhrasing pins the three risk-driven headlines: untested
+// risk, fully covered risk, and unknown coverage.
+func TestSummarizeCoveragePhrasing(t *testing.T) {
+	critical := string(analysis.RiskCritical)
+
+	untested := summarize(VerdictBlock, nil, []FileRisk{{File: "a.go", Risk: critical, Symbols: 2, Uncovered: 1}})
+	require.Contains(t, untested, "1 without covering tests")
+
+	covered := summarize(VerdictReview, nil, []FileRisk{{File: "a.go", Risk: critical, Symbols: 2}})
+	require.Contains(t, covered, "all test-covered")
+
+	unknown := summarize(VerdictBlock, nil, []FileRisk{{File: "a.go", Risk: critical}})
+	require.Contains(t, unknown, "test coverage unknown")
+}
+
+// TestComputeVerdictCoverageCap pins the coverage temper: a critical-risk
+// file whose changed symbols are all test-covered contributes at most
+// REVIEW; the same file with an untested changed symbol blocks.
+func TestComputeVerdictCoverageCap(t *testing.T) {
+	covered := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical), Symbols: 2, Uncovered: 0}}
+	require.Equal(t, VerdictReview, computeVerdict(nil, covered),
+		"blast radius alone must not block a fully test-covered change")
+
+	untested := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical), Symbols: 2, Uncovered: 1}}
+	require.Equal(t, VerdictBlock, computeVerdict(nil, untested))
+
+	// No coverage evidence (no impact data) keeps the conservative ladder.
+	unknown := []FileRisk{{File: "a.go", Risk: string(analysis.RiskCritical)}}
+	require.Equal(t, VerdictBlock, computeVerdict(nil, unknown))
 }

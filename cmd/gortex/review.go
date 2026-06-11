@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -180,9 +179,12 @@ type reviewPayloadCLI struct {
 		Source   string `json:"source"`
 	} `json:"comments"`
 	FileRisk []struct {
-		File     string `json:"file"`
-		Risk     string `json:"risk"`
-		Findings int    `json:"findings"`
+		File      string `json:"file"`
+		Risk      string `json:"risk"`
+		Findings  int    `json:"findings"`
+		Affected  int    `json:"affected"`
+		Symbols   int    `json:"symbols"`
+		Uncovered int    `json:"uncovered"`
 	} `json:"file_risk"`
 	Depth string `json:"depth"`
 	Cost  *struct {
@@ -225,9 +227,12 @@ func reviewReportFromPayload(p reviewPayloadCLI) *review.ReviewReport {
 	}
 	for _, fr := range p.FileRisk {
 		report.FileRisk = append(report.FileRisk, review.FileRisk{
-			File:     fr.File,
-			Risk:     fr.Risk,
-			Findings: fr.Findings,
+			File:      fr.File,
+			Risk:      fr.Risk,
+			Findings:  fr.Findings,
+			Affected:  fr.Affected,
+			Symbols:   fr.Symbols,
+			Uncovered: fr.Uncovered,
 		})
 	}
 	if p.Cost != nil {
@@ -258,67 +263,15 @@ func printReview(cmd *cobra.Command, raw json.RawMessage) error {
 		return nil
 	}
 
-	// The agent audience renders the terse, machine-first summary from the
-	// canonical review renderer so the CLI and any sub-agent shelling the verb
-	// see byte-identical output. The human audience keeps the readable per-file
-	// packet below.
+	// Both audiences render through the canonical review renderer so the CLI,
+	// the MCP text rendering, and any sub-agent shelling the verb see the
+	// same packet — the human path used to keep a hand-rolled duplicate here,
+	// which silently dropped every field the renderer learned after it forked
+	// (coverage evidence, the rulepack-passed line).
 	if strings.EqualFold(reviewAudience, "agent") {
 		_, _ = io.WriteString(out, review.RenderSummary(reviewReportFromPayload(p), review.AudienceAgent))
 		return nil
 	}
-
-	verdict := p.Verdict
-	if verdict == "" {
-		verdict = "APPROVE"
-	}
-	_, _ = fmt.Fprintf(out, "Verdict: %s\n", verdict)
-	if p.Summary != "" {
-		_, _ = fmt.Fprintf(out, "%s\n", p.Summary)
-	}
-
-	if len(p.FileRisk) > 0 {
-		_, _ = fmt.Fprintln(out, "\nFile risk:")
-		for _, fr := range p.FileRisk {
-			_, _ = fmt.Fprintf(out, "  %-8s %s (%d finding(s))\n", fr.Risk, fr.File, fr.Findings)
-		}
-	}
-
-	if len(p.Comments) == 0 {
-		_, _ = fmt.Fprintln(out, "\nNo inline findings.")
-		return nil
-	}
-
-	// Group the comments by file, ordered within a file by line, so the output
-	// reads like a per-file review pass.
-	byFile := map[string][]int{}
-	for i, c := range p.Comments {
-		byFile[c.File] = append(byFile[c.File], i)
-	}
-	files := make([]string, 0, len(byFile))
-	for f := range byFile {
-		files = append(files, f)
-	}
-	sort.Strings(files)
-
-	_, _ = fmt.Fprintf(out, "\nFindings (%d):\n", len(p.Comments))
-	for _, f := range files {
-		idxs := byFile[f]
-		sort.Slice(idxs, func(a, b int) bool {
-			return p.Comments[idxs[a]].Line < p.Comments[idxs[b]].Line
-		})
-		_, _ = fmt.Fprintf(out, "\n%s\n", f)
-		for _, i := range idxs {
-			c := p.Comments[i]
-			rule := c.Rule
-			if c.Category != "" {
-				rule = strings.TrimSpace(c.Category + "/" + c.Rule)
-			}
-			_, _ = fmt.Fprintf(out, "  L%-5d %-8s %s", c.Line, c.Severity, c.Message)
-			if rule != "" {
-				_, _ = fmt.Fprintf(out, "  [%s]", rule)
-			}
-			_, _ = fmt.Fprintln(out)
-		}
-	}
+	_, _ = io.WriteString(out, review.RenderSummary(reviewReportFromPayload(p), review.AudienceHuman))
 	return nil
 }

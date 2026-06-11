@@ -71,8 +71,7 @@ func (s *Server) handleSuggestReviewers(ctx context.Context, req mcp.CallToolReq
 	}
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
+	repoRoot, repoPrefix := s.diffRepoScope(ctx, repo)
 
 	changedFiles, _, err := s.resolveReviewerChangeset(ctx, req, repoRoot)
 	if err != nil {
@@ -100,10 +99,12 @@ func (s *Server) handleSuggestReviewers(ctx context.Context, req mcp.CallToolReq
 	}
 
 	// Ownership signal — recent authors of the changed symbols / files.
+	// The changed-file paths are repo-relative (git / forge), so the node
+	// join is prefix-aware in multi-repo mode.
 	blame := blameRowsByID(s.graph)
 	authorCounts := map[string]int{}
 	for _, f := range changedFiles {
-		for _, n := range s.graph.GetFileNodes(f) {
+		for _, n := range analysis.JoinFileNodes(s.graph, repoPrefix, f) {
 			if la, ok := lastAuthoredFrom(blame, n); ok && la.Email != "" {
 				authorCounts[normalizeReviewer(la.Email)]++
 			}
@@ -115,7 +116,7 @@ func (s *Server) handleSuggestReviewers(ctx context.Context, req mcp.CallToolReq
 	// candidate experts; the count is the number of co-change links.
 	coChangeCounts := map[string]int{}
 	for _, f := range changedFiles {
-		for partner := range s.coChangeScores(f) {
+		for partner := range s.coChangeScores(analysis.JoinFilePath(s.graph, repoPrefix, f)) {
 			for _, n := range s.graph.GetFileNodes(partner) {
 				if la, ok := lastAuthoredFrom(blame, n); ok && la.Email != "" {
 					coChangeCounts[normalizeReviewer(la.Email)]++
@@ -168,7 +169,7 @@ func (s *Server) resolveReviewerChangeset(ctx context.Context, req mcp.CallToolR
 		if repoRoot == "" {
 			return nil, nil, fmt.Errorf("could not resolve a repository root for the base diff")
 		}
-		diff, derr := analysis.MapGitDiff(s.graph, repoRoot, "compare", base)
+		diff, derr := analysis.MapGitDiff(s.graph, repoRoot, s.diffJoinPrefix(repoRoot), "compare", base)
 		if derr != nil {
 			return nil, nil, fmt.Errorf("git diff against %q failed: %v", base, derr)
 		}

@@ -40,7 +40,10 @@ type DiffResult struct {
 // scope: "unstaged", "staged", "all", "compare"
 // baseRef: used when scope is "compare" (e.g., "main")
 // repoRoot: absolute path to the repository root
-func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, error) {
+// repoPrefix: the graph repo prefix anchoring repoRoot's indexed nodes.
+// Multi-repo daemons key file paths as "<prefix>/<rel>" while git emits
+// repo-relative paths; empty in single-repo / unprefixed mode.
+func MapGitDiff(g graph.Store, repoRoot, repoPrefix, scope, baseRef string) (*DiffResult, error) {
 	args := buildDiffArgs(scope, baseRef)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -56,10 +59,48 @@ func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, er
 	}
 
 	hunks := parseDiffHunks(string(output))
+	return joinHunksToSymbols(g, repoPrefix, hunks), nil
+}
 
-	result := &DiffResult{
-		Hunks: hunks,
+// JoinFileNodes maps one repo-relative changed-file path to the graph nodes
+// its file defines. Indexed file paths carry the repo prefix in multi-repo
+// mode ("<prefix>/<rel>") while git and forge APIs emit repo-relative paths,
+// so the raw lookup is tried first (single-repo / already-prefixed input)
+// and the prefixed form second.
+func JoinFileNodes(g graph.Store, repoPrefix, path string) []*graph.Node {
+	if nodes := g.GetFileNodes(path); len(nodes) > 0 {
+		return nodes
 	}
+	if repoPrefix == "" || strings.HasPrefix(path, repoPrefix+"/") {
+		return nil
+	}
+	return g.GetFileNodes(repoPrefix + "/" + path)
+}
+
+// JoinFilePath returns the graph-keyed variant of a repo-relative file path:
+// the raw path when it resolves (or no prefix applies), otherwise the prefixed
+// form when that resolves. Falls back to the raw path when neither does, so
+// the caller's downstream lookup misses exactly as it would have anyway.
+func JoinFilePath(g graph.Store, repoPrefix, path string) string {
+	if repoPrefix == "" || strings.HasPrefix(path, repoPrefix+"/") {
+		return path
+	}
+	if len(g.GetFileNodes(path)) > 0 {
+		return path
+	}
+	if prefixed := repoPrefix + "/" + path; len(g.GetFileNodes(prefixed)) > 0 {
+		return prefixed
+	}
+	return path
+}
+
+// joinHunksToSymbols builds the hunk→symbol/file join shared by MapGitDiff
+// and MapGitDiffWithLines: every symbol whose line range overlaps a changed
+// hunk in its file, deduped, plus the changed-file set. ChangedFiles keeps
+// the diff-relative paths (callers re-join them with git pathspecs); only
+// the node lookup is prefix-aware.
+func joinHunksToSymbols(g graph.Store, repoPrefix string, hunks []DiffHunk) *DiffResult {
+	result := &DiffResult{Hunks: hunks}
 
 	fileSet := make(map[string]bool)
 	symbolSeen := make(map[string]bool)
@@ -68,8 +109,7 @@ func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, er
 		fileSet[hunk.FilePath] = true
 
 		// Find symbols whose line range overlaps the hunk
-		nodes := g.GetFileNodes(hunk.FilePath)
-		for _, n := range nodes {
+		for _, n := range JoinFileNodes(g, repoPrefix, hunk.FilePath) {
 			if n.Kind == graph.KindFile {
 				continue
 			}
@@ -93,41 +133,45 @@ func MapGitDiff(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, er
 		result.ChangedFiles = append(result.ChangedFiles, f)
 	}
 
-	return result, nil
+	return result
 }
 
-func buildDiffArgs(scope, baseRef string) []string {
+// GitDiffArgs builds the `git diff` argv for a scope ("unstaged", "staged",
+// "all", "compare") with the given context width. The -c overrides pin the
+// diff header prefixes to git's standard a/ b/ form: parseDiffHunks and
+// parseDiffLines anchor on "+++ b/", which a developer's diff.mnemonicPrefix
+// (c/ w/ headers on worktree-side diffs) or diff.noprefix config would
+// otherwise silently zero out — every hunk drops, every diff-driven tool
+// reports an empty changeset.
+func GitDiffArgs(scope, baseRef string, unified int) []string {
+	args := []string{
+		"-c", "diff.mnemonicPrefix=false",
+		"-c", "diff.noprefix=false",
+		"diff",
+	}
 	switch scope {
 	case "staged":
-		return []string{"diff", "--cached", "--unified=0"}
+		args = append(args, "--cached")
 	case "all":
-		return []string{"diff", "HEAD", "--unified=0"}
+		args = append(args, "HEAD")
 	case "compare":
 		if baseRef == "" {
 			baseRef = "main"
 		}
-		return []string{"diff", baseRef + "...HEAD", "--unified=0"}
-	default: // unstaged
-		return []string{"diff", "--unified=0"}
+		args = append(args, baseRef+"...HEAD")
+	default: // unstaged — bare `git diff`
 	}
+	return append(args, fmt.Sprintf("--unified=%d", unified))
+}
+
+func buildDiffArgs(scope, baseRef string) []string {
+	return GitDiffArgs(scope, baseRef, 0)
 }
 
 // buildDiffArgsWithContext mirrors buildDiffArgs but emits a context window so
 // the new-side line text survives into the hunk body for snippet grounding.
 func buildDiffArgsWithContext(scope, baseRef string) []string {
-	switch scope {
-	case "staged":
-		return []string{"diff", "--cached", "--unified=3"}
-	case "all":
-		return []string{"diff", "HEAD", "--unified=3"}
-	case "compare":
-		if baseRef == "" {
-			baseRef = "main"
-		}
-		return []string{"diff", baseRef + "...HEAD", "--unified=3"}
-	default: // unstaged
-		return []string{"diff", "--unified=3"}
-	}
+	return GitDiffArgs(scope, baseRef, 3)
 }
 
 // HunkLine is a single new-side line carried out of a unified diff: added lines
@@ -253,7 +297,8 @@ func parseNewStart(line string) (int, bool) {
 // their post-change line numbers — the substrate snippet grounding anchors on.
 // The returned *DiffResult is computed with the same logic as MapGitDiff (only
 // the diff's context width differs), so symbol overlap is unaffected.
-func MapGitDiffWithLines(g graph.Store, repoRoot, scope, baseRef string) (*DiffResult, map[string][]HunkLine, error) {
+// repoPrefix anchors the node join exactly as in MapGitDiff.
+func MapGitDiffWithLines(g graph.Store, repoRoot, repoPrefix, scope, baseRef string) (*DiffResult, map[string][]HunkLine, error) {
 	args := buildDiffArgsWithContext(scope, baseRef)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -271,39 +316,7 @@ func MapGitDiffWithLines(g graph.Store, repoRoot, scope, baseRef string) (*DiffR
 	hunks := parseDiffHunks(text)
 	lines := parseDiffLines(text)
 
-	result := &DiffResult{Hunks: hunks}
-
-	fileSet := make(map[string]bool)
-	symbolSeen := make(map[string]bool)
-
-	for _, hunk := range hunks {
-		fileSet[hunk.FilePath] = true
-
-		nodes := g.GetFileNodes(hunk.FilePath)
-		for _, n := range nodes {
-			if n.Kind == graph.KindFile {
-				continue
-			}
-			if n.StartLine <= hunk.EndLine && n.EndLine >= hunk.StartLine {
-				if !symbolSeen[n.ID] {
-					symbolSeen[n.ID] = true
-					result.ChangedSymbols = append(result.ChangedSymbols, ChangedSymbol{
-						ID:       n.ID,
-						Name:     n.Name,
-						Kind:     string(n.Kind),
-						FilePath: n.FilePath,
-						Line:     n.StartLine,
-					})
-				}
-			}
-		}
-	}
-
-	for f := range fileSet {
-		result.ChangedFiles = append(result.ChangedFiles, f)
-	}
-
-	return result, lines, nil
+	return joinHunksToSymbols(g, repoPrefix, hunks), lines, nil
 }
 
 func parseDiffHunks(output string) []DiffHunk {

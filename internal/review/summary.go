@@ -124,12 +124,26 @@ func renderHumanSummary(report *ReviewReport) string {
 	if len(report.FileRisk) > 0 {
 		b.WriteString("\nFile risk:\n")
 		for _, fr := range report.FileRisk {
-			fmt.Fprintf(&b, "  %-8s %s (%d finding(s))\n", fr.Risk, fr.File, fr.Findings)
+			fmt.Fprintf(&b, "  %-8s %s (%d finding(s))", fr.Risk, fr.File, fr.Findings)
+			// Evidence, when the impact analysis supplied it: the blast
+			// radius behind the tier, and — when the graph indexes tests
+			// at all — whether tests stand behind the change.
+			if fr.Affected > 0 || fr.Symbols > 0 {
+				fmt.Fprintf(&b, " — %d affected", fr.Affected)
+				if fr.Symbols > 0 {
+					if fr.Uncovered > 0 {
+						fmt.Fprintf(&b, ", %d/%d changed symbols untested", fr.Uncovered, fr.Symbols)
+					} else {
+						fmt.Fprintf(&b, ", all %d changed symbols test-covered ✓", fr.Symbols)
+					}
+				}
+			}
+			b.WriteByte('\n')
 		}
 	}
 
 	if len(report.Findings) == 0 {
-		b.WriteString("\nNo inline findings.\n")
+		b.WriteString("\n✓ No inline findings — the deterministic rulepack passed.\n")
 	} else {
 		fmt.Fprintf(&b, "\nFindings (%d):\n", len(report.Findings))
 		for _, file := range findingFilesSorted(report.Findings) {

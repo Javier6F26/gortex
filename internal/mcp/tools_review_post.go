@@ -43,13 +43,7 @@ func (s *Server) handlePostReview(ctx context.Context, req mcp.CallToolRequest) 
 	}
 
 	repo := strings.TrimSpace(req.GetString("repo", ""))
-	roots := s.collectRepoRoots(repo)
-	repoRoot := pickRepoRoot(roots, repo)
-	if repoRoot == "" && s.indexer != nil {
-		if root := s.indexer.RootPath(); root != "" {
-			repoRoot = root
-		}
-	}
+	repoRoot, _ := s.diffRepoScope(ctx, repo)
 
 	findings, err := s.postReviewFindingsFor(ctx, req, repoRoot)
 	if err != nil {
@@ -140,8 +134,10 @@ func (s *Server) postReviewFindingsFor(ctx context.Context, req mcp.CallToolRequ
 		rulepack []astquery.Match
 		impact   map[string]*analysis.ImpactResult
 	)
+	repoPrefix := s.diffJoinPrefix(repoRoot)
+	var changedFiles []string
 	if diffText == "" {
-		diff, err := analysis.MapGitDiff(s.graph, repoRoot, scope, baseRef)
+		diff, err := analysis.MapGitDiff(s.graph, repoRoot, repoPrefix, scope, baseRef)
 		if err != nil {
 			return nil, err
 		}
@@ -151,11 +147,14 @@ func (s *Server) postReviewFindingsFor(ctx context.Context, req mcp.CallToolRequ
 		}
 		rulepack = s.reviewRulepackMatches(ctx, diff.ChangedFiles, allowedRepos)
 		impact = s.reviewImpact(diff.ChangedSymbols)
+		changedFiles = diff.ChangedFiles
 	}
 
 	suppStore, suppRepoKey := s.reviewSuppressions()
 	report, err := review.Run(ctx, s.graph, nil, review.Options{
 		RepoRoot:        repoRoot,
+		RepoPrefix:      repoPrefix,
+		CoverageKnown:   s.coverageKnownForDiff(repoPrefix, changedFiles),
 		Scope:           scope,
 		BaseRef:         baseRef,
 		Diff:            diffText,
