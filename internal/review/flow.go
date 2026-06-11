@@ -383,7 +383,7 @@ func compress(opts Options, plan *reviewPlan, llmFindings []Finding, dropped int
 		WithSuppression(opts.Suppressions, opts.RepoKey).
 		Apply(merged)
 
-	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged)
+	fileRisk := rankFileRisk(plan.diff, opts.Impact, merged, opts.RepoPrefix)
 	verdict := computeVerdict(merged, fileRisk)
 
 	bySeverity := map[string]int{}
@@ -443,9 +443,23 @@ func sortFindings(findings []Finding) {
 	})
 }
 
-// summarize produces the one-line report headline.
+// summarize produces the one-line report headline. With no findings a
+// non-APPROVE verdict is risk-driven (computeVerdict escalates on per-file
+// blast radius), so the headline says which tier earned it instead of the
+// self-contradictory "BLOCK: no findings".
 func summarize(verdict Verdict, findings []Finding, fileRisk []FileRisk) string {
 	if len(findings) == 0 {
+		if verdict != VerdictApprove && len(fileRisk) > 0 {
+			worst := fileRisk[0].Risk // sorted worst-first
+			n := 0
+			for _, fr := range fileRisk {
+				if fr.Risk == worst {
+					n++
+				}
+			}
+			return fmt.Sprintf("%s: no rule findings, but %d of %d changed file(s) carry %s blast-radius risk",
+				verdict, n, len(fileRisk), worst)
+		}
 		return fmt.Sprintf("%s: no findings across %d changed file(s)", verdict, len(fileRisk))
 	}
 	return fmt.Sprintf("%s: %d finding(s) across %d changed file(s)", verdict, len(findings), len(fileRisk))

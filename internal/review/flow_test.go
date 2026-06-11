@@ -235,9 +235,31 @@ func TestRankFileRiskUsesImpact(t *testing.T) {
 		"app/a.go::A": {Risk: analysis.RiskCritical},
 		"app/b.go::B": {Risk: analysis.RiskLow},
 	}
-	rows := rankFileRisk(diff, impact, nil)
+	rows := rankFileRisk(diff, impact, nil, "")
 	require.Len(t, rows, 2)
 	require.Equal(t, "app/a.go", rows[0].File, "the critical-risk file ranks first")
 	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk)
 	require.Equal(t, string(analysis.RiskLow), rows[1].Risk)
+}
+
+// TestRankFileRiskNormalizesRepoPrefix pins the multi-repo shape: changed
+// symbols carry graph-prefixed file paths while the diff's changed files are
+// repo-relative. The rollup must merge both onto one row per file (keyed
+// relative), carrying the symbol's impact tier — not emit a prefixed
+// impact-tier row plus a LOW diff-only duplicate.
+func TestRankFileRiskNormalizesRepoPrefix(t *testing.T) {
+	diff := &analysis.DiffResult{
+		ChangedSymbols: []analysis.ChangedSymbol{
+			{ID: "myrepo/app/a.go::A", FilePath: "myrepo/app/a.go", Line: 1},
+		},
+		ChangedFiles: []string{"app/a.go", "app/b.go"},
+	}
+	impact := map[string]*analysis.ImpactResult{
+		"myrepo/app/a.go::A": {Risk: analysis.RiskCritical},
+	}
+	rows := rankFileRisk(diff, impact, nil, "myrepo")
+	require.Len(t, rows, 2, "one row per file, prefixed and relative forms merged")
+	require.Equal(t, "app/a.go", rows[0].File)
+	require.Equal(t, string(analysis.RiskCritical), rows[0].Risk)
+	require.Equal(t, "app/b.go", rows[1].File)
 }

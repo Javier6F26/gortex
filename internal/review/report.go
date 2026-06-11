@@ -2,6 +2,7 @@ package review
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/zzet/gortex/internal/analysis"
 )
@@ -89,19 +90,33 @@ func worseVerdict(a, b Verdict) Verdict {
 // of the worst changed symbol it contains; with no impact data it falls back to a
 // finding-count heuristic via the same assessRisk ladder. The result is sorted
 // worst-first, then by file for determinism.
-func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactResult, findings []Finding) []FileRisk {
+//
+// repoPrefix normalizes the two path vocabularies onto one key: changed-symbol
+// (and finding) paths come from graph nodes, which multi-repo daemons key as
+// "<prefix>/<rel>", while the diff's changed files are repo-relative. Without
+// stripping the prefix every file would surface twice — once with its real
+// impact tier and once as a LOW diff-only row.
+func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactResult, findings []Finding, repoPrefix string) []FileRisk {
+	norm := func(file string) string {
+		file = cleanPath(file)
+		if repoPrefix != "" {
+			file = strings.TrimPrefix(file, repoPrefix+"/")
+		}
+		return file
+	}
+
 	byFile := map[string]string{}
 	findingCount := map[string]int{}
 
 	for _, f := range findings {
 		if f.File != "" {
-			findingCount[f.File]++
+			findingCount[norm(f.File)]++
 		}
 	}
 
 	if diff != nil {
 		for _, cs := range diff.ChangedSymbols {
-			file := cleanPath(cs.FilePath)
+			file := norm(cs.FilePath)
 			if file == "" {
 				continue
 			}
@@ -114,7 +129,7 @@ func rankFileRisk(diff *analysis.DiffResult, impact map[string]*analysis.ImpactR
 			byFile[file] = worseRisk(byFile[file], risk)
 		}
 		for _, file := range diff.ChangedFiles {
-			file = cleanPath(file)
+			file = norm(file)
 			if file == "" {
 				continue
 			}
