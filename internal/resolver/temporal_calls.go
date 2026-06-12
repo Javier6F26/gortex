@@ -12,6 +12,14 @@ import (
 // (`unresolved::temporal::<kind>::<name>`).
 const temporalStubPrefix = unresolvedPrefix + "temporal::"
 
+// temporalEnvDefaultConfidence is stamped on a stub edge whose name was
+// resolved through an env-var-with-literal-default variable (the parser
+// tags it `temporal_name_origin=env_default`). It sits in the
+// speculative band (< 0.5) so the edge lands at the AMBIGUOUS label and,
+// together with MetaSpeculative, is hidden from default queries: the
+// runtime env override may name a different handler than the default.
+const temporalEnvDefaultConfidence = 0.4
+
 // Temporal annotation node IDs the Java extractor emits via
 // EmitAnnotationEdge. The resolver consumes these to discover
 // temporal-tagged interfaces and methods.
@@ -127,6 +135,18 @@ func ResolveTemporalCalls(g graph.Store) int {
 		}
 		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo)
 
+		// When the name came from an env-var-with-literal-default
+		// variable, the value is a best-guess: land the resolved edge at
+		// the speculative tier instead of ast_resolved.
+		envDefault := false
+		if v, _ := e.Meta["temporal_name_origin"].(string); v == "env_default" {
+			envDefault = true
+		}
+		if handlerID != "" && envDefault {
+			origin = graph.OriginSpeculative
+			conf = temporalEnvDefaultConfidence
+		}
+
 		want := handlerID
 		if want == "" {
 			want = temporalStubPlaceholder(s.kind, s.name)
@@ -145,6 +165,9 @@ func ResolveTemporalCalls(g graph.Store) int {
 			e.Confidence = conf
 			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
 			e.Meta["temporal_resolution"] = origin
+			if envDefault {
+				e.Meta[graph.MetaSpeculative] = true
+			}
 			StampSynthesized(e, SynthTemporalStub)
 			resolved++
 		} else {
@@ -152,6 +175,7 @@ func ResolveTemporalCalls(g graph.Store) int {
 			e.Confidence = 0
 			e.ConfidenceLabel = ""
 			delete(e.Meta, "temporal_resolution")
+			delete(e.Meta, graph.MetaSpeculative)
 			UnstampSynthesized(e)
 		}
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})

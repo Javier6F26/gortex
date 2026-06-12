@@ -44,6 +44,17 @@ func (b *temporalTestGraph) addStubCall(callerID, kind, name, filePath string) *
 	return e
 }
 
+// addStubCallEnvDefault adds a Temporal stub-call edge whose name was
+// resolved from an env-var-with-literal-default variable
+// (temporal_name_origin=env_default). The resolver must still land it on
+// the registered handler but at the speculative tier (the runtime env
+// override may differ from the default).
+func (b *temporalTestGraph) addStubCallEnvDefault(callerID, kind, name, filePath string) *graph.Edge {
+	e := b.addStubCall(callerID, kind, name, filePath)
+	e.Meta["temporal_name_origin"] = "env_default"
+	return e
+}
+
 // addGoRegister adds a Go `worker.RegisterActivity(F)` edge: an
 // EdgeCalls edge from the worker-setup function to a placeholder,
 // carrying the temporal.register meta the resolver consumes.
@@ -150,6 +161,34 @@ func TestResolveTemporalCalls_GoActivityRegistration(t *testing.T) {
 	assert.Equal(t, "ChargeCard", activity.Meta["temporal_name"])
 
 	require.Len(t, b.g.GetInEdges(activity.ID), 1, "activity must see the inbound call edge")
+}
+
+func TestResolveTemporalCalls_EnvDefaultResolvesSpeculative(t *testing.T) {
+	b := newTemporalTestGraph()
+	b.addGoFunc("wf/workflow.go::OrderWorkflow", "OrderWorkflow", "wf/workflow.go", "svc")
+	call := b.addStubCallEnvDefault("wf/workflow.go::OrderWorkflow", "activity", "ChargeCard", "wf/workflow.go")
+	activity := b.addGoFunc("wf/activity.go::ChargeCard", "ChargeCard", "wf/activity.go", "svc")
+	b.addGoFunc("wf/main.go::setupWorker", "setupWorker", "wf/main.go", "svc")
+	b.addGoRegister("wf/main.go::setupWorker", "activity", "ChargeCard", "wf/main.go")
+
+	resolved := ResolveTemporalCalls(b.g)
+	assert.Equal(t, 1, resolved)
+	assert.Equal(t, activity.ID, call.To, "env-default stub must still land on the registered activity")
+	assert.Equal(t, graph.OriginSpeculative, call.Origin, "env-default resolution must be speculative tier")
+	assert.Less(t, call.Confidence, 0.5, "speculative confidence must be below the inferred threshold")
+	assert.Equal(t, true, call.Meta[graph.MetaSpeculative], "env-default edge must be hidden-by-default")
+}
+
+func TestResolveTemporalCalls_EnvDefaultUnresolvedStaysPlaceholder(t *testing.T) {
+	b := newTemporalTestGraph()
+	b.addGoFunc("wf/workflow.go::WF", "WF", "wf/workflow.go", "svc")
+	call := b.addStubCallEnvDefault("wf/workflow.go::WF", "activity", "MissingActivity", "wf/workflow.go")
+
+	resolved := ResolveTemporalCalls(b.g)
+	assert.Equal(t, 0, resolved)
+	assert.Equal(t, temporalStubPlaceholder("activity", "MissingActivity"), call.To)
+	_, speculative := call.Meta[graph.MetaSpeculative]
+	assert.False(t, speculative, "unresolved env-default edge must not carry the speculative flag")
 }
 
 func TestResolveTemporalCalls_GoChildWorkflowRegistration(t *testing.T) {

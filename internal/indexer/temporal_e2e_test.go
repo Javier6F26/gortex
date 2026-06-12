@@ -133,3 +133,65 @@ func setup(w Worker) {
 	assert.Equal(t, child.ID, stubCall.To)
 	assert.Equal(t, "workflow", stubCall.Meta["temporal_kind"])
 }
+
+// TestTemporalE2E_GoEnvDefaultActivity exercises the env-var-with-literal
+// -default dispatch name: the workflow names its activity through a
+// variable read from os.Getenv with a literal fallback. The pipeline must
+// land the call on the default activity but at the speculative tier.
+func TestTemporalE2E_GoEnvDefaultActivity(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import (
+	"cmp"
+	"os"
+
+	"go.temporal.io/sdk/workflow"
+)
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+	actName := cmp.Or(os.Getenv("CHARGE_ACTIVITY"), "ChargeCard")
+	return workflow.ExecuteActivity(ctx, actName, id).Get(ctx, nil)
+}
+`)
+	writeFile(t, filepath.Join(dir, "activity.go"), `package wf
+
+import "context"
+
+func ChargeCard(ctx context.Context, id string) error {
+	return nil
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setupWorker(w Worker) {
+	w.RegisterWorkflow(OrderWorkflow)
+	w.RegisterActivity(ChargeCard)
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("OrderWorkflow")[0]
+	activity := g.FindNodesByName("ChargeCard")[0]
+
+	var stubCall *graph.Edge
+	for _, e := range g.GetOutEdges(wf.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stubCall = e
+			break
+		}
+	}
+	require.NotNil(t, stubCall, "workflow must have an outbound temporal.stub edge")
+	assert.Equal(t, activity.ID, stubCall.To,
+		"env-default dispatch must land on the default activity")
+	assert.Equal(t, "env_default", stubCall.Meta["temporal_name_origin"])
+	assert.Equal(t, graph.OriginSpeculative, stubCall.Origin,
+		"env-default resolution must be speculative")
+	assert.Equal(t, true, stubCall.Meta[graph.MetaSpeculative],
+		"env-default edge must be hidden-by-default")
+}
