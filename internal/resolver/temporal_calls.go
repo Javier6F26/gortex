@@ -22,6 +22,13 @@ const temporalStubPrefix = unresolvedPrefix + "temporal::"
 // runtime env override may name a different handler than the default.
 const temporalEnvDefaultConfidence = 0.4
 
+// temporalCrossLangConfidence is stamped on a cross-language Temporal link
+// (e.g. a Java service that starts a Go workflow, matched by canonical
+// name across a type-system boundary with no compiler guarantee the names
+// line up). It sits in the speculative band so the edge is hidden from
+// default queries, consistent with the env-default tier.
+const temporalCrossLangConfidence = 0.4
+
 // Temporal annotation node IDs the Java extractor emits via
 // EmitAnnotationEdge. The resolver consumes these to discover
 // temporal-tagged interfaces and methods.
@@ -193,6 +200,23 @@ func ResolveTemporalCalls(g graph.Store) int {
 				}
 			}
 		}
+		// Cross-language join: a consumer (typically a temporal.start, e.g.
+		// a Java service starting a Go workflow) with no same-language
+		// handler is matched to a unique other-language candidate by
+		// canonical name, at the speculative tier.
+		crossLang := false
+		if handlerID == "" {
+			matchName := s.name
+			if constDeref != "" {
+				matchName = constDeref
+			}
+			if hID, ok := idx.lookupCrossLang(s.kind, matchName, callerLang); ok {
+				handlerID = hID
+				origin = graph.OriginSpeculative
+				conf = temporalCrossLangConfidence
+				crossLang = true
+			}
+		}
 
 		// When the name came from an env-var-with-literal-default
 		// variable, the value is a best-guess: land the resolved edge at
@@ -224,8 +248,13 @@ func ResolveTemporalCalls(g graph.Store) int {
 			e.Confidence = conf
 			e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeCalls, conf)
 			e.Meta["temporal_resolution"] = origin
-			if envDefault {
+			if envDefault || crossLang {
 				e.Meta[graph.MetaSpeculative] = true
+			}
+			if crossLang {
+				e.Meta["temporal_cross_lang"] = true
+			} else {
+				delete(e.Meta, "temporal_cross_lang")
 			}
 			if constDeref != "" {
 				e.Meta["temporal_const_deref"] = constDeref
@@ -241,6 +270,7 @@ func ResolveTemporalCalls(g graph.Store) int {
 			delete(e.Meta, "temporal_resolution")
 			delete(e.Meta, graph.MetaSpeculative)
 			delete(e.Meta, "temporal_const_deref")
+			delete(e.Meta, "temporal_cross_lang")
 			UnstampSynthesized(e)
 		}
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
@@ -305,6 +335,31 @@ func (idx *temporalIndex) lookup(kind, name, callerRepo, callerLang string) (id,
 		return cands[0].ID, graph.OriginASTResolved, 0.9
 	}
 	return "", "", 0
+}
+
+// lookupCrossLang is the cross-language fallback for a Temporal consumer
+// whose same-language lookup found no handler: it matches a candidate in a
+// DIFFERENT language by canonical name (e.g. a Java service that starts a
+// Go workflow, or vice-versa). The match is a by-string name across a
+// type-system boundary with no compiler guarantee, so it resolves only
+// when there is exactly ONE other-language candidate for the name — and
+// the caller lands it at the speculative tier. Returns ("", false) when
+// the join is absent or ambiguous.
+func (idx *temporalIndex) lookupCrossLang(kind, name, callerLang string) (id string, ok bool) {
+	all := idx.byKindName[kind+"::"+name]
+	if len(all) == 0 || callerLang == "" {
+		return "", false
+	}
+	var other []*graph.Node
+	for _, n := range all {
+		if n != nil && n.Language != callerLang {
+			other = append(other, n)
+		}
+	}
+	if len(other) == 1 {
+		return other[0].ID, true
+	}
+	return "", false
 }
 
 // buildTemporalIndex (a) stamps temporal_role on every node identifiable

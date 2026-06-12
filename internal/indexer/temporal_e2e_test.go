@@ -451,3 +451,61 @@ func setup(w Worker) {
 	assert.Equal(t, "ChargeCard", stubCall.Meta["temporal_const_deref"],
 		"the dereferenced literal value is recorded on the edge")
 }
+
+// TestTemporalE2E_CrossLangJavaStartsGoWorkflow exercises the full
+// cross-language join: a Java service that creates a workflow stub for a
+// workflow implemented (and registered) in Go must get a via=temporal.start
+// edge that resolves to the Go workflow node, at the speculative tier.
+func TestTemporalE2E_CrossLangJavaStartsGoWorkflow(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) {
+	w.RegisterWorkflow(OrderWorkflow)
+}
+`)
+	writeFile(t, filepath.Join(dir, "OrderService.java"), `public class OrderService {
+    public void start(WorkflowClient client) {
+        OrderWorkflow wf = client.newWorkflowStub(OrderWorkflow.class, options);
+        wf.processOrder("id");
+    }
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexerGoJava(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	javaStart := g.FindNodesByName("start")
+	require.NotEmpty(t, javaStart, "Java start method must be indexed")
+	goWf := g.FindNodesByName("OrderWorkflow")
+	require.NotEmpty(t, goWf)
+	var goWfID string
+	for _, n := range goWf {
+		if n.Language == "go" {
+			goWfID = n.ID
+		}
+	}
+	require.NotEmpty(t, goWfID)
+
+	var start *graph.Edge
+	for _, e := range g.GetOutEdges(javaStart[0].ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.start" {
+			start = e
+			break
+		}
+	}
+	require.NotNil(t, start, "Java service must have an outbound temporal.start edge")
+	assert.Equal(t, goWfID, start.To,
+		"the Java start must cross-resolve to the Go workflow")
+	assert.Equal(t, true, start.Meta["temporal_cross_lang"])
+	assert.Equal(t, graph.OriginSpeculative, start.Origin)
+}

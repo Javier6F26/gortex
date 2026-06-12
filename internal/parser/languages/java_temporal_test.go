@@ -117,3 +117,64 @@ public interface OrderActivities {
 	assert.True(t, hasAnnotationEdge(t, result.Edges, method.ID, "ActivityMethod"),
 		"method-level @ActivityMethod must emit its own EdgeAnnotated edge")
 }
+
+// temporalStartEdge returns the via=temporal.start edge originating at
+// fromID, or nil.
+func temporalStartEdge(edges []*graph.Edge, fromID string) *graph.Edge {
+	for _, e := range edges {
+		if e.From == fromID && e.Meta != nil && e.Meta["via"] == "temporal.start" {
+			return e
+		}
+	}
+	return nil
+}
+
+func TestJavaTemporal_NewWorkflowStubStart(t *testing.T) {
+	src := []byte(`public class OrderService {
+    public void start(WorkflowClient client) {
+        OrderWorkflow wf = client.newWorkflowStub(OrderWorkflow.class, options);
+        wf.processOrder("id");
+    }
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("OrderService.java", src)
+	require.NoError(t, err)
+
+	var startMethod string
+	for _, n := range result.Nodes {
+		if n.Name == "start" {
+			startMethod = n.ID
+		}
+	}
+	require.NotEmpty(t, startMethod, "start method must be indexed")
+
+	edge := temporalStartEdge(result.Edges, startMethod)
+	require.NotNil(t, edge, "newWorkflowStub must emit a via=temporal.start edge")
+	assert.Equal(t, "workflow", edge.Meta["temporal_kind"])
+	assert.Equal(t, "OrderWorkflow", edge.Meta["temporal_name"],
+		"the class literal's simple name is the canonical workflow type")
+}
+
+func TestJavaTemporal_NewUntypedWorkflowStubStart(t *testing.T) {
+	src := []byte(`public class OrderService {
+    public void start(WorkflowClient client) {
+        client.newUntypedWorkflowStub("OrderWorkflow");
+    }
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("OrderService.java", src)
+	require.NoError(t, err)
+
+	var startMethod string
+	for _, n := range result.Nodes {
+		if n.Name == "start" {
+			startMethod = n.ID
+		}
+	}
+	require.NotEmpty(t, startMethod)
+	edge := temporalStartEdge(result.Edges, startMethod)
+	require.NotNil(t, edge)
+	assert.Equal(t, "OrderWorkflow", edge.Meta["temporal_name"])
+}

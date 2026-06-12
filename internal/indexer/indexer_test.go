@@ -72,6 +72,17 @@ func newTestIndexer(g graph.Store) *Indexer {
 	return New(g, reg, cfg, zap.NewNop())
 }
 
+// newTestIndexerGoJava registers both the Go and Java extractors — used by
+// the cross-language Temporal join tests.
+func newTestIndexerGoJava(g graph.Store) *Indexer {
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	reg.Register(languages.NewJavaExtractor())
+	cfg := config.Default().Index
+	cfg.Workers = 2
+	return New(g, reg, cfg, zap.NewNop())
+}
+
 func TestIndex_SingleGoFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "main.go"), `package main

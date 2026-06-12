@@ -488,6 +488,39 @@ func TestTemporalIndexLookup_LanguageGate(t *testing.T) {
 	assert.Equal(t, javaNode.ID, id, "unknown caller lang keeps the unique-overall fallback")
 }
 
+func TestResolveTemporalCalls_CrossLangJavaStartsGoWorkflow(t *testing.T) {
+	b := newTemporalTestGraph()
+	// Go side: a workflow registered under the canonical name OrderWorkflow.
+	b.addGoFunc("go/main.go::setup", "setup", "go/main.go", "gosvc")
+	b.addGoRegister("go/main.go::setup", "workflow", "OrderWorkflow", "go/main.go")
+	goWf := b.addGoFunc("go/wf.go::OrderWorkflow", "OrderWorkflow", "go/wf.go", "gosvc")
+
+	// Java side (a DIFFERENT repo): a service that starts the workflow by
+	// its canonical type name via a via=temporal.start consumer edge.
+	javaCaller := &graph.Node{
+		ID: "java/Svc.java::startOrder", Kind: graph.KindMethod, Name: "startOrder",
+		FilePath: "java/Svc.java", RepoPrefix: "jsvc", Language: "java",
+	}
+	b.g.AddNode(javaCaller)
+	startEdge := &graph.Edge{
+		From: javaCaller.ID, To: temporalStubPlaceholder("workflow", "OrderWorkflow"),
+		Kind: graph.EdgeCalls, FilePath: "java/Svc.java", Line: 10,
+		Meta: map[string]any{
+			"via": "temporal.start", "temporal_kind": "workflow", "temporal_name": "OrderWorkflow",
+		},
+	}
+	b.g.AddEdge(startEdge)
+
+	ResolveTemporalCalls(b.g)
+
+	assert.Equal(t, goWf.ID, startEdge.To,
+		"a Java start must cross-resolve to the Go workflow of the same canonical name")
+	assert.Equal(t, graph.OriginSpeculative, startEdge.Origin,
+		"a cross-language join lands at the speculative tier")
+	assert.Equal(t, true, startEdge.Meta["temporal_cross_lang"])
+	assert.Equal(t, true, startEdge.Meta[graph.MetaSpeculative], "cross-language edge is hidden by default")
+}
+
 func TestResolveTemporalCalls_RegisterNameOverride(t *testing.T) {
 	b := newTemporalTestGraph()
 	// Worker registers the impl ChargeCard under the override name "Charge"
