@@ -392,3 +392,62 @@ func setup(w Worker) {
 	assert.Equal(t, wf[0].ID, start.To,
 		"the start edge must resolve to the registered workflow")
 }
+
+// TestTemporalE2E_GoConstNamedActivity exercises cross-file const-value
+// retention + dereference: the activity name is a string const declared in
+// a separate file (the dominant real-world shape), and the dispatch names
+// it through the const identifier. The pipeline must persist the const
+// value and dereference it so the stub resolves to the activity.
+func TestTemporalE2E_GoConstNamedActivity(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "constants.go"), `package wf
+
+const ChargeCardActivity = "ChargeCard"
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+	return workflow.ExecuteActivity(ctx, ChargeCardActivity, id).Get(ctx, nil)
+}
+`)
+	writeFile(t, filepath.Join(dir, "activity.go"), `package wf
+
+import "context"
+
+func ChargeCard(ctx context.Context, id string) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) {
+	w.RegisterWorkflow(OrderWorkflow)
+	w.RegisterActivityWithOptions(ChargeCard, RegisterOptions{Name: "ChargeCard"})
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("OrderWorkflow")[0]
+	activity := g.FindNodesByName("ChargeCard")
+	require.NotEmpty(t, activity)
+
+	var stubCall *graph.Edge
+	for _, e := range g.GetOutEdges(wf.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stubCall = e
+			break
+		}
+	}
+	require.NotNil(t, stubCall, "workflow must have an outbound temporal.stub edge")
+	assert.Equal(t, "ChargeCardActivity", stubCall.Meta["temporal_name"],
+		"the stub keeps the const identifier as its name")
+	assert.Equal(t, activity[0].ID, stubCall.To,
+		"the const-named dispatch must dereference to the activity")
+	assert.Equal(t, "ChargeCard", stubCall.Meta["temporal_const_deref"],
+		"the dereferenced literal value is recorded on the edge")
+}

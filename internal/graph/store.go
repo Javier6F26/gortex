@@ -986,6 +986,39 @@ type CloneShingleReader interface {
 	LoadCloneShingles(repoPrefix string) (map[string][]uint64, error)
 }
 
+// ConstantValueWriter is an optional capability backends MAY implement
+// to persist a KindConstant node's literal value (string / numeric)
+// keyed by node id, in a queryable sidecar rather than the gob-encoded
+// Meta blob (which is unindexable and decoded on every node load). The
+// resolver reads these to dereference a const-identifier dispatch name
+// (e.g. `const ChargeCardActivity = "ChargeCard"`) to its value across
+// files. It is the const-value sibling of CloneShingleWriter.
+//
+// rows is keyed on the const node id; the value is the literal text.
+// Empty input is a no-op. DeleteConstantValuesByFiles drops the rows
+// for a set of re-indexed / evicted files so the snapshot stays in step
+// with the live graph.
+type ConstantValueWriter interface {
+	BulkSetConstantValues(repoPrefix string, rows []ConstantValueRow) error
+	DeleteConstantValuesByFiles(repoPrefix string, files []string) error
+}
+
+// ConstantValueReader is the read side of ConstantValueWriter. Returns
+// the recorded constant values for the supplied node ids as a fresh map
+// (node id → value); ids with no recorded value are omitted. A nil /
+// empty ids slice returns an empty map.
+type ConstantValueReader interface {
+	ConstantValuesByNodeIDs(nodeIDs []string) (map[string]string, error)
+}
+
+// ConstantValueRow is one persisted constant value: the const node id,
+// its owning file (for file-scoped eviction), and the literal value.
+type ConstantValueRow struct {
+	NodeID   string
+	FilePath string
+	Value    string
+}
+
 // RefFact is one durable resolved-reference fact: a reference edge from
 // FromID resolved TO ToID with the provenance tier that resolved it. Persisted
 // per source file so a reference's resolution is an auditable, diffable record

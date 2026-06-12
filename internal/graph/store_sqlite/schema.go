@@ -101,6 +101,23 @@ CREATE TABLE IF NOT EXISTS clone_shingles (
     shingles    BLOB
 ) WITHOUT ROWID;
 
+-- constant_values is the per-KindConstant literal-value sidecar: one row
+-- per constant whose RHS is a string / numeric literal, keyed by node_id
+-- (the join key back to nodes.id). Lifting the value out of the gob Meta
+-- blob keeps it queryable (and out of the every-node-load decode path) so
+-- the resolver can dereference a const-identifier dispatch name to its
+-- value across files. file_path scopes per-file eviction on reindex;
+-- repo_prefix scopes per-repo wipes. WITHOUT ROWID — the PK index IS the
+-- table, like file_mtimes / clone_shingles.
+CREATE TABLE IF NOT EXISTS constant_values (
+    node_id     TEXT PRIMARY KEY,
+    repo_prefix TEXT NOT NULL DEFAULT '',
+    file_path   TEXT NOT NULL DEFAULT '',
+    value       TEXT NOT NULL DEFAULT ''
+) WITHOUT ROWID;
+
+CREATE INDEX IF NOT EXISTS constant_values_by_file ON constant_values(repo_prefix, file_path);
+
 -- ref_facts is the resolved-reference sidecar: one row per reference edge
 -- that resolved to a concrete target, recording the target + the provenance
 -- tier that resolved it. Denormalized file_path + lang make "all reference

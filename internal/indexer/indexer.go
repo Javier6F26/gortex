@@ -2219,6 +2219,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 					// of 102 workers blocked on lockTwoWrite under the
 					// per-edge path during cold-start warmup.
 					idx.graph.AddBatch(result.Nodes, result.Edges)
+					idx.persistConstValues(result)
 
 					if !skipped && fileGraphPath != "" {
 						exts := contractExtractorsByLang[lang]
@@ -2746,6 +2747,7 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 	idx.applyRepoPrefix(result.Nodes, result.Edges)
 
 	idx.graph.AddBatch(result.Nodes, result.Edges)
+	idx.persistConstValues(result)
 
 	// Add new symbols to search index. shouldIndexForSearch enforces
 	// the same SkipSearch filter used by the bulk and upgrade paths.

@@ -162,6 +162,17 @@ func ResolveTemporalCalls(g graph.Store) int {
 	}
 	callerNodes := g.GetNodesByIDs(fromList)
 
+	// Const-dereference map: a dispatch named through a string const
+	// (`const ChargeCardActivity = "ChargeCard"`) reaches the resolver as
+	// the identifier "ChargeCardActivity"; map it to the literal value so
+	// the lookup keys on the registered name. Built once from the
+	// queryable constant_values sidecar.
+	stubNames := make([]string, 0, len(stubs))
+	for _, s := range stubs {
+		stubNames = append(stubNames, s.name)
+	}
+	derefByName := buildConstDerefMap(g, stubNames)
+
 	for _, s := range stubs {
 		e := s.edge
 		callerRepo := ""
@@ -171,6 +182,17 @@ func ResolveTemporalCalls(g graph.Store) int {
 			callerLang = from.Language
 		}
 		handlerID, origin, conf := idx.lookup(s.kind, s.name, callerRepo, callerLang)
+		// When the direct name didn't resolve, try dereferencing it as a
+		// string constant and re-looking-up under the literal value.
+		constDeref := ""
+		if handlerID == "" {
+			if v, ok := derefByName[s.name]; ok && v != "" {
+				if hID, o, c := idx.lookup(s.kind, v, callerRepo, callerLang); hID != "" {
+					handlerID, origin, conf = hID, o, c
+					constDeref = v
+				}
+			}
+		}
 
 		// When the name came from an env-var-with-literal-default
 		// variable, the value is a best-guess: land the resolved edge at
@@ -205,6 +227,11 @@ func ResolveTemporalCalls(g graph.Store) int {
 			if envDefault {
 				e.Meta[graph.MetaSpeculative] = true
 			}
+			if constDeref != "" {
+				e.Meta["temporal_const_deref"] = constDeref
+			} else {
+				delete(e.Meta, "temporal_const_deref")
+			}
 			StampSynthesized(e, SynthTemporalStub)
 			resolved++
 		} else {
@@ -213,6 +240,7 @@ func ResolveTemporalCalls(g graph.Store) int {
 			e.ConfidenceLabel = ""
 			delete(e.Meta, "temporal_resolution")
 			delete(e.Meta, graph.MetaSpeculative)
+			delete(e.Meta, "temporal_const_deref")
 			UnstampSynthesized(e)
 		}
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
@@ -710,6 +738,65 @@ func isExportedGoName(name string) bool {
 	}
 	r, _ := utf8.DecodeRuneInString(name)
 	return unicode.IsUpper(r)
+}
+
+// buildConstDerefMap resolves the names of string constants used as
+// Temporal dispatch identifiers to their literal values, read from the
+// queryable constant_values sidecar. Returns name → value for every name
+// that is a string const with a single unambiguous value across the
+// workspace; a name with conflicting values in different files (e.g. the
+// same const name defined twice with different literals) is dropped so a
+// dereference is never a wrong guess. Returns nil when the backend does
+// not implement ConstantValueReader.
+func buildConstDerefMap(g graph.Store, names []string) map[string]string {
+	reader, ok := g.(graph.ConstantValueReader)
+	if !ok || len(names) == 0 {
+		return nil
+	}
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	uniq := make([]string, 0, len(nameSet))
+	for n := range nameSet {
+		uniq = append(uniq, n)
+	}
+	candByName := g.FindNodesByNames(uniq)
+	idToName := map[string]string{}
+	var constIDs []string
+	for name, cands := range candByName {
+		for _, n := range cands {
+			if n == nil || n.Kind != graph.KindConstant {
+				continue
+			}
+			constIDs = append(constIDs, n.ID)
+			idToName[n.ID] = name
+		}
+	}
+	if len(constIDs) == 0 {
+		return nil
+	}
+	vals, err := reader.ConstantValuesByNodeIDs(constIDs)
+	if err != nil || len(vals) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(vals))
+	ambiguous := map[string]struct{}{}
+	for id, v := range vals {
+		name := idToName[id]
+		if name == "" || v == "" {
+			continue
+		}
+		if existing, seen := out[name]; seen && existing != v {
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		out[name] = v
+	}
+	for name := range ambiguous {
+		delete(out, name)
+	}
+	return out
 }
 
 // buildJavaMethodViews materialises two indexes over every Java

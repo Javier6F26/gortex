@@ -512,7 +512,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			e.emitVar(m, filePath, fileID, result, tenv)
 
 		case m.Captures["const.def"] != nil:
-			e.emitConst(m, filePath, fileID, result)
+			e.emitConst(m, filePath, fileID, src, result)
 
 		case m.Captures["svar.def"] != nil:
 			e.recordShortVarType(m, src, tenv)
@@ -1710,7 +1710,7 @@ func (e *GoExtractor) emitVar(m parser.QueryResult, filePath, fileID string, res
 	}
 }
 
-func (e *GoExtractor) emitConst(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
+func (e *GoExtractor) emitConst(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {
 	nameCap := m.Captures["const.name"]
 	def := m.Captures["const.def"]
 	if nameCap == nil || nameCap.Text == "" || nameCap.Text == "_" {
@@ -1739,6 +1739,59 @@ func (e *GoExtractor) emitConst(m parser.QueryResult, filePath, fileID string, r
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	// Retain the literal value (string / numeric) for the queryable
+	// constant_values sidecar, so the resolver can dereference a
+	// const-identifier dispatch name to its value across files. Computed
+	// constants (iota, expressions) carry no literal and are skipped.
+	if kind == graph.KindConstant {
+		if v, ok := goConstLiteralValue(def.Node, src); ok {
+			result.ConstValues = append(result.ConstValues, parser.ConstValue{
+				NodeID: id, FilePath: filePath, Value: v,
+			})
+		}
+	}
+}
+
+// goConstLiteralValue extracts the literal value of a single-spec
+// const_spec (`const X = "literal"` / `const X = 42`) from the spec's
+// value field, when that value is a string or numeric literal. Returns
+// ("", false) for computed / multi-value / non-literal specs.
+func goConstLiteralValue(constSpec *sitter.Node, src []byte) (string, bool) {
+	if constSpec == nil {
+		return "", false
+	}
+	spec := constSpec
+	if spec.Type() != "const_spec" {
+		// def captures the const_declaration; descend to the lone spec.
+		var found *sitter.Node
+		count := 0
+		for i := 0; i < int(spec.NamedChildCount()); i++ {
+			c := spec.NamedChild(i)
+			if c != nil && c.Type() == "const_spec" {
+				found = c
+				count++
+			}
+		}
+		if count != 1 || found == nil {
+			return "", false
+		}
+		spec = found
+	}
+	valueList := spec.ChildByFieldName("value")
+	if valueList == nil || valueList.NamedChildCount() != 1 {
+		return "", false
+	}
+	v := valueList.NamedChild(0)
+	if v == nil {
+		return "", false
+	}
+	switch v.Type() {
+	case "interpreted_string_literal", "raw_string_literal":
+		return goTemporalNameFromExpr(v, src), true
+	case "int_literal", "float_literal":
+		return v.Content(src), true
+	}
+	return "", false
 }
 
 // containsGoIotaBlock reports whether a const_declaration's source

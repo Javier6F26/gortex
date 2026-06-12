@@ -494,6 +494,13 @@ type Graph struct {
 	// blameEnrich is the in-memory blame-enrichment sidecar.
 	blameEnrichMu sync.Mutex
 	blameEnrich   map[string]BlameEnrichment
+
+	// constValues is the in-memory implementation of the ConstantValue*
+	// capability: a KindConstant node's literal value keyed by node id,
+	// alongside its owning file (for file-scoped eviction) and repo
+	// prefix. Guarded by constValuesMu.
+	constValuesMu sync.Mutex
+	constValues   map[string]constValueEntry
 }
 
 // cloneShingleEntry is one in-memory clone_shingles row: the owning
@@ -501,6 +508,14 @@ type Graph struct {
 type cloneShingleEntry struct {
 	repoPrefix string
 	shingles   []uint64
+}
+
+// constValueEntry is one in-memory constant_values row: the owning repo
+// prefix and file (for file-scoped eviction) plus the literal value.
+type constValueEntry struct {
+	repoPrefix string
+	filePath   string
+	value      string
 }
 
 // Compile-time assertions that the in-memory *Graph satisfies the
@@ -519,6 +534,8 @@ var (
 	_ BlameEnrichmentReader    = (*Graph)(nil)
 	_ ReleaseEnrichmentWriter  = (*Graph)(nil)
 	_ ReleaseEnrichmentReader  = (*Graph)(nil)
+	_ ConstantValueWriter      = (*Graph)(nil)
+	_ ConstantValueReader      = (*Graph)(nil)
 )
 
 // New creates an empty graph.
@@ -607,6 +624,69 @@ func (g *Graph) LoadCloneShingles(repoPrefix string) (map[string][]uint64, error
 		cp := make([]uint64, len(entry.shingles))
 		copy(cp, entry.shingles)
 		out[id] = cp
+	}
+	return out, nil
+}
+
+// BulkSetConstantValues is the in-memory ConstantValueWriter. It records
+// every (nodeID -> value) row for one repo prefix, replacing any prior
+// value in place. Empty input is a no-op.
+func (g *Graph) BulkSetConstantValues(repoPrefix string, rows []ConstantValueRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	g.constValuesMu.Lock()
+	defer g.constValuesMu.Unlock()
+	if g.constValues == nil {
+		g.constValues = make(map[string]constValueEntry, len(rows))
+	}
+	for _, r := range rows {
+		if r.NodeID == "" {
+			continue
+		}
+		g.constValues[r.NodeID] = constValueEntry{repoPrefix: repoPrefix, filePath: r.FilePath, value: r.Value}
+	}
+	return nil
+}
+
+// DeleteConstantValuesByFiles is the in-memory ConstantValueWriter delete
+// side: it drops every row whose file is in the supplied set for the given
+// repo prefix, so a reindex of those files replaces their values cleanly.
+func (g *Graph) DeleteConstantValuesByFiles(repoPrefix string, files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+	fileSet := make(map[string]struct{}, len(files))
+	for _, f := range files {
+		fileSet[f] = struct{}{}
+	}
+	g.constValuesMu.Lock()
+	defer g.constValuesMu.Unlock()
+	for id, entry := range g.constValues {
+		if entry.repoPrefix != repoPrefix {
+			continue
+		}
+		if _, ok := fileSet[entry.filePath]; ok {
+			delete(g.constValues, id)
+		}
+	}
+	return nil
+}
+
+// ConstantValuesByNodeIDs is the in-memory ConstantValueReader. It returns
+// the recorded values for the supplied node ids (omitting ids with no
+// recorded value). Always returns a non-nil map and never an error.
+func (g *Graph) ConstantValuesByNodeIDs(nodeIDs []string) (map[string]string, error) {
+	out := make(map[string]string, len(nodeIDs))
+	if len(nodeIDs) == 0 {
+		return out, nil
+	}
+	g.constValuesMu.Lock()
+	defer g.constValuesMu.Unlock()
+	for _, id := range nodeIDs {
+		if entry, ok := g.constValues[id]; ok {
+			out[id] = entry.value
+		}
 	}
 	return out, nil
 }
