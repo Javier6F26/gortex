@@ -79,6 +79,36 @@ func goTemporalRegisterKind(method string) (kind string, plural bool, ok bool) {
 	return "", false, false
 }
 
+// goTemporalSignalQueryOutKind reports whether (receiver, method) names
+// an OUTBOUND signal-send or query-call against an already-running
+// workflow and, if so, returns the kind ("signal" / "query") plus the
+// 1-based position of the signal/query-name argument.
+//
+//	workflow.SignalExternalWorkflow(ctx, wid, rid, "name", arg)  // wf -> wf
+//	client.SignalWorkflow(ctx, wid, rid, "name", arg)           // svc -> wf
+//	client.QueryWorkflow(ctx, wid, rid, "name", args...)        // svc -> wf
+//
+// SignalExternalWorkflow is gated on the canonical "workflow" receiver
+// (it is a workflow-package function). SignalWorkflow / QueryWorkflow
+// live on the client and are called on an arbitrary client variable, so
+// — like the Register* helpers — they are matched by method name alone;
+// the string-literal name gate below keeps that high-precision. There is
+// deliberately no workflow.QueryWorkflow (querying is client-side) and no
+// SignalExternalWorkflowAsync (SignalExternalWorkflow returns a Future).
+func goTemporalSignalQueryOutKind(receiver, method string) (kind string, namePos int, ok bool) {
+	switch method {
+	case "SignalExternalWorkflow":
+		if receiver == "workflow" {
+			return "signal", 4, true
+		}
+	case "SignalWorkflow":
+		return "signal", 4, true
+	case "QueryWorkflow":
+		return "query", 4, true
+	}
+	return "", 0, false
+}
+
 // goTemporalDispatchName extracts the activity (or child-workflow)
 // name from a `workflow.ExecuteActivity(ctx, X, args...)` call. X is
 // the second positional argument and is either:
@@ -110,6 +140,38 @@ func goTemporalDispatchName(callNode *sitter.Node, src []byte) string {
 		count++
 		if count == 2 {
 			return goTemporalNameFromExpr(c, src)
+		}
+	}
+	return ""
+}
+
+// goTemporalNthStringLiteralArg returns the unquoted value of the n-th
+// (1-based) positional argument of a call when that argument is a string
+// literal, else "". Used to extract the signal/query name from an
+// outbound send/call — names are matched by string at runtime, so only a
+// literal can be pinned here (a variable / constant is left undetected,
+// keeping the detector high-precision).
+func goTemporalNthStringLiteralArg(callNode *sitter.Node, n int, src []byte) string {
+	if callNode == nil || callNode.Type() != "call_expression" {
+		return ""
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return ""
+	}
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		count++
+		if count == n {
+			switch c.Type() {
+			case "interpreted_string_literal", "raw_string_literal":
+				return goTemporalNameFromExpr(c, src)
+			}
+			return ""
 		}
 	}
 	return ""
@@ -165,6 +227,37 @@ func applyGoTemporalRegisterMeta(edge *graph.Edge, c goDeferredCall) {
 	}
 	edge.Meta["via"] = "temporal.register"
 	edge.Meta["temporal_kind"] = kind
+	edge.Meta["temporal_name"] = c.tempName
+}
+
+// applyGoTemporalSignalQueryMeta stamps the outbound signal-send /
+// query-call meta onto an EdgeCalls edge derived from
+// `SignalExternalWorkflow` / `SignalWorkflow` / `QueryWorkflow`:
+// `via=temporal.signal-send` or `temporal.query-call`, plus
+// `temporal_kind` (signal / query) and `temporal_name` (the literal
+// signal/query name). No-op when c.tempOutKind / c.tempName are unset.
+//
+// These are the consumer side of the signal/query namespaces; the
+// provider side is the in-workflow handler (GetSignalChannel /
+// SetQueryHandler), tagged via=temporal.handler.
+func applyGoTemporalSignalQueryMeta(edge *graph.Edge, c goDeferredCall) {
+	if edge == nil || c.tempOutKind == "" || c.tempName == "" {
+		return
+	}
+	var via string
+	switch c.tempOutKind {
+	case "signal":
+		via = "temporal.signal-send"
+	case "query":
+		via = "temporal.query-call"
+	default:
+		return
+	}
+	if edge.Meta == nil {
+		edge.Meta = map[string]any{}
+	}
+	edge.Meta["via"] = via
+	edge.Meta["temporal_kind"] = c.tempOutKind
 	edge.Meta["temporal_name"] = c.tempName
 }
 

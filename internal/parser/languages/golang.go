@@ -201,6 +201,12 @@ type goDeferredCall struct {
 	tempKind  string
 	tempName  string
 	tempLocal bool
+	// tempOutKind is "signal" / "query" when this call is an outbound
+	// signal-send / query-call against a running workflow
+	// (SignalExternalWorkflow / SignalWorkflow / QueryWorkflow); tempName
+	// then carries the signal/query name. `via=temporal.signal-send` /
+	// `temporal.query-call` meta is stamped on the emitted edge below.
+	tempOutKind string
 }
 
 type goDeferredTypeRef struct {
@@ -344,6 +350,14 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				// `w.RegisterActivity(F)` etc.
 				if name := goTemporalRegisterName(expr.Node, src); name != "" {
 					dc.tempKind = "register_" + kind
+					dc.tempName = name
+				}
+			} else if okind, namePos, ok := goTemporalSignalQueryOutKind(receiver, method); ok {
+				// Outbound signal-send / query-call against a running
+				// workflow: SignalExternalWorkflow / SignalWorkflow /
+				// QueryWorkflow. The name is the 4th positional literal.
+				if name := goTemporalNthStringLiteralArg(expr.Node, namePos, src); name != "" {
+					dc.tempOutKind = okind
 					dc.tempName = name
 				}
 			}
@@ -668,6 +682,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			}
 			applyGoGRPCRegisterMeta(edge, c, src, tenv)
 			applyGoTemporalRegisterMeta(edge, c)
+			applyGoTemporalSignalQueryMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -680,6 +695,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			}
 			applyGoGRPCRegisterMeta(edge, c, src, tenv)
 			applyGoTemporalRegisterMeta(edge, c)
+			applyGoTemporalSignalQueryMeta(edge, c)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -729,6 +745,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		}
 		applyGoGRPCRegisterMeta(edge, c, src, tenv)
 		applyGoTemporalRegisterMeta(edge, c)
+		applyGoTemporalSignalQueryMeta(edge, c)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}

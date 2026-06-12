@@ -200,3 +200,94 @@ func setup(w Worker) {
 	require.Len(t, stubs, 1)
 	require.Len(t, registers, 2)
 }
+
+// --- Outbound signal sends / query calls ----------------------------
+//
+// A workflow (or a service holding a Temporal client) can signal or
+// query an ALREADY-RUNNING workflow by name. These are the consumer
+// side of the signal/query namespaces — distinct from the in-workflow
+// handler declarations. We surface them as EdgeCalls edges tagged
+// `via=temporal.signal-send` / `temporal.query-call` carrying the
+// signal/query name (the 4th positional argument, a string literal).
+//
+// APIs (the name is always the 4th positional arg, after ctx +
+// workflowID + runID):
+//
+//	workflow.SignalExternalWorkflow(ctx, wid, rid, "name", arg)   // workflow -> workflow
+//	client.SignalWorkflow(ctx, wid, rid, "name", arg)            // service  -> workflow
+//	client.QueryWorkflow(ctx, wid, rid, "name", args...)         // service  -> workflow
+//
+// (Note: there is no workflow.QueryWorkflow — querying is a client-side
+// operation; and SignalExternalWorkflow already returns a Future, so
+// there is no ...Async variant.)
+
+func TestGoTemporal_SignalExternalWorkflow(t *testing.T) {
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func Orchestrator(ctx workflow.Context) error {
+	return workflow.SignalExternalWorkflow(ctx, "order-123", "", "cancel-request", nil).Get(ctx, nil)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.signal-send")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "signal", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "cancel-request", edges[0].Meta["temporal_name"])
+}
+
+func TestGoTemporal_ClientSignalWorkflow(t *testing.T) {
+	// Receiver is an arbitrary client variable, so detection is by
+	// method name (like the Register* helpers), gated on a string-literal
+	// name in the 4th position.
+	fix := runGoExtract(t, `package svc
+
+func Cancel(c Client) error {
+	return c.SignalWorkflow(ctx, "order-123", "", "cancel-request", nil)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.signal-send")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "signal", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "cancel-request", edges[0].Meta["temporal_name"])
+}
+
+func TestGoTemporal_ClientQueryWorkflow(t *testing.T) {
+	fix := runGoExtract(t, `package svc
+
+func Status(c Client) {
+	c.QueryWorkflow(ctx, "order-123", "", "get-status")
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.query-call")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "query", edges[0].Meta["temporal_kind"])
+	assert.Equal(t, "get-status", edges[0].Meta["temporal_name"])
+}
+
+func TestGoTemporal_OutboundNonLiteralNameUndetected(t *testing.T) {
+	// Signal/query names are matched by string at runtime; a non-literal
+	// name can't be pinned, so no outbound edge is emitted.
+	fix := runGoExtract(t, `package svc
+
+func Cancel(c Client, name string) error {
+	return c.SignalWorkflow(ctx, "order-123", "", name, nil)
+}
+`)
+	assert.Empty(t, temporalEdgesByVia(fix, "temporal.signal-send"))
+}
+
+func TestGoTemporal_SignalExternalAliasedNotDetected(t *testing.T) {
+	// SignalExternalWorkflow is gated on the canonical "workflow"
+	// receiver (it is a workflow-package function); an aliased import
+	// is intentionally missed, consistent with the dispatch detector.
+	fix := runGoExtract(t, `package wf
+
+import wf "go.temporal.io/sdk/workflow"
+
+func Orchestrator(ctx wf.Context) error {
+	return wf.SignalExternalWorkflow(ctx, "order-123", "", "cancel-request", nil).Get(ctx, nil)
+}
+`)
+	assert.Empty(t, temporalEdgesByVia(fix, "temporal.signal-send"))
+}
