@@ -201,6 +201,12 @@ type goDeferredCall struct {
 	tempKind  string
 	tempName  string
 	tempLocal bool
+	// tempEnvDefault is set when tempName was resolved from a bare
+	// variable read from an env var with a literal default (e.g.
+	// `cmp.Or(os.Getenv("K"), "Default")`). The stub edge is then tagged
+	// `temporal_name_origin=env_default` so the resolver lands it at the
+	// speculative tier — the runtime env value may differ from the default.
+	tempEnvDefault bool
 }
 
 type goDeferredTypeRef struct {
@@ -334,10 +340,20 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			// Temporal workflow → activity dispatch:
 			// `workflow.ExecuteActivity(ctx, X, ...)` etc.
 			if kind, local, ok := goTemporalDispatchKind(receiver, method); ok {
-				if name := goTemporalDispatchName(expr.Node, src); name != "" {
+				argNode := goTemporalDispatchArg(expr.Node)
+				if name := goTemporalNameFromExpr(argNode, src); name != "" {
 					dc.tempKind = kind
 					dc.tempName = name
 					dc.tempLocal = local
+					// Env-default refinement: when the name is a bare local
+					// variable, try to resolve it to an env-var-with-literal
+					// -default so the dispatch lands on the default activity.
+					if argNode != nil && argNode.Type() == "identifier" {
+						if def, ok := goTemporalEnvDefaultName(expr.Node, name, src); ok {
+							dc.tempName = def
+							dc.tempEnvDefault = true
+						}
+					}
 				}
 			} else if kind, _, ok := goTemporalRegisterKind(method); ok {
 				// Temporal worker registration:
@@ -649,6 +665,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				}
 				if c.tempLocal {
 					meta["temporal_local"] = true
+				}
+				if c.tempEnvDefault {
+					meta["temporal_name_origin"] = "env_default"
 				}
 				result.Edges = append(result.Edges, &graph.Edge{
 					From: callerID, To: target,

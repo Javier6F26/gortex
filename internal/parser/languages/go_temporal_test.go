@@ -200,3 +200,100 @@ func setup(w Worker) {
 	require.Len(t, stubs, 1)
 	require.Len(t, registers, 2)
 }
+
+// --- Dispatch name from an env-var-with-literal-default variable -----
+//
+// When the activity / workflow name is a local variable read from an
+// env var with a literal fallback, resolve to the literal default and
+// flag the stub edge `temporal_name_origin=env_default` so the resolver
+// lands it at the speculative tier (the runtime env override may differ
+// from the default). Anchored on a literal os.Getenv / os.LookupEnv read
+// so the value is provably env-sourced — no general data-flow guessing.
+
+func TestGoTemporal_ExecuteActivity_EnvDefault_CmpOr(t *testing.T) {
+	fix := runGoExtract(t, `package wf
+
+import (
+	"cmp"
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func WF(ctx workflow.Context) {
+	actName := cmp.Or(os.Getenv("CHARGE_ACTIVITY"), "ChargeCard")
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	e := edges[0]
+	assert.Equal(t, "unresolved::temporal::activity::ChargeCard", e.To,
+		"name must resolve to the literal default, not the variable identifier")
+	assert.Equal(t, "ChargeCard", e.Meta["temporal_name"])
+	assert.Equal(t, "env_default", e.Meta["temporal_name_origin"])
+}
+
+func TestGoTemporal_ExecuteActivity_EnvDefault_IfEmpty(t *testing.T) {
+	fix := runGoExtract(t, `package wf
+
+import (
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func WF(ctx workflow.Context) {
+	name := os.Getenv("CHARGE_ACTIVITY")
+	if name == "" {
+		name = "ChargeCard"
+	}
+	workflow.ExecuteActivity(ctx, name, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "unresolved::temporal::activity::ChargeCard", edges[0].To)
+	assert.Equal(t, "ChargeCard", edges[0].Meta["temporal_name"])
+	assert.Equal(t, "env_default", edges[0].Meta["temporal_name_origin"])
+}
+
+func TestGoTemporal_ExecuteActivity_PlainVarNotEnvDefault(t *testing.T) {
+	// A variable NOT sourced from an env read keeps the existing
+	// behaviour (trailing identifier as the name) and carries no
+	// env_default flag — we don't guess at arbitrary variables.
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func WF(ctx workflow.Context, picked string) {
+	actName := picked
+	workflow.ExecuteActivity(ctx, actName, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "actName", edges[0].Meta["temporal_name"])
+	_, flagged := edges[0].Meta["temporal_name_origin"]
+	assert.False(t, flagged, "plain variable must not be flagged env_default")
+}
+
+func TestGoTemporal_ExecuteActivity_EnvReadNoLiteralDefault(t *testing.T) {
+	// os.Getenv with no literal fallback can't be pinned to a name —
+	// keep the variable identifier, no env_default flag.
+	fix := runGoExtract(t, `package wf
+
+import (
+	"os"
+	"go.temporal.io/sdk/workflow"
+)
+
+func WF(ctx workflow.Context) {
+	name := os.Getenv("CHARGE_ACTIVITY")
+	workflow.ExecuteActivity(ctx, name, 1)
+}
+`)
+	edges := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, edges, 1)
+	assert.Equal(t, "name", edges[0].Meta["temporal_name"])
+	_, flagged := edges[0].Meta["temporal_name_origin"]
+	assert.False(t, flagged)
+}
