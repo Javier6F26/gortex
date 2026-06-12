@@ -260,6 +260,62 @@ func applyGoTemporalRegisterMeta(edge *graph.Edge, c goDeferredCall) {
 	if c.tempRegisteredName != "" {
 		edge.Meta["temporal_registered_name"] = c.tempRegisteredName
 	}
+	if c.tempRegisterPlural {
+		edge.Meta["temporal_register_plural"] = true
+	}
+}
+
+// goTemporalRegisterStructType returns the struct TYPE name from the first
+// argument of a `w.RegisterActivities(&MyActivities{})` call — the struct
+// whose exported methods are each registered as an activity. Handles the
+// `&T{}` pointer and `T{}` value composite-literal forms and a qualified
+// `pkg.T{}`. Returns "" when the argument is not a composite literal (e.g.
+// a pre-built variable, which carries no static type here).
+func goTemporalRegisterStructType(callNode *sitter.Node, src []byte) string {
+	if callNode == nil || callNode.Type() != "call_expression" {
+		return ""
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil || args.NamedChildCount() == 0 {
+		return ""
+	}
+	arg := args.NamedChild(0)
+	if arg == nil {
+		return ""
+	}
+	if arg.Type() == "unary_expression" {
+		if op := arg.ChildByFieldName("operand"); op != nil {
+			arg = op
+		}
+	}
+	if arg.Type() != "composite_literal" {
+		return ""
+	}
+	typ := arg.ChildByFieldName("type")
+	if typ == nil {
+		return ""
+	}
+	switch typ.Type() {
+	case "type_identifier", "identifier":
+		return typ.Content(src)
+	case "qualified_type":
+		if name := typ.ChildByFieldName("name"); name != nil {
+			return name.Content(src)
+		}
+	case "pointer_type":
+		// `&T` already unwrapped above, but a `*T` element type can appear.
+		if inner := typ.ChildByFieldName("type"); inner != nil {
+			switch inner.Type() {
+			case "type_identifier", "identifier":
+				return inner.Content(src)
+			case "qualified_type":
+				if name := inner.ChildByFieldName("name"); name != nil {
+					return name.Content(src)
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // goTemporalRegisterNameOverride extracts the `Name:` string-literal

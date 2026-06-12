@@ -2,6 +2,8 @@ package resolver
 
 import (
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/zzet/gortex/internal/graph"
 )
@@ -298,8 +300,12 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		// name is the function-reference identifier (used to locate the
 		// registered node); regName is the canonical registered name (the
 		// index key) — they differ only when RegisterActivityWithOptions
-		// overrides the name via RegisterOptions{Name: "..."}.
+		// overrides the name via RegisterOptions{Name: "..."}. For a plural
+		// registration name is the struct TYPE name and regName is unused.
 		name, regName string
+		// plural marks a RegisterActivities(&Struct{}) struct registration:
+		// every exported method of the struct is promoted to an activity.
+		plural bool
 	}
 	var goRegisters []goRegister
 	registerCallerIDs := map[string]struct{}{}
@@ -317,7 +323,8 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 		if regName == "" {
 			regName = name
 		}
-		goRegisters = append(goRegisters, goRegister{edge: e, kind: kind, name: name, regName: regName})
+		plural, _ := e.Meta["temporal_register_plural"].(bool)
+		goRegisters = append(goRegisters, goRegister{edge: e, kind: kind, name: name, regName: regName, plural: plural})
 		if e.From != "" {
 			registerCallerIDs[e.From] = struct{}{}
 		}
@@ -337,6 +344,19 @@ func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Ed
 	for _, r := range goRegisters {
 		caller := registerCallers[r.edge.From]
 		if caller == nil {
+			continue
+		}
+		if r.plural {
+			// RegisterActivities(&MyActivities{}): promote every exported
+			// method of the struct to an activity keyed by its method name.
+			typeNode := pickGoTypeNode(candidatesByName[r.name], caller)
+			if typeNode == nil {
+				continue
+			}
+			for _, m := range exportedGoMethodsOfType(g, typeNode) {
+				stampTemporalRole(g, m, r.kind, m.Name)
+				idx.byKindName[r.kind+"::"+m.Name] = append(idx.byKindName[r.kind+"::"+m.Name], m)
+			}
 			continue
 		}
 		target := pickGoTemporalTarget(candidatesByName[r.name], caller)
@@ -605,6 +625,86 @@ func pickGoTemporalTarget(candidates []*graph.Node, caller *graph.Node) *graph.N
 		return all[0]
 	}
 	return nil
+}
+
+// pickGoTypeNode selects the Go type node a `RegisterActivities(&T{})`
+// struct registration refers to, from a name-matched candidate set, using
+// the same same-file → same-repo → unique-overall locality tie-break as
+// pickGoTemporalTarget. Returns nil when no unambiguous Go type matches.
+func pickGoTypeNode(candidates []*graph.Node, caller *graph.Node) *graph.Node {
+	if caller == nil {
+		return nil
+	}
+	var sameFile, sameRepo, all []*graph.Node
+	for _, n := range candidates {
+		if n == nil || n.Language != "go" {
+			continue
+		}
+		if n.Kind != graph.KindType && n.Kind != graph.KindInterface {
+			continue
+		}
+		all = append(all, n)
+		if caller.RepoPrefix != "" && n.RepoPrefix == caller.RepoPrefix {
+			sameRepo = append(sameRepo, n)
+		}
+		if n.FilePath == caller.FilePath {
+			sameFile = append(sameFile, n)
+		}
+	}
+	if len(sameFile) == 1 {
+		return sameFile[0]
+	}
+	if len(sameRepo) == 1 {
+		return sameRepo[0]
+	}
+	if len(all) == 1 {
+		return all[0]
+	}
+	return nil
+}
+
+// exportedGoMethodsOfType returns the exported Go method nodes of a type,
+// found via the EdgeMemberOf in-edges the Go extractor emits from each
+// method to its receiver type. Used to promote every method of a
+// RegisterActivities(&Struct{}) registration to a temporal activity.
+func exportedGoMethodsOfType(g graph.Store, typeNode *graph.Node) []*graph.Node {
+	if typeNode == nil {
+		return nil
+	}
+	var memberIDs []string
+	for _, ie := range g.GetInEdges(typeNode.ID) {
+		if ie == nil || ie.Kind != graph.EdgeMemberOf || ie.From == "" {
+			continue
+		}
+		memberIDs = append(memberIDs, ie.From)
+	}
+	if len(memberIDs) == 0 {
+		return nil
+	}
+	members := g.GetNodesByIDs(memberIDs)
+	var out []*graph.Node
+	for _, id := range memberIDs {
+		m := members[id]
+		if m == nil || m.Language != "go" || m.Kind != graph.KindMethod {
+			continue
+		}
+		if !isExportedGoName(m.Name) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// isExportedGoName reports whether a Go identifier is exported (its first
+// rune is an uppercase letter) — Temporal registers only exported methods
+// of a struct passed to RegisterActivities.
+func isExportedGoName(name string) bool {
+	if name == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(name)
+	return unicode.IsUpper(r)
 }
 
 // buildJavaMethodViews materialises two indexes over every Java

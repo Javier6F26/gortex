@@ -283,3 +283,59 @@ func CheckStatus(ctx any, c Client) {
 	assert.Equal(t, "query", qry.Meta["temporal_kind"])
 	assert.Equal(t, "get-status", qry.Meta["temporal_name"])
 }
+
+// TestTemporalE2E_GoRegisterActivitiesPlural exercises struct registration:
+// w.RegisterActivities(&Activities{}) must promote every exported method of
+// the struct to a temporal activity, so a workflow that dispatches one of
+// those methods by name resolves to the method node.
+func TestTemporalE2E_GoRegisterActivitiesPlural(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "activities.go"), `package wf
+
+import "context"
+
+type Activities struct{}
+
+func (a *Activities) ChargeCard(ctx context.Context, id string) error { return nil }
+func (a *Activities) Refund(ctx context.Context, id string) error     { return nil }
+func (a *Activities) internalHelper() {}
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+	return workflow.ExecuteActivity(ctx, "ChargeCard", id).Get(ctx, nil)
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) {
+	w.RegisterActivities(&Activities{})
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("OrderWorkflow")[0]
+	var stubCall *graph.Edge
+	for _, e := range g.GetOutEdges(wf.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stubCall = e
+			break
+		}
+	}
+	require.NotNil(t, stubCall, "workflow must have an outbound temporal.stub edge")
+
+	// The stub must land on the promoted ChargeCard method, which must
+	// carry the activity role.
+	charge := g.FindNodesByName("ChargeCard")
+	require.NotEmpty(t, charge, "ChargeCard method must be indexed")
+	assert.Equal(t, charge[0].ID, stubCall.To,
+		"dispatch must resolve to the struct's promoted method")
+	assert.Equal(t, "activity", charge[0].Meta["temporal_role"])
+}

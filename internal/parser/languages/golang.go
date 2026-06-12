@@ -226,6 +226,11 @@ type goDeferredCall struct {
 	// is the name the activity/workflow is dispatched under and becomes
 	// the resolver's index key. Empty when no Name override is present.
 	tempRegisteredName string
+	// tempRegisterPlural marks a `w.RegisterActivities(&MyActivities{})`
+	// struct registration: tempName then holds the struct TYPE name and
+	// the resolver promotes every exported method of that struct to a
+	// temporal activity keyed by the method name.
+	tempRegisterPlural bool
 }
 
 type goDeferredTypeRef struct {
@@ -374,10 +379,20 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 						}
 					}
 				}
-			} else if kind, _, ok := goTemporalRegisterKind(method); ok {
+			} else if kind, plural, ok := goTemporalRegisterKind(method); ok {
 				// Temporal worker registration:
 				// `w.RegisterActivity(F)` etc.
-				if name := goTemporalRegisterName(expr.Node, src); name != "" {
+				if plural {
+					// `w.RegisterActivities(&MyActivities{})` — every
+					// exported method of the struct becomes an activity.
+					// tempName carries the struct TYPE name; the resolver
+					// promotes the methods.
+					if st := goTemporalRegisterStructType(expr.Node, src); st != "" {
+						dc.tempKind = "register_" + kind
+						dc.tempName = st
+						dc.tempRegisterPlural = true
+					}
+				} else if name := goTemporalRegisterName(expr.Node, src); name != "" {
 					dc.tempKind = "register_" + kind
 					dc.tempName = name
 					// RegisterActivityWithOptions / RegisterWorkflowWithOptions
