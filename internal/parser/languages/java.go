@@ -91,6 +91,13 @@ type javaDeferredCall struct {
 	// resolver cross-resolves it to the workflow's implementation (which
 	// may live in a Go repo).
 	tempStartWorkflow string
+	// tempSignalKind / tempSignalName carry an outbound signal-send /
+	// query-call on an untyped WorkflowStub (stub.signal("name", …) /
+	// stub.query("name", …)). Emitted in the post-pass only when the
+	// receiver's inferred type is WorkflowStub, to keep the common
+	// "signal"/"query" method names from false-matching.
+	tempSignalKind string
+	tempSignalName string
 }
 
 // javaDeferredVar buffers a variable declaration for the post-pass
@@ -186,6 +193,9 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			}
 			if wf := javaTemporalStartWorkflowName(expr.Node, method, src); wf != "" {
 				dc.tempStartWorkflow = wf
+			}
+			if sk, sn := javaTemporalSignalQuery(expr.Node, method, src); sk != "" {
+				dc.tempSignalKind, dc.tempSignalName = sk, sn
 			}
 			calls = append(calls, dc)
 
@@ -292,6 +302,25 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 					"via":           "temporal.start",
 					"temporal_kind": "workflow",
 					"temporal_name": c.tempStartWorkflow,
+				},
+			})
+		}
+		// Outbound signal-send / query-call on an untyped WorkflowStub,
+		// symmetric with the Go side (#81). Gated on the receiver's inferred
+		// type being WorkflowStub so the common "signal"/"query" method
+		// names don't false-match arbitrary code.
+		if c.tempSignalKind != "" && tenv[c.receiver] == "WorkflowStub" {
+			via := "temporal.signal-send"
+			if c.tempSignalKind == "query" {
+				via = "temporal.query-call"
+			}
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: callerID, To: "unresolved::*." + c.name,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+				Meta: map[string]any{
+					"via":           via,
+					"temporal_kind": c.tempSignalKind,
+					"temporal_name": c.tempSignalName,
 				},
 			})
 		}

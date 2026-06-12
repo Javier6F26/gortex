@@ -64,3 +64,44 @@ func javaSimpleTypeName(name string) string {
 	}
 	return name
 }
+
+// javaTemporalSignalQuery recognises an outbound signal-send / query-call
+// on an untyped Temporal WorkflowStub and returns its kind ("signal" /
+// "query") and the signal/query name (the first positional argument, a
+// string literal). The call shapes are:
+//
+//	stub.signal("signalName", arg)              // WorkflowStub.signal
+//	stub.query("queryType", ResultClass, arg)   // WorkflowStub.query
+//
+// "signal" / "query" are ordinary method names, so the caller gates the
+// match on the receiver's inferred type being WorkflowStub to stay
+// precise. Returns ("", "") when the method is not signal/query or the
+// name is not a string literal.
+func javaTemporalSignalQuery(callNode *sitter.Node, method string, src []byte) (kind, name string) {
+	switch method {
+	case "signal":
+		kind = "signal"
+	case "query":
+		kind = "query"
+	default:
+		return "", ""
+	}
+	if callNode == nil {
+		return "", ""
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return "", ""
+	}
+	var first *sitter.Node
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		if c := args.NamedChild(i); c != nil {
+			first = c
+			break
+		}
+	}
+	if first == nil || first.Type() != "string_literal" {
+		return "", ""
+	}
+	return kind, strings.Trim(first.Content(src), `"`)
+}
