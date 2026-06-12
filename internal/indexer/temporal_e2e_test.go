@@ -708,3 +708,60 @@ func setupWorker(w Worker) {
 		"func-returning-constant dispatch must resolve to ChargeActivity")
 	assert.Equal(t, graph.OriginASTResolved, stubCall.Origin)
 }
+
+// TestTemporalE2E_GoUnregisteredActivityByConvention exercises Pattern 2 /
+// Stage 1.2: the activity function lives here but is registered by a
+// separate worker-runner (no RegisterActivity in this workspace). The
+// dispatch names it through a two-part const (ActivityFuncName), and the
+// resolver must fall back to the function-name convention.
+func TestTemporalE2E_GoUnregisteredActivityByConvention(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "activity.go"), `package wf
+
+import "context"
+
+// Registered elsewhere (a separate worker-runner); no RegisterActivity here.
+func GetProductOfferingActivity(ctx context.Context) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "constants.go"), `package wf
+
+const (
+	ActivityPackageName = "browse-product-catalog-activities"
+	ActivityFuncName    = "GetProductOfferingActivity"
+)
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func BrowseWorkflow(ctx workflow.Context) error {
+	return workflow.ExecuteActivity(ctx, ActivityFuncName).Get(ctx, nil)
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setupWorker(w Worker) {
+	w.RegisterWorkflow(BrowseWorkflow)
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("BrowseWorkflow")[0]
+	act := g.FindNodesByName("GetProductOfferingActivity")[0]
+
+	var stub *graph.Edge
+	for _, e := range g.GetOutEdges(wf.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stub = e
+		}
+	}
+	require.NotNil(t, stub)
+	assert.Equal(t, act.ID, stub.To, "unregistered activity must resolve by func-name convention")
+	assert.Equal(t, "convention", stub.Meta["temporal_resolution_via"])
+	assert.Equal(t, graph.OriginASTInferred, stub.Origin, "convention match is inferred-tier")
+}

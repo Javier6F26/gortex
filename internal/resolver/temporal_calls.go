@@ -392,6 +392,31 @@ func ResolveTemporalCalls(g graph.Store) int {
 				}
 			}
 		}
+		// Convention fallback: dispatch to an activity/workflow FUNCTION
+		// by name when the worker registers it elsewhere (unregistered
+		// here) — Pattern 2 / Stage 1.2. Try the dispatch name, then its
+		// const-deref value. Landed at the inferred tier (name convention,
+		// not a register-confirmed binding). Tried before the cross-language
+		// join: a same-language convention match is a stronger signal than a
+		// speculative by-string match across a type-system boundary.
+		convention := false
+		if handlerID == "" {
+			candNames := []string{s.name}
+			if v, ok := derefByName[s.name]; ok && v != "" && v != s.name {
+				candNames = append(candNames, v)
+			}
+			for _, nm := range candNames {
+				if id := idx.lookupConvention(s.kind, nm, callerRepo, callerLang); id != "" {
+					handlerID, origin, conf = id, graph.OriginASTInferred, 0.6
+					convention = true
+					if nm != s.name {
+						constDeref = nm
+					}
+					break
+				}
+			}
+		}
+
 		// Cross-language join: a consumer (typically a temporal.start, e.g.
 		// a Java service starting a Go workflow) with no same-language
 		// handler is matched to a unique other-language candidate by
@@ -453,6 +478,11 @@ func ResolveTemporalCalls(g graph.Store) int {
 			} else {
 				delete(e.Meta, "temporal_const_deref")
 			}
+			if convention {
+				e.Meta["temporal_resolution_via"] = "convention"
+			} else {
+				delete(e.Meta, "temporal_resolution_via")
+			}
 			StampSynthesized(e, SynthTemporalStub)
 			resolved++
 		} else {
@@ -463,6 +493,7 @@ func ResolveTemporalCalls(g graph.Store) int {
 			delete(e.Meta, graph.MetaSpeculative)
 			delete(e.Meta, "temporal_const_deref")
 			delete(e.Meta, "temporal_cross_lang")
+			delete(e.Meta, "temporal_resolution_via")
 			UnstampSynthesized(e)
 		}
 		reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
@@ -485,6 +516,15 @@ func temporalStubPlaceholder(kind, name string) string {
 type temporalIndex struct {
 	// byKindName maps "<kind>::<name>" → handler candidate nodes.
 	byKindName map[string][]*graph.Node
+	// funcByName indexes Go functions / methods whose name follows the
+	// activity / workflow naming convention (suffix "Activity" /
+	// "Workflow"), keyed by bare name. Used as a last-resort, lower-
+	// confidence resolution for dispatch to an UNREGISTERED activity —
+	// the common case where activity repos hold the functions but the
+	// `worker.Register*` calls live in a separate worker-runner (so the
+	// register-based byKindName index never sees them). Pattern 2's
+	// two-part name resolves here once F1/F2 reduce it to the func name.
+	funcByName map[string][]*graph.Node
 }
 
 func (idx *temporalIndex) lookup(kind, name, callerRepo, callerLang string) (id, origin string, confidence float64) {
@@ -529,6 +569,47 @@ func (idx *temporalIndex) lookup(kind, name, callerRepo, callerLang string) (id,
 	return "", "", 0
 }
 
+// lookupConvention resolves a dispatch name to a convention-named Go
+// function (suffix "Activity" / "Workflow" matching the kind) when no
+// registered handler matched — the unregistered-activity case (Pattern 2
+// / Stage 1.2). Returns "" when there's no unambiguous candidate. The
+// caller stamps this at a lower (inferred) confidence than a
+// register-confirmed match.
+//
+// callerLang mirrors the same-language gate idx.lookup applies: a Go
+// workflow.ExecuteActivity dispatch resolves only to a Go function, never
+// to a like-named symbol in another language.
+func (idx *temporalIndex) lookupConvention(kind, name, callerRepo, callerLang string) string {
+	cands := idx.funcByName[name]
+	if len(cands) == 0 {
+		return ""
+	}
+	suffix := "Activity"
+	if kind == "workflow" {
+		suffix = "Workflow"
+	}
+	var filtered, sameRepo []*graph.Node
+	for _, n := range cands {
+		if !strings.HasSuffix(n.Name, suffix) {
+			continue
+		}
+		if callerLang != "" && n.Language != callerLang {
+			continue
+		}
+		filtered = append(filtered, n)
+		if callerRepo != "" && n.RepoPrefix == callerRepo {
+			sameRepo = append(sameRepo, n)
+		}
+	}
+	if len(sameRepo) == 1 {
+		return sameRepo[0].ID
+	}
+	if len(filtered) == 1 {
+		return filtered[0].ID
+	}
+	return ""
+}
+
 // lookupCrossLang is the cross-language fallback for a Temporal consumer
 // whose same-language lookup found no handler: it matches a candidate in a
 // DIFFERENT language by canonical name (e.g. a Java service that starts a
@@ -566,7 +647,31 @@ func (idx *temporalIndex) lookupCrossLang(kind, name, callerLang string) (id str
 // avoids re-scanning the (largest) EdgeCalls class and the EdgeAnnotated
 // class a second time.
 func buildTemporalIndex(g graph.Store, registerEdges, annotatedEdges []*graph.Edge) *temporalIndex {
-	idx := &temporalIndex{byKindName: map[string][]*graph.Node{}}
+	idx := &temporalIndex{byKindName: map[string][]*graph.Node{}, funcByName: map[string][]*graph.Node{}}
+
+	// Convention index: Go functions / methods named like activities or
+	// workflows (suffix "Activity" / "Workflow"), for resolving dispatch
+	// to functions the worker-runner registers elsewhere (unregistered
+	// here). Bounded to the convention-named set to keep it small. Consumed
+	// by lookupConvention as a last-resort fallback after the register- and
+	// const-deref-based byKindName lookups miss.
+	indexConventionFunc := func(n *graph.Node) {
+		if n == nil || n.Language != "go" {
+			return
+		}
+		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
+			return
+		}
+		if strings.HasSuffix(n.Name, "Activity") || strings.HasSuffix(n.Name, "Workflow") {
+			idx.funcByName[n.Name] = append(idx.funcByName[n.Name], n)
+		}
+	}
+	for n := range g.NodesByKind(graph.KindFunction) {
+		indexConventionFunc(n)
+	}
+	for n := range g.NodesByKind(graph.KindMethod) {
+		indexConventionFunc(n)
+	}
 
 	// Phase 1 — Go side. Walk the pre-collected `temporal.register` edges
 	// and stamp the registered function's node.
