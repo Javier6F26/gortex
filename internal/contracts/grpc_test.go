@@ -182,6 +182,140 @@ func main() {
 	}
 }
 
+// TestGRPCExtractor_RegisterServerDefinitionIsNotProvider guards the
+// registration-site false positive: `Register<X>Server(` also matches a
+// plain function definition (`func RegisterHTTPServer(mux ...)`) and
+// non-gRPC helper calls. Minting a provider from those activates a
+// latent `New<X>Client` consumer into a false exact-ID match. None of
+// the inputs below name google.golang.org/grpc, so they must produce no
+// provider contract.
+func TestGRPCExtractor_RegisterServerDefinitionIsNotProvider(t *testing.T) {
+	ext := &GRPCExtractor{}
+
+	cases := map[string]string{
+		"func definition": `package httpx
+
+import "net/http"
+
+// A plain registration helper — not a gRPC server registration.
+func RegisterHTTPServer(mux *http.ServeMux) {
+	mux.Handle("/", nil)
+}
+`,
+		"bare helper call in grpc-free file": `package app
+
+func boot() {
+	RegisterMetricsServer(localRegistry)
+}
+`,
+	}
+
+	for name, src := range cases {
+		contracts := ext.Extract("x.go", []byte(src), nil, nil)
+		for _, c := range contracts {
+			if c.Role == RoleProvider {
+				t.Errorf("%s: unexpected provider contract %+v — no gRPC evidence present", name, c)
+			}
+		}
+	}
+}
+
+// TestGRPCExtractor_RegisterServerNoFalseBridgePartner is the end-to-end
+// guard for the activation chain: a file with a `New<X>Client` consumer
+// plus a `func Register<X>Server` definition (the same service name)
+// must NOT produce a same-ID provider, so the consumer stays an orphan
+// and no false EdgeMatches / bridge can form.
+func TestGRPCExtractor_RegisterServerNoFalseBridgePartner(t *testing.T) {
+	ext := &GRPCExtractor{}
+	src := []byte(`package app
+
+func wire() {
+	c := NewHTTPClient()
+	_ = c
+}
+
+func RegisterHTTPServer(mux interface{}) {}
+`)
+	contracts := ext.Extract("app.go", []byte(src), nil, nil)
+	var providers, consumers []Contract
+	for _, c := range contracts {
+		switch c.Role {
+		case RoleProvider:
+			providers = append(providers, c)
+		case RoleConsumer:
+			consumers = append(consumers, c)
+		}
+	}
+	if len(providers) != 0 {
+		t.Fatalf("expected no provider contracts from a func definition; got %+v", providers)
+	}
+	// The consumer side legitimately records grpc::HTTP, but with no
+	// provider it can never pair into a bridge.
+	for _, c := range consumers {
+		if c.ID == "grpc::HTTP" {
+			// Acceptable: an orphan consumer. Just assert no provider
+			// shares its ID (already checked above).
+			return
+		}
+	}
+}
+
+// TestGRPCExtractor_RegisterServerPackageQualifiedIsProvider pins the
+// positive path: a generated-stub registration call
+// (`pb.RegisterUsersServer(grpcServer, impl)`) is package-qualified, so
+// it remains a service-level provider even without a grpc import.
+func TestGRPCExtractor_RegisterServerPackageQualifiedIsProvider(t *testing.T) {
+	ext := &GRPCExtractor{}
+	src := []byte(`package main
+
+import "context"
+
+type UsersServer struct{}
+
+func register(grpcServer interface{}) {
+	pb.RegisterUsersServer(grpcServer, &UsersServer{})
+}
+`)
+	contracts := ext.Extract("server.go", []byte(src), nil, nil)
+	var found bool
+	for _, c := range contracts {
+		if c.Role == RoleProvider && c.ID == "grpc::Users" {
+			found = true
+			if reg, _ := c.Meta["registration"].(bool); !reg {
+				t.Errorf("expected registration=true on the provider contract, got %+v", c.Meta)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected provider contract grpc::Users from pb.RegisterUsersServer; got %+v", contracts)
+	}
+}
+
+// TestGRPCExtractor_RegisterServerGRPCImportAllowsBareCall: a same-
+// package registration with no selector still records when the file
+// independently imports grpc.
+func TestGRPCExtractor_RegisterServerGRPCImportAllowsBareCall(t *testing.T) {
+	ext := &GRPCExtractor{}
+	src := []byte(`package pb
+
+import "google.golang.org/grpc"
+
+func wire(s *grpc.Server, impl interface{}) {
+	RegisterUsersServer(s, impl)
+}
+`)
+	contracts := ext.Extract("wire.go", []byte(src), nil, nil)
+	var found bool
+	for _, c := range contracts {
+		if c.Role == RoleProvider && c.ID == "grpc::Users" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected provider contract grpc::Users for a bare registration in a grpc-importing file; got %+v", contracts)
+	}
+}
+
 func assertContract(t *testing.T, c Contract, id string, ctype ContractType, role Role) {
 	t.Helper()
 	if c.ID != id {

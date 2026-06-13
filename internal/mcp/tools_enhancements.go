@@ -274,14 +274,17 @@ func (s *Server) registerEnhancementTools() {
 	// contracts — unified contracts tool (list + check + validate)
 	s.addTool(
 		mcp.NewTool("contracts",
-			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues.\n\nDEFAULT SCOPE for list: auto-scopes to the active project's repos and hides dependency-origin contracts (type=dependency, vendored paths like vendor/, node_modules/). The response reports other_repos (count of contracts filtered out of scope) and dependencies_skipped (count of dep contracts hidden). To widen scope, pass repo=<prefix>, project=<name>, ref=<tag>, or all_repos=true. To include dependency contracts, pass include_deps=true."),
-			mcp.WithString("action", mcp.Description("list (default), check, or validate")),
+			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, Thrift, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues. action=bridge: queries the persisted contract-bridge subgraph — one node per matched provider↔consumer group (HTTP route, gRPC/Thrift method, pub/sub topic) — ranked by reciprocal rank fusion over text, path/repo, graph-adjacency, and consumer-degree signals (mode=rank, pass query and/or symbol), or expanded from a symbol into its cross-service blast radius (mode=impact, pass symbol).\n\nDEFAULT SCOPE for list: auto-scopes to the active project's repos and hides dependency-origin contracts (type=dependency, vendored paths like vendor/, node_modules/). The response reports other_repos (count of contracts filtered out of scope) and dependencies_skipped (count of dep contracts hidden). To widen scope, pass repo=<prefix>, project=<name>, ref=<tag>, or all_repos=true. To include dependency contracts, pass include_deps=true."),
+			mcp.WithString("action", mcp.Description("list (default), check, validate, or bridge")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project (resolves to the project's repo set)")),
 			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
 			mcp.WithBoolean("all_repos", mcp.Description("(list) Disable active-project auto-scope; return contracts from every indexed repo. Default false.")),
 			mcp.WithBoolean("include_deps", mcp.Description("(list) Include type=dependency contracts and contracts from vendored paths (vendor/, node_modules/, Pods/, .venv/). Default false.")),
-			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi, dependency")),
+			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, thrift, graphql, topic, ws, env, openapi, dependency")),
+			mcp.WithString("query", mcp.Description("(bridge) Free-text query ranked against bridge canonical keys, contract names, repos, and file paths")),
+			mcp.WithString("symbol", mcp.Description("(bridge) Symbol ID anchoring the graph-adjacency signal (mode=rank) or the blast-radius expansion (mode=impact)")),
+			mcp.WithString("mode", mcp.Description("(bridge) rank (default) or impact")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithNumber("limit", mcp.Description("(list) Max contracts per page (default: 200)")),
 			mcp.WithString("cursor", mcp.Description("(list) Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
@@ -3339,8 +3342,10 @@ func (s *Server) handleContracts(ctx context.Context, req mcp.CallToolRequest) (
 		return s.handleCheckContracts(ctx, req)
 	case "validate":
 		return s.handleValidateContracts(ctx, req)
+	case "bridge":
+		return s.handleContractBridges(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list, check, or validate)"), nil
+		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list, check, validate, or bridge)"), nil
 	}
 }
 

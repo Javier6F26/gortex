@@ -461,7 +461,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 ### API Contracts
 | Tool | What it gives you |
 |------|-------------------|
-| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos. Scope either action with ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
+| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos; action=bridge ranks matched provider↔consumer groups (RRF over text / path-repo / adjacency / degree signals; mode=impact for a symbol's cross-service blast radius). Scope any action with ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 
 ### Config Hygiene
 | Tool | What it gives you |

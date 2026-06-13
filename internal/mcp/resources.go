@@ -182,6 +182,14 @@ func (s *Server) handleResourceSchema(_ context.Context, req mcp.ReadResourceReq
 - doc       — a heading-delimited Markdown prose section; Name is the
               breadcrumb heading path, Meta["section_text"] holds the
               section body. Searchable via search_symbols corpus:docs.
+- contract  — an API contract record (HTTP route, gRPC/Thrift method,
+              topic, env var, …); ID is the canonical contract key,
+              Meta carries type/role/symbol_id.
+- contract_bridge — one matched provider↔consumer contract group
+              (route / RPC method / topic) spanning every participating
+              repo; ID is bridge::<contract-id>, Meta carries
+              canonical_key, repos, provider_count, consumer_count.
+              Queried via the contracts tool's action=bridge.
 
 ## Edge Kinds
 - calls        — function/method A calls function/method B
@@ -193,6 +201,10 @@ func (s *Server) handleResourceSchema(_ context.Context, req mcp.ReadResourceReq
 - member_of    — method/field A belongs to type B
 - instantiates — function A creates instance of type B
 - similar_to   — function/method A is a near-duplicate (clone) of B
+- provides     — symbol A provides contract B; consumes is the inverse role
+- matches      — consumer symbol A resolves to provider symbol B across services
+- bridges      — contract_bridge A groups contract B (edge Meta["side"] =
+                 provider|consumer|both)
 - package_workspace_member — package-manager workspace root A owns member package B
 - cross_repo_calls      — calls edge whose target lives in another repo
 - cross_repo_implements — implements edge crossing a repo boundary

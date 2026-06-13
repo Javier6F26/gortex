@@ -4302,6 +4302,7 @@ func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map
 	extractors := []contracts.Extractor{
 		&contracts.HTTPExtractor{ClientAliases: idx.config.HTTPClientAliases},
 		&contracts.GRPCExtractor{},
+		&contracts.ThriftExtractor{},
 		&contracts.GraphQLExtractor{},
 		&contracts.OpenAPIExtractor{},
 		&contracts.TopicExtractor{},
@@ -4639,6 +4640,7 @@ func isRouteContractType(t contracts.ContractType) bool {
 	switch t {
 	case contracts.ContractHTTP,
 		contracts.ContractGRPC,
+		contracts.ContractThrift,
 		contracts.ContractGraphQL,
 		contracts.ContractTopic,
 		contracts.ContractWS:

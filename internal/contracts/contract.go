@@ -10,9 +10,16 @@ import (
 type ContractType string
 
 const (
-	ContractHTTP       ContractType = "http"
-	ContractGRPC       ContractType = "grpc"
-	ContractGraphQL    ContractType = "graphql"
+	ContractHTTP ContractType = "http"
+	ContractGRPC ContractType = "grpc"
+	// ContractThrift covers Apache Thrift IDL services. Provider
+	// contracts come from `service { ... }` blocks in .thrift files;
+	// the consumer side is usually detected through the generated-stub
+	// patterns the gRPC extractor recognises (New<Service>Client), so
+	// the matcher's canonical-name join treats grpc and thrift as one
+	// RPC family when pairing.
+	ContractThrift  ContractType = "thrift"
+	ContractGraphQL ContractType = "graphql"
 	ContractTopic      ContractType = "topic"
 	ContractWS         ContractType = "ws"
 	ContractEnv        ContractType = "env"

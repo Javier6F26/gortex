@@ -65,6 +65,19 @@ type MultiIndexer struct {
 	logger    *zap.Logger
 	mu        sync.RWMutex
 
+	// reconcileMu serialises ReconcileContractEdges end-to-end. The pass
+	// evicts the prior EdgeMatches / topic / bridge generation and mints
+	// a fresh one across many independent graph-store writes — it is NOT
+	// atomic. Several goroutines drive it concurrently (the periodic
+	// janitor's ReconcileAll, the file-watcher's IncrementalReindex,
+	// MCP-triggered track / untrack / index), and mi.mu is only taken in
+	// fine-grained spots inside, not across the whole pass. Without this
+	// lock two overlapping reconciles can interleave evict and mint and
+	// persist a stale generation (a bridge wiped by the other run's
+	// EvictFile after it was minted). A dedicated outer mutex keeps the
+	// pass self-consistent without widening mi.mu's scope.
+	reconcileMu sync.Mutex
+
 	// stitchProber / proxyBudget wire the cross-daemon proxy-edge feature:
 	// when set by the daemon entry point (flag on), every CrossRepoResolver
 	// this MultiIndexer builds mints proxy edges to remote-owned symbols
@@ -2178,6 +2191,12 @@ func (mi *MultiIndexer) wrapperSourceReader() contracts.SourceReader {
 // via the `contracts check` tool and traversals stop at each service's
 // boundary.
 func (mi *MultiIndexer) ReconcileContractEdges() int {
+	// Serialise the whole pass: the evict-then-mint of EdgeMatches, topic
+	// edges, and the bridge subgraph spans many non-atomic store writes,
+	// and several goroutines call this concurrently (see reconcileMu).
+	mi.reconcileMu.Lock()
+	defer mi.reconcileMu.Unlock()
+
 	g := mi.Graph()
 	if g == nil {
 		return 0
@@ -2381,6 +2400,13 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 			emitTopicEdges(g, m, topicNodes)
 		}
 	}
+
+	// Persist the matched contract groups as the bridge subgraph: one
+	// KindContractBridge node per group plus EdgeBridges fan-out to
+	// the participating contract nodes. The pass evicts the previous
+	// bridge generation internally, so it stays idempotent across
+	// reconciles and drops bridges whose contracts disappeared.
+	MaterializeContractBridges(g, result.Matched)
 
 	// Topic nodes whose producer and consumer edges all evaporated
 	// since the previous reconcile remain in the graph as leaf

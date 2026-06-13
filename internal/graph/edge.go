@@ -30,6 +30,16 @@ const (
 	// boundaries by hopping Consumer → EdgeConsumes⁻¹ → consumer-contract
 	// → EdgeMatches → provider-contract → EdgeProvides⁻¹ → handler.
 	EdgeMatches EdgeKind = "matches"
+	// EdgeBridges links a KindContractBridge group node to one of the
+	// KindContract nodes participating in the group. Direction:
+	// bridge → contract. Meta["side"] ∈ provider | consumer | both
+	// ("both" when the provider and consumer contracts share one ID
+	// and therefore collapse into a single contract node in the
+	// graph). Emitted by the contract-bridge materialisation pass in
+	// ReconcileContractEdges alongside EdgeMatches; the whole bridge
+	// generation is evicted and re-derived on every reconcile so the
+	// edges never outlive the contracts they group.
+	EdgeBridges EdgeKind = "bridges"
 	// EdgeAnnotated links a symbol to a synthetic annotation node
 	// representing a decorator / annotation / attribute applied to it
 	// (e.g. @Component, @Test, @Deprecated, #[derive(Debug)],
@@ -700,7 +710,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 	// Structural AST edges are unambiguous by construction.
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf,
-		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches,
+		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches, EdgeBridges,
 		// Coverage structural edges: the extractor produces an
 		// unambiguous source→target binding for each, so they share
 		// the AST-resolved tier.
@@ -940,7 +950,7 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 	// Structural edges from AST are always extracted.
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf, EdgeImplements,
-		EdgeProvides, EdgeConsumes, EdgeMatches,
+		EdgeProvides, EdgeConsumes, EdgeMatches, EdgeBridges,
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
 		EdgePackageWorkspaceMember,
