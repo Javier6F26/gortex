@@ -110,6 +110,13 @@ const qGoAll = `
     (literal_element (identifier) @fieldval.key)
     (literal_element (identifier) @fieldval.value)) @fieldval.elem
 
+  ; Struct field set to a string literal, e.g. ActivityName: "Charge".
+  ; The Temporal step/executor resolver joins these to a struct whose
+  ; method dispatches via that field.
+  (keyed_element
+    (literal_element (identifier) @fieldstr.key)
+    (literal_element (interpreted_string_literal) @fieldstr.val)) @fieldstr.elem
+
   (keyed_element
     (literal_element (identifier) @fieldsel.key)
     (literal_element
@@ -244,8 +251,23 @@ type goDeferredCall struct {
 	// callNode is the call_expression AST node, retained so the general
 	// call-edge emission can extract positional arg names
 	// (attachGoTemporalCallArgNames) for the resolver's wrapper-following
-	// pass. Nil for synthetic / non-call entries.
+	// pass; the executor-field resolver also uses it to inspect the
+	// dispatch argument shape (e.g. `e.ActivityName` as a selector).
+	// Nil for synthetic / non-call entries.
 	callNode *sitter.Node
+}
+
+// PURPOSE — captures a struct-literal field assignment to a string literal
+// so the Temporal executor-field resolver can join the construction site
+// to a dispatch method that reads the same field.
+// RATIONALE — separate from goDeferredCall because it fires on composite
+// literals, not call expressions; the two passes share a single tree walk.
+// KEYWORDS — temporal, executor, struct-field
+type goExecutorField struct {
+	typeName string
+	field    string
+	value    string
+	line     int
 }
 
 type goDeferredTypeRef struct {
@@ -336,6 +358,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// function and (when known) carries the receiver type for the
 	// resolver to land on the right field node.
 	var writes []goDeferredValueSel
+	var executorFields []goExecutorField
 
 	parser.EachMatch(e.qAll, root, src, func(m parser.QueryResult) {
 		switch {
@@ -387,6 +410,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				returnUsage: classifyReturnUsage(expr.Node, src, goReturnUsageSpec),
 				callNode:    expr.Node,
 			}
+			dc.callNode = expr.Node
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, method); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
 			}
@@ -626,6 +650,21 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				line: elem.StartLine + 1,
 			})
 
+		case m.Captures["fieldstr.elem"] != nil:
+			elem := m.Captures["fieldstr.elem"]
+			if typeName := goCompositeLiteralType(elem.Node, src); typeName != "" {
+				val := m.Captures["fieldstr.val"].Text
+				if len(val) >= 2 && (val[0] == '"' || val[0] == '`') {
+					val = val[1 : len(val)-1]
+				}
+				executorFields = append(executorFields, goExecutorField{
+					typeName: typeName,
+					field:    m.Captures["fieldstr.key"].Text,
+					value:    val,
+					line:     elem.StartLine + 1,
+				})
+			}
+
 		case m.Captures["assign.def"] != nil:
 			def := m.Captures["assign.def"]
 			writes = append(writes, goDeferredValueSel{
@@ -707,10 +746,14 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// (s.counter.Increment() / s.helper()) — the basis for indirect
 	// receiver-field-mutation attribution.
 	recvNameByID := map[string]string{}
+	recvTypeByID := map[string]string{}
 	for _, n := range result.Nodes {
 		if n.Kind == graph.KindMethod && n.Meta != nil {
 			if rn, _ := n.Meta["recv_name"].(string); rn != "" {
 				recvNameByID[n.ID] = rn
+			}
+			if rt, _ := n.Meta["receiver"].(string); rt != "" {
+				recvTypeByID[n.ID] = rt
 			}
 		}
 	}
@@ -804,6 +847,18 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				}
 				if c.tempEnvDefault {
 					meta["temporal_name_origin"] = "env_default"
+				}
+				if recvName := recvNameByID[callerID]; recvName != "" {
+					if arg := goTemporalDispatchArg(c.callNode); arg != nil && arg.Type() == "selector_expression" {
+						op := arg.ChildByFieldName("operand")
+						fld := arg.ChildByFieldName("field")
+						if op != nil && fld != nil && op.Content(src) == recvName {
+							meta["temporal_name_field"] = fld.Content(src)
+							if rt := recvTypeByID[callerID]; rt != "" {
+								meta["temporal_recv_type"] = rt
+							}
+						}
+					}
 				}
 				edge := &graph.Edge{
 					From: callerID, To: target,
@@ -1026,6 +1081,31 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			edge.Meta = map[string]any{"receiver_type": recvType}
 		}
 		result.Edges = append(result.Edges, edge)
+	}
+
+	// Temporal step/executor field: `ActivityExecutor{ActivityName: "X"}`.
+	// PURPOSE — emits a marker edge so the resolver can join the string
+	// literal at the construction site to the dispatch that reads this field.
+	// RATIONALE — separate pass because it fires on keyed_element nodes, not
+	// call expressions; the construction site and dispatch site may be in
+	// different functions or even files.
+	// KEYWORDS — temporal, executor-field, marker
+	for _, ef := range executorFields {
+		callerID := findEnclosingFunc(funcRanges, ef.line)
+		if callerID == "" {
+			callerID = filePath
+		}
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: callerID,
+			To:   "unresolved::temporal-executor::" + ef.typeName + "::" + ef.field,
+			Kind: graph.EdgeCalls, FilePath: filePath, Line: ef.line,
+			Meta: map[string]any{
+				"via":            "temporal.executor-field",
+				"executor_type":  ef.typeName,
+				"executor_field": ef.field,
+				"executor_value": ef.value,
+			},
+		})
 	}
 
 	// Assignment / inc / dec selector LHS — EdgeWrites from the

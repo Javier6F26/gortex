@@ -576,3 +576,67 @@ func setupWorker(w Worker) {
 	assert.Equal(t, activity[0].ID, stubCall.To,
 		"the wrapper-following stub must resolve to the registered ChargeCard activity")
 }
+
+// TestTemporalE2E_GoExecutorFieldDispatch exercises the full pipeline for
+// executor struct-field dispatch: a struct method that dispatches via a
+// field, constructed with a string literal, must resolve through the
+// real indexer to the registered activity.
+func TestTemporalE2E_GoExecutorFieldDispatch(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "executor.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+type ActivityExecutor struct{ ActivityName string }
+
+func (e ActivityExecutor) Run(ctx workflow.Context) {
+    workflow.ExecuteActivity(ctx, e.ActivityName)
+}
+`)
+	writeFile(t, filepath.Join(dir, "activity.go"), `package wf
+
+import "context"
+
+func ChargeCard(ctx context.Context) error { return nil }
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setup(w Worker) {
+    w.RegisterActivity(ChargeCard)
+    _ = ActivityExecutor{ActivityName: "ChargeCard"}
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	// Find the Run method node.
+	runners := g.FindNodesByName("Run")
+	require.NotEmpty(t, runners, "Run method must be indexed")
+	var runNode *graph.Node
+	for _, n := range runners {
+		if n.Language == "go" {
+			runNode = n
+			break
+		}
+	}
+	require.NotNil(t, runNode)
+
+	activity := g.FindNodesByName("ChargeCard")
+	require.NotEmpty(t, activity)
+
+	// The stub from Run must resolve to ChargeCard.
+	var stubCall *graph.Edge
+	for _, e := range g.GetOutEdges(runNode.ID) {
+		if e != nil && e.Meta != nil && e.Meta["via"] == "temporal.stub" {
+			stubCall = e
+			break
+		}
+	}
+	require.NotNil(t, stubCall, "Run must have an outbound temporal.stub edge")
+	assert.Equal(t, activity[0].ID, stubCall.To,
+		"executor-field dispatch must resolve to ChargeCard")
+}
