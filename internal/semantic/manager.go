@@ -44,6 +44,23 @@ type LSPRouter interface {
 	Close() error
 }
 
+// SupplementalProvider is an optional interface a Provider MAY
+// implement to opt out of the per-language arbitration: instead of
+// competing for a language slot it always runs (when available and not
+// config-disabled) in addition to whichever provider won the slot.
+// The in-process tree-sitter type resolvers implement it so they
+// coexist with LSP / SCIP providers — their AST-grade provenance never
+// downgrades a compiler-grade edge, and a language with no external
+// tooling still gets type-aware enrichment.
+type SupplementalProvider interface {
+	Supplemental() bool
+}
+
+func isSupplemental(p Provider) bool {
+	sp, ok := p.(SupplementalProvider)
+	return ok && sp.Supplemental()
+}
+
 // Manager orchestrates multiple semantic providers and coordinates enrichment.
 type Manager struct {
 	providers []Provider
@@ -183,7 +200,33 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 		}
 	}
 
+	// Supplemental providers run last, outside arbitration: they only
+	// hold AST-grade provenance, so running after a compiler-grade
+	// winner can confirm-but-never-downgrade what it stamped.
+	for _, p := range m.providers {
+		if !isSupplemental(p) || !p.Available() || m.providerDisabled(p.Name()) {
+			continue
+		}
+		langs := p.Languages()
+		if len(langs) == 0 {
+			continue
+		}
+		results = m.runEnrichForProvider(g, roots, langs[0], p, results)
+	}
+
 	return results, nil
+}
+
+// providerDisabled reports an explicit `enabled: false` config entry
+// for the named provider. Used by the supplemental run loop, which
+// never passes through selectProviders' config gate.
+func (m *Manager) providerDisabled(name string) bool {
+	for _, pc := range m.config.Providers {
+		if pc.Name == name {
+			return !pc.Enabled
+		}
+	}
+	return false
 }
 
 // configPriorityFor returns the user's config-overridden priority for
@@ -211,7 +254,17 @@ func (m *Manager) runEnrichForProvider(g graph.Store, roots map[string]string, l
 			zap.String("repo", repoName),
 		)
 
-		result, err := provider.Enrich(g, repoRoot)
+		// repoName is the roots-map key. In multi-repo mode it carries the
+		// repo prefix (the MultiIndexer keys roots by prefix; the per-repo
+		// indexer passes its own RepoPrefix()); a repo-scoped provider uses
+		// it to scope file selection to the repo actually being enriched.
+		var result *EnrichResult
+		var err error
+		if rsp, ok := provider.(RepoScopedProvider); ok {
+			result, err = rsp.EnrichRepo(g, repoName, repoRoot)
+		} else {
+			result, err = provider.Enrich(g, repoRoot)
+		}
 		if err != nil {
 			m.logger.Warn("semantic enrichment failed",
 				zap.String("provider", provider.Name()),
@@ -259,12 +312,39 @@ func (m *Manager) EnrichFile(g graph.Store, repoRoot, filePath string) (*EnrichR
 	}
 	lang := nodes[0].Language
 
-	provider, ok := langProviders[lang]
-	if !ok || !provider.Available() {
-		return nil, nil
+	var primary *EnrichResult
+	var primaryErr error
+	if provider, ok := langProviders[lang]; ok && provider.Available() {
+		primary, primaryErr = provider.EnrichFile(g, repoRoot, filePath)
 	}
 
-	return provider.EnrichFile(g, repoRoot, filePath)
+	// Supplemental providers for this language run regardless of the
+	// arbitration outcome — same contract as EnrichAll.
+	for _, p := range m.providers {
+		if !isSupplemental(p) || !p.Available() || m.providerDisabled(p.Name()) {
+			continue
+		}
+		for _, l := range p.Languages() {
+			if l != lang {
+				continue
+			}
+			res, err := p.EnrichFile(g, repoRoot, filePath)
+			if err != nil {
+				m.logger.Debug("supplemental incremental enrichment failed",
+					zap.String("provider", p.Name()),
+					zap.String("file", filePath),
+					zap.Error(err),
+				)
+				break
+			}
+			if primary == nil {
+				primary = res
+			}
+			break
+		}
+	}
+
+	return primary, primaryErr
 }
 
 // selectProviders returns the highest-priority available provider per language.
@@ -292,6 +372,12 @@ func (m *Manager) selectProviders() map[string]Provider {
 	langCandidates := make(map[string][]langCandidate)
 
 	for _, p := range m.providers {
+		// Supplemental providers never occupy a language slot — they
+		// run unconditionally after arbitration (see EnrichAll), so a
+		// router-backed LSP spec can still win the language.
+		if isSupplemental(p) {
+			continue
+		}
 		ce, ok := configMap[p.Name()]
 		if ok && !ce.enabled {
 			continue

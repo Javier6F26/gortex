@@ -106,6 +106,7 @@ type Store struct {
 	stmtEdgeCount        *sql.Stmt
 	stmtRemoveEdge       *sql.Stmt
 	stmtUpdateEdgeOrigin *sql.Stmt
+	stmtUpdateEdgeAttrs  *sql.Stmt
 	stmtSelectEdgeOrigin *sql.Stmt
 	stmtDeleteEdgeByKey  *sql.Stmt
 
@@ -276,7 +277,7 @@ func (s *Store) Close() error {
 		s.stmtInsertEdge, s.stmtOutEdges, s.stmtInEdges,
 		s.stmtRepoEdges,
 		s.stmtAllEdges, s.stmtEdgeCount, s.stmtRemoveEdge,
-		s.stmtUpdateEdgeOrigin, s.stmtSelectEdgeOrigin, s.stmtDeleteEdgeByKey,
+		s.stmtUpdateEdgeOrigin, s.stmtUpdateEdgeAttrs, s.stmtSelectEdgeOrigin, s.stmtDeleteEdgeByKey,
 		s.stmtSelectFileNodeIDs, s.stmtSelectRepoNodeIDs,
 		s.stmtDeleteNodeByFile, s.stmtDeleteNodeByRepo,
 	}
@@ -381,6 +382,8 @@ func (s *Store) prepare() error {
 		`SELECT origin FROM edges WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ?`)
 	prep(&s.stmtUpdateEdgeOrigin,
 		`UPDATE edges SET origin = ?, tier = ? WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ?`)
+	prep(&s.stmtUpdateEdgeAttrs,
+		`UPDATE edges SET confidence = ?, confidence_label = ?, origin = ?, tier = ?, meta = ? WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ?`)
 	prep(&s.stmtDeleteEdgeByKey,
 		`DELETE FROM edges WHERE from_id = ? AND to_id = ? AND kind = ? AND file_path = ? AND line = ?`)
 
@@ -661,6 +664,32 @@ func (s *Store) SetEdgeProvenance(e *graph.Edge, newOrigin string) bool {
 	}
 	s.edgeIdentityRevs.Add(1)
 	return true
+}
+
+// PersistEdgeAttributes durably rewrites the mutable attribute columns
+// (confidence, confidence_label, origin, tier, meta) of the edge row
+// identified by e's full logical key. It is the disk-backend counterpart
+// to the in-memory store's "mutate the live *Edge in place" behaviour: a
+// pass that confirms an edge's full provenance bundle (not just origin)
+// calls this so the confidence / label / meta survive a reload. A missing
+// row is a silent no-op (UPDATE ... WHERE matches nothing).
+func (s *Store) PersistEdgeAttributes(e *graph.Edge) {
+	if e == nil {
+		return
+	}
+	metaBlob, err := encodeMeta(e.Meta)
+	if err != nil {
+		panicOnFatal(err)
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if _, err := s.stmtUpdateEdgeAttrs.Exec(
+		e.Confidence, e.ConfidenceLabel, e.Origin, e.Tier, metaBlob,
+		e.From, e.To, string(e.Kind), e.FilePath, e.Line,
+	); err != nil {
+		panicOnFatal(err)
+	}
 }
 
 // ReindexEdge updates the stored row after e.To has been mutated from

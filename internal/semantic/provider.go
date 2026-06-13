@@ -32,6 +32,19 @@ type Provider interface {
 	Close() error
 }
 
+// RepoScopedProvider is an optional interface a Provider MAY implement to
+// receive the repo prefix of the enrichment root alongside the root path.
+// In a multi-repo daemon the shared graph holds file nodes from every
+// tracked repo, and two repos can share a relative path; a provider that
+// selects its work by walking graph file nodes needs the prefix to scope
+// to the repo actually being enriched rather than guessing from disk
+// existence (which a path collision defeats). The Manager calls EnrichRepo
+// when the provider implements it, passing the repo's prefix (empty in
+// single-repo mode); otherwise it falls back to Enrich.
+type RepoScopedProvider interface {
+	EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error)
+}
+
 // EnrichResult contains statistics from an enrichment pass.
 type EnrichResult struct {
 	Provider        string  `json:"provider"`

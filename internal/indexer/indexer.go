@@ -306,6 +306,16 @@ type Indexer struct {
 	// after which indexFile drives EvictFuncs/UpdateFuncs. While un-built
 	// indexFile falls back to the whole-graph pass.
 	cloneIndex *incrementalCloneIndex
+
+	// affectedByPasses / affectedByFilesResolved / affectedByDropped
+	// count the affected-by re-resolution activity (see affected_by.go):
+	// passes that found a signature delta and ran, referencing files
+	// re-resolved by them, and files dropped by the fan-out cap.
+	// Exposed via AffectedByCounts so tests and diagnostics can observe
+	// that a body-only edit triggered no fan-out.
+	affectedByPasses        atomic.Int64
+	affectedByFilesResolved atomic.Int64
+	affectedByDropped       atomic.Int64
 }
 
 // contractCacheEntry is a cached contract-extraction result for one file.
@@ -832,7 +842,9 @@ func (idx *Indexer) RunDeferredPasses(ctx context.Context) {
 
 	if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 		reporter.Report("semantic enrichment", 0, 0)
-		roots := map[string]string{"default": idx.rootPath}
+		// Key by the repo prefix so a repo-scoped provider can scope file
+		// selection to this repo (empty in single-repo mode).
+		roots := map[string]string{idx.repoPrefix: idx.rootPath}
 		results, err := idx.semanticMgr.EnrichAll(idx.graph, roots)
 		if err != nil {
 			idx.logger.Warn("semantic enrichment failed", zap.Error(err))
@@ -2050,6 +2062,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			}
 			reporter.Report("persisting bulk graph", 1, 1)
 			idx.graph = diskTarget
+			// Mirror of the SetGraph(inMemShadow) above: the resolver
+			// must follow the graph pointer back to the disk store, or
+			// every post-index per-file resolve (the watcher save path,
+			// incremental reindex) reads the drained — now empty —
+			// shadow and silently resolves nothing.
+			if idx.resolver != nil {
+				idx.resolver.SetGraph(diskTarget)
+			}
 		}()
 	} else if diskTarget == nil && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
 		if _, isBulk := idx.graph.(graph.BulkLoader); isBulk && len(files) > shadowMaxFileCount() {
@@ -2411,7 +2431,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		// Semantic enrichment (SCIP, go/types, LSP).
 		if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
 			reporter.Report("semantic enrichment", 0, 0)
-			roots := map[string]string{"default": absRoot}
+			// Key by the repo prefix so a repo-scoped provider can scope
+			// file selection to this repo (empty in single-repo mode).
+			roots := map[string]string{idx.repoPrefix: absRoot}
 			results, err := idx.semanticMgr.EnrichAll(idx.graph, roots)
 			if err != nil {
 				idx.logger.Warn("semantic enrichment failed", zap.Error(err))
@@ -2733,6 +2755,24 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		return err
 	}
 
+	// Affected-by snapshot: the symbol shapes and reverse-reference
+	// sources the post-resolve signature-delta pass compares against,
+	// captured BEFORE eviction — EvictFile drops in-edges from
+	// unchanged files and replaces this file's nodes, so neither is
+	// recoverable afterwards. Skipped on the no-resolve and
+	// deferred-batch paths, whose callers run a full resolve (and
+	// persistAllRefFacts) once at the end of the batch.
+	//
+	// Also skipped for a quarantined / timed-out / minified-skipped file:
+	// its synthetic result carries zero symbols, so the delta would read
+	// every prior symbol as removed and fan out to re-resolve the whole
+	// reverse graph on a transient parse failure. A failure that yields no
+	// symbols is not the same as a symbol genuinely deleted from source.
+	var abSnap *affectedBySnapshot
+	if resolve && !idx.deferGlobalPasses && !skipped {
+		abSnap = idx.snapshotAffectedBy(graphPath)
+	}
+
 	// We hold a usable result: evict the old state now, then add the
 	// new — the window where the file has no nodes is just this gap.
 	evictExisting()
@@ -2805,10 +2845,34 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 				detectClonesAndEmitEdges(idx.graph, idx.repoPrefix, idx.cloneThreshold())
 			}
 		}
-		// Persist this file's resolved-reference facts to the durable sidecar
-		// (delete-then-set so removed references don't linger). No-op on the
-		// in-memory backend.
-		idx.persistRefFactsForFiles([]string{graphPath})
+		// in-memory backend. Skipped for a quarantined / timed-out /
+		// minified file: its synthetic result yields no facts, so a
+		// delete-then-set would durably drop the file's real facts on a
+		// transient parse failure and leave them gone until a clean
+		// reparse — abSnap is nil here too, so the affected-by pass that
+		// would also fan out is already a no-op.
+		if !skipped {
+			idx.persistRefFactsForFiles([]string{graphPath})
+			// Affected-by re-resolution: if this save changed a symbol's
+			// signature or kind, or removed a symbol, re-resolve the files
+			// that referenced it — bounded, synchronous, and gated on the
+			// signature delta so a body-only edit fans out to nothing.
+			idx.reresolveAffectedBy(graphPath, abSnap, result.Nodes)
+
+			// Incremental semantic enrichment for this single file. Mirrors the
+			// full-index EnrichAll call but scoped to the saved file, so a
+			// watcher save re-runs the type resolvers (and any watch-enabled
+			// LSP / compiler provider) instead of leaving the file's edges at
+			// their pre-enrichment tier until the next full reindex. Gated
+			// internally on Config.EnrichOnWatch; a no-op when disabled.
+			if idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders() {
+				if _, err := idx.semanticMgr.EnrichFile(idx.graph, idx.rootPath, graphPath); err != nil {
+					idx.logger.Debug("indexer: incremental semantic enrichment failed",
+						zap.String("file", graphPath),
+						zap.Error(err))
+				}
+			}
+		}
 	}
 
 	// Update mtime for this file. relPath is already the canonical
@@ -4254,6 +4318,7 @@ func (idx *Indexer) buildPerFileContractExtractors() ([]contracts.Extractor, map
 	extractors := []contracts.Extractor{
 		&contracts.HTTPExtractor{ClientAliases: idx.config.HTTPClientAliases},
 		&contracts.GRPCExtractor{},
+		&contracts.ThriftExtractor{},
 		&contracts.GraphQLExtractor{},
 		&contracts.OpenAPIExtractor{},
 		&contracts.TopicExtractor{},
@@ -4591,6 +4656,7 @@ func isRouteContractType(t contracts.ContractType) bool {
 	switch t {
 	case contracts.ContractHTTP,
 		contracts.ContractGRPC,
+		contracts.ContractThrift,
 		contracts.ContractGraphQL,
 		contracts.ContractTopic,
 		contracts.ContractWS:

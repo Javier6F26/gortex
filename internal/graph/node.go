@@ -238,6 +238,23 @@ const (
 	// the persistent code graph; this kind names the entity so it reads as
 	// first-class in tool output and query filters.
 	KindAgent NodeKind = "agent"
+	// KindContractBridge represents one matched provider↔consumer
+	// contract group — an HTTP route, a gRPC/Thrift method, or a
+	// pub/sub topic — materialised as a single graph node that spans
+	// every repo participating in the group. ID convention:
+	// `bridge::<contract-id>` where contract-id is the canonical
+	// contract key (`http::GET::/v1/users`, `grpc::Users::GetUser`,
+	// `topic::kafka::orders`), so the bridge for any contract is
+	// addressable from the contract ID alone, across repos. Meta
+	// carries contract_type, canonical_key, repos (sorted slice of
+	// participating repo prefixes), provider_count, consumer_count
+	// and cross_repo. EdgeBridges links the bridge to each
+	// participating KindContract node. Bridge nodes are re-derived
+	// from the matcher result on every contract reconcile — all of
+	// them share the synthetic FilePath "contracts://bridges" so the
+	// reconcile pass can evict the stale generation with one
+	// EvictFile call before re-minting.
+	KindContractBridge NodeKind = "contract_bridge"
 )
 
 var validNodeKinds = map[NodeKind]bool{
@@ -254,7 +271,7 @@ var validNodeKinds = map[NodeKind]bool{
 	KindRelease: true, KindLicense: true, KindString: true,
 	KindResource: true, KindKustomization: true, KindImage: true,
 	KindArtifact: true, KindDoc: true, KindTopic: true,
-	KindMacro: true, KindAgent: true,
+	KindMacro: true, KindAgent: true, KindContractBridge: true,
 }
 
 type Node struct {

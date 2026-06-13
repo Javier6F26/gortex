@@ -98,6 +98,10 @@ type javaDeferredCall struct {
 	// "signal"/"query" method names from false-matching.
 	tempSignalKind string
 	tempSignalName string
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on the EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 // javaDeferredVar buffers a variable declaration for the post-pass
@@ -186,10 +190,11 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			expr := m.Captures["callm.expr"]
 			method := m.Captures["callm.method"].Text
 			dc := javaDeferredCall{
-				name:       method,
-				receiver:   m.Captures["callm.receiver"].Text,
-				line:       expr.StartLine + 1,
-				isSelector: true,
+				name:        method,
+				receiver:    m.Captures["callm.receiver"].Text,
+				line:        expr.StartLine + 1,
+				isSelector:  true,
+				returnUsage: classifyReturnUsage(expr.Node, src, javaReturnUsageSpec),
 			}
 			if wf := javaTemporalStartWorkflowName(expr.Node, method, src); wf != "" {
 				dc.tempStartWorkflow = wf
@@ -205,8 +210,9 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			// edges, so we mirror that here.
 			expr := m.Captures["call.expr"]
 			calls = append(calls, javaDeferredCall{
-				name: m.Captures["call.name"].Text,
-				line: expr.StartLine + 1,
+				name:        m.Captures["call.name"].Text,
+				line:        expr.StartLine + 1,
+				returnUsage: classifyReturnUsage(expr.Node, src, javaReturnUsageSpec),
 			})
 		}
 	})
@@ -288,6 +294,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 				}
 			}
 		}
+		stampReturnUsage(edge, c.returnUsage)
 		result.Edges = append(result.Edges, edge)
 
 		// Temporal workflow START (consumer side): emit a via=temporal.start
@@ -295,7 +302,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		// it to the registered workflow — which may be implemented in a Go
 		// repo — so get_callers on that workflow surfaces this Java service.
 		if c.tempStartWorkflow != "" {
-			result.Edges = append(result.Edges, &graph.Edge{
+			startEdge := &graph.Edge{
 				From: callerID, To: "unresolved::temporal::workflow::" + c.tempStartWorkflow,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 				Meta: map[string]any{
@@ -303,7 +310,9 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 					"temporal_kind": "workflow",
 					"temporal_name": c.tempStartWorkflow,
 				},
-			})
+			}
+			stampReturnUsage(startEdge, c.returnUsage)
+			result.Edges = append(result.Edges, startEdge)
 		}
 		// Outbound signal-send / query-call on an untyped WorkflowStub,
 		// symmetric with the Go side (#81). Gated on the receiver's inferred
@@ -314,7 +323,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			if c.tempSignalKind == "query" {
 				via = "temporal.query-call"
 			}
-			result.Edges = append(result.Edges, &graph.Edge{
+			signalEdge := &graph.Edge{
 				From: callerID, To: "unresolved::*." + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 				Meta: map[string]any{
@@ -322,7 +331,9 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 					"temporal_kind": c.tempSignalKind,
 					"temporal_name": c.tempSignalName,
 				},
-			})
+			}
+			stampReturnUsage(signalEdge, c.returnUsage)
+			result.Edges = append(result.Edges, signalEdge)
 		}
 	}
 

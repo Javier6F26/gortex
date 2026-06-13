@@ -93,6 +93,10 @@ type rustDeferredCall struct {
 	path       string // full scoped_identifier text for path calls (e.g. "Foo::new", "crate::util::helper"); "" otherwise
 	line       int
 	isSelector bool
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on the EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 // rustDeferredLet buffers a let_declaration for the post-pass type-env
@@ -179,17 +183,19 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
 			calls = append(calls, rustDeferredCall{
-				name:       m.Captures["callm.method"].Text,
-				receiver:   m.Captures["callm.receiver"].Text,
-				line:       expr.StartLine + 1,
-				isSelector: true,
+				name:        m.Captures["callm.method"].Text,
+				receiver:    m.Captures["callm.receiver"].Text,
+				line:        expr.StartLine + 1,
+				isSelector:  true,
+				returnUsage: classifyReturnUsage(expr.Node, src, rustReturnUsageSpec),
 			})
 
 		case m.Captures["callp.expr"] != nil:
 			expr := m.Captures["callp.expr"]
 			c := rustDeferredCall{
-				name: m.Captures["callp.name"].Text,
-				line: expr.StartLine + 1,
+				name:        m.Captures["callp.name"].Text,
+				line:        expr.StartLine + 1,
+				returnUsage: classifyReturnUsage(expr.Node, src, rustReturnUsageSpec),
 			}
 			// The query only captures the scoped_identifier's trailing
 			// segment, so the qualifier (Foo / Self / crate / super /
@@ -207,8 +213,9 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
 			calls = append(calls, rustDeferredCall{
-				name: m.Captures["call.name"].Text,
-				line: expr.StartLine + 1,
+				name:        m.Captures["call.name"].Text,
+				line:        expr.StartLine + 1,
+				returnUsage: classifyReturnUsage(expr.Node, src, rustReturnUsageSpec),
 			})
 		}
 	})
@@ -281,6 +288,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 				}
 				edge.Meta["rust_recv"] = c.receiver
 			}
+			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}
@@ -294,6 +302,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		if c.path != "" && strings.Contains(c.path, "::") {
 			edge.Meta = map[string]any{"rust_path": c.path}
 		}
+		stampReturnUsage(edge, c.returnUsage)
 		result.Edges = append(result.Edges, edge)
 	}
 

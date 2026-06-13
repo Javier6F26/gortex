@@ -348,6 +348,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 |------|-------------------|
 | flow_between | Ranked dataflow paths between two symbol IDs. Walks ` + "`value_flow`" + ` (intra-procedural) ∪ ` + "`arg_of`" + ` (caller arg → callee param) ∪ ` + "`returns_to`" + ` (callee → assignment). Pass ` + "`max_depth`" + ` (default 8) and ` + "`max_paths`" + ` (default 10). |
 | taint_paths | Pattern-driven dataflow sweep — every flow from a matching source to a matching sink. Patterns: bare token = name substring; ` + "`exact:Foo`" + `; ` + "`path:dir/`" + `; ` + "`kind:method`" + ` (clauses combine with AND). Sinks expand functions to their params automatically. |
+| get_cfg | Per-function control-flow graph for one function/method ID — basic blocks, labeled edges (seq/true/false/loop_back/break/continue/return/case/exception/finally), per-statement def/use sets, and statement-granular reaching-definition chains. Optional ` + "`mermaid`" + ` rendering. Go / Python / JS / TS / Java / Rust / Ruby. |
 
 ### Structural Code Search
 | Tool | What it gives you |
@@ -392,7 +393,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 ### Code Quality
 | Tool | What it gives you |
 |------|-------------------|
-| analyze | Unified graph-analysis dispatcher (60 kinds). Structural: dead_code, hotspots, cycles, would_create_cycle, clusters, concepts, role, connectivity_health, edge_audit, constructors_missing_fields. Quality / security: health_score, impact, sast, hygiene, unsafe_patterns, named, review (idiomatic / correctness rulepack — NPE, thread-safety check-then-act, N+1, logic-error; Go + Python — with a graph-grounded false-positive-reduction pass). Churn / ownership: todos, stale_code, ownership, fixes_history, blame. Coverage / releases: coverage, coverage_gaps, coverage_summary, releases. Schema / SQL: orphan_tables, unreferenced_tables, sql_call_sites, sql_rebuild, dbt_models, models. Flags / interop: stale_flags, cgo_users, wasm_users. Edge-driven: channel_ops, race_writes, unclosed_channels, goroutine_spawns, field_writers, annotation_users, config_readers, env_var_users, event_emitters, log_events, string_emitters, error_surface, external_calls, tests_as_edges. Web / infra: routes, components, k8s_resources, images, kustomize, pubsub. Cross-repo: cross_repo. Provenance / resolution: synthesizers (framework-dispatch edges grouped by pass), resolution_outcomes (why a call/ref edge stayed unresolved). Extensible: domain |
+| analyze | Unified graph-analysis dispatcher (60 kinds). Structural: dead_code, hotspots, cycles, would_create_cycle, clusters, concepts, role, connectivity_health, edge_audit, constructors_missing_fields. Quality / security: health_score, impact, sast, hygiene, unsafe_patterns, named, review (idiomatic / correctness rulepack — NPE, thread-safety check-then-act, N+1, logic-error; Go + Python — with a graph-grounded false-positive-reduction pass). Churn / ownership: todos, stale_code, ownership, fixes_history, blame. Coverage / releases: coverage, coverage_gaps, coverage_summary, releases. Schema / SQL: orphan_tables, unreferenced_tables, sql_call_sites, sql_rebuild, dbt_models, models. Flags / interop: stale_flags, cgo_users, wasm_users. Edge-driven: channel_ops, race_writes, unclosed_channels, goroutine_spawns, field_writers, annotation_users, config_readers, env_var_users, event_emitters, log_events, string_emitters, error_surface, external_calls, tests_as_edges. Web / infra: routes, components, k8s_resources, images, kustomize, pubsub. Cross-repo: cross_repo. Dataflow: def_use (per-function reaching-definition def→use chains over the on-demand CFG; pairs with the get_cfg tool). Provenance / resolution: synthesizers (framework-dispatch edges grouped by pass), resolution_outcomes (why a call/ref edge stayed unresolved). Extensible: domain |
 | analyze kind=dead_code | Symbols with zero incoming edges (excludes entry points, tests, exports) |
 | analyze kind=hotspots | Over-coupled symbols ranked by fan-in, fan-out, and community crossings |
 | analyze kind=cycles | Tarjan's SCC with severity classification |
@@ -460,7 +461,7 @@ These wrap the discovery + impact + memory surfaces into ordered playbooks so po
 ### API Contracts
 | Tool | What it gives you |
 |------|-------------------|
-| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos. Scope either action with ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
+| contracts | API contracts: action=list (default) lists detected contracts; action=check matches providers/consumers and reports orphans across repos; action=bridge ranks matched provider↔consumer groups (RRF over text / path-repo / adjacency / degree signals; mode=impact for a symbol's cross-service blast radius). Scope any action with ` + "`repo`" + `, ` + "`project`" + `, or ` + "`ref`" + ` |
 
 ### Config Hygiene
 | Tool | What it gives you |

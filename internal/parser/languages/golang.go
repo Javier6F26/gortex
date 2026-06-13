@@ -178,6 +178,11 @@ type goDeferredCall struct {
 	line       int    // 1-based line of call_expression
 	isSelector bool
 	spawn      bool // call is launched via `go` — emit EdgeSpawns alongside EdgeCalls
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified from the call node's
+	// parent chain at capture time and stamped as edge Meta on every
+	// EdgeCalls emitted for this site. Empty when unclassifiable.
+	returnUsage string
 	// gRPC server registration. Set when this call is the generated
 	// `Register<Service>Server(registrar, impl)` helper: grpcRegService
 	// is the service name and grpcRegArgNode is the second-argument AST
@@ -353,9 +358,10 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			expr := m.Captures["call.expr"]
 			callName := m.Captures["call.name"].Text
 			dc := goDeferredCall{
-				callName: callName,
-				line:     expr.StartLine + 1,
-				spawn:    isGoroutineSpawn(expr.Node),
+				callName:    callName,
+				line:        expr.StartLine + 1,
+				spawn:       isGoroutineSpawn(expr.Node),
+				returnUsage: classifyReturnUsage(expr.Node, src, goReturnUsageSpec),
 			}
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, callName); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
@@ -367,11 +373,12 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			method := m.Captures["callm.method"].Text
 			receiver := m.Captures["callm.receiver"].Text
 			dc := goDeferredCall{
-				method:     method,
-				receiver:   receiver,
-				line:       expr.StartLine + 1,
-				isSelector: true,
-				spawn:      isGoroutineSpawn(expr.Node),
+				method:      method,
+				receiver:    receiver,
+				line:        expr.StartLine + 1,
+				isSelector:  true,
+				spawn:       isGoroutineSpawn(expr.Node),
+				returnUsage: classifyReturnUsage(expr.Node, src, goReturnUsageSpec),
 			}
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, method); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
@@ -717,7 +724,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		if c.isSelector {
 			if svc, ok := goGRPCStubService(c, grpcStubVars); ok {
 				target := "unresolved::grpc::" + svc + "::" + c.method
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: target,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 					Meta: map[string]any{
@@ -725,7 +732,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 						"grpc_service": svc,
 						"grpc_method":  c.method,
 					},
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				emitGoSpawnEdge(c, callerID, target, filePath, result)
 				continue
 			}
@@ -767,11 +776,13 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				if c.tempEnvDefault {
 					meta["temporal_name_origin"] = "env_default"
 				}
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: target,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 					Meta: meta,
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				emitGoSpawnEdge(c, callerID, target, filePath, result)
 				continue
 			}
@@ -788,6 +799,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalHandlerMeta(edge, c)
 			applyGoTemporalSignalQueryMeta(edge, c)
 			applyGoTemporalStartMeta(edge, c)
+			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -803,6 +815,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalHandlerMeta(edge, c)
 			applyGoTemporalSignalQueryMeta(edge, c)
 			applyGoTemporalStartMeta(edge, c)
+			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -854,6 +867,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		applyGoTemporalRegisterMeta(edge, c)
 		applyGoTemporalSignalQueryMeta(edge, c)
 		applyGoTemporalStartMeta(edge, c)
+		stampReturnUsage(edge, c.returnUsage)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}

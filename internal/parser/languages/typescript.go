@@ -137,6 +137,10 @@ type deferredCall struct {
 	// expr is the call_expression node, kept for member calls so the
 	// post-pass can inspect arguments for pub/sub topic detection.
 	expr *sitter.Node
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on every EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 // deferredVar holds a lexical_declaration match whose emission is
@@ -254,18 +258,20 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
 			calls = append(calls, deferredCall{
-				name: m.Captures["call.name"].Text,
-				line: expr.StartLine + 1,
+				name:        m.Captures["call.name"].Text,
+				line:        expr.StartLine + 1,
+				returnUsage: classifyReturnUsage(expr.Node, src, jsTSReturnUsageSpec),
 			})
 
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
 			calls = append(calls, deferredCall{
-				method:   m.Captures["callm.method"].Text,
-				receiver: m.Captures["callm.receiver"].Text,
-				line:     expr.StartLine + 1,
-				isMember: true,
-				expr:     expr.Node,
+				method:      m.Captures["callm.method"].Text,
+				receiver:    m.Captures["callm.receiver"].Text,
+				line:        expr.StartLine + 1,
+				isMember:    true,
+				expr:        expr.Node,
+				returnUsage: classifyReturnUsage(expr.Node, src, jsTSReturnUsageSpec),
 			})
 
 		case m.Captures["tvar.def"] != nil:
@@ -350,24 +356,30 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		if !c.isMember {
 			if binding, ok := destructured[c.name]; ok {
 				if memberID := objLiteralMembers[binding][c.name]; memberID != "" {
-					result.Edges = append(result.Edges, &graph.Edge{
+					edge := &graph.Edge{
 						From: callerID, To: memberID,
 						Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 						Origin: graph.OriginASTResolved, Confidence: 0.9,
-					})
+					}
+					stampReturnUsage(edge, c.returnUsage)
+					result.Edges = append(result.Edges, edge)
 					continue
 				}
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: "unresolved::" + c.name,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 					Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.name},
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				continue
 			}
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::" + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 			continue
 		}
 		// Object-literal member call (`api.process()` where
@@ -378,38 +390,46 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		// this edge in the name-only fallback.
 		if members, ok := objLiteralMembers[c.receiver]; ok {
 			if memberID, ok := members[c.method]; ok {
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: memberID,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 					Origin: graph.OriginASTResolved, Confidence: 0.92,
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				continue
 			}
 		}
 		// Namespace/default import receiver (e.g. `fs.readFile`): attach
 		// the module path so the resolver can classify externally.
 		if importPath, ok := imports[c.receiver]; ok {
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::extern::" + importPath + "::" + c.method,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 			continue
 		}
 		// Store-factory chained call: `useStore.getState().action()`.
 		if binding, ok := jsParseGetStateChain(c.receiver); ok {
 			if memberID := objLiteralMembers[binding][c.method]; memberID != "" {
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: memberID,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 					Origin: graph.OriginASTResolved, Confidence: 0.9,
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				continue
 			}
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::*." + c.method,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 				Meta: map[string]any{"via": "store-factory", "store_binding": binding, "store_action": c.method},
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 			continue
 		}
 		edge := &graph.Edge{
@@ -423,6 +443,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 				edge.Meta = map[string]any{"receiver_type": chainType}
 			}
 		}
+		stampReturnUsage(edge, c.returnUsage)
 		result.Edges = append(result.Edges, edge)
 	}
 
@@ -484,11 +505,13 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		if callerID == "" {
 			continue
 		}
-		result.Edges = append(result.Edges, &graph.Edge{
+		edge := &graph.Edge{
 			From: callerID, To: rnNativePlaceholder(module, c.method),
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			Meta: map[string]any{"via": rnNativeVia, "rn_module": module, "rn_method": c.method},
-		})
+		}
+		stampReturnUsage(edge, c.returnUsage)
+		result.Edges = append(result.Edges, edge)
 	}
 
 	// --- React Native Fabric / Codegen component spec ---

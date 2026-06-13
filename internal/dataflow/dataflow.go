@@ -47,20 +47,27 @@ const DefaultMaxDepth = 8
 
 // DefaultMaxPaths bounds how many distinct paths flow_between
 // will return for a single (source, sink) pair. The handler ranks
-// by length first, then by edge-confidence sum, so the user gets
-// the most plausible paths first.
+// refinement-confirmed paths ahead of disproved (pruned) ones, then
+// by length, then by edge-confidence, so the user gets the most
+// plausible paths first.
 const DefaultMaxPaths = 10
 
 // EdgeStep is one hop along a flow path. It carries the edge kind,
 // origin tier, and coarse tier label so the caller can distinguish a
 // strong intra-procedural chain from a heuristic inter-procedural
-// binding without recomputing the origin → tier mapping.
+// binding without recomputing the origin → tier mapping. Refined is
+// stamped by the CFG-backed reaching-definitions refinement when the
+// hop's endpoints are bindings of the same function:
+// confirmed_intraprocedural (a def→use chain verifies the hop) or
+// pruned (the source's definition is killed before the target on
+// every path). Empty when the hop is out of refinement scope.
 type EdgeStep struct {
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Kind   string `json:"kind"`
-	Origin string `json:"origin,omitempty"`
-	Tier   string `json:"tier,omitempty"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Kind    string `json:"kind"`
+	Origin  string `json:"origin,omitempty"`
+	Tier    string `json:"tier,omitempty"`
+	Refined string `json:"refined,omitempty"`
 }
 
 // Path is an ordered sequence of edge hops from a source node to
@@ -79,13 +86,26 @@ func (p Path) Length() int { return len(p.Edges) }
 
 // Engine is the dataflow query backend. It holds a reference to
 // the graph and exposes the two MCP-ready primitives. Concurrency-
-// safe by virtue of relying only on graph.Store's read methods.
+// safe by virtue of relying only on graph.Store's read methods —
+// unless a Refiner is attached (refiners cache per-function CFGs and
+// are meant for a single query).
 type Engine struct {
-	g graph.Store
+	g       graph.Store
+	refiner *Refiner
 }
 
 // New returns an engine backed by the given graph.
 func New(g graph.Store) *Engine { return &Engine{g: g} }
+
+// WithRefiner attaches a CFG-backed reaching-definitions refiner:
+// FlowBetween / TaintPaths results get per-hop
+// confirmed_intraprocedural / pruned markers where both hop
+// endpoints are bindings of the same function. Returns the engine
+// for chaining.
+func (e *Engine) WithRefiner(r *Refiner) *Engine {
+	e.refiner = r
+	return e
+}
 
 // IsDataflowKind returns true for the three edge kinds the BFS
 // traverses.
@@ -191,6 +211,13 @@ func (e *Engine) FlowBetweenWithTier(sourceID, sinkID string, maxDepth, maxPaths
 	}
 	dfs(sourceID, 0)
 
+	// CFG-backed refinement: judge same-function value_flow hops
+	// with reaching-definition chains before ranking, so pruned
+	// paths sink below confirmed ones.
+	if e.refiner != nil {
+		e.refiner.refinePaths(paths)
+	}
+
 	rankPaths(paths)
 	if len(paths) > maxPaths {
 		paths = paths[:maxPaths]
@@ -210,17 +237,35 @@ func edgeOrigin(e *graph.Edge) string {
 	return graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 }
 
-// rankPaths sorts in-place by length asc, then by confidence desc.
-// Shorter, higher-confidence paths sort first so the agent always
-// sees the most plausible explanation before the more speculative
-// chains.
+// rankPaths sorts in-place so the most plausible explanation comes
+// first. A path the reaching-definitions refinement disproved (any
+// pruned hop) always sinks below every non-pruned path, regardless of
+// length — confidence demotion alone can't move a pruned hop past a
+// shorter confirmed one when length is the primary key. Among paths
+// of the same pruned status, shorter and then higher-confidence paths
+// sort first.
 func rankPaths(paths []Path) {
 	sort.SliceStable(paths, func(i, j int) bool {
+		pi, pj := hasPrunedHop(paths[i]), hasPrunedHop(paths[j])
+		if pi != pj {
+			return !pi // non-pruned paths rank ahead of pruned ones
+		}
 		if len(paths[i].Edges) != len(paths[j].Edges) {
 			return len(paths[i].Edges) < len(paths[j].Edges)
 		}
 		return paths[i].Confidence > paths[j].Confidence
 	})
+}
+
+// hasPrunedHop reports whether any hop on the path was disproved by
+// the CFG-backed refinement.
+func hasPrunedHop(p Path) bool {
+	for _, e := range p.Edges {
+		if e.Refined == RefinedPruned {
+			return true
+		}
+	}
+	return false
 }
 
 // confidenceFromEdges computes a normalised path confidence from

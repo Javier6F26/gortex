@@ -106,6 +106,10 @@ type csharpDeferredCall struct {
 	receiver string
 	line     int
 	isMember bool
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on the EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 // csharpDeferredLocal buffers a local variable declaration for the
@@ -190,17 +194,19 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		case m.Captures["callm.expr"] != nil:
 			expr := m.Captures["callm.expr"]
 			calls = append(calls, csharpDeferredCall{
-				name:     m.Captures["callm.method"].Text,
-				receiver: m.Captures["callm.receiver"].Text,
-				line:     expr.StartLine + 1,
-				isMember: true,
+				name:        m.Captures["callm.method"].Text,
+				receiver:    m.Captures["callm.receiver"].Text,
+				line:        expr.StartLine + 1,
+				isMember:    true,
+				returnUsage: classifyReturnUsage(expr.Node, src, csharpReturnUsageSpec),
 			})
 
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
 			calls = append(calls, csharpDeferredCall{
-				name: m.Captures["call.name"].Text,
-				line: expr.StartLine + 1,
+				name:        m.Captures["call.name"].Text,
+				line:        expr.StartLine + 1,
+				returnUsage: classifyReturnUsage(expr.Node, src, csharpReturnUsageSpec),
 			})
 
 		case m.Captures["lvar.def"] != nil:
@@ -274,13 +280,16 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 					edge.Meta = map[string]any{"receiver_type": chainType}
 				}
 			}
+			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}
-		result.Edges = append(result.Edges, &graph.Edge{
+		edge := &graph.Edge{
 			From: callerID, To: "unresolved::" + c.name,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-		})
+		}
+		stampReturnUsage(edge, c.returnUsage)
+		result.Edges = append(result.Edges, edge)
 	}
 
 	// .NET surfaces a symbol walk misses: DI registrations + COM

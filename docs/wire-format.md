@@ -180,16 +180,22 @@ Exactly one row.
 
 ### `find_usages`
 
-| field      | type   | description |
-|------------|--------|-------------|
-| from       | string | caller symbol ID |
-| to         | string | called symbol ID (the query subject) |
-| edge_kind  | string | `calls`, `references`, `implements`, ... |
-| origin     | string | tier: `lsp_resolved`, `lsp_dispatch`, `ast_resolved`, `ast_inferred`, `text_matched` |
-| confidence | float  | 0..1 |
-| from_name  | string | caller short name |
-| from_path  | string | caller file path |
-| from_line  | int    | caller start line |
+| field            | type   | description |
+|------------------|--------|-------------|
+| from             | string | caller symbol ID |
+| to               | string | called symbol ID (the query subject) |
+| edge_kind        | string | `calls`, `references`, `implements`, ... |
+| context          | string | reference role at the usage site: `parameter_type`, `return_type`, `field`, `value`, `type`, `attribute`, `generic_arg`, `call` |
+| return_usage     | string | how a call site consumes the return value: `discarded`, `assigned`, `partially_ignored`, `returned`, `goroutine`, `deferred`, `argument`, `condition`; empty when unclassified |
+| origin           | string | provenance: `lsp_resolved`, `lsp_dispatch`, `ast_resolved`, `ast_inferred`, `text_matched` |
+| tier             | string | coarse provenance label derived from origin |
+| confidence       | float  | 0..1 |
+| from_name        | string | caller short name |
+| from_path        | string | usage-site file path |
+| from_line        | int    | call-site line (falls back to the caller's start line) |
+| from_is_test     | bool   | caller is a test symbol |
+| from_test_role   | string | `test`, `benchmark`, `fuzz`, `example` when applicable |
+| from_test_runner | string | detected JS/TS test runner when applicable |
 
 ### `get_file_summary`
 

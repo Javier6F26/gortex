@@ -140,6 +140,11 @@ CREATE TABLE IF NOT EXISTS ref_facts (
     PRIMARY KEY (repo_prefix, from_id, to_id, kind, line)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ref_facts_by_file ON ref_facts(repo_prefix, file_path);
+-- ref_facts_by_target backs the reverse lookup ("which files hold a fact
+-- resolving TO these symbols") that affected-by re-resolution runs when a
+-- file's symbol signatures change. Without it that query is a full
+-- ref_facts scan — the PK leads with from_id, not to_id.
+CREATE INDEX IF NOT EXISTS ref_facts_by_target ON ref_facts(repo_prefix, to_id);
 
 CREATE TABLE IF NOT EXISTS vectors (
     node_id TEXT PRIMARY KEY,

@@ -120,6 +120,10 @@ var defaultToolScopes = map[string]ToolScope{
 	"flow_between": ScopeRepo,
 	"taint_paths":  ScopeRepo,
 	"trace_path":   ScopeRepo,
+
+	// Per-function control-flow graphs: built from one symbol's
+	// source in the active repo.
+	"get_cfg": ScopeRepo,
 }
 
 // applyDefaultToolScopes registers the canonical scope for every

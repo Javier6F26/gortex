@@ -369,7 +369,7 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 	meta := []string{"edges", fmt.Sprintf("%d", len(sg.Edges))}
 	meta = append(meta, zeroEdgeCaveatMeta(sg.Caveat)...)
 	enc := newGCX(&buf, "find_usages",
-		[]string{"from", "to", "edge_kind", "context", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role", "from_test_runner"},
+		[]string{"from", "to", "edge_kind", "context", "return_usage", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role", "from_test_runner"},
 		meta...,
 	)
 	nodeIdx := indexNodes(sg.Nodes)
@@ -398,7 +398,7 @@ func encodeFindUsages(sg *query.SubGraph) ([]byte, error) {
 			tier = graph.ResolvedBy(e.Origin)
 		}
 		if err := enc.WriteRow(
-			e.From, e.To, string(e.Kind), e.Context, e.Origin, tier, e.Confidence,
+			e.From, e.To, string(e.Kind), e.Context, e.ReturnUsage, e.Origin, tier, e.Confidence,
 			fname, fpath, fline, nodeIsTest(fn), nodeTestRole(fn), nodeTestRunner(fn),
 		); err != nil {
 			return nil, err
@@ -589,6 +589,18 @@ func encodeAnalyze(kind string, payload any) ([]byte, error) {
 		)
 		for _, c := range cycles {
 			if err := enc.WriteRow(c.Size, c.Severity, strings.Join(c.Nodes, ",")); err != nil {
+				return nil, err
+			}
+		}
+		return buf.Bytes(), enc.Close()
+	case "def_use":
+		items, _ := payload.([]defUseItem)
+		enc := newGCX(&buf, "analyze.def_use",
+			[]string{"symbol", "var", "use_line", "use_text", "def_lines"},
+			"count", fmt.Sprintf("%d", len(items)),
+		)
+		for _, it := range items {
+			if err := enc.WriteRow(it.Symbol, it.Var, it.UseLine, it.UseText, it.DefLines); err != nil {
 				return nil, err
 			}
 		}

@@ -143,12 +143,12 @@ func wireContractGolden(name string) string {
 		// ProjectID, were added.
 		return "3b8920ab88d05028e215d68d5917445e2e6d05bdad23aef6dcdf6c9920647823"
 	case "graph.Edge":
-		// Bumped when Context was added — the per-reference role label
-		// (parameter_type / return_type / field / …) populated on demand by
-		// find_usages via RefContextOf. Additive: gob decodes older
-		// snapshots with Context blank, and it is recomputed at query time.
-		// (Previously bumped when Tier was added.)
-		return "ed897cce4720cd1482d8c217ba5ffb72d7f19d5d1c2d4015b9a98e9daa9d4b63"
+		// Bumped when ReturnUsage was added — the per-call-site return-value
+		// consumption label (discarded / assigned / returned / …) populated on
+		// demand at extraction and query time. Additive: gob decodes older
+		// snapshots with ReturnUsage blank, and it is recomputed.
+		// (Previously bumped when Context, then Tier, were added.)
+		return "f537793b5542de95a9a4f383e6ed02317ac416c529b187e02fa60dccef1112d0"
 	case "snapshotHeader":
 		// Bumped when the VectorIndex / VectorDims / VectorCount fields
 		// were added (additive — gob decodes unknown fields as zero).

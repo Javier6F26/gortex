@@ -27,12 +27,61 @@ type ContractViolation struct {
 
 // VerifyResult is the output of contract violation verification.
 type VerifyResult struct {
-	Violations          []ContractViolation `json:"violations"`
-	CheckedCallers      int                 `json:"checked_callers"`
-	CheckedImpls        int                 `json:"checked_impls"`
-	Clean               bool                `json:"clean"`
-	Errors              []string            `json:"errors,omitempty"`
-	CrossRepoViolations bool                `json:"cross_repo_violations,omitempty"`
+	Violations          []ContractViolation  `json:"violations"`
+	CheckedCallers      int                  `json:"checked_callers"`
+	CheckedImpls        int                  `json:"checked_impls"`
+	Clean               bool                 `json:"clean"`
+	Errors              []string             `json:"errors,omitempty"`
+	CrossRepoViolations bool                 `json:"cross_repo_violations,omitempty"`
+	ReturnUsage         []ReturnUsageSummary `json:"return_usage,omitempty"`
+}
+
+// ReturnUsageSummary aggregates how the call sites of one changed
+// function or method consume its return value — the "who actually uses
+// the return?" answer an agent needs before changing a return
+// signature. Counts come from the extractor-stamped return-usage label
+// on each incoming call edge; call sites the classifier could not
+// place are reported as unclassified rather than guessed.
+type ReturnUsageSummary struct {
+	SymbolID     string         `json:"symbol_id"`
+	CallSites    int            `json:"call_sites"`
+	Counts       map[string]int `json:"counts,omitempty"`
+	Unclassified int            `json:"unclassified,omitempty"`
+}
+
+// summarizeReturnUsage builds the return-usage distribution for one
+// function/method's incoming call edges. Returns nil when the symbol
+// has no call sites at all (nothing to report).
+func summarizeReturnUsage(g graph.Store, node *graph.Node) *ReturnUsageSummary {
+	if node == nil || (node.Kind != graph.KindFunction && node.Kind != graph.KindMethod) {
+		return nil
+	}
+	summary := &ReturnUsageSummary{SymbolID: node.ID}
+	for _, e := range g.GetInEdges(node.ID) {
+		if e.Kind != graph.EdgeCalls {
+			continue
+		}
+		// Skip speculative dispatch edges: the read surfaces (find_usages
+		// and the rest) hide them by default, so counting them here would
+		// make this distribution disagree with the call sites a user
+		// actually sees.
+		if e.IsSpeculative() {
+			continue
+		}
+		summary.CallSites++
+		if usage := graph.ReturnUsageOf(e); usage != "" {
+			if summary.Counts == nil {
+				summary.Counts = map[string]int{}
+			}
+			summary.Counts[usage]++
+		} else {
+			summary.Unclassified++
+		}
+	}
+	if summary.CallSites == 0 {
+		return nil
+	}
+	return summary
 }
 
 // parsedSignature holds the extracted parameter and return type info from a signature string.
@@ -62,6 +111,18 @@ func VerifyChanges(g graph.Store, engine *query.Engine, changes []SignatureChang
 			if sig, ok := meta["signature"].(string); ok {
 				oldSig = parseSignature(sig)
 			}
+		}
+
+		// For a function/method, summarise how its call sites consume
+		// the return value — the sites that bind / return / branch on the
+		// result are the ones a return-type change touches. The discarded
+		// count is not a blanket all-clear: a discarded label also folds
+		// every-sink-blank multi-assignment (Go `_, _ = f()`), which still
+		// breaks on a return-arity change because the blank list must
+		// match the result count. Read it as "the value is unused here",
+		// not "this site is safe to change".
+		if summary := summarizeReturnUsage(g, node); summary != nil {
+			result.ReturnUsage = append(result.ReturnUsage, *summary)
 		}
 
 		// Check callers for parameter mismatches

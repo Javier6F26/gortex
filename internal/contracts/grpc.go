@@ -17,6 +17,10 @@ var (
 	// Proto service definitions: service Foo { rpc Bar(...) returns (...) }
 	protoServiceRe = regexp.MustCompile(`(?m)service\s+(\w+)\s*\{`)
 	protoRPCRe     = regexp.MustCompile(`(?m)rpc\s+(\w+)\s*\(`)
+	// Proto package declaration: `package billing.v1;` — the namespace
+	// half of the canonical gRPC method name
+	// `<package>.<Service>/<Method>`.
+	protoPackageRe = regexp.MustCompile(`(?m)^\s*package\s+([\w.]+)\s*;`)
 
 	// Richer RPC pattern that captures the request / response message
 	// types along with optional `stream` modifiers on either side:
@@ -44,6 +48,11 @@ var (
 	// the service as a consumer contract with SymbolID on the
 	// enclosing function, even when we can't resolve method calls.
 	goGRPCNewClientRe = regexp.MustCompile(`(?:[\w.]+\.)?New(\w+)Client\s*\(`)
+	// Go server registration: pb.RegisterUserServiceServer(s, impl).
+	// The code-side provider anchor — a service-level provider
+	// contract joins the IDL definition to the implementing repo even
+	// when per-method handler binding can't resolve.
+	goGRPCRegisterServerRe = regexp.MustCompile(`(?:[\w.]+\.)?Register(\w+)Server\s*\(`)
 	// Inline chained call: pb.NewServiceClient(conn).Method(...). The
 	// constructor's argument list is balance-scanned at match time, so
 	// the regex only needs to anchor the `New<Service>Client(` head;
@@ -73,13 +82,15 @@ func (e *GRPCExtractor) SupportedLanguages() []string {
 
 // Cheap substring markers that act as a pre-filter before the regex
 // scans. Every gRPC consumer pattern in extractConsumers hinges on a
-// `Client(` construction (Go, TS) or `Stub(` (Python) — so if the
-// file has neither, none of the 9 regexes can match. bytes.Contains
-// is ~100× cheaper than a regex walk and short-circuits 99% of files
-// in gRPC-free repositories.
+// `Client(` construction (Go, TS) or `Stub(` (Python), and every Go
+// server registration on `Server(` — so if the file has none, none of
+// the regexes can match. bytes.Contains is ~100× cheaper than a regex
+// walk and short-circuits 99% of files in gRPC-free repositories.
 var (
-	grpcClientMarker = []byte("Client(")
-	grpcStubMarker   = []byte("Stub(")
+	grpcClientMarker   = []byte("Client(")
+	grpcStubMarker     = []byte("Stub(")
+	grpcRegisterMarker = []byte("Register")
+	grpcServerMarker   = []byte("Server(")
 )
 
 func (e *GRPCExtractor) Extract(filePath string, src []byte, nodes []*graph.Node, edges []*graph.Edge) []Contract {
@@ -89,22 +100,186 @@ func (e *GRPCExtractor) Extract(filePath string, src []byte, nodes []*graph.Node
 		contracts = append(contracts, e.extractProtoProviders(filePath, src)...)
 		return contracts
 	}
-	if !bytes.Contains(src, grpcClientMarker) && !bytes.Contains(src, grpcStubMarker) {
+	hasClient := bytes.Contains(src, grpcClientMarker) || bytes.Contains(src, grpcStubMarker)
+	hasRegistration := strings.HasSuffix(filePath, ".go") &&
+		bytes.Contains(src, grpcRegisterMarker) && bytes.Contains(src, grpcServerMarker)
+	if !hasClient && !hasRegistration {
 		return nil
 	}
 	fileNodes := filterFileNodes(filePath, nodes)
 	sort.Slice(fileNodes, func(i, j int) bool {
 		return fileNodes[i].StartLine < fileNodes[j].StartLine
 	})
-	contracts = append(contracts, e.extractConsumers(filePath, src, fileNodes)...)
+	if hasClient {
+		contracts = append(contracts, e.extractConsumers(filePath, src, fileNodes)...)
+	}
+	if hasRegistration {
+		contracts = append(contracts, e.extractServerRegistrations(filePath, src, fileNodes)...)
+	}
 
 	return contracts
+}
+
+// extractServerRegistrations detects Go gRPC server registration
+// sites — `pb.RegisterUserServiceServer(s, impl)` — and emits one
+// service-level provider contract per registered service. Generated
+// stubs name the registration after the service, so the contract ID
+// `grpc::<Service>` anchors the implementing repo to the IDL
+// definition: the matcher's canonical-name join pairs it with
+// method-level consumers/providers of the same service.
+//
+// The `Register<X>Server(` shape also matches plain function
+// definitions (`func RegisterHTTPServer(mux *http.ServeMux)`) and
+// helpers with no gRPC involvement. Those are not registration call
+// sites, so we reject any match that is a `func` declaration head and
+// require real gRPC evidence in the file before treating a match as a
+// provider — without the gate, latent `New<X>Client` consumer
+// detections gain a spurious exact-ID partner and a false bridge forms.
+func (e *GRPCExtractor) extractServerRegistrations(filePath string, src []byte, fileNodes []*graph.Node) []Contract {
+	text := string(src)
+	if !fileHasGRPCEvidence(text) {
+		return nil
+	}
+	var out []Contract
+	lines := strings.Split(text, "\n")
+	seen := make(map[string]struct{})
+	for _, m := range goGRPCRegisterServerRe.FindAllStringSubmatchIndex(text, -1) {
+		svc := text[m[2]:m[3]]
+		if svc == "" {
+			continue
+		}
+		// Skip function definitions — `func Register<X>Server(...)` is a
+		// declaration, not a registration call against a *grpc.Server.
+		if precededByFuncKeyword(text, m[0]) {
+			continue
+		}
+		if _, dup := seen[svc]; dup {
+			continue
+		}
+		// A bare `Register<X>Server(arg)` with no package selector is
+		// almost always a local helper call or an unqualified definition
+		// reference, not a generated-stub registration. Generated gRPC
+		// registration funcs live in the protobuf package and are always
+		// invoked through it (`pb.RegisterUsersServer(...)`). Accept the
+		// unqualified form only when the file independently shows gRPC
+		// involvement (a grpc import), so a same-package registration
+		// still records while a plain `RegisterHTTPServer(mux)` helper
+		// call in a grpc-free file does not.
+		if !matchHasPackageSelector(text, m[0], m[1]) && !fileImportsGRPC(text) {
+			continue
+		}
+		seen[svc] = struct{}{}
+		ln := lineNumber(lines, m[0])
+		out = append(out, Contract{
+			ID:       fmt.Sprintf("grpc::%s", svc),
+			Type:     ContractGRPC,
+			Role:     RoleProvider,
+			SymbolID: findEnclosingSymbol(fileNodes, ln),
+			FilePath: filePath,
+			Line:     ln,
+			Meta: map[string]any{
+				"service":      svc,
+				"lang":         "go",
+				"registration": true,
+			},
+			Confidence: 0.85,
+		})
+	}
+	return out
+}
+
+// fileHasGRPCEvidence reports whether a Go source file shows any sign of
+// being a gRPC server-registration site rather than coincidentally
+// containing a `Register<X>Server(` token. Evidence is either a grpc
+// import or a package-qualified registration call (`pb.Register…`).
+// Files with neither cannot host a real registration, so the registration
+// scan is skipped wholesale — preventing a latent `New<X>Client` consumer
+// from gaining a spurious exact-ID provider partner.
+func fileHasGRPCEvidence(text string) bool {
+	if fileImportsGRPC(text) {
+		return true
+	}
+	for _, m := range goGRPCRegisterServerRe.FindAllStringSubmatchIndex(text, -1) {
+		if precededByFuncKeyword(text, m[0]) {
+			continue
+		}
+		if matchHasPackageSelector(text, m[0], m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// fileImportsGRPC reports whether the source imports a gRPC package.
+// The substring is specific enough that a false hit is implausible.
+func fileImportsGRPC(text string) bool {
+	return strings.Contains(text, "google.golang.org/grpc")
+}
+
+// precededByFuncKeyword reports whether the token starting at off is a
+// function declaration head — i.e. immediately preceded by the `func `
+// keyword (allowing for whitespace). `func RegisterHTTPServer(...)` is a
+// definition, not a registration call.
+func precededByFuncKeyword(text string, off int) bool {
+	i := off
+	// Skip whitespace immediately before the identifier.
+	for i > 0 && (text[i-1] == ' ' || text[i-1] == '\t') {
+		i--
+	}
+	const kw = "func"
+	if i < len(kw) {
+		return false
+	}
+	if text[i-len(kw):i] != kw {
+		return false
+	}
+	// Ensure "func" is a standalone keyword, not the tail of an
+	// identifier like "myfunc".
+	if i-len(kw) > 0 {
+		prev := text[i-len(kw)-1]
+		if prev == '_' || isAlphaNum(prev) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchHasPackageSelector reports whether the registration token whose
+// full match spans [start,end) is reached through a package/receiver
+// selector (`pb.RegisterUsersServer(`) rather than bare
+// (`RegisterHTTPServer(`). The regex's optional `[\w.]+\.` selector
+// prefix is part of the match, so a selector is present exactly when the
+// matched text holds a `.` ahead of `Register`.
+func matchHasPackageSelector(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	span := text[start:end]
+	dot := strings.IndexByte(span, '.')
+	reg := strings.Index(span, "Register")
+	return dot >= 0 && reg >= 0 && dot < reg
+}
+
+// isAlphaNum reports whether b is an ASCII letter or digit.
+func isAlphaNum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 func (e *GRPCExtractor) extractProtoProviders(filePath string, src []byte) []Contract {
 	var contracts []Contract
 	text := string(src)
 	lines := strings.Split(text, "\n")
+
+	// The proto package declaration provides the namespace half of the
+	// canonical gRPC method name `<package>.<Service>/<Method>` — the
+	// identity a client uses on the wire. Contract IDs stay
+	// package-free (`grpc::<Service>::<Method>`) so cross-repo exact-ID
+	// pairing keeps working against generated-stub consumers that only
+	// know the bare service name; the canonical name rides in Meta.
+	protoPackage := ""
+	if m := protoPackageRe.FindStringSubmatch(text); m != nil {
+		protoPackage = m[1]
+	}
 
 	// Build a fast lookup from (methodName → shape) so we can attach
 	// request/response types to each RPC contract below. We run the
@@ -126,15 +301,28 @@ func (e *GRPCExtractor) extractProtoProviders(filePath string, src []byte) []Con
 		}
 	}
 
-	// Find service blocks and their RPC methods.
+	// Find service blocks and their RPC methods. Each block is
+	// brace-bounded so a file declaring multiple services doesn't
+	// attribute a later service's RPCs to an earlier one (the open-ended
+	// "scan to EOF" form double-counted every method after the first
+	// service header).
 	serviceMatches := protoServiceRe.FindAllStringSubmatchIndex(text, -1)
 	for _, sMatch := range serviceMatches {
 		serviceName := text[sMatch[2]:sMatch[3]]
-		// Find RPCs within the remainder of this service block.
 		serviceStart := sMatch[0]
-		rest := text[serviceStart:]
-		rpcMatches := protoRPCRe.FindAllStringSubmatch(rest, -1)
-		rpcLocs := protoRPCRe.FindAllStringIndex(rest, -1)
+		// sMatch[1] points just past the `{`; balance-scan to the
+		// closing brace so the RPC scan stays inside this service.
+		blockEnd := matchCloseBrace(text, sMatch[1])
+		if blockEnd < 0 {
+			blockEnd = len(text)
+		}
+		block := text[serviceStart:blockEnd]
+		rpcMatches := protoRPCRe.FindAllStringSubmatch(block, -1)
+		rpcLocs := protoRPCRe.FindAllStringIndex(block, -1)
+		qualService := serviceName
+		if protoPackage != "" {
+			qualService = protoPackage + "." + serviceName
+		}
 		for i, rpc := range rpcMatches {
 			methodName := rpc[1]
 			absOffset := serviceStart + rpcLocs[i][0]
@@ -143,7 +331,11 @@ func (e *GRPCExtractor) extractProtoProviders(filePath string, src []byte) []Con
 			meta := map[string]any{
 				"service":       serviceName,
 				"method":        methodName,
+				"canonical":     qualService + "/" + methodName,
 				"schema_source": "none",
+			}
+			if protoPackage != "" {
+				meta["package"] = protoPackage
 			}
 			if s, ok := shapes[methodName]; ok {
 				meta["request_type"] = s.requestType
@@ -170,6 +362,28 @@ func (e *GRPCExtractor) extractProtoProviders(filePath string, src []byte) []Con
 	}
 
 	return contracts
+}
+
+// matchCloseBrace returns the byte offset of the `}` that closes the
+// `{` whose position is just before openEnd (i.e. openEnd points one
+// past the opening brace). Returns -1 when the braces are unbalanced.
+func matchCloseBrace(text string, openEnd int) int {
+	if openEnd <= 0 || openEnd > len(text) {
+		return -1
+	}
+	depth := 1
+	for i := openEnd; i < len(text); i++ {
+		switch text[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // extractConsumers detects gRPC client usage in a non-proto source file.

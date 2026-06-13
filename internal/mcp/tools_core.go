@@ -979,6 +979,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithBoolean("exclude_tests", mcp.Description("Drop references originating in test functions (set true to see only production usages)")),
 			mcp.WithString("group_by", mcp.Description("Set to \"file\" to bucket the usages by the file each reference originates in -- each group carries the per-file use count and the enclosing symbol of every reference. Omit for the default flat result.")),
 			mcp.WithString("context", mcp.Description("Filter usages by their reference context — the role the symbol plays at each site: parameter_type, return_type, field, value, type, attribute, generic_arg, or call. Every returned usage also carries its classified context. Omit for all usages.")),
+			mcp.WithString("return_usage", mcp.Description("Filter call-site usages by how they consume the callee's return value: discarded, assigned, partially_ignored, returned, goroutine, deferred, argument, or condition. Every returned call usage also carries its classification when the extractor recorded one. Use before changing a function's return signature to see who actually uses the return. Omit for all usages.")),
 		),
 		s.handleFindUsages,
 	)
@@ -2212,6 +2213,10 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// / field / value / type / attribute / call) and optionally filter to
 	// one context — `find_usages context:"parameter_type"`.
 	annotateAndFilterUsageContext(sg, strings.ToLower(strings.TrimSpace(req.GetString("context", ""))))
+	// Surface the extractor-stamped return-usage classification on each
+	// call usage and optionally filter to one consumption shape —
+	// `find_usages return_usage:"discarded"`.
+	annotateAndFilterReturnUsage(sg, strings.ToLower(strings.TrimSpace(req.GetString("return_usage", ""))))
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
@@ -2259,6 +2264,31 @@ func annotateAndFilterUsageContext(sg *query.SubGraph, contextFilter string) {
 	sg.Edges = kept
 }
 
+// annotateAndFilterReturnUsage copies the extractor-stamped
+// return-usage label (Meta[MetaReturnUsage]) onto each usage edge's
+// JSON-visible ReturnUsage field and, when usageFilter is non-empty,
+// drops every usage whose label does not match — the engine behind
+// `find_usages return_usage:"discarded"`. Edges without a label (non-
+// call edges, unclassifiable sites) never match a filter.
+func annotateAndFilterReturnUsage(sg *query.SubGraph, usageFilter string) {
+	if sg == nil {
+		return
+	}
+	for _, e := range sg.Edges {
+		e.ReturnUsage = graph.ReturnUsageOf(e)
+	}
+	if usageFilter == "" {
+		return
+	}
+	kept := sg.Edges[:0]
+	for _, e := range sg.Edges {
+		if e.ReturnUsage == usageFilter {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
+}
+
 // usageFileGroup is one file's worth of references from a
 // group_by:"file" find_usages response.
 type usageFileGroup struct {
@@ -2270,11 +2300,12 @@ type usageFileGroup struct {
 // usageGroupItem is one reference inside a usageFileGroup -- the
 // line it sits on plus the enclosing symbol.
 type usageGroupItem struct {
-	Line       int    `json:"line"`
-	EdgeKind   string `json:"edge_kind"`
-	Context    string `json:"context,omitempty"`
-	SymbolID   string `json:"symbol_id,omitempty"`
-	SymbolName string `json:"symbol_name,omitempty"`
+	Line        int    `json:"line"`
+	EdgeKind    string `json:"edge_kind"`
+	Context     string `json:"context,omitempty"`
+	ReturnUsage string `json:"return_usage,omitempty"`
+	SymbolID    string `json:"symbol_id,omitempty"`
+	SymbolName  string `json:"symbol_name,omitempty"`
 }
 
 // groupUsagesByFile buckets a find_usages SubGraph by the file each
@@ -2302,7 +2333,7 @@ func groupUsagesByFile(sg *query.SubGraph) map[string]any {
 			g = &usageFileGroup{File: file}
 			groups[file] = g
 		}
-		item := usageGroupItem{Line: e.Line, EdgeKind: string(e.Kind), Context: e.Context}
+		item := usageGroupItem{Line: e.Line, EdgeKind: string(e.Kind), Context: e.Context, ReturnUsage: e.ReturnUsage}
 		if from != nil {
 			item.SymbolID = from.ID
 			item.SymbolName = from.Name

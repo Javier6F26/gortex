@@ -274,14 +274,17 @@ func (s *Server) registerEnhancementTools() {
 	// contracts — unified contracts tool (list + check + validate)
 	s.addTool(
 		mcp.NewTool("contracts",
-			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues.\n\nDEFAULT SCOPE for list: auto-scopes to the active project's repos and hides dependency-origin contracts (type=dependency, vendored paths like vendor/, node_modules/). The response reports other_repos (count of contracts filtered out of scope) and dependencies_skipped (count of dep contracts hidden). To widen scope, pass repo=<prefix>, project=<name>, ref=<tag>, or all_repos=true. To include dependency contracts, pass include_deps=true."),
-			mcp.WithString("action", mcp.Description("list (default), check, or validate")),
+			mcp.WithDescription("API contracts tool. action=list (default): lists detected contracts (HTTP, gRPC, Thrift, GraphQL, topics, WebSocket, env, OpenAPI). action=check: detects orphan providers/consumers across repos. action=validate: diffs provider↔consumer request/response shapes and flags breaking/warning/info issues. action=bridge: queries the persisted contract-bridge subgraph — one node per matched provider↔consumer group (HTTP route, gRPC/Thrift method, pub/sub topic) — ranked by reciprocal rank fusion over text, path/repo, graph-adjacency, and consumer-degree signals (mode=rank, pass query and/or symbol), or expanded from a symbol into its cross-service blast radius (mode=impact, pass symbol).\n\nDEFAULT SCOPE for list: auto-scopes to the active project's repos and hides dependency-origin contracts (type=dependency, vendored paths like vendor/, node_modules/). The response reports other_repos (count of contracts filtered out of scope) and dependencies_skipped (count of dep contracts hidden). To widen scope, pass repo=<prefix>, project=<name>, ref=<tag>, or all_repos=true. To include dependency contracts, pass include_deps=true."),
+			mcp.WithString("action", mcp.Description("list (default), check, validate, or bridge")),
 			mcp.WithString("repo", mcp.Description("Filter by repository prefix")),
 			mcp.WithString("project", mcp.Description("Filter to repositories in a specific project (resolves to the project's repo set)")),
 			mcp.WithString("ref", mcp.Description("Filter to repositories tagged with this ref")),
 			mcp.WithBoolean("all_repos", mcp.Description("(list) Disable active-project auto-scope; return contracts from every indexed repo. Default false.")),
 			mcp.WithBoolean("include_deps", mcp.Description("(list) Include type=dependency contracts and contracts from vendored paths (vendor/, node_modules/, Pods/, .venv/). Default false.")),
-			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, graphql, topic, ws, env, openapi, dependency")),
+			mcp.WithString("type", mcp.Description("(list) Filter by type: http, grpc, thrift, graphql, topic, ws, env, openapi, dependency")),
+			mcp.WithString("query", mcp.Description("(bridge) Free-text query ranked against bridge canonical keys, contract names, repos, and file paths")),
+			mcp.WithString("symbol", mcp.Description("(bridge) Symbol ID anchoring the graph-adjacency signal (mode=rank) or the blast-radius expansion (mode=impact)")),
+			mcp.WithString("mode", mcp.Description("(bridge) rank (default) or impact")),
 			mcp.WithString("role", mcp.Description("(list) Filter by role: provider or consumer")),
 			mcp.WithNumber("limit", mcp.Description("(list) Max contracts per page (default: 200)")),
 			mcp.WithString("cursor", mcp.Description("(list) Opaque pagination cursor from a previous `next_cursor` to fetch the next page.")),
@@ -376,6 +379,24 @@ func (s *Server) handleVerifyChange(ctx context.Context, req mcp.CallToolRequest
 		var b strings.Builder
 		for _, v := range result.Violations {
 			fmt.Fprintf(&b, "%s %s %s:%d %s\n", v.Kind, v.SymbolID, v.FilePath, v.Line, v.Description)
+		}
+		// One line per changed function: how its call sites consume the
+		// return value, so a return-signature change shows exactly which
+		// sites bind / return / branch on the result.
+		for _, ru := range result.ReturnUsage {
+			fmt.Fprintf(&b, "return_usage %s call_sites:%d", ru.SymbolID, ru.CallSites)
+			labels := make([]string, 0, len(ru.Counts))
+			for label := range ru.Counts {
+				labels = append(labels, label)
+			}
+			sort.Strings(labels)
+			for _, label := range labels {
+				fmt.Fprintf(&b, " %s:%d", label, ru.Counts[label])
+			}
+			if ru.Unclassified > 0 {
+				fmt.Fprintf(&b, " unclassified:%d", ru.Unclassified)
+			}
+			b.WriteString("\n")
 		}
 		if result.Clean {
 			fmt.Fprintf(&b, "clean: checked %d callers, %d implementors\n", result.CheckedCallers, result.CheckedImpls)
@@ -714,7 +735,7 @@ func (s *Server) handlePrefetchContext(ctx context.Context, req mcp.CallToolRequ
 func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	kind, err := req.RequireString("kind")
 	if err != nil {
-		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, health_score, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, synthesizers, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, impact, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
+		return mcp.NewToolResultError("kind is required (one of: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, def_use, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, health_score, annotation_users, config_readers, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, synthesizers, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, impact, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
 	}
 	switch kind {
 	case "dead_code":
@@ -753,6 +774,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 		return s.handleAnalyzeCoverageSummary(ctx, req)
 	case "channel_ops":
 		return s.handleAnalyzeChannelOps(ctx, req)
+	case "def_use":
+		return s.handleAnalyzeDefUse(ctx, req)
 	case "goroutine_spawns":
 		return s.handleAnalyzeGoroutineSpawns(ctx, req)
 	case "field_writers":
@@ -854,7 +877,7 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 	case "kcore":
 		return s.handleAnalyzeKCore(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, sast, hygiene, review, health_score, annotation_users, config_readers, env_var_users, sql_call_sites, fixes_history, edge_audit, domain, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models, impact, bottlenecks, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
+		return mcp.NewToolResultError("unknown analyze kind: " + kind + " (expected: dead_code, hotspots, cycles, would_create_cycle, todos, blame, coverage, stale_code, ownership, coverage_gaps, stale_flags, releases, cgo_users, wasm_users, orphan_tables, unreferenced_tables, coverage_summary, channel_ops, def_use, goroutine_spawns, field_writers, race_writes, unclosed_channels, unsafe_patterns, sast, hygiene, review, health_score, annotation_users, config_readers, env_var_users, sql_call_sites, fixes_history, edge_audit, domain, event_emitters, pubsub, string_emitters, error_surface, log_events, sql_rebuild, external_calls, resolution_outcomes, retrieval_log, routes, models, components, k8s_resources, images, kustomize, cross_repo, dbt_models, impact, bottlenecks, named, tests_as_edges, connectivity_health, pagerank, louvain, wcc, scc, kcore)"), nil
 	}
 }
 
@@ -3319,8 +3342,10 @@ func (s *Server) handleContracts(ctx context.Context, req mcp.CallToolRequest) (
 		return s.handleCheckContracts(ctx, req)
 	case "validate":
 		return s.handleValidateContracts(ctx, req)
+	case "bridge":
+		return s.handleContractBridges(ctx, req)
 	default:
-		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list, check, or validate)"), nil
+		return mcp.NewToolResultError("unknown contracts action: " + action + " (expected: list, check, validate, or bridge)"), nil
 	}
 }
 

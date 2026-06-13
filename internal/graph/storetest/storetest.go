@@ -102,6 +102,7 @@ func RunConformance(t *testing.T, factory Factory) {
 	t.Run("CoverageEnrichmentSidecar", func(t *testing.T) { testCoverageEnrichmentSidecar(t, factory) })
 	t.Run("ReleaseEnrichmentSidecar", func(t *testing.T) { testReleaseEnrichmentSidecar(t, factory) })
 	t.Run("BlameEnrichmentSidecar", func(t *testing.T) { testBlameEnrichmentSidecar(t, factory) })
+	t.Run("ContractBridgeRoundTrip", func(t *testing.T) { testContractBridgeRoundTrip(t, factory) })
 }
 
 // -- fixture helpers ---------------------------------------------------
@@ -3648,5 +3649,126 @@ func testBlameEnrichmentSidecar(t *testing.T, factory Factory) {
 	}
 	if got := r.BlameRows("repoB"); len(got) != 1 {
 		t.Fatalf("delete must not touch repoB: %d", len(got))
+	}
+}
+
+// testContractBridgeRoundTrip verifies the contract-bridge subgraph
+// survives the backend: a KindContractBridge node with its grouped
+// Meta (incl. a []string repo spread), EdgeBridges edges carrying
+// Meta["side"], kind-filtered retrieval, and the EvictFile path the
+// bridge re-materialisation pass uses to drop the prior generation.
+func testContractBridgeRoundTrip(t *testing.T, factory Factory) {
+	t.Helper()
+	s := factory(t)
+
+	const bridgeFile = "contracts://bridges"
+	s.AddNode(&graph.Node{
+		ID: "http::GET::/v1/users", Kind: graph.KindContract,
+		Name: "http::GET::/v1/users", FilePath: "svc-a/routes.go",
+		Language: "contract", RepoPrefix: "svc-a",
+	})
+	s.AddNode(&graph.Node{
+		ID: "grpc::Users::GetUser", Kind: graph.KindContract,
+		Name: "grpc::Users::GetUser", FilePath: "svc-b/client.go",
+		Language: "contract", RepoPrefix: "svc-b",
+	})
+	s.AddNode(&graph.Node{
+		ID: "bridge::http::GET::/v1/users", Kind: graph.KindContractBridge,
+		Name: "GET /v1/users", FilePath: bridgeFile,
+		Language: "contract", RepoPrefix: "svc-a",
+		Meta: map[string]any{
+			"contract_type":  "http",
+			"canonical_key":  "GET /v1/users",
+			"repos":          []string{"svc-a", "svc-b"},
+			"provider_count": 1,
+			"consumer_count": 2,
+			"cross_repo":     true,
+		},
+	})
+	s.AddEdge(&graph.Edge{
+		From: "bridge::http::GET::/v1/users", To: "http::GET::/v1/users",
+		Kind: graph.EdgeBridges, FilePath: bridgeFile,
+		Meta: map[string]any{"side": "both"},
+	})
+	s.AddEdge(&graph.Edge{
+		From: "bridge::http::GET::/v1/users", To: "grpc::Users::GetUser",
+		Kind: graph.EdgeBridges, FilePath: bridgeFile,
+		Meta: map[string]any{"side": "consumer"},
+	})
+
+	got := s.GetNode("bridge::http::GET::/v1/users")
+	if got == nil {
+		t.Fatalf("bridge node did not round-trip")
+	}
+	if got.Kind != graph.KindContractBridge {
+		t.Fatalf("bridge kind = %q, want %q", got.Kind, graph.KindContractBridge)
+	}
+	if got.Meta == nil {
+		t.Fatalf("bridge Meta not preserved")
+	}
+	if got.Meta["canonical_key"] != "GET /v1/users" {
+		t.Fatalf("Meta[canonical_key] = %v", got.Meta["canonical_key"])
+	}
+	switch repos := got.Meta["repos"].(type) {
+	case []string:
+		if len(repos) != 2 || repos[0] != "svc-a" || repos[1] != "svc-b" {
+			t.Fatalf("Meta[repos] = %v", repos)
+		}
+	case []any:
+		if len(repos) != 2 || repos[0] != "svc-a" || repos[1] != "svc-b" {
+			t.Fatalf("Meta[repos] = %v", repos)
+		}
+	default:
+		t.Fatalf("Meta[repos] has unexpected type %T (%v)", got.Meta["repos"], got.Meta["repos"])
+	}
+
+	var byKind []*graph.Node
+	for n := range s.NodesByKind(graph.KindContractBridge) {
+		byKind = append(byKind, n)
+	}
+	if len(byKind) != 1 || byKind[0].ID != "bridge::http::GET::/v1/users" {
+		t.Fatalf("NodesByKind(contract_bridge) = %v", byKind)
+	}
+
+	out := s.GetOutEdges("bridge::http::GET::/v1/users")
+	sides := map[string]string{}
+	for _, e := range out {
+		if e.Kind != graph.EdgeBridges {
+			t.Fatalf("unexpected out-edge kind %q", e.Kind)
+		}
+		side, _ := e.Meta["side"].(string)
+		sides[e.To] = side
+	}
+	if sides["http::GET::/v1/users"] != "both" || sides["grpc::Users::GetUser"] != "consumer" {
+		t.Fatalf("EdgeBridges side meta did not round-trip: %v", sides)
+	}
+
+	// The reverse direction the impact query walks.
+	var inKinds []graph.EdgeKind
+	for _, e := range s.GetInEdges("http::GET::/v1/users") {
+		inKinds = append(inKinds, e.Kind)
+	}
+	if len(inKinds) != 1 || inKinds[0] != graph.EdgeBridges {
+		t.Fatalf("GetInEdges(contract) = %v, want one bridges edge", inKinds)
+	}
+
+	// Evicting the synthetic bridge file must drop the bridge node and
+	// its edges while leaving the contract nodes untouched — this is
+	// the idempotency mechanism the materialisation pass relies on.
+	nodesRemoved, edgesRemoved := s.EvictFile(bridgeFile)
+	if nodesRemoved != 1 {
+		t.Fatalf("EvictFile removed %d nodes, want 1", nodesRemoved)
+	}
+	if edgesRemoved != 2 {
+		t.Fatalf("EvictFile removed %d edges, want 2", edgesRemoved)
+	}
+	if s.GetNode("bridge::http::GET::/v1/users") != nil {
+		t.Fatalf("bridge node survived EvictFile")
+	}
+	if s.GetNode("http::GET::/v1/users") == nil || s.GetNode("grpc::Users::GetUser") == nil {
+		t.Fatalf("contract nodes must survive bridge eviction")
+	}
+	if got := s.GetInEdges("http::GET::/v1/users"); len(got) != 0 {
+		t.Fatalf("stale bridge in-edges survived eviction: %v", got)
 	}
 }

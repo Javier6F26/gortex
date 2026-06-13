@@ -30,6 +30,16 @@ const (
 	// boundaries by hopping Consumer → EdgeConsumes⁻¹ → consumer-contract
 	// → EdgeMatches → provider-contract → EdgeProvides⁻¹ → handler.
 	EdgeMatches EdgeKind = "matches"
+	// EdgeBridges links a KindContractBridge group node to one of the
+	// KindContract nodes participating in the group. Direction:
+	// bridge → contract. Meta["side"] ∈ provider | consumer | both
+	// ("both" when the provider and consumer contracts share one ID
+	// and therefore collapse into a single contract node in the
+	// graph). Emitted by the contract-bridge materialisation pass in
+	// ReconcileContractEdges alongside EdgeMatches; the whole bridge
+	// generation is evicted and re-derived on every reconcile so the
+	// edges never outlive the contracts they group.
+	EdgeBridges EdgeKind = "bridges"
 	// EdgeAnnotated links a symbol to a synthetic annotation node
 	// representing a decorator / annotation / attribute applied to it
 	// (e.g. @Component, @Test, @Deprecated, #[derive(Debug)],
@@ -555,6 +565,15 @@ type Edge struct {
 	// (`find_usages context:"parameter_type"`). Not part of the edge
 	// identity / dedup key.
 	Context string `json:"context,omitempty"`
+	// ReturnUsage is how the call site consumes the callee's return
+	// value — discarded, assigned, partially_ignored, returned,
+	// goroutine, deferred, argument, or condition. Like Context it is
+	// empty on the stored edge and populated on demand from
+	// Meta[MetaReturnUsage] (stamped by the language extractors at
+	// call-edge creation) when find_usages renders a usage, so agents
+	// can ask "who actually uses the return?" before changing a return
+	// signature. Not part of the edge identity / dedup key.
+	ReturnUsage string `json:"return_usage,omitempty"`
 	// Meta is intentionally excluded from JSON. It holds internal
 	// instrumentation (semantic_source, provider hints, etc.) that agents
 	// don't consume but that adds measurable bytes to every edge in
@@ -691,7 +710,7 @@ func DefaultOriginFor(kind EdgeKind, confidence float64, semanticSource string) 
 	// Structural AST edges are unambiguous by construction.
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf,
-		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches,
+		EdgeImplements, EdgeProvides, EdgeConsumes, EdgeMatches, EdgeBridges,
 		// Coverage structural edges: the extractor produces an
 		// unambiguous source→target binding for each, so they share
 		// the AST-resolved tier.
@@ -876,6 +895,52 @@ func RefContextOf(e *Edge, fromKind NodeKind) string {
 	return ""
 }
 
+// Return-usage labels — how a call site consumes the callee's return
+// value. Stamped by the language extractors as Meta[MetaReturnUsage]
+// on EdgeCalls edges at creation time, so the classification persists
+// through every backend and survives reindexing.
+const (
+	// ReturnUsageDiscarded: the call is a bare expression statement (or
+	// every result is bound to a blank sink, e.g. Go `_, _ = f()`).
+	ReturnUsageDiscarded = "discarded"
+	// ReturnUsageAssigned: the result is bound to variables or fields.
+	ReturnUsageAssigned = "assigned"
+	// ReturnUsagePartiallyIgnored: a multi-result call where some (but
+	// not all) results are bound to blank sinks — Go `v, _ := f()`.
+	ReturnUsagePartiallyIgnored = "partially_ignored"
+	// ReturnUsageReturned: the call sits inside a return statement (or
+	// the implicit-return tail position of an expression-bodied lambda
+	// / Rust function / Ruby method).
+	ReturnUsageReturned = "returned"
+	// ReturnUsageGoroutine: the call is launched via a Go `go`
+	// statement — the return value is unobservable.
+	ReturnUsageGoroutine = "goroutine"
+	// ReturnUsageDeferred: the call is a Go `defer` statement.
+	ReturnUsageDeferred = "deferred"
+	// ReturnUsageArgument: the result feeds another call — either as a
+	// literal argument or as the receiver of a chained call.
+	ReturnUsageArgument = "argument"
+	// ReturnUsageCondition: the call sits inside an if / for / while /
+	// switch condition.
+	ReturnUsageCondition = "condition"
+)
+
+// MetaReturnUsage is the edge Meta key carrying the return-usage label
+// of a call site. Single source of truth for the extractors that stamp
+// it and the read paths (find_usages, verify_change) that surface it.
+const MetaReturnUsage = "return_usage"
+
+// ReturnUsageOf returns the extractor-stamped return-usage label of a
+// call edge, or "" when the edge carries none (non-call edges, call
+// shapes the classifier could not place).
+func ReturnUsageOf(e *Edge) string {
+	if e == nil || e.Meta == nil {
+		return ""
+	}
+	s, _ := e.Meta[MetaReturnUsage].(string)
+	return s
+}
+
 // ConfidenceLabelFor returns EXTRACTED, INFERRED, or AMBIGUOUS for an edge
 // based on its kind and confidence value.
 //
@@ -885,7 +950,7 @@ func ConfidenceLabelFor(kind EdgeKind, confidence float64) string {
 	// Structural edges from AST are always extracted.
 	switch kind {
 	case EdgeDefines, EdgeImports, EdgeContains, EdgeExtends, EdgeMemberOf, EdgeImplements,
-		EdgeProvides, EdgeConsumes, EdgeMatches,
+		EdgeProvides, EdgeConsumes, EdgeMatches, EdgeBridges,
 		EdgeParamOf, EdgeAliases, EdgeComposes, EdgeOverrides, EdgeLicensedAs,
 		EdgeOwns, EdgeAuthored, EdgeGeneratedBy, EdgeDependsOnModule,
 		EdgePackageWorkspaceMember,

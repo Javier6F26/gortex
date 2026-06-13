@@ -403,7 +403,7 @@ func main() {
 		}
 	}
 	require.NotNil(t, saveCall, "expected a call edge to Save")
-	assert.Nil(t, saveCall.Meta, "unknown type should not produce Meta")
+	assert.NotContains(t, saveCall.Meta, "receiver_type", "unknown type should not produce a receiver_type hint")
 }
 
 // --- Tier 2: Chain resolution tests ---
@@ -474,7 +474,7 @@ func main() {
 		}
 	}
 	require.NotNil(t, finishCall)
-	assert.Nil(t, finishCall.Meta, "unresolvable chain should not produce Meta")
+	assert.NotContains(t, finishCall.Meta, "receiver_type", "unresolvable chain should not produce a receiver_type hint")
 }
 
 func TestGoExtractor_ReturnType(t *testing.T) {

@@ -813,9 +813,43 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	return stats
 }
 
+// ResolveFilesAndIncoming runs the forward and reverse passes for a
+// batch of files under one lock, one build of the per-pass indexes, and
+// one run of the attribution passes. The affected-by re-resolution path
+// uses this: calling ResolveFileAndIncoming per file would rebuild the
+// four pass indexes and re-run the whole-graph attribution sweeps once
+// per file, turning a bounded fan-out into N whole-graph passes.
+func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
+	stats := &ResolveStats{}
+	if len(filePaths) == 0 {
+		return stats
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	clear := r.buildPassIndexes()
+	defer clear()
+
+	for _, p := range filePaths {
+		r.resolveFileEdgesLocked(p, stats)
+		r.resolveIncomingLocked(p, stats)
+	}
+	r.runFileAttributionPassesLocked()
+	return stats
+}
+
 // resolveFileLocked is the forward-pass core. Caller holds r.mu and
 // has built the per-pass indexes.
 func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
+	r.resolveFileEdgesLocked(filePath, stats)
+	r.runFileAttributionPassesLocked()
+}
+
+// resolveFileEdgesLocked walks one file's outgoing unresolved edges and
+// binds them, without the attribution tail — batch callers run the
+// attribution passes once after the whole batch instead of once per
+// file. Caller holds r.mu and has built the per-pass indexes.
+func (r *Resolver) resolveFileEdgesLocked(filePath string, stats *ResolveStats) {
 	// Get all nodes in the file, then check their outgoing edges.
 	// Single-threaded path — collect mutations into a batch and flush
 	// in one ReindexEdges call after the file's edges are walked, so a
@@ -864,14 +898,17 @@ func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 		}
 	}
 
-	// Re-run the attribution passes that ResolveAll runs. ResolveFile
-	// handles incremental updates — a re-parse of one file emits
-	// fresh `unresolved::<name>` edges that haven't been seen by these
-	// passes yet, so without re-running them the incremental graph
-	// diverges from a cold re-index (caught by
-	// TestIncrementalReindex_ConvergesToFullIndex). Each pass is
-	// idempotent on already-rewritten edges (the `unresolved::`
-	// prefix check makes a second sweep a no-op).
+}
+
+// runFileAttributionPassesLocked re-runs the attribution passes that
+// ResolveAll runs. The per-file resolve paths handle incremental
+// updates — a re-parse of one file emits fresh `unresolved::<name>`
+// edges that haven't been seen by these passes yet, so without
+// re-running them the incremental graph diverges from a cold re-index
+// (caught by TestIncrementalReindex_ConvergesToFullIndex). Each pass is
+// idempotent on already-rewritten edges (the `unresolved::` prefix
+// check makes a second sweep a no-op). Caller holds r.mu.
+func (r *Resolver) runFileAttributionPassesLocked() {
 	r.rebindGoMethodReceivers()
 	r.bindBareNameScopeRefs()
 	r.bindGenericParamRefs()

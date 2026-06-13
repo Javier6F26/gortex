@@ -606,6 +606,17 @@ type IndexConfig struct {
 	// ON. Set false (or GORTEX_INDEX_SCOPED_GLOBAL_PASSES=0) to restore the
 	// whole-graph behaviour.
 	ScopedGlobalPasses *bool `mapstructure:"scoped_global_passes" yaml:"scoped_global_passes,omitempty"`
+	// AffectedByReresolveMax caps how many referencing files a single
+	// save's affected-by re-resolution pass will re-resolve. When a
+	// file's symbol signatures change (or symbols are removed / change
+	// kind), the files that referenced those symbols are re-resolved so
+	// their edges and persisted reference facts track the new shape; a
+	// symbol with thousands of callers must not turn one save into a
+	// near-whole-graph resolve, so the affected set is truncated at this
+	// bound (truncation is logged with the dropped count). Zero (the
+	// default) uses the built-in cap of 200 files. Configured under
+	// `index.affected_by_reresolve_max` in .gortex.yaml.
+	AffectedByReresolveMax int `mapstructure:"affected_by_reresolve_max" yaml:"affected_by_reresolve_max,omitempty"`
 	// Transforms are pluggable pre-ingestion content processors. Each
 	// rewrites a matching file's bytes before the parser sees them —
 	// expanding minified bundles, normalising SVG/TOON, converting a

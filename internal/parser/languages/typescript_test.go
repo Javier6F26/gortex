@@ -259,7 +259,7 @@ function main() {
 		}
 	}
 	require.NotNil(t, processCall)
-	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
+	assert.NotContains(t, processCall.Meta, "receiver_type", "unknown type should not produce a receiver_type hint")
 }
 
 func TestTSExtractor_TypeEnv_Chain(t *testing.T) {

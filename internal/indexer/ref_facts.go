@@ -64,8 +64,11 @@ func collectRefFacts(g graph.Store, nodes []*graph.Node) []graph.RefFact {
 
 // persistRefFactsForFiles re-derives and persists the resolved-reference facts
 // for the given graph file paths (delete-then-set per file so stale facts from
-// removed references don't linger). No-op when the backend has no durable layer
-// or the file list is empty.
+// removed references don't linger). Every requested file is deleted even when
+// it yields no fresh facts — a file whose last resolvable reference just
+// degraded to an unresolved stub must drop its stale rows, not keep them
+// because there is nothing new to write. No-op when the backend has no
+// durable layer or the file list is empty.
 func (idx *Indexer) persistRefFactsForFiles(graphPaths []string) {
 	w, ok := idx.refFactsWriter()
 	if !ok || len(graphPaths) == 0 {
@@ -73,14 +76,28 @@ func (idx *Indexer) persistRefFactsForFiles(graphPaths []string) {
 	}
 	byRepo := map[string][]graph.RefFact{}
 	filesByRepo := map[string]map[string]struct{}{}
+	addFile := func(repo, file string) {
+		if filesByRepo[repo] == nil {
+			filesByRepo[repo] = map[string]struct{}{}
+		}
+		filesByRepo[repo][file] = struct{}{}
+	}
 	for _, p := range graphPaths {
 		nodes := idx.graph.GetFileNodes(p)
+		// Register the file for deletion under its nodes' repo prefix
+		// (falling back to the indexer's own) regardless of whether any
+		// fresh facts come out of it below.
+		repo := idx.repoPrefix
+		for _, n := range nodes {
+			if n != nil && n.RepoPrefix != "" {
+				repo = n.RepoPrefix
+				break
+			}
+		}
+		addFile(repo, p)
 		for _, f := range collectRefFacts(idx.graph, nodes) {
 			byRepo[f.RepoPrefix] = append(byRepo[f.RepoPrefix], f)
-			if filesByRepo[f.RepoPrefix] == nil {
-				filesByRepo[f.RepoPrefix] = map[string]struct{}{}
-			}
-			filesByRepo[f.RepoPrefix][f.FilePath] = struct{}{}
+			addFile(f.RepoPrefix, f.FilePath)
 		}
 	}
 	for repo, fileSet := range filesByRepo {

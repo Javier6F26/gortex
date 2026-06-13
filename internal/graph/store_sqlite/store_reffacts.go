@@ -163,3 +163,57 @@ func (s *Store) LoadRefFactsByFiles(repoPrefix string, files []string) ([]graph.
 	}
 	return out, nil
 }
+
+// LoadRefFactsByTargets returns the persisted facts that resolve TO any of
+// the given node IDs for one repo prefix, grouped by source file path — the
+// reverse lookup incremental re-resolution uses to find the files that
+// referenced a changed symbol after its live in-edges were evicted. Served by
+// the ref_facts_by_target index, chunked under the host-parameter limit.
+// Always non-nil; empty input is a no-op.
+func (s *Store) LoadRefFactsByTargets(repoPrefix string, targetIDs []string) (map[string][]graph.RefFact, error) {
+	out := map[string][]graph.RefFact{}
+	if len(targetIDs) == 0 {
+		return out, nil
+	}
+	const cols = `from_id, to_id, kind, ref_name, line, origin, tier, candidates, file_path, lang`
+	for start := 0; start < len(targetIDs); start += refFactChunk {
+		end := start + refFactChunk
+		if end > len(targetIDs) {
+			end = len(targetIDs)
+		}
+		chunk := targetIDs[start:end]
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, repoPrefix)
+		stmt := make([]byte, 0, 96+len(chunk)*2)
+		stmt = append(stmt, "SELECT "+cols+" FROM ref_facts WHERE repo_prefix = ? AND to_id IN ("...)
+		for i, id := range chunk {
+			if i > 0 {
+				stmt = append(stmt, ',')
+			}
+			stmt = append(stmt, '?')
+			args = append(args, id)
+		}
+		stmt = append(stmt, ')')
+		rows, err := s.db.Query(string(stmt), args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var f graph.RefFact
+			var cand string
+			if err := rows.Scan(&f.FromID, &f.ToID, &f.Kind, &f.RefName, &f.Line, &f.Origin, &f.Tier, &cand, &f.FilePath, &f.Lang); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			f.RepoPrefix = repoPrefix
+			f.Candidates = decodeCandidates(cand)
+			out[f.FilePath] = append(out[f.FilePath], f)
+		}
+		err = rows.Err()
+		_ = rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}

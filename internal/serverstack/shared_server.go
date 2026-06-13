@@ -25,6 +25,7 @@ import (
 	"github.com/zzet/gortex/internal/semantic/goanalysis"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 	"github.com/zzet/gortex/internal/semantic/scip"
+	"github.com/zzet/gortex/internal/semantic/tstypes"
 )
 
 // Lifecycle selects the backend default, whether warm-restart/snapshot
@@ -283,6 +284,15 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		goProvider := goanalysis.NewProvider(goMode, false, logger)
 		semMgr.RegisterProvider(goProvider)
 		contracts.SetBindingResolver(goProvider)
+
+		// In-process tree-sitter type resolvers — always-available
+		// (no external binary), supplemental (they coexist with LSP /
+		// SCIP providers instead of competing for the language slot).
+		// Disable one via a `semantic.providers` entry with
+		// `enabled: false` under its name (e.g. "java-types").
+		for _, tp := range tstypes.DefaultProviders(logger) {
+			semMgr.RegisterProvider(tp)
+		}
 
 		lspWorkspace := cfg.Index
 		if lspWorkspace == "" {

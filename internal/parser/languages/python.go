@@ -96,6 +96,10 @@ type pyDeferredCall struct {
 	// the literal method name when the subscript is a string literal.
 	dynShape string
 	dynKey   string
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on every EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 // pyStringLiteralValue returns the unquoted value of a Python string-literal
@@ -169,19 +173,21 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		case m.Captures["callattr.expr"] != nil:
 			expr := m.Captures["callattr.expr"]
 			calls = append(calls, pyDeferredCall{
-				name:     m.Captures["callattr.method"].Text,
-				receiver: m.Captures["callattr.receiver"].Text,
-				line:     expr.StartLine + 1,
-				isAttr:   true,
-				expr:     expr.Node,
+				name:        m.Captures["callattr.method"].Text,
+				receiver:    m.Captures["callattr.receiver"].Text,
+				line:        expr.StartLine + 1,
+				isAttr:      true,
+				expr:        expr.Node,
+				returnUsage: classifyReturnUsage(expr.Node, src, pyReturnUsageSpec),
 			})
 
 		case m.Captures["call.expr"] != nil:
 			expr := m.Captures["call.expr"]
 			calls = append(calls, pyDeferredCall{
-				name: m.Captures["call.name"].Text,
-				line: expr.StartLine + 1,
-				expr: expr.Node,
+				name:        m.Captures["call.name"].Text,
+				line:        expr.StartLine + 1,
+				expr:        expr.Node,
+				returnUsage: classifyReturnUsage(expr.Node, src, pyReturnUsageSpec),
 			})
 
 		case m.Captures["subcall.expr"] != nil:
@@ -190,9 +196,10 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			// edge by itself unless that pass is enabled.
 			expr := m.Captures["subcall.expr"]
 			dc := pyDeferredCall{
-				line:     expr.StartLine + 1,
-				expr:     expr.Node,
-				dynShape: "computed_member",
+				line:        expr.StartLine + 1,
+				expr:        expr.Node,
+				dynShape:    "computed_member",
+				returnUsage: classifyReturnUsage(expr.Node, src, pyReturnUsageSpec),
 			}
 			if r := m.Captures["subcall.receiver"]; r != nil {
 				dc.receiver = r.Text
@@ -251,20 +258,24 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			if c.receiver != "" {
 				meta["dyn_receiver"] = c.receiver
 			}
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::*",
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line, Meta: meta,
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 			continue
 		}
 		if c.isAttr {
 			// Module-qualified call (requests.get, np.array, os.path.join):
 			// attach the import path so resolver can classify externally.
 			if importPath, ok := lookupPyImport(c.receiver, imports); ok {
-				result.Edges = append(result.Edges, &graph.Edge{
+				edge := &graph.Edge{
 					From: callerID, To: "unresolved::extern::" + importPath + "::" + c.name,
 					Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-				})
+				}
+				stampReturnUsage(edge, c.returnUsage)
+				result.Edges = append(result.Edges, edge)
 				continue
 			}
 
@@ -279,6 +290,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 					edge.Meta = map[string]any{"receiver_type": chainType}
 				}
 			}
+			stampReturnUsage(edge, c.returnUsage)
 			result.Edges = append(result.Edges, edge)
 			continue
 		}
@@ -291,15 +303,19 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 		// `import numpy as np; np.array(...)` both attribute to
 		// numpy after the resolver post-pass.
 		if importPath, ok := lookupPyImport(c.name, imports); ok {
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::extern::" + importPath + "::" + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 		} else {
-			result.Edges = append(result.Edges, &graph.Edge{
+			edge := &graph.Edge{
 				From: callerID, To: "unresolved::" + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-			})
+			}
+			stampReturnUsage(edge, c.returnUsage)
+			result.Edges = append(result.Edges, edge)
 		}
 
 		// FastAPI dependency injection: Depends(target) — emit a direct

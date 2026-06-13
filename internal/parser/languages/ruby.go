@@ -69,6 +69,10 @@ type rubyDeferredCall struct {
 	name    string
 	line    int
 	hasRecv bool
+	// returnUsage is how the call site consumes the return value
+	// (graph.ReturnUsage* label), classified at capture time and
+	// stamped as edge Meta on the EdgeCalls emitted for this site.
+	returnUsage string
 }
 
 func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
@@ -128,9 +132,10 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 				}
 			}
 			calls = append(calls, rubyDeferredCall{
-				name:    name,
-				line:    expr.StartLine + 1,
-				hasRecv: hasRecv,
+				name:        name,
+				line:        expr.StartLine + 1,
+				hasRecv:     hasRecv,
+				returnUsage: classifyReturnUsage(expr.Node, src, rubyReturnUsageSpec),
 			})
 
 		case m.Captures["const.def"] != nil:
@@ -149,10 +154,12 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		if c.hasRecv {
 			target = "unresolved::*." + c.name
 		}
-		result.Edges = append(result.Edges, &graph.Edge{
+		edge := &graph.Edge{
 			From: callerID, To: target,
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
-		})
+		}
+		stampReturnUsage(edge, c.returnUsage)
+		result.Edges = append(result.Edges, edge)
 	}
 
 	// Rails-style callback dispatch — preserves legacy behaviour exactly.

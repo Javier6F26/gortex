@@ -84,7 +84,7 @@ func (s *Server) handleFlowBetween(ctx context.Context, req mcp.CallToolRequest)
 	maxPaths := req.GetInt("max_paths", dataflow.DefaultMaxPaths)
 	minTier := req.GetString("min_tier", "")
 
-	engine := dataflow.New(s.graph)
+	engine := dataflow.New(s.graph).WithRefiner(s.dataflowRefiner(ctx))
 	paths := engine.FlowBetweenWithTier(source, sink, maxDepth, maxPaths, minTier)
 
 	if s.isGCX(ctx, req) {
@@ -154,7 +154,7 @@ func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) 
 		return mcp.NewToolResultError("sink_pattern matched no clauses"), nil
 	}
 
-	engine := dataflow.New(s.graph)
+	engine := dataflow.New(s.graph).WithRefiner(s.dataflowRefiner(ctx))
 	findings := engine.TaintPathsWithTier(src, sink, maxDepth, limit, minTier)
 
 	if s.isGCX(ctx, req) {
@@ -180,6 +180,29 @@ func (s *Server) handleTaintPaths(ctx context.Context, req mcp.CallToolRequest) 
 		return returnTOON(result)
 	}
 	return s.respondJSONOrTOON(ctx, req, result)
+}
+
+// dataflowRefiner builds the per-call CFG-backed refiner that
+// confirms or prunes same-function value_flow hops on
+// flow_between / taint_paths paths. The source resolver reads
+// through the session's overlay so unsaved buffers refine
+// consistently with every other tool.
+func (s *Server) dataflowRefiner(ctx context.Context) *dataflow.Refiner {
+	resolve := func(fn *graph.Node) (dataflow.FuncSource, error) {
+		if fn.StartLine == 0 || fn.EndLine == 0 {
+			return dataflow.FuncSource{}, fmt.Errorf("symbol has no line range: %s", fn.ID)
+		}
+		absPath, err := s.resolveNodePath(fn)
+		if err != nil {
+			return dataflow.FuncSource{}, err
+		}
+		src, fromLine, _, err := s.readLinesForCtx(ctx, absPath, fn.StartLine, fn.EndLine, 0)
+		if err != nil {
+			return dataflow.FuncSource{}, err
+		}
+		return dataflow.FuncSource{Src: []byte(src), StartLine: fromLine}, nil
+	}
+	return dataflow.NewRefiner(s.graph, resolve, 0)
 }
 
 // describeNode returns a JSON-shaped summary of a graph node for
@@ -225,7 +248,7 @@ func encodeFlowBetween(source, sink string, paths []dataflow.Path) ([]byte, erro
 	}
 	pathEnc := wire.NewEncoder(&buf, wire.Header{
 		Tool:   "flow_between.paths",
-		Fields: []string{"length", "confidence", "worst_tier", "ids", "kinds", "origins", "tiers"},
+		Fields: []string{"length", "confidence", "worst_tier", "ids", "kinds", "origins", "tiers", "refined"},
 		Meta: map[string]string{
 			"count": fmt.Sprintf("%d", len(paths)),
 		},
@@ -235,7 +258,8 @@ func encodeFlowBetween(source, sink string, paths []dataflow.Path) ([]byte, erro
 		kinds := joinEdgeKinds(p.Edges)
 		origins := joinEdgeOrigins(p.Edges)
 		tiers := joinEdgeTiers(p.Edges)
-		if err := pathEnc.WriteRow(p.Length(), p.Confidence, worstTierOnPath(p.Edges), ids, kinds, origins, tiers); err != nil {
+		refined := joinEdgeRefined(p.Edges)
+		if err := pathEnc.WriteRow(p.Length(), p.Confidence, worstTierOnPath(p.Edges), ids, kinds, origins, tiers, refined); err != nil {
 			return nil, err
 		}
 	}
@@ -370,7 +394,7 @@ func encodeTaintPaths(srcPattern, sinkPattern string, findings []dataflow.TaintF
 		Fields: []string{
 			"source_id", "source_name", "sink_id", "sink_name",
 			"best_length", "best_confidence", "best_worst_tier",
-			"paths", "best_ids", "best_kinds", "best_origins", "best_tiers",
+			"paths", "best_ids", "best_kinds", "best_origins", "best_tiers", "best_refined",
 		},
 	})
 	for _, f := range findings {
@@ -391,6 +415,7 @@ func encodeTaintPaths(srcPattern, sinkPattern string, findings []dataflow.TaintF
 			joinEdgeKinds(best.Edges),
 			joinEdgeOrigins(best.Edges),
 			joinEdgeTiers(best.Edges),
+			joinEdgeRefined(best.Edges),
 		}
 		if err := findEnc.WriteRow(row...); err != nil {
 			return nil, err
@@ -453,6 +478,26 @@ func joinEdgeOrigins(edges []dataflow.EdgeStep) string {
 		b.WriteString(e.Origin)
 	}
 	return b.String()
+}
+
+// joinEdgeRefined flattens the per-step refinement markers; empty
+// markers stay empty so positions align with the kinds/tiers fields.
+func joinEdgeRefined(edges []dataflow.EdgeStep) string {
+	if len(edges) == 0 {
+		return ""
+	}
+	parts := make([]string, len(edges))
+	any := false
+	for i, e := range edges {
+		parts[i] = e.Refined
+		if e.Refined != "" {
+			any = true
+		}
+	}
+	if !any {
+		return ""
+	}
+	return strings.Join(parts, ",")
 }
 
 func joinEdgeTiers(edges []dataflow.EdgeStep) string {

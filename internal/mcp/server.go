@@ -1025,6 +1025,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	s.registerGraphInvalidatedTools()
 	s.registerToolProfileTool()
 	s.registerDataflowTools()
+	s.registerCFGTools()
 	s.registerASTTools()
 	s.registerCloneTools()
 	s.registerSimulationTools()

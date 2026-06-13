@@ -305,7 +305,7 @@ func TestCSharpExtractor_TypeEnv_Unknown(t *testing.T) {
 		}
 	}
 	require.NotNil(t, processCall)
-	assert.Nil(t, processCall.Meta, "unknown type should not produce Meta")
+	assert.NotContains(t, processCall.Meta, "receiver_type", "unknown type should not produce a receiver_type hint")
 }
 
 func TestCSharpExtractor_TypeEnv_Chain(t *testing.T) {
