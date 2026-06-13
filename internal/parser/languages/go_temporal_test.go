@@ -709,11 +709,16 @@ func executeActivity(ctx workflow.Context, name string, args ...any) error {
 	return workflow.ExecuteActivity(ctx, name, args...).Get(ctx, nil)
 }
 `)
-	// The parameter-named dispatch must NOT emit a (never-resolvable) stub.
-	assert.Empty(t, temporalEdgesByVia(fix, "temporal.stub"),
-		"a parameter-forwarded dispatch must not emit a junk stub")
+	// PR2: the parameter-forwarded dispatch now emits a wrapper-anchor stub
+	// carrying temporal_name_param (instead of being fully suppressed). The
+	// resolver's wrapper-following pass uses this anchor to synthesise real
+	// stubs at callers that pass a literal activity name.
+	stubs := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, stubs, 1, "wrapper must emit exactly one anchor temporal.stub edge")
+	assert.Equal(t, "name", stubs[0].Meta["temporal_name_param"],
+		"wrapper anchor stub must carry temporal_name_param")
 
-	// The wrapper function is marked for a future interprocedural follower.
+	// The wrapper function is marked for the interprocedural follower.
 	var wrapper *graph.Node
 	for _, n := range fix.nodesByKind[graph.KindFunction] {
 		if n.Name == "executeActivity" {
@@ -723,4 +728,58 @@ func executeActivity(ctx workflow.Context, name string, args ...any) error {
 	require.NotNil(t, wrapper)
 	assert.Equal(t, "activity", wrapper.Meta["temporal_wrapper_kind"])
 	assert.Equal(t, "name", wrapper.Meta["temporal_wrapper_param"])
+}
+
+func TestGoTemporal_WrapperEmitsParamStub(t *testing.T) {
+	// A wrapper function that forwards its `name` param as the dispatch name
+	// must emit a temporal.stub edge with temporal_name_param="name".
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func execAct(ctx workflow.Context, name string, in any) workflow.Future {
+    return workflow.ExecuteActivity(ctx, name, in)
+}
+`)
+	stubs := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, stubs, 1, "wrapper must emit exactly one temporal.stub edge")
+	e := stubs[0]
+	assert.Equal(t, "activity", e.Meta["temporal_kind"])
+	assert.Equal(t, "name", e.Meta["temporal_name_param"],
+		"wrapper stub must carry temporal_name_param")
+}
+
+func TestGoTemporal_CallerEdgeHasArgNames(t *testing.T) {
+	// A call to a wrapper-like function with a string-literal argument
+	// must carry arg_names on the call edge.
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func execAct(ctx workflow.Context, name string, in any) workflow.Future {
+    return workflow.ExecuteActivity(ctx, name, in)
+}
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+    execAct(ctx, "ChargeCard", id)
+    return nil
+}
+`)
+	// Find the call edge from OrderWorkflow to execAct
+	var callerEdge *graph.Edge
+	for _, e := range fix.edgesByKind[graph.EdgeCalls] {
+		if e.Meta != nil {
+			if names, ok := e.Meta["arg_names"]; ok {
+				_ = names
+				callerEdge = e
+				break
+			}
+		}
+	}
+	require.NotNil(t, callerEdge, "call edge to execAct must carry arg_names")
+	argNames, ok := callerEdge.Meta["arg_names"].([]string)
+	require.True(t, ok, "arg_names must be []string")
+	// Position 1 (0-indexed) should be "ChargeCard"
+	require.Greater(t, len(argNames), 1)
+	assert.Equal(t, "ChargeCard", argNames[1])
 }

@@ -139,6 +139,84 @@ func capitalise(s string) string {
 	return string(s[0]-32) + s[1:]
 }
 
+// addWrapperStubCall adds a Temporal wrapper stub edge: from=wrapperID, to=placeholder,
+// with temporal_name_param set so resolveTemporalWrapperCalls recognises it as a wrapper.
+func (b *temporalTestGraph) addWrapperStubCall(wrapperID, kind, paramName, filePath string) *graph.Edge {
+	e := &graph.Edge{
+		From: wrapperID, To: temporalStubPlaceholder(kind, paramName),
+		Kind: graph.EdgeCalls, FilePath: filePath, Line: 5,
+		Meta: map[string]any{
+			"via":                 "temporal.stub",
+			"temporal_kind":       kind,
+			"temporal_name":       paramName,
+			"temporal_name_param": paramName,
+		},
+	}
+	b.g.AddEdge(e)
+	return e
+}
+
+// addCallerEdgeWithArgNames adds an EdgeCalls from callerID to calleeID carrying arg_names.
+func (b *temporalTestGraph) addCallerEdgeWithArgNames(callerID, calleeID string, argNames []string, line int) *graph.Edge {
+	e := &graph.Edge{
+		From: callerID, To: calleeID,
+		Kind: graph.EdgeCalls, FilePath: "wf/caller.go", Line: line,
+		Meta: map[string]any{"arg_names": argNames},
+	}
+	b.g.AddEdge(e)
+	return e
+}
+
+func TestResolveTemporalCalls_WrapperFollowing(t *testing.T) {
+	// Graph layout:
+	//   execAct (wrapper): temporal.stub edge with temporal_name_param="name"
+	//   execAct#param:name: KindParam at position 1 (0-indexed: ctx=0, name=1)
+	//   OrderWorkflow: calls execAct with arg_names=["ctx", "ChargeCard", "in"] at position 1
+	//   ChargeCard: registered activity
+	b := newTemporalTestGraph()
+
+	// The wrapper function
+	b.addGoFunc("wf/wrap.go::execAct", "execAct", "wf/wrap.go", "svc")
+	// Add the #param:name node at position 1
+	b.g.AddNode(&graph.Node{
+		ID: "wf/wrap.go::execAct#param:name", Kind: graph.KindParam, Name: "name",
+		FilePath: "wf/wrap.go", Language: "go",
+		Meta: map[string]any{"position": 1},
+	})
+	// The wrapper stub edge
+	b.addWrapperStubCall("wf/wrap.go::execAct", "activity", "name", "wf/wrap.go")
+
+	// The caller
+	b.addGoFunc("wf/workflow.go::OrderWorkflow", "OrderWorkflow", "wf/workflow.go", "svc")
+	b.addCallerEdgeWithArgNames("wf/workflow.go::OrderWorkflow", "wf/wrap.go::execAct",
+		[]string{"ctx", "ChargeCard", "in"}, 15)
+
+	// The registered activity
+	activity := b.addGoFunc("wf/activity.go::ChargeCard", "ChargeCard", "wf/activity.go", "svc")
+	b.addGoFunc("wf/main.go::setup", "setup", "wf/main.go", "svc")
+	b.addGoRegister("wf/main.go::setup", "activity", "ChargeCard", "wf/main.go")
+
+	resolved := ResolveTemporalCalls(b.g)
+	assert.GreaterOrEqual(t, resolved, 1, "wrapper-following must resolve at least one stub")
+
+	// The OrderWorkflow must now have a temporal.stub edge pointing at ChargeCard
+	var wrapperStub *graph.Edge
+	for _, e := range b.g.GetOutEdges("wf/workflow.go::OrderWorkflow") {
+		if e == nil || e.Meta == nil {
+			continue
+		}
+		if e.Meta["via"] == "temporal.stub" && e.Meta["temporal_name"] == "ChargeCard" {
+			wrapperStub = e
+			break
+		}
+	}
+	require.NotNil(t, wrapperStub, "caller must have a synthesized temporal.stub edge for ChargeCard")
+	assert.Equal(t, activity.ID, wrapperStub.To,
+		"synthesized stub must resolve to the registered ChargeCard activity")
+	assert.Equal(t, "execAct", wrapperStub.Meta["temporal_via_wrapper"],
+		"synthesized edge must carry the wrapper name")
+}
+
 // --- Go-side tests --------------------------------------------------
 
 func TestResolveTemporalCalls_GoActivityRegistration(t *testing.T) {

@@ -1,6 +1,7 @@
 package resolver
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -89,6 +90,186 @@ const (
 //
 // Returns the number of temporal.stub edges pointing at a resolved
 // handler after the pass.
+// argNameAt reads the positional arg name recorded on a call edge.
+//
+// PURPOSE — read the positional arg name recorded on a call edge by the extractor
+// RATIONALE — arg_names can be []string (most paths) or []any (json-round-tripped)
+// KEYWORDS — arg_names, wrapper-following, position
+func argNameAt(e *graph.Edge, pos int) string {
+	if e == nil || e.Meta == nil || pos < 0 {
+		return ""
+	}
+	switch a := e.Meta["arg_names"].(type) {
+	case []string:
+		if pos < len(a) {
+			return a[pos]
+		}
+	case []any:
+		if pos < len(a) {
+			if s, ok := a[pos].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+// metaIntValue coerces an int-ish meta value to an int.
+//
+// PURPOSE — coerce various numeric representations of a position to int
+// RATIONALE — meta values can be stored as int, int64, float64, or string depending on serialization
+// KEYWORDS — position, coercion, param, wrapper-following
+func metaIntValue(v any) (int, bool) {
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case string:
+		if n, err := strconv.Atoi(x); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+// temporalWrapperStubExists is the idempotence guard for the wrapper pass.
+//
+// PURPOSE — prevent duplicate wrapper-synthesized stub edges on repeated resolver runs
+// RATIONALE — resolveTemporalWrapperCalls runs on every settle; the guard is O(out-edges of caller)
+// KEYWORDS — idempotence, temporal.stub, wrapper
+func temporalWrapperStubExists(g graph.Store, from, kind, name string) bool {
+	for _, e := range g.GetOutEdges(from) {
+		if e == nil || e.Meta == nil {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.stub" {
+			continue
+		}
+		if k, _ := e.Meta["temporal_kind"].(string); k != kind {
+			continue
+		}
+		if n, _ := e.Meta["temporal_name"].(string); n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveTemporalWrapperCalls synthesises temporal.stub edges at callers of
+// dispatch wrappers, propagating the caller's literal arg value through the
+// wrapper's forwarded parameter.
+//
+// PURPOSE — synthesize temporal.stub edges at callers of wrapper functions that forward
+//
+//	a parameter as the dispatch name, propagating the caller's literal arg value
+//
+// RATIONALE — single-level pass: find edges WITH temporal_name_param, find their callers,
+//
+//	extract the arg at the wrapper's param position, emit a new stub
+//
+// KEYWORDS — wrapper-following, temporal.stub, arg_names, single-level
+func resolveTemporalWrapperCalls(g graph.Store) {
+	type wrapper struct {
+		id, kind, name string
+		pos            int
+	}
+	byID := map[string]wrapper{}
+	byName := map[string][]wrapper{}
+
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil || e.From == "" {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.stub" {
+			continue
+		}
+		param, _ := e.Meta["temporal_name_param"].(string)
+		kind, _ := e.Meta["temporal_kind"].(string)
+		if param == "" || kind == "" {
+			continue
+		}
+		if _, seen := byID[e.From]; seen {
+			continue
+		}
+		pn := g.GetNode(e.From + "#param:" + param)
+		if pn == nil {
+			continue
+		}
+		pos, ok := metaIntValue(pn.Meta["position"])
+		if !ok {
+			continue
+		}
+		wname := ""
+		if wnode := g.GetNode(e.From); wnode != nil {
+			wname = wnode.Name
+		}
+		w := wrapper{id: e.From, kind: kind, name: wname, pos: pos}
+		byID[e.From] = w
+		if wname != "" {
+			byName[wname] = append(byName[wname], w)
+		}
+	}
+	if len(byID) == 0 {
+		return
+	}
+
+	type pending struct {
+		from, file, kind, name, wrapperName string
+		line                                int
+	}
+	var out []pending
+	emit := func(w wrapper, ce *graph.Edge) {
+		if ce.From == w.id {
+			return
+		}
+		name := argNameAt(ce, w.pos)
+		if name == "" {
+			return
+		}
+		out = append(out, pending{from: ce.From, file: ce.FilePath, line: ce.Line,
+			kind: w.kind, name: name, wrapperName: w.name})
+	}
+
+	for ce := range g.EdgesByKind(graph.EdgeCalls) {
+		if ce == nil || ce.From == "" || ce.Meta == nil {
+			continue
+		}
+		if _, ok := ce.Meta["arg_names"]; !ok {
+			continue
+		}
+		if w, ok := byID[ce.To]; ok {
+			emit(w, ce)
+			continue
+		}
+		callee, _ := ce.Meta["callee"].(string)
+		if callee == "" {
+			continue
+		}
+		for _, w := range byName[callee] {
+			emit(w, ce)
+		}
+	}
+
+	for _, p := range out {
+		if temporalWrapperStubExists(g, p.from, p.kind, p.name) {
+			continue
+		}
+		g.AddEdge(&graph.Edge{
+			From: p.from, To: temporalStubPlaceholder(p.kind, p.name),
+			Kind: graph.EdgeCalls, FilePath: p.file, Line: p.line,
+			Meta: map[string]any{
+				"via":                  "temporal.stub",
+				"temporal_kind":        p.kind,
+				"temporal_name":        p.name,
+				"temporal_via_wrapper": p.wrapperName,
+			},
+		})
+	}
+}
+
 func ResolveTemporalCalls(g graph.Store) int {
 	if g == nil {
 		return 0
@@ -102,6 +283,12 @@ func ResolveTemporalCalls(g graph.Store) int {
 	mu := g.ResolveMutex()
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Wrapper-following pre-pass: synthesise temporal.stub edges at callers of
+	// wrapper functions that forward a parameter as the Temporal dispatch name.
+	// Must run before the stub-collection sweep so the freshly synthesised stubs
+	// are picked up and resolved by the existing loop below.
+	resolveTemporalWrapperCalls(g)
 
 	// Single sweep over EdgeCalls — the largest edge class — collecting
 	// both the temporal.register edges (index inputs) and the

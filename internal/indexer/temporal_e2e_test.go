@@ -509,3 +509,70 @@ func setup(w Worker) {
 	assert.Equal(t, true, start.Meta["temporal_cross_lang"])
 	assert.Equal(t, graph.OriginSpeculative, start.Origin)
 }
+
+// TestTemporalE2E_WrapperFollowing exercises the full wrapper-following pipeline:
+// a thin dispatch wrapper forwards its `name` parameter to ExecuteActivity,
+// and a workflow calls the wrapper with a literal activity name. The pipeline
+// must produce a resolved temporal.stub edge from the workflow caller to the
+// registered ChargeCard activity.
+func TestTemporalE2E_WrapperFollowing(t *testing.T) {
+	dir := t.TempDir()
+
+	writeFile(t, filepath.Join(dir, "wrapper.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func execAct(ctx workflow.Context, name string, in any) workflow.Future {
+    return workflow.ExecuteActivity(ctx, name, in)
+}
+`)
+	writeFile(t, filepath.Join(dir, "workflow.go"), `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+func OrderWorkflow(ctx workflow.Context, id string) error {
+    return execAct(ctx, "ChargeCard", id).Get(ctx, nil)
+}
+`)
+	writeFile(t, filepath.Join(dir, "activity.go"), `package wf
+
+import "context"
+
+func ChargeCard(ctx context.Context, id string) error {
+    return nil
+}
+`)
+	writeFile(t, filepath.Join(dir, "main.go"), `package wf
+
+func setupWorker(w Worker) {
+    w.RegisterWorkflow(OrderWorkflow)
+    w.RegisterActivity(ChargeCard)
+}
+`)
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	wf := g.FindNodesByName("OrderWorkflow")
+	require.NotEmpty(t, wf)
+	activity := g.FindNodesByName("ChargeCard")
+	require.NotEmpty(t, activity)
+
+	// Find the temporal.stub edge from OrderWorkflow that names ChargeCard
+	var stubCall *graph.Edge
+	for _, e := range g.GetOutEdges(wf[0].ID) {
+		if e == nil || e.Meta == nil {
+			continue
+		}
+		if e.Meta["via"] == "temporal.stub" && e.Meta["temporal_name"] == "ChargeCard" {
+			stubCall = e
+			break
+		}
+	}
+	require.NotNil(t, stubCall,
+		"workflow caller must have a wrapper-synthesized temporal.stub edge for ChargeCard")
+	assert.Equal(t, activity[0].ID, stubCall.To,
+		"the wrapper-following stub must resolve to the registered ChargeCard activity")
+}

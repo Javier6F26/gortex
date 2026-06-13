@@ -241,6 +241,11 @@ type goDeferredCall struct {
 	// meta is stamped on the emitted edge and the resolver rewrites it to
 	// the registered workflow — the "who starts this workflow" edge.
 	tempStartName string
+	// callNode is the call_expression AST node, retained so the general
+	// call-edge emission can extract positional arg names
+	// (attachGoTemporalCallArgNames) for the resolver's wrapper-following
+	// pass. Nil for synthetic / non-call entries.
+	callNode *sitter.Node
 }
 
 type goDeferredTypeRef struct {
@@ -362,6 +367,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				line:        expr.StartLine + 1,
 				spawn:       isGoroutineSpawn(expr.Node),
 				returnUsage: classifyReturnUsage(expr.Node, src, goReturnUsageSpec),
+				callNode:    expr.Node,
 			}
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, callName); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
@@ -379,6 +385,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 				isSelector:  true,
 				spawn:       isGoroutineSpawn(expr.Node),
 				returnUsage: classifyReturnUsage(expr.Node, src, goReturnUsageSpec),
+				callNode:    expr.Node,
 			}
 			if svc, argNode, ok := grpcRegisterArgNode(expr.Node, method); ok {
 				dc.grpcRegService, dc.grpcRegArgNode = svc, argNode
@@ -760,6 +767,28 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 					if names, ok := paramNamesByFunc[callerID]; ok {
 						if names[c.tempName] {
 							markGoTemporalWrapper(result, callerID, c.tempKind, c.tempName)
+							// Emit a wrapper-stub edge that the resolver's
+							// wrapper-following pass can use as an anchor:
+							// from=callerID, target=placeholder,
+							// temporal_name_param=paramName. No literal
+							// temporal_name resolution here (it's a param);
+							// the resolver synthesises a proper stub for each
+							// caller that passes a literal at this position.
+							target := "unresolved::temporal::" + c.tempKind + "::" + c.tempName
+							meta := map[string]any{
+								"via":                 "temporal.stub",
+								"temporal_kind":       c.tempKind,
+								"temporal_name":       c.tempName,
+								"temporal_name_param": c.tempName,
+							}
+							if c.tempLocal {
+								meta["temporal_local"] = true
+							}
+							result.Edges = append(result.Edges, &graph.Edge{
+								From: callerID, To: target,
+								Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
+								Meta: meta,
+							})
 							continue
 						}
 					}
@@ -800,6 +829,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalSignalQueryMeta(edge, c)
 			applyGoTemporalStartMeta(edge, c)
 			stampReturnUsage(edge, c.returnUsage)
+			attachGoTemporalCallArgNames(edge, c, c.callNode, src)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -816,6 +846,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 			applyGoTemporalSignalQueryMeta(edge, c)
 			applyGoTemporalStartMeta(edge, c)
 			stampReturnUsage(edge, c.returnUsage)
+			attachGoTemporalCallArgNames(edge, c, c.callNode, src)
 			result.Edges = append(result.Edges, edge)
 			emitGoSpawnEdge(c, callerID, target, filePath, result)
 			continue
@@ -868,6 +899,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 		applyGoTemporalSignalQueryMeta(edge, c)
 		applyGoTemporalStartMeta(edge, c)
 		stampReturnUsage(edge, c.returnUsage)
+		attachGoTemporalCallArgNames(edge, c, c.callNode, src)
 		result.Edges = append(result.Edges, edge)
 		emitGoSpawnEdge(c, callerID, target, filePath, result)
 	}

@@ -878,3 +878,76 @@ func goStringLiteralValue(n *sitter.Node, src []byte) (string, bool) {
 	}
 	return "", false
 }
+
+// goTemporalCallArgNames extracts positional arg names from a call expression.
+//
+// PURPOSE — extract positional arg names from a call expression for wrapper-following
+// RATIONALE — only qualifying args (string literals, selectors, Capitalized identifiers)
+//
+//	are included; plain lowercase vars are not useful as activity names
+//
+// KEYWORDS — arg_names, wrapper-following, call_expression
+func goTemporalCallArgNames(callNode *sitter.Node, src []byte) ([]string, bool) {
+	if callNode == nil || callNode.Type() != "call_expression" {
+		return nil, false
+	}
+	args := callNode.ChildByFieldName("arguments")
+	if args == nil {
+		return nil, false
+	}
+	const maxArgs = 8
+	var out []string
+	qualifying := false
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()) && count < maxArgs; i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		count++
+		name := ""
+		switch c.Type() {
+		case "interpreted_string_literal", "raw_string_literal":
+			name = goTemporalNameFromExpr(c, src)
+			qualifying = true
+		case "selector_expression":
+			name = goTemporalNameFromExpr(c, src)
+			qualifying = true
+		case "identifier":
+			name = c.Content(src)
+			if name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+				qualifying = true
+			}
+		}
+		out = append(out, name)
+	}
+	if !qualifying {
+		return nil, false
+	}
+	return out, true
+}
+
+// attachGoTemporalCallArgNames attaches arg_names + callee meta to a call edge.
+//
+// PURPOSE — attach arg_names and callee meta to a call edge for wrapper-following
+// RATIONALE — the resolver's wrapper pass needs both the arg values and the callee name
+//
+//	to match caller edges to wrapper definitions
+//
+// KEYWORDS — arg_names, callee, wrapper-following, edge meta
+func attachGoTemporalCallArgNames(edge *graph.Edge, c goDeferredCall, callNode *sitter.Node, src []byte) {
+	names, ok := goTemporalCallArgNames(callNode, src)
+	if !ok {
+		return
+	}
+	if edge.Meta == nil {
+		edge.Meta = map[string]any{}
+	}
+	edge.Meta["arg_names"] = names
+	// callee: the function/method name being called
+	if c.isSelector {
+		edge.Meta["callee"] = c.method
+	} else if c.callName != "" {
+		edge.Meta["callee"] = c.callName
+	}
+}
