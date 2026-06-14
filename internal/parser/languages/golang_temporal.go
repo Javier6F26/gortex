@@ -951,3 +951,37 @@ func attachGoTemporalCallArgNames(edge *graph.Edge, c goDeferredCall, callNode *
 		edge.Meta["callee"] = c.callName
 	}
 }
+
+// goCompositeLiteralType walks up from a keyed_element node to find the
+// enclosing composite_literal and returns the simple type name.
+//
+// PURPOSE — extracts the receiver struct type from a struct literal so the
+// executor-field pass can key the field assignment by (type, field).
+// RATIONALE — tree-sitter does not expose a direct parent-of-kind API;
+// walking the Parent chain is the standard idiom in this codebase.
+// KEYWORDS — composite-literal, type-name, executor-field
+func goCompositeLiteralType(keyed *sitter.Node, src []byte) string {
+	for n := keyed; n != nil; n = n.Parent() {
+		if n.Type() != "composite_literal" {
+			continue
+		}
+		t := n.ChildByFieldName("type")
+		if t == nil {
+			return ""
+		}
+		switch t.Type() {
+		case "type_identifier":
+			return t.Content(src)
+		case "pointer_type":
+			if inner := t.NamedChild(0); inner != nil && inner.Type() == "type_identifier" {
+				return inner.Content(src)
+			}
+		case "qualified_type":
+			if f := t.ChildByFieldName("name"); f != nil {
+				return f.Content(src)
+			}
+		}
+		return ""
+	}
+	return ""
+}

@@ -620,3 +620,46 @@ func TestResolveTemporalCalls_RegisterNameOverride(t *testing.T) {
 		"the impl is known under the registered (override) name")
 	assert.Equal(t, "activity", impl.Meta["temporal_role"])
 }
+
+func TestResolveTemporalCalls_ExecutorFieldDispatch(t *testing.T) {
+	b := newTemporalTestGraph()
+	// Method stub edge with temporal_name_field + temporal_recv_type.
+	b.addGoFunc("wf/executor.go::ActivityExecutor.Run", "Run", "wf/executor.go", "svc")
+	methodStub := &graph.Edge{
+		From: "wf/executor.go::ActivityExecutor.Run",
+		To:   temporalStubPlaceholder("activity", "ActivityName"),
+		Kind: graph.EdgeCalls, FilePath: "wf/executor.go", Line: 10,
+		Meta: map[string]any{
+			"via":                 "temporal.stub",
+			"temporal_kind":       "activity",
+			"temporal_name":       "ActivityName",
+			"temporal_name_field": "ActivityName",
+			"temporal_recv_type":  "ActivityExecutor",
+		},
+	}
+	b.g.AddEdge(methodStub)
+
+	// Executor-field marker edge: construction site.
+	b.addGoFunc("wf/main.go::setup", "setup", "wf/main.go", "svc")
+	markerEdge := &graph.Edge{
+		From: "wf/main.go::setup",
+		To:   "unresolved::temporal-executor::ActivityExecutor::ActivityName",
+		Kind: graph.EdgeCalls, FilePath: "wf/main.go", Line: 5,
+		Meta: map[string]any{
+			"via":            "temporal.executor-field",
+			"executor_type":  "ActivityExecutor",
+			"executor_field": "ActivityName",
+			"executor_value": "ChargeCard",
+		},
+	}
+	b.g.AddEdge(markerEdge)
+
+	// Registered activity.
+	activity := b.addGoFunc("wf/activity.go::ChargeCard", "ChargeCard", "wf/activity.go", "svc")
+	b.addGoRegister("wf/main.go::setup", "activity", "ChargeCard", "wf/main.go")
+
+	resolved := ResolveTemporalCalls(b.g)
+	assert.GreaterOrEqual(t, resolved, 1, "ChargeCard must be resolved")
+	assert.Equal(t, activity.ID, methodStub.To,
+		"the method stub must be rewritten to the registered activity")
+}

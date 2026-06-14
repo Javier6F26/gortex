@@ -783,3 +783,38 @@ func OrderWorkflow(ctx workflow.Context, id string) error {
 	require.Greater(t, len(argNames), 1)
 	assert.Equal(t, "ChargeCard", argNames[1])
 }
+
+func TestGoTemporal_ExecutorFieldDispatch_EmitsStubMeta(t *testing.T) {
+	// The dispatch `e.ActivityName` on a receiver of type ActivityExecutor
+	// must carry temporal_name_field + temporal_recv_type on the stub edge.
+	fix := runGoExtract(t, `package wf
+
+import "go.temporal.io/sdk/workflow"
+
+type ActivityExecutor struct{ ActivityName string }
+
+func (e ActivityExecutor) Run(ctx workflow.Context) {
+    workflow.ExecuteActivity(ctx, e.ActivityName)
+}
+`)
+	stubs := temporalEdgesByVia(fix, "temporal.stub")
+	require.Len(t, stubs, 1)
+	s := stubs[0]
+	assert.Equal(t, "ActivityName", s.Meta["temporal_name_field"])
+	assert.Equal(t, "ActivityExecutor", s.Meta["temporal_recv_type"])
+
+	// Construction site: ActivityExecutor{ActivityName: "ChargeCard"}
+	// should emit a temporal.executor-field marker edge.
+	fix2 := runGoExtract(t, `package wf
+
+func setup() {
+    _ = ActivityExecutor{ActivityName: "ChargeCard"}
+}
+`)
+	markers := temporalEdgesByVia(fix2, "temporal.executor-field")
+	require.Len(t, markers, 1)
+	m := markers[0]
+	assert.Equal(t, "ActivityExecutor", m.Meta["executor_type"])
+	assert.Equal(t, "ActivityName", m.Meta["executor_field"])
+	assert.Equal(t, "ChargeCard", m.Meta["executor_value"])
+}

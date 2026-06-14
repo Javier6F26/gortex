@@ -290,6 +290,11 @@ func ResolveTemporalCalls(g graph.Store) int {
 	// are picked up and resolved by the existing loop below.
 	resolveTemporalWrapperCalls(g)
 
+	// Executor-field pre-pass: rewrite struct-field dispatch stubs to the
+	// literal name supplied at the executor's construction site. Also runs
+	// before the sweep so the rewritten stubs resolve below.
+	resolveTemporalExecutorFields(g)
+
 	// Single sweep over EdgeCalls — the largest edge class — collecting
 	// both the temporal.register edges (index inputs) and the
 	// temporal.stub edges (edges to resolve), instead of scanning it once
@@ -1205,4 +1210,107 @@ func methodsOfJavaTypeFromIndex(t *graph.Node, methodsByReceiver map[string][]*g
 		out = append(out, candidates...)
 	}
 	return out
+}
+
+// resolveTemporalExecutorFields rewrites the dispatch name of a method
+// stub that reads a receiver field to the string literal the struct was
+// constructed with at its (possibly remote) construction site.
+//
+// PURPOSE — when a struct method reads a field to dispatch an activity/workflow
+// (e.g. `workflow.ExecuteActivity(ctx, e.ActivityName)`) and the struct was
+// constructed with a string literal for that field
+// (`ActivityExecutor{ActivityName: "ChargeCard"}`), this pass rewrites the
+// method stub's `temporal_name` from the field name to that literal, so the
+// main resolver sweep lands it on the registered handler. The dispatch happens
+// IN the method, so the call edge stays anchored to the method (get_callers on
+// the activity surfaces the dispatching method, not the construction site).
+// RATIONALE — two-edge join: the method-stub edge carries (recvType, field)
+// from the dispatch site; the executor-field marker edge carries
+// (type, field, value) from the construction site. The join key is
+// `recvType::fieldName`. The rewrite is re-derived from the marker edges on
+// every pass (never relying on the prior pass's mutation surviving), so it is
+// recompute-safe under the full-recompute contract of ResolveTemporalCalls:
+// the parser re-emits the stub with `temporal_name=<field>` on reindex, and
+// this pass re-applies the literal before the main sweep runs. A
+// recvType::field with conflicting construction-site literals is left
+// unresolved — same unique-or-nothing policy as the const-deref join.
+// KEYWORDS — temporal, executor-field, resolver
+func resolveTemporalExecutorFields(g graph.Store) {
+	// Phase 1: collect the method-stub edges that read a receiver field,
+	// grouped by `recvType::field`.
+	type dispatch struct {
+		stubs []*graph.Edge
+	}
+	byField := map[string]*dispatch{}
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.stub" {
+			continue
+		}
+		field, _ := e.Meta["temporal_name_field"].(string)
+		rtype, _ := e.Meta["temporal_recv_type"].(string)
+		kind, _ := e.Meta["temporal_kind"].(string)
+		if field == "" || rtype == "" || kind == "" {
+			continue
+		}
+		key := rtype + "::" + field
+		d := byField[key]
+		if d == nil {
+			d = &dispatch{}
+			byField[key] = d
+		}
+		d.stubs = append(d.stubs, e)
+	}
+	if len(byField) == 0 {
+		return
+	}
+
+	// Phase 2: for each executor-field marker edge, collect the literal
+	// construction value per `recvType::field`. A key with conflicting
+	// values across construction sites is ambiguous and dropped.
+	valByField := map[string]string{}
+	ambiguous := map[string]struct{}{}
+	for e := range g.EdgesByKind(graph.EdgeCalls) {
+		if e == nil || e.Meta == nil || e.From == "" {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "temporal.executor-field" {
+			continue
+		}
+		rtype, _ := e.Meta["executor_type"].(string)
+		field, _ := e.Meta["executor_field"].(string)
+		value, _ := e.Meta["executor_value"].(string)
+		if rtype == "" || field == "" || value == "" {
+			continue
+		}
+		key := rtype + "::" + field
+		if _, ok := byField[key]; !ok {
+			continue
+		}
+		if existing, seen := valByField[key]; seen && existing != value {
+			ambiguous[key] = struct{}{}
+			continue
+		}
+		valByField[key] = value
+	}
+	for key := range ambiguous {
+		delete(valByField, key)
+	}
+
+	// Phase 3: rewrite each matched method stub's dispatch name to the
+	// construction literal. e.To is left for the main sweep to recompute
+	// from the new temporal_name; temporal_name_field / temporal_recv_type
+	// are preserved as the join key for the next full-recompute pass.
+	for key, value := range valByField {
+		d := byField[key]
+		if d == nil {
+			continue
+		}
+		for _, e := range d.stubs {
+			e.Meta["temporal_name"] = value
+			e.Meta["temporal_via_executor"] = true
+		}
+	}
 }
