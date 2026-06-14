@@ -19,6 +19,30 @@ type GuardViolation struct {
 	LayerFrom string `json:"layer_from,omitempty"`
 	LayerTo   string `json:"layer_to,omitempty"`
 	EdgeType  string `json:"edge_type,omitempty"`
+	// Severity tiers the violation for the change_contract verdict mapping:
+	// "error" → refuse, "warn" → warn, "info" → annotate. Stamped from the
+	// rule; empty means the consumer applies its own default.
+	Severity string `json:"severity,omitempty"`
+}
+
+// ruleSeverity normalises a configured severity, defaulting to "warn" so a
+// rule advises until it explicitly opts into blocking ("error").
+func ruleSeverity(s string) string {
+	if s == "" {
+		return "warn"
+	}
+	return strings.ToLower(s)
+}
+
+// matchesAnyGlob reports whether path p matches any of the (possibly **-using)
+// globs — the except-list check shared by the guard and architecture families.
+func matchesAnyGlob(p string, globs []string) bool {
+	for _, g := range globs {
+		if g != "" && globMatch(g, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // EvaluateGuards checks the given guard rules against a set of changed symbol IDs
@@ -60,6 +84,9 @@ func evaluateCoChange(rule config.GuardRule, changedNodes []*graph.Node) []Guard
 	hasTarget := false
 
 	for _, n := range changedNodes {
+		if matchesAnyGlob(n.FilePath, rule.Except) {
+			continue
+		}
 		if strings.HasPrefix(n.FilePath, rule.Source) {
 			hasSource = true
 		}
@@ -80,6 +107,7 @@ func evaluateCoChange(rule config.GuardRule, changedNodes []*graph.Node) []Guard
 			RuleName:    rule.Name,
 			Kind:        "co-change",
 			Description: msg,
+			Severity:    ruleSeverity(rule.Severity),
 		}}
 	}
 
@@ -94,6 +122,9 @@ func evaluateBoundary(g graph.Store, rule config.GuardRule, changedNodes []*grap
 
 	for _, n := range changedNodes {
 		if !strings.HasPrefix(n.FilePath, rule.Source) {
+			continue
+		}
+		if matchesAnyGlob(n.FilePath, rule.Except) {
 			continue
 		}
 
@@ -128,6 +159,8 @@ func evaluateBoundary(g graph.Store, rule config.GuardRule, changedNodes []*grap
 				RuleName:    rule.Name,
 				Kind:        "boundary",
 				Description: fmt.Sprintf("%s: %s %s %s", msg, n.ID, edge.Kind, target.ID),
+				Violator:    n.ID,
+				Severity:    ruleSeverity(rule.Severity),
 			})
 		}
 	}

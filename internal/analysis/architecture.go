@@ -66,6 +66,7 @@ func EvaluateArchitecture(g graph.Store, arch config.ArchitectureConfig, changed
 				LayerFrom: fromLayer,
 				LayerTo:   toLayer,
 				EdgeType:  string(e.Kind),
+				Severity:  ruleSeverity(arch.Severity),
 			})
 		}
 	}
@@ -92,6 +93,9 @@ func evaluateArchRules(g graph.Store, arch config.ArchitectureConfig, changedSym
 			if !ruleApplies(rule, ep, nodeLayer) {
 				continue
 			}
+			if matchesAnyGlob(ep, rule.Except) {
+				continue
+			}
 			label := archRuleLabel(rule)
 			if rule.MaxFanOut > 0 {
 				if fan := distinctCallTargets(g, id); fan > rule.MaxFanOut {
@@ -102,6 +106,7 @@ func evaluateArchRules(g graph.Store, arch config.ArchitectureConfig, changedSym
 							"%s has dependency fan-out %d, exceeding the limit of %d",
 							n.ID, fan, rule.MaxFanOut)),
 						Violator: n.ID,
+						Severity: ruleSeverity(rule.Severity),
 					})
 				}
 			}
@@ -127,6 +132,7 @@ func evaluateArchRules(g graph.Store, arch config.ArchitectureConfig, changedSym
 							"%s calls into %s from outside the permitted set", caller.ID, n.ID)),
 						Violator: caller.ID,
 						EdgeType: string(e.Kind),
+						Severity: ruleSeverity(rule.Severity),
 					})
 				}
 			}

@@ -21,6 +21,13 @@ type GuardRule struct {
 	Source  string `mapstructure:"source"  yaml:"source"`            // package/path prefix
 	Target  string `mapstructure:"target"  yaml:"target"`            // package/path prefix
 	Message string `mapstructure:"message" yaml:"message,omitempty"` // human-readable explanation
+	// Severity tiers the violation: "error" → a change_contract refuse,
+	// "warn" → warn, "info" → annotate. Empty defaults to "warn" so a rule
+	// advises until it explicitly opts into blocking.
+	Severity string `mapstructure:"severity" yaml:"severity,omitempty"`
+	// Except lists path globs exempt from this rule — a source symbol whose
+	// file matches one is never flagged.
+	Except []string `mapstructure:"except" yaml:"except,omitempty"`
 }
 
 type GuardsConfig struct {
@@ -41,6 +48,10 @@ type ArchitectureConfig struct {
 	// fan-out caps and caller-boundary restrictions — evaluated on
 	// top of the layer allow/deny graph.
 	Rules []ArchRule `mapstructure:"rules" yaml:"rules,omitempty"`
+	// Severity tiers the layer allow/deny violations: "error" → a
+	// change_contract refuse, "warn" → warn, "info" → annotate. Empty
+	// defaults to "warn".
+	Severity string `mapstructure:"severity" yaml:"severity,omitempty"`
 }
 
 // ArchRule is one architecture constraint scoped to a layer or a file
@@ -63,6 +74,11 @@ type ArchRule struct {
 	DenyCallersOutside []string `mapstructure:"deny_callers_outside" yaml:"deny_callers_outside,omitempty"`
 	// Message is an optional human-readable explanation.
 	Message string `mapstructure:"message" yaml:"message,omitempty"`
+	// Severity tiers the violation: "error" → a change_contract refuse,
+	// "warn" → warn, "info" → annotate. Empty defaults to "warn".
+	Severity string `mapstructure:"severity" yaml:"severity,omitempty"`
+	// Except lists path globs exempt from this rule.
+	Except []string `mapstructure:"except" yaml:"except,omitempty"`
 }
 
 // ArtifactEntry is one row of the `artifacts:` manifest — a non-code

@@ -346,23 +346,43 @@ func (s *Server) lowerDiffSource(ctx context.Context, req mcp.CallToolRequest) (
 	}, nil
 }
 
-// evaluateChange runs the rule families over the changed set. Commit C wires
-// guards + architecture directly; later work generalises this to a RuleFamily
-// interface (events, taint) with per-rule severity.
+// ruleFamilies returns the change-gate rule families configured for this
+// server, in evaluation order. Each implements analysis.RuleFamily; adding a
+// family (events, taint) is a registration here, not a new pipeline branch.
+func (s *Server) ruleFamilies() []analysis.RuleFamily {
+	fams := []analysis.RuleFamily{
+		analysis.GuardsFamily{Rules: s.guardRules},
+		analysis.ArchitectureFamily{Config: s.architecture},
+	}
+	fams = append(fams, s.extraRuleFamilies()...)
+	return fams
+}
+
+// extraRuleFamilies returns rule families beyond the always-on guards +
+// architecture pair — populated as families (event boundaries, taint) come
+// online.
+func (s *Server) extraRuleFamilies() []analysis.RuleFamily {
+	return nil
+}
+
+// evaluateChange runs every registered rule family over the changed set.
 func (s *Server) evaluateChange(p *prediction) []analysis.GuardViolation {
 	if len(p.changedIDs) == 0 {
 		return nil
 	}
 	var violations []analysis.GuardViolation
-	violations = append(violations, analysis.EvaluateGuards(s.graph, s.guardRules, p.changedIDs)...)
-	violations = append(violations, analysis.EvaluateArchitecture(s.graph, s.architecture, p.changedIDs)...)
+	for _, fam := range s.ruleFamilies() {
+		violations = append(violations, fam.Evaluate(s.graph, p.changedIDs)...)
+	}
 	return violations
 }
 
-// severityForViolation is the default severity for a rule family before
-// per-rule severity tiers exist. Correctness breakage is escalated by the
-// caller; advisory rules warn rather than wall.
+// severityForViolation prefers the severity the rule stamped; absent that it
+// falls back to a conservative family default (advisory rules warn).
 func severityForViolation(v analysis.GuardViolation) string {
+	if v.Severity != "" {
+		return v.Severity
+	}
 	switch v.Kind {
 	case "layer", "boundary", "fan_out", "caller_boundary", "co-change":
 		return "warn"
