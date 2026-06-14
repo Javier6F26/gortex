@@ -192,4 +192,22 @@ func (s *Server) registerChangeContractTools() {
 		),
 		s.handleSymbolsForRanges,
 	)
+
+	s.addTool(
+		mcp.NewTool("change_contract",
+			mcp.WithDescription("Run one change through the full pipeline — LOWER any change source to a changed-symbol set, PREDICT its blast radius, EVALUATE the guard / architecture rules, SCORE the risk, CLASSIFY the change, and EMIT one verdict envelope {verdict: allow|warn|refuse, reasons[], risk, classification, verification_command, stop_condition, edit_strategy}. The analysis advises; a pretooluse hook is the only thing that turns a `refuse` into a block. Sources: a WorkspaceEdit (true speculative simulation with broken-caller detection), a git diff range, an explicit symbol set, or file line-ranges."),
+			mcp.WithString("source", mcp.Description("Change source: auto (default — pick the most specific input present), edit, diff, symbols, or ranges.")),
+			mcp.WithString("workspace_edit", mcp.Description("source=edit: an LSP WorkspaceEdit as a JSON string. Simulated speculatively (disk untouched) for broken callers / implementors and test targets.")),
+			mcp.WithString("symbols", mcp.Description("source=symbols: comma-separated symbol IDs to treat as the changed set.")),
+			mcp.WithString("ranges", mcp.Description("source=ranges: JSON array of {file, start_line, end_line} objects, lowered to enclosing symbols.")),
+			mcp.WithString("path", mcp.Description("source=ranges single-file form: the file whose range to lower (with start_line / end_line).")),
+			mcp.WithNumber("start_line", mcp.Description("1-based start line for the single-file ranges form.")),
+			mcp.WithNumber("end_line", mcp.Description("1-based end line for the single-file ranges form (defaults to start_line).")),
+			mcp.WithString("scope", mcp.Description("source=diff: unstaged (default), staged, all, or compare.")),
+			mcp.WithString("base", mcp.Description("source=diff: base ref for a compare-scope diff (e.g. main); setting it implies scope=compare.")),
+			mcp.WithString("repo", mcp.Description("source=diff: repository selector when more than one repo is tracked.")),
+			mcp.WithString("format", mcp.Description("Output format: json (default), gcx, or toon")),
+		),
+		s.handleChangeContract,
+	)
 }
