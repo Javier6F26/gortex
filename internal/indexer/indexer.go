@@ -4035,11 +4035,16 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 			idx.resolver.InferImplements()
 			idx.resolver.InferOverrides()
 		}
-		// Keep capability edges (reads_env / executes_process /
-		// accesses_field) fresh on incremental reindex — same idempotent
-		// re-derive RunGlobalGraphPasses runs at full index.
-		synthesizeCapabilityEdges(idx.graph)
-		resolver.RunFrameworkSynthesizers(idx.graph)
+		// Capability (reads_env / executes_process / accesses_field) and
+		// framework-dispatch synthesis derive from code structure; skip them
+		// when the reconcile touched only non-code files (docs/config) and
+		// removed nothing — they cannot change any edge in that case, and
+		// eviction already handled any deletion. Same idempotent re-derive
+		// RunGlobalGraphPasses runs at full index.
+		if len(deletedFiles) > 0 || idx.staleFilesAffectDerivedEdges(staleFiles) {
+			synthesizeCapabilityEdges(idx.graph)
+			resolver.RunFrameworkSynthesizers(idx.graph)
+		}
 		// Incremental: synthesize external calls only for the reindexed
 		// files (O(edited files)), not a full-graph recompute.
 		resolver.SynthesizeExternalCallsForFiles(idx.graph, idx.externalCallSynthesisEnabled(), idx.graphFilePaths(staleFiles))

@@ -56,6 +56,25 @@ func (idx *Indexer) affectedTypeSet(graphPaths []string) (types, ifaces map[stri
 	return types, ifaces
 }
 
+// staleFilesAffectDerivedEdges reports whether any stale file carries code
+// structure (functions / methods / types / fields / …) that the capability
+// and framework-dispatch synthesizers derive edges from. When every stale
+// file is non-code — a README, a JSON/YAML config, a data file — those
+// whole-graph passes cannot produce or change any edge, so the caller skips
+// them (the doc/config-edit fast path). Sound by construction: a file with
+// no structural nodes contributes no calls / reads / writes / dispatch
+// sites, which is the only input those synthesizers read.
+func (idx *Indexer) staleFilesAffectDerivedEdges(staleFiles []string) bool {
+	for _, p := range idx.graphFilePaths(staleFiles) {
+		for _, n := range idx.graph.GetFileNodes(p) {
+			if n != nil && isStructuralKind(n.Kind) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // runScopedInferencePasses runs the implements/override inference passes scoped
 // to the types/interfaces a set of stale files can affect. Returns false when
 // scoping is disabled (caller should run the full passes). When nothing
