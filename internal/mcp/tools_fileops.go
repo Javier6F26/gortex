@@ -576,6 +576,15 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	newContentBytes := []byte(newContent)
 	newSHA := gitBlobSHA(newContentBytes)
 
+	allowParseErrors := req.GetBool("allow_parse_errors", false)
+	var gate parseGateResult
+	if parseGateEnabled() {
+		gate = checkParseGate(relPath, content, newContentBytes)
+		if gate.Blocked && !allowParseErrors && !dryRun {
+			return mcp.NewToolResultError(parseGateError(relPath, gate)), nil
+		}
+	}
+
 	if dryRun {
 		// Dry-run: validate everything but skip the write + reindex.
 		// Returns the same shape so callers can branch on dry_run for a
@@ -592,6 +601,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 		if matches.normalized {
 			preview["eol_normalized"] = true
+		}
+		if info := parseGateInfo(gate, allowParseErrors); info != nil {
+			preview["parse_gate"] = info
 		}
 		return s.respondJSONOrTOON(ctx, req, preview)
 	}
@@ -619,6 +631,9 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	if matches.normalized {
 		resp["eol_normalized"] = true
+	}
+	if info := parseGateInfo(gate, allowParseErrors); info != nil {
+		resp["parse_gate"] = info
 	}
 	if health := s.fileSyntaxHealth(relPath, absPath); health != nil {
 		resp["syntax_health"] = health
@@ -675,6 +690,19 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 	contentBytes := []byte(content)
 	newSHA := gitBlobSHA(contentBytes)
 
+	allowParseErrors := req.GetBool("allow_parse_errors", false)
+	var gate parseGateResult
+	if parseGateEnabled() {
+		var priorContent []byte
+		if fileExists {
+			priorContent, _ = os.ReadFile(absPath)
+		}
+		gate = checkParseGate(relPath, priorContent, contentBytes)
+		if gate.Blocked && !allowParseErrors && !dryRun {
+			return mcp.NewToolResultError(parseGateError(relPath, gate)), nil
+		}
+	}
+
 	if dryRun {
 		// Dry-run: skip the write + reindex but report what would happen,
 		// including a unified-diff preview of the change.
@@ -686,7 +714,7 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 				oldContent = string(existing)
 			}
 		}
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		preview := map[string]any{
 			"path":          relPath,
 			"status":        dryStatus,
 			"dry_run":       true,
@@ -694,7 +722,11 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 			"reindexed":     false,
 			"diff":          unifiedDiff(relPath, oldContent, content),
 			"new_sha":       newSHA,
-		})
+		}
+		if info := parseGateInfo(gate, allowParseErrors); info != nil {
+			preview["parse_gate"] = info
+		}
+		return s.respondJSONOrTOON(ctx, req, preview)
 	}
 
 	if err := agents.AtomicWriteFile(absPath, contentBytes, perm); err != nil {
@@ -712,6 +744,9 @@ func (s *Server) handleWriteFile(ctx context.Context, req mcp.CallToolRequest) (
 		"bytes_written": len(contentBytes),
 		"reindexed":     reindexed,
 		"new_sha":       newSHA,
+	}
+	if info := parseGateInfo(gate, allowParseErrors); info != nil {
+		resp["parse_gate"] = info
 	}
 	if health := s.fileSyntaxHealth(relPath, absPath); health != nil {
 		resp["syntax_health"] = health

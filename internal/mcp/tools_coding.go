@@ -145,6 +145,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence instead of requiring uniqueness (default: false)")),
 			mcp.WithBoolean("dry_run", mcp.Description("Validate the replacement and report what would change without writing (default: false)")),
 			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
+			mcp.WithBoolean("allow_parse_errors", mcp.Description("Bypass the pre-write parse gate. By default an edit that would introduce new tree-sitter parse errors (leaving the file more syntactically broken than before) is refused before the atomic write; set true to write anyway.")),
 		),
 		s.handleEditFile,
 	)
@@ -156,6 +157,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("content", mcp.Required(), mcp.Description("Full file content")),
 			mcp.WithBoolean("dry_run", mcp.Description("Report would_create / would_overwrite without writing (default: false)")),
 			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, write_file refuses to overwrite a divergent on-disk file (or write to a path the caller expected to exist but no longer does). Drift guard against silent clobbers on existing files; leave empty when creating a new file.")),
+			mcp.WithBoolean("allow_parse_errors", mcp.Description("Bypass the pre-write parse gate. By default a write that would introduce new tree-sitter parse errors (relative to the prior content, or any error in a brand-new file) is refused before the atomic write; set true to write anyway.")),
 		),
 		s.handleWriteFile,
 	)
