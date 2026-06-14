@@ -31,7 +31,7 @@ const (
 // SupportedHooks enumerates the hook names that InstallHook accepts.
 // Anything else returns an error so we don't silently scatter our
 // markers into hooks we haven't audited.
-var SupportedHooks = []string{"post-commit", "post-merge"}
+var SupportedHooks = []string{"post-commit", "post-merge", "post-checkout"}
 
 func isSupportedHook(name string) bool {
 	for _, h := range SupportedHooks {
@@ -103,6 +103,17 @@ func (o InstallOpts) withDefaults() InstallOpts {
 // marker block. The body is a `#!/bin/sh` snippet that runs every
 // enabled action and tolerates failures so the hook always completes.
 func hookCommands(hook string, opts InstallOpts) []string {
+	if hook == "post-checkout" {
+		// post-checkout fires on branch switch / clone / file checkout.
+		// Touch the notify file so a running gortex daemon reconciles the
+		// new working-tree state immediately (sub-second) instead of waiting
+		// out its poll interval. Harmless when no daemon is running.
+		return []string{
+			"# Force a running gortex daemon to reconcile after a checkout.",
+			"mkdir -p .gortex 2>/dev/null || true",
+			"touch .gortex/reindex.notify 2>/dev/null || true",
+		}
+	}
 	var cmds []string
 	cmds = append(cmds, fmt.Sprintf("# Auto-regenerate gortex artefacts on %s.", hook))
 	cmds = append(cmds, "# Failures are tolerated so the hook always completes.")

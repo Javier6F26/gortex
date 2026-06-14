@@ -42,6 +42,11 @@ import (
 type Store struct {
 	db *sql.DB
 
+	// dbPath is the on-disk SQLite file path, retained for size
+	// telemetry — the WAL high-water mark surfaces in daemon_health so a
+	// runaway -wal is observable rather than silently filling the disk.
+	dbPath string
+
 	// writeMu serialises every mutation. SQLite serialises writers
 	// internally; doing the same on the Go side turns SQLITE_BUSY
 	// contention into clean lock-wait and keeps the conformance
@@ -182,7 +187,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("sqlite edges_external index: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, dbPath: path}
 	// Initialise the bundle cache at construction so its pointer is
 	// never written after Open — concurrent SearchSymbolBundles reads
 	// and SetBundleFingerprints writes then race only on the cache's

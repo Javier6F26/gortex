@@ -1814,6 +1814,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	var skippedLarge int
 	var skippedBytes int64
 	var skippedBySize []skippedFile
+	var parseFailedFiles []skippedFile
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -2189,6 +2190,16 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						errMu.Unlock()
 					}
 					if result == nil {
+						// A full-index parse failure that produced no nodes:
+						// record it for a skip-node post-pass so the file
+						// stays visible instead of vanishing. (The live-modify
+						// path never reaches here — it keeps a file's prior
+						// nodes through a transient parse failure.)
+						if err != nil {
+							errMu.Lock()
+							parseFailedFiles = append(parseFailedFiles, skippedFile{relPath: relPath, lang: lang, cause: err.Error()})
+							errMu.Unlock()
+						}
 						continue
 					}
 					if skipped && len(result.Nodes) > 0 {
@@ -2330,6 +2341,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	// they stay visible in the graph with skip telemetry attached
 	// instead of vanishing silently.
 	idx.emitSizeSkipNodes(skippedBySize)
+	idx.emitParseFailedSkipNodes(parseFailedFiles)
 
 	// Populate fileMtimes for all detected files. Keyed through
 	// relKey so the mtime map agrees with the graph's file-node keys
@@ -2593,16 +2605,18 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 
 	// Persist the Merkle baseline so the next incremental pass diffs
 	// against content hashes rather than re-indexing the whole repo.
+	workspaceFP := ""
 	if idx.merkleEnabled() {
 		paths := make([]string, len(files))
 		for i, wf := range files {
 			paths[i] = wf.path
 		}
-		idx.saveMerkleBaseline(absRoot, paths)
+		workspaceFP = idx.saveMerkleBaseline(absRoot, paths)
 	}
 	idx.indexGen.Add(1) // invalidate the trigram search cache
 
 	nodes, edges := idx.repoNodeEdgeCount()
+	idx.persistRepoIndexState(diskTarget, absRoot, workspaceFP, nodes, edges)
 	result = &IndexResult{
 		NodeCount:        nodes,
 		EdgeCount:        edges,
@@ -4021,11 +4035,16 @@ func (idx *Indexer) IncrementalReindexPaths(root string, paths []string) (*Index
 			idx.resolver.InferImplements()
 			idx.resolver.InferOverrides()
 		}
-		// Keep capability edges (reads_env / executes_process /
-		// accesses_field) fresh on incremental reindex — same idempotent
-		// re-derive RunGlobalGraphPasses runs at full index.
-		synthesizeCapabilityEdges(idx.graph)
-		resolver.RunFrameworkSynthesizers(idx.graph)
+		// Capability (reads_env / executes_process / accesses_field) and
+		// framework-dispatch synthesis derive from code structure; skip them
+		// when the reconcile touched only non-code files (docs/config) and
+		// removed nothing — they cannot change any edge in that case, and
+		// eviction already handled any deletion. Same idempotent re-derive
+		// RunGlobalGraphPasses runs at full index.
+		if len(deletedFiles) > 0 || idx.staleFilesAffectDerivedEdges(staleFiles) {
+			synthesizeCapabilityEdges(idx.graph)
+			resolver.RunFrameworkSynthesizers(idx.graph)
+		}
 		// Incremental: synthesize external calls only for the reindexed
 		// files (O(edited files)), not a full-graph recompute.
 		resolver.SynthesizeExternalCallsForFiles(idx.graph, idx.externalCallSynthesisEnabled(), idx.graphFilePaths(staleFiles))
@@ -6285,5 +6304,28 @@ func (idx *Indexer) IsStale(relPath string) bool {
 		return true
 	}
 
+	return info.ModTime().UnixNano() != storedMtime
+}
+
+// IsTrackedStale reports whether a file that IS in the index has changed
+// on disk since it was indexed. Unlike IsStale it returns false for an
+// untracked path (a new file, a non-source path, or a path-form
+// mismatch), so a freshness signal never false-positives on a file the
+// index legitimately does not cover.
+func (idx *Indexer) IsTrackedStale(relPath string) bool {
+	relPath = pathkey.Normalize(filepath.ToSlash(relPath))
+
+	idx.mtimeMu.RLock()
+	storedMtime, ok := idx.fileMtimes[relPath]
+	idx.mtimeMu.RUnlock()
+	if !ok {
+		return false
+	}
+
+	absPath := filepath.Join(idx.rootPath, filepath.FromSlash(relPath))
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return false
+	}
 	return info.ModTime().UnixNano() != storedMtime
 }

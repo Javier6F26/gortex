@@ -412,6 +412,16 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			if stateCapture.graph != nil {
 				out["graph_nodes"] = stateCapture.graph.NodeCount()
 				out["graph_edges"] = stateCapture.graph.EdgeCount()
+				if r, ok := stateCapture.graph.(graph.DBStatReporter); ok {
+					dbBytes, walBytes := r.DBStats()
+					if dbBytes > 0 || walBytes > 0 {
+						out["db_bytes"] = dbBytes
+						out["wal_bytes"] = walBytes
+						if dbBytes > 0 {
+							out["wal_db_ratio"] = float64(walBytes) / float64(dbBytes)
+						}
+					}
+				}
 			}
 			return out
 		})

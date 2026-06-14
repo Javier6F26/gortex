@@ -249,6 +249,7 @@ func quarantineResult(relPath, lang, reason string) *parser.ExtractionResult {
 			FilePath: relPath,
 			Language: lang,
 			Meta: map[string]any{
+				"skip_reason": "parse_panic",
 				"parse_error": reason,
 				"quarantined": true,
 			},

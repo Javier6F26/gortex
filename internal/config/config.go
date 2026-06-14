@@ -355,6 +355,15 @@ type Config struct {
 	// re-include something an outer layer excluded.
 	Exclude []string `mapstructure:"exclude" yaml:"exclude,omitempty"`
 
+	// Include force-indexes paths an outer layer (notably the repo
+	// .gitignore) excludes — the dedicated, readable counterpart to
+	// hand-writing `!pattern` negations in Exclude. Each entry is appended
+	// last as a gitignore `!pattern` re-include, so it wins over the
+	// builtin / .gitignore / global / repo exclude layers. Use it for a
+	// vendored or generated tree you nonetheless want in the graph
+	// (e.g. Pods/, a per-customer customer/ directory).
+	Include []string `mapstructure:"include" yaml:"include,omitempty"`
+
 	// RuleFiles are paths (or globs) to TOML files of user-defined
 	// domain-extractor rules. Each rule is a tree-sitter pattern that
 	// becomes a registered detector surfaced through `analyze

@@ -32,7 +32,7 @@ func TestBuildAndDiff_DetectsContentChange(t *testing.T) {
 	write(t, root, "pkg/util.go", "package pkg\n")
 	files := []string{"main.go", "pkg/util.go"}
 
-	t1 := Build(root, files, nil)
+	t1 := Build(root, files, nil, nil)
 	if len(t1.Files) != 2 {
 		t.Fatalf("expected 2 files, got %d", len(t1.Files))
 	}
@@ -40,7 +40,7 @@ func TestBuildAndDiff_DetectsContentChange(t *testing.T) {
 	write(t, root, "main.go", "package main\n\nfunc main() {}\n")
 	bumpMtime(t, filepath.Join(root, "main.go"))
 
-	t2 := Build(root, files, t1)
+	t2 := Build(root, files, t1, nil)
 	changed, removed := t2.Diff(t1)
 	if len(removed) != 0 {
 		t.Errorf("no removals expected, got %v", removed)
@@ -55,10 +55,10 @@ func TestDiff_MtimeTouchIsNotAChange(t *testing.T) {
 	write(t, root, "a.go", "package a\n")
 	files := []string{"a.go"}
 
-	t1 := Build(root, files, nil)
+	t1 := Build(root, files, nil, nil)
 	bumpMtime(t, filepath.Join(root, "a.go")) // touch: new mtime, same content
 
-	t2 := Build(root, files, t1)
+	t2 := Build(root, files, t1, nil)
 	changed, _ := t2.Diff(t1)
 	if len(changed) != 0 {
 		t.Errorf("a touch with unchanged content must not be a change, got %v", changed)
@@ -72,10 +72,10 @@ func TestDiff_AddAndRemove(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "keep.go", "package main\n")
 	write(t, root, "gone.go", "package main\n")
-	t1 := Build(root, []string{"keep.go", "gone.go"}, nil)
+	t1 := Build(root, []string{"keep.go", "gone.go"}, nil, nil)
 
 	write(t, root, "new.go", "package main\n")
-	t2 := Build(root, []string{"keep.go", "new.go"}, t1)
+	t2 := Build(root, []string{"keep.go", "new.go"}, t1, nil)
 
 	changed, removed := t2.Diff(t1)
 	if len(changed) != 1 || changed[0] != "new.go" {
@@ -90,7 +90,7 @@ func TestDiff_NilPriorYieldsEverything(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "a.go", "x")
 	write(t, root, "b.go", "y")
-	t1 := Build(root, []string{"a.go", "b.go"}, nil)
+	t1 := Build(root, []string{"a.go", "b.go"}, nil, nil)
 
 	changed, removed := t1.Diff(nil)
 	if len(changed) != 2 {
@@ -106,11 +106,11 @@ func TestSubtreeChanged(t *testing.T) {
 	write(t, root, "a/x.go", "package a\n")
 	write(t, root, "b/y.go", "package b\n")
 	files := []string{"a/x.go", "b/y.go"}
-	t1 := Build(root, files, nil)
+	t1 := Build(root, files, nil, nil)
 
 	write(t, root, "a/x.go", "package a\n\nfunc X() {}\n")
 	bumpMtime(t, filepath.Join(root, "a", "x.go"))
-	t2 := Build(root, files, t1)
+	t2 := Build(root, files, t1, nil)
 
 	if !t2.SubtreeChanged("a", t1) {
 		t.Error("subtree a changed and must report so")
@@ -123,7 +123,7 @@ func TestSubtreeChanged(t *testing.T) {
 func TestSaveLoad_RoundTrip(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "main.go", "package main\n")
-	t1 := Build(root, []string{"main.go"}, nil)
+	t1 := Build(root, []string{"main.go"}, nil, nil)
 
 	path := filepath.Join(t.TempDir(), "nested", "merkle.json")
 	if err := t1.Save(path); err != nil {
@@ -150,5 +150,69 @@ func TestLoad_MissingFile(t *testing.T) {
 	}
 	if loaded != nil {
 		t.Error("missing file must yield a nil tree")
+	}
+}
+
+func TestDiff_SaltChangeReExtractsOnlyThatLanguage(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "a.go", "package a\n")
+	write(t, root, "b.py", "x = 1\n")
+	files := []string{"a.go", "b.py"}
+
+	// Baseline: the .go file is salted at version 1, .py carries no salt.
+	saltV1 := func(rel string) string {
+		if filepath.Ext(rel) == ".go" {
+			return "go@1"
+		}
+		return ""
+	}
+	t1 := Build(root, files, nil, saltV1)
+
+	// Bump only the .go extractor version; file content and mtime are
+	// untouched, so the only signal is the salt.
+	saltV2 := func(rel string) string {
+		if filepath.Ext(rel) == ".go" {
+			return "go@2"
+		}
+		return ""
+	}
+	t2 := Build(root, files, t1, saltV2)
+
+	changed, removed := t2.Diff(t1)
+	if len(removed) != 0 {
+		t.Errorf("no removals expected, got %v", removed)
+	}
+	if len(changed) != 1 || changed[0] != "a.go" {
+		t.Errorf("a salt bump must re-flag only the salted language, changed = %v, want [a.go]", changed)
+	}
+	if t2.Root == t1.Root {
+		t.Error("root must move when a file's salt changes")
+	}
+	// The content hash was reused (no re-read) even though the leaf moved.
+	if t2.Files["a.go"].Hash != t1.Files["a.go"].Hash {
+		t.Error("content hash must be reused across a salt-only change")
+	}
+}
+
+func TestSalt_EmptyEqualsLegacyContentOnly(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "a.go", "package a\n")
+	files := []string{"a.go"}
+
+	// An empty-salt build, a nil-saltFor build, and the legacy
+	// content-only tree must all produce the same root — adopting salts
+	// costs nothing until a version is actually bumped.
+	emptySalt := func(string) string { return "" }
+	withEmpty := Build(root, files, nil, emptySalt)
+	withNil := Build(root, files, nil, nil)
+	if withEmpty.Root != withNil.Root {
+		t.Errorf("empty salt must equal nil saltFor: %s vs %s", withEmpty.Root, withNil.Root)
+	}
+	if withEmpty.Files["a.go"].Salt != "" {
+		t.Errorf("empty salt must be stored empty, got %q", withEmpty.Files["a.go"].Salt)
+	}
+	changed, _ := withEmpty.Diff(withNil)
+	if len(changed) != 0 {
+		t.Errorf("empty-salt and nil-salt trees must diff clean, got %v", changed)
 	}
 }

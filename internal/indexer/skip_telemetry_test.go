@@ -1,6 +1,7 @@
 package indexer
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,4 +130,58 @@ func TestIndexFile_SizeSkip(t *testing.T) {
 	n := g.GetNode("huge.go")
 	require.NotNil(t, n)
 	require.Equal(t, true, n.Meta["skipped_due_to_size"])
+}
+
+// TestSkipNodes_CarryUnifiedReason verifies every skip-node shape stamps a
+// uniform skip_reason so index_health can roll them up by reason.
+func TestSkipNodes_CarryUnifiedReason(t *testing.T) {
+	cases := []struct {
+		name   string
+		node   *graph.Node
+		reason string
+	}{
+		{"size", sizeSkipNode(skippedFile{relPath: "big.go", lang: "go", size: 1 << 20}, 1024), "size"},
+		{"timeout", timeoutSkipResult("slow.go", "go", 500).Nodes[0], "timeout"},
+		{"minified", minifiedSkipResult("bundle.js", "javascript", "long-lines").Nodes[0], "minified"},
+		{"parse_failed", parseFailedSkipResult("bad.go", "go", errors.New("boom")).Nodes[0], "parse_failed"},
+		{"parse_panic", quarantineResult("crash.go", "go", "panic").Nodes[0], "parse_panic"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, graph.KindFile, c.node.Kind)
+			require.Equal(t, c.reason, c.node.Meta["skip_reason"])
+		})
+	}
+}
+
+func TestParseFailedSkipResult_RecordsError(t *testing.T) {
+	r := parseFailedSkipResult("bad.go", "go", errors.New("unexpected token"))
+	require.Len(t, r.Nodes, 1)
+	n := r.Nodes[0]
+	require.Equal(t, "bad.go", n.FilePath)
+	require.Equal(t, "bad.go", n.Name)
+	require.Equal(t, "parse_failed", n.Meta["skip_reason"])
+	require.Equal(t, "unexpected token", n.Meta["parse_error"])
+}
+
+// TestIndex_ParseFailedSkipTelemetry verifies a file that fails to parse
+// during a FULL index stays visible as a parse_failed skip node instead of
+// vanishing — the safe counterpart to the live-modify path, which keeps a
+// file's prior nodes through a transient failure (see
+// TestPatchGraphModify_ParseFailureKeepsPriorNodes).
+func TestIndex_ParseFailedSkipTelemetry(t *testing.T) {
+	idx, ext := newToggleIndexer(t)
+	ext.setFail(true) // every extraction returns an error
+
+	dir := t.TempDir()
+	idx.SetRootPath(dir)
+	writeFile(t, filepath.Join(dir, "broken.fk"), "this does not parse")
+
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	n := idx.graph.GetNode("broken.fk")
+	require.NotNil(t, n, "a full-index parse failure must leave a visible skip node")
+	require.Equal(t, graph.KindFile, n.Kind)
+	require.Equal(t, "parse_failed", n.Meta["skip_reason"])
 }

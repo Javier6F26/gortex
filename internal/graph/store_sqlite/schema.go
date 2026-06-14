@@ -86,6 +86,24 @@ CREATE TABLE IF NOT EXISTS file_mtimes (
     PRIMARY KEY (repo_prefix, file_path)
 ) WITHOUT ROWID;
 
+-- repo_index_state records per-repo freshness provenance written at the
+-- end of a (re)index: the git revision + dirty flag the graph reflects,
+-- the Merkle workspace fingerprint (Tree.Root) that gates global-pass
+-- short-circuiting, node/edge counts for the index-plausibility baseline,
+-- and the JSON per-language extractor versions that produced the graph.
+-- One row per repo_prefix; WITHOUT ROWID — the PK index IS the table,
+-- like file_mtimes / clone_shingles.
+CREATE TABLE IF NOT EXISTS repo_index_state (
+    repo_prefix        TEXT PRIMARY KEY,
+    indexed_sha        TEXT NOT NULL DEFAULT '',
+    dirty              INTEGER NOT NULL DEFAULT 0,
+    indexed_at         INTEGER NOT NULL DEFAULT 0,
+    workspace_fp       TEXT NOT NULL DEFAULT '',
+    node_count         INTEGER NOT NULL DEFAULT 0,
+    edge_count         INTEGER NOT NULL DEFAULT 0,
+    extractor_versions TEXT NOT NULL DEFAULT ''
+) WITHOUT ROWID;
+
 -- clone_shingles is the per-symbol MinHash shingle-set sidecar. Each
 -- function/method node's []uint64 shingle set is stored as a little-
 -- endian BLOB (8 bytes/elem) keyed by node_id so the maintained clone-

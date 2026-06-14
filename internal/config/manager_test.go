@@ -126,6 +126,25 @@ index:
 	assert.Contains(t, got, "legacy/**", "legacy index.exclude must still be honoured")
 }
 
+func TestEffectiveExclude_IncludeForceReincludesGitignored(t *testing.T) {
+	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
+	require.NoError(t, err)
+
+	repoDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gitignore"), []byte("Pods/\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".gortex.yaml"),
+		[]byte("include:\n  - \"Pods/\"\n"), 0644))
+	cm.LoadWorkspaceConfig("repo-inc", repoDir)
+
+	got := cm.EffectiveExclude("repo-inc")
+	assert.Contains(t, got, "Pods/", "the .gitignore exclude is present")
+	assert.Equal(t, "!Pods/", got[len(got)-1], "the force-include negation lands last so it wins")
+
+	// The compiled matcher must NOT exclude the force-included tree.
+	assert.False(t, excludes.New(got).MatchRel("Pods/"),
+		"a force-included gitignored dir must be re-included")
+}
+
 func TestEffectiveExclude_FallsBackToBuiltin(t *testing.T) {
 	cm, err := NewConfigManager("/tmp/nonexistent-gortex-test-cm/config.yaml")
 	require.NoError(t, err)

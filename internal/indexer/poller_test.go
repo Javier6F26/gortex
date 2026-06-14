@@ -263,7 +263,7 @@ func TestPoller_StartedAndStoppedWithWatcher(t *testing.T) {
 // root), or Stop was already called once.
 func TestPoller_StopIdempotent(t *testing.T) {
 	// Inert poller — no indexer, Start is a no-op.
-	inert := &Poller{done: make(chan struct{}), stopped: make(chan struct{})}
+	inert := &Poller{done: make(chan struct{})}
 	inert.Start()
 	inert.Stop()
 	inert.Stop() // second call must not panic or block
@@ -292,6 +292,44 @@ func TestPoller_StopIdempotent(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("poller Stop deadlocked")
+	}
+}
+
+// TestPoller_NotifyFileTriggersReconcile verifies touching the notify file
+// forces an immediate reconcile via the fast notify loop, independent of the
+// (much longer) adaptive poll interval.
+func TestPoller_NotifyFileTriggersReconcile(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "main.go"), "package main\n\nfunc Main() {}\n")
+
+	g := graph.New()
+	idx := newTestIndexer(g)
+	idx.SetRootPath(dir)
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	w, err := NewWatcher(idx, config.WatchConfig{Enabled: true, DebounceMs: 10}, zap.NewNop())
+	require.NoError(t, err)
+	p := newPoller(w, idx, zap.NewNop())
+	require.NotEmpty(t, p.notifyPath, "notify path must default under .gortex")
+	require.NoError(t, os.MkdirAll(filepath.Dir(p.notifyPath), 0o755))
+	require.NoError(t, os.WriteFile(p.notifyPath, []byte("x"), 0o644))
+
+	swept := make(chan int, 8)
+	p.swept = func(n int) { swept <- n }
+	p.Start()
+	defer p.Stop()
+
+	// Touch the notify file with a strictly later mtime.
+	time.Sleep(20 * time.Millisecond)
+	future := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(p.notifyPath, future, future))
+
+	select {
+	case <-swept:
+		// the notify loop forced a reconcile within the fast cadence
+	case <-time.After(3 * time.Second):
+		t.Fatal("notify-file touch did not trigger a reconcile within 3s")
 	}
 }
 

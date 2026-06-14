@@ -91,10 +91,10 @@ func init() {
 // SupportedHooks list rather than importing it so the CLI surface
 // stays decoupled from the install package's internals.
 func supportedHook(name string) error {
-	if name == "post-commit" || name == "post-merge" {
+	if name == "post-commit" || name == "post-merge" || name == "post-checkout" {
 		return nil
 	}
-	return fmt.Errorf("unsupported hook %q (supported: post-commit, post-merge)", name)
+	return fmt.Errorf("unsupported hook %q (supported: post-commit, post-merge, post-checkout)", name)
 }
 
 func runGithookInstall(cmd *cobra.Command, args []string) error {

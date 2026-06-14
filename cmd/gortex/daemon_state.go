@@ -423,9 +423,12 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	logger.Info("daemon: warmup phase done",
 		zap.String("phase", "parallel_parse"),
 		zap.Duration("elapsed", time.Since(phaseStart)))
+	parseStats := progress.Stats(string(progress.PhaseParse), phaseStart, len(repos), len(repos))
 	publishReadinessPhase(state, "parallel_parse_done", false, map[string]any{
 		"tracked_repos": len(repos),
 		"elapsed_ms":    time.Since(phaseStart).Milliseconds(),
+		"elapsed_human": parseStats.Elapsed,
+		"repos_per_sec": parseStats.ItemsPerSec,
 	})
 
 	// Warm-restart fast path. When the reconcile loop above re-indexed

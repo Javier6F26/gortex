@@ -26,6 +26,24 @@ import (
 type FileNode struct {
 	Hash  string `json:"hash"`
 	Mtime int64  `json:"mtime"`
+	// Salt is an opaque per-file discriminator mixed into the leaf
+	// hash. It carries the language extractor version, so a file whose
+	// content is unchanged but whose extractor logic was upgraded still
+	// diffs as changed and is re-extracted. An empty Salt reproduces the
+	// pre-salt leaf exactly, so adopting salts is zero-cost and fully
+	// back-compatible until a language's extractor version is bumped.
+	Salt string `json:"salt,omitempty"`
+}
+
+// leaf is the value mixed into the parent directory's hash for this
+// file. An empty Salt yields exactly the content hash, so trees built
+// before salting — and files whose extractor is at the baseline
+// version — hash identically.
+func (n FileNode) leaf() string {
+	if n.Salt == "" {
+		return n.Hash
+	}
+	return n.Hash + "\x01" + n.Salt
 }
 
 // Tree is a content-addressed Merkle tree of one repository snapshot.
@@ -46,7 +64,20 @@ type Tree struct {
 // not re-read, so a rebuild reads only the mtime-changed files. A file
 // that cannot be read is recorded with an empty hash so a diff always
 // flags it.
-func Build(rootAbs string, relPaths []string, prior *Tree) *Tree {
+//
+// saltFor, when non-nil, returns a per-file salt (e.g. the language
+// extractor version) mixed into the leaf hash. A salt change re-flags a
+// file as changed even when its content and mtime did not move, so an
+// extractor-logic upgrade re-extracts the affected files — without a
+// re-read, since the content hash is reused. A nil saltFor (or one
+// returning "") leaves every leaf equal to its content hash.
+func Build(rootAbs string, relPaths []string, prior *Tree, saltFor func(rel string) string) *Tree {
+	salt := func(rel string) string {
+		if saltFor == nil {
+			return ""
+		}
+		return saltFor(rel)
+	}
 	t := &Tree{
 		Files: make(map[string]FileNode, len(relPaths)),
 		Dirs:  make(map[string]string),
@@ -56,22 +87,25 @@ func Build(rootAbs string, relPaths []string, prior *Tree) *Tree {
 		abs := filepath.Join(rootAbs, filepath.FromSlash(rel))
 		info, err := os.Stat(abs)
 		if err != nil {
-			t.Files[rel] = FileNode{} // unreadable — always treated as changed
+			t.Files[rel] = FileNode{Salt: salt(rel)} // unreadable — always treated as changed
 			continue
 		}
 		mtime := info.ModTime().UnixNano()
 		if prior != nil {
 			if pn, ok := prior.Files[rel]; ok && pn.Mtime == mtime && pn.Hash != "" {
-				t.Files[rel] = pn // mtime unchanged — reuse the hash, skip the read
+				// mtime unchanged — reuse the content hash, skip the read,
+				// but re-stamp the salt so an extractor-version bump still
+				// surfaces in the leaf.
+				t.Files[rel] = FileNode{Hash: pn.Hash, Mtime: mtime, Salt: salt(rel)}
 				continue
 			}
 		}
 		h, err := hashFile(abs)
 		if err != nil {
-			t.Files[rel] = FileNode{Mtime: mtime}
+			t.Files[rel] = FileNode{Mtime: mtime, Salt: salt(rel)}
 			continue
 		}
-		t.Files[rel] = FileNode{Hash: h, Mtime: mtime}
+		t.Files[rel] = FileNode{Hash: h, Mtime: mtime, Salt: salt(rel)}
 	}
 	t.aggregate()
 	return t
@@ -114,7 +148,7 @@ func (t *Tree) aggregate() {
 	for rel, node := range t.Files {
 		d := parentDir(rel)
 		markDir(d)
-		files[d] = append(files[d], baseName(rel)+"\x00f"+node.Hash)
+		files[d] = append(files[d], baseName(rel)+"\x00f"+node.leaf())
 	}
 
 	// Deepest directories first, so a directory's child-dir hashes are
@@ -161,7 +195,7 @@ func (t *Tree) Diff(prior *Tree) (changed, removed []string) {
 	}
 	for rel, node := range t.Files {
 		pn, ok := prior.Files[rel]
-		if !ok || pn.Hash != node.Hash || node.Hash == "" {
+		if !ok || pn.leaf() != node.leaf() || node.Hash == "" {
 			changed = append(changed, rel)
 		}
 	}

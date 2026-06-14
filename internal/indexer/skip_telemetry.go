@@ -43,12 +43,15 @@ func safeExtract(ext parser.Extractor, relPath string, src []byte) (result *pars
 	return ext.Extract(relPath, src)
 }
 
-// skippedFile records a file dropped by the size cap, kept so a
-// synthetic telemetry node can be emitted after the parse pass.
+// skippedFile records a file dropped by the size cap or a full-index
+// parse failure, kept so a synthetic telemetry node can be emitted after
+// the parse pass. cause carries the extraction error for parse failures
+// (empty for size skips).
 type skippedFile struct {
 	relPath string
 	lang    string
 	size    int64
+	cause   string
 }
 
 // walkedFile records a file that survived the walk-time filters,
@@ -104,6 +107,7 @@ func timeoutSkipResult(relPath, lang string, budgetMS int) *parser.ExtractionRes
 			FilePath: relPath,
 			Language: lang,
 			Meta: map[string]any{
+				"skip_reason":            "timeout",
 				"skipped_due_to_timeout": true,
 				"extract_budget_ms":      budgetMS,
 			},
@@ -124,6 +128,7 @@ func minifiedSkipResult(relPath, lang, reason string) *parser.ExtractionResult {
 			FilePath: relPath,
 			Language: lang,
 			Meta: map[string]any{
+				"skip_reason":             "minified",
 				"skipped_due_to_minified": true,
 				"minified_reason":         reason,
 			},
@@ -141,10 +146,39 @@ func sizeSkipNode(sf skippedFile, maxSize int64) *graph.Node {
 		FilePath: sf.relPath,
 		Language: sf.lang,
 		Meta: map[string]any{
+			"skip_reason":         "size",
 			"skipped_due_to_size": true,
 			"file_size_bytes":     sf.size,
 			"max_file_size_bytes": maxSize,
 		},
+	}
+}
+
+// parseFailedSkipResult builds a synthetic single-node result for a file
+// whose extractor returned an error that did not panic or time out — an
+// ordinary parse failure that would otherwise be dropped silently.
+// Keeping the file in the graph as a skip node makes "why is this symbol
+// missing" answerable (index_health rolls the skip reasons up), and the
+// Merkle reconcile retries it automatically once its content changes or
+// its language's extractor version is bumped — so no separate retry
+// ledger is needed.
+func parseFailedSkipResult(relPath, lang string, cause error) *parser.ExtractionResult {
+	reason := "parse failed"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	return &parser.ExtractionResult{
+		Nodes: []*graph.Node{{
+			ID:       relPath,
+			Kind:     graph.KindFile,
+			Name:     filepath.Base(relPath),
+			FilePath: relPath,
+			Language: lang,
+			Meta: map[string]any{
+				"skip_reason": "parse_failed",
+				"parse_error": reason,
+			},
+		}},
 	}
 }
 
@@ -159,6 +193,30 @@ func (idx *Indexer) emitSizeSkipNodes(skipped []skippedFile) {
 	nodes := make([]*graph.Node, 0, len(skipped))
 	for _, sf := range skipped {
 		nodes = append(nodes, sizeSkipNode(sf, maxSize))
+	}
+	idx.applyRepoPrefix(nodes, nil)
+	idx.graph.AddBatch(nodes, nil)
+}
+
+// emitParseFailedSkipNodes adds a synthetic file node for every file that
+// failed extraction during a FULL index and produced no nodes, so the
+// file stays visible (index_health rolls it up under skip_reason
+// "parse_failed") instead of vanishing silently. Only the full-index path
+// uses this: the live-modify path deliberately keeps a file's prior nodes
+// through a transient mid-edit parse failure, so it must never be fed
+// here. The Merkle reconcile retries a failed file when its content or
+// extractor version changes.
+func (idx *Indexer) emitParseFailedSkipNodes(failed []skippedFile) {
+	if len(failed) == 0 {
+		return
+	}
+	nodes := make([]*graph.Node, 0, len(failed))
+	for _, sf := range failed {
+		var cause error
+		if sf.cause != "" {
+			cause = errors.New(sf.cause)
+		}
+		nodes = append(nodes, parseFailedSkipResult(sf.relPath, sf.lang, cause).Nodes...)
 	}
 	idx.applyRepoPrefix(nodes, nil)
 	idx.graph.AddBatch(nodes, nil)

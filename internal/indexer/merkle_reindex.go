@@ -40,7 +40,7 @@ func (idx *Indexer) merkleStaleFiles(rootAbs string, diskFiles map[string]bool) 
 	}
 	treePath := merkleTreeFile(rootAbs)
 	prior, _ := merkle.Load(treePath)
-	tree := merkle.Build(rootAbs, rels, prior)
+	tree := merkle.Build(rootAbs, rels, prior, merkleSaltFor)
 	changed, _ := tree.Diff(prior)
 	if err := tree.Save(treePath); err != nil {
 		idx.logger.Warn("indexer: merkle tree save failed", zap.Error(err))
@@ -54,16 +54,19 @@ func (idx *Indexer) merkleStaleFiles(rootAbs string, diskFiles map[string]bool) 
 
 // saveMerkleBaseline builds and persists the Merkle tree after a full
 // index, so the next incremental pass diffs against a content-addressed
-// baseline rather than treating every file as changed.
-func (idx *Indexer) saveMerkleBaseline(rootAbs string, absFiles []string) {
+// baseline rather than treating every file as changed. It returns the
+// tree root — the workspace fingerprint recorded in repo_index_state and
+// used to short-circuit the global derivation passes when nothing moved.
+func (idx *Indexer) saveMerkleBaseline(rootAbs string, absFiles []string) string {
 	rels := make([]string, 0, len(absFiles))
 	for _, f := range absFiles {
 		if rel, err := filepath.Rel(rootAbs, f); err == nil {
 			rels = append(rels, filepath.ToSlash(rel))
 		}
 	}
-	tree := merkle.Build(rootAbs, rels, nil)
+	tree := merkle.Build(rootAbs, rels, nil, merkleSaltFor)
 	if err := tree.Save(merkleTreeFile(rootAbs)); err != nil {
 		idx.logger.Warn("indexer: merkle baseline save failed", zap.Error(err))
 	}
+	return tree.Root
 }

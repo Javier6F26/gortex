@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -227,6 +228,23 @@ func (cm *ConfigManager) EffectiveExclude(repoPrefix string) []string {
 		if len(ws.Exclude) == 0 {
 			out = append(out, ws.Index.Exclude...)
 			out = append(out, ws.Watch.Exclude...)
+		}
+	}
+
+	// Force-include last so it wins: each Include entry becomes a gitignore
+	// `!pattern` re-include over every exclude layer above (builtin,
+	// .gitignore, global, repo). This is the readable form of hand-writing
+	// negations, for a vendored/generated tree you want indexed anyway.
+	if ws != nil {
+		for _, inc := range ws.Include {
+			inc = strings.TrimSpace(inc)
+			if inc == "" {
+				continue
+			}
+			if !strings.HasPrefix(inc, "!") {
+				inc = "!" + inc
+			}
+			out = append(out, inc)
 		}
 	}
 	return out

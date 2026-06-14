@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +37,14 @@ type Poller struct {
 
 	interval time.Duration
 	done     chan struct{}
-	stopped  chan struct{}
+	wg       sync.WaitGroup
+
+	// notifyPath is the sentinel file an external trigger (a post-checkout
+	// git hook, or an agent that just wrote files) touches to force an
+	// immediate reconcile; notifyMtime is the last mtime the fast notify
+	// loop observed. Empty notifyPath disables the fast loop.
+	notifyPath  string
+	notifyMtime int64
 
 	mu          sync.Mutex
 	lastSHA     string
@@ -115,10 +123,10 @@ func newPoller(w *Watcher, idx *Indexer, logger *zap.Logger) *Poller {
 		indexer:  idx,
 		rootPath: root,
 		logger:   logger,
-		interval: pollInterval(nodeCount),
-		lastSHA:  lastSHA,
-		done:     make(chan struct{}),
-		stopped:  make(chan struct{}),
+		interval:   pollInterval(nodeCount),
+		lastSHA:    lastSHA,
+		done:       make(chan struct{}),
+		notifyPath: notifyFilePath(root),
 	}
 }
 
@@ -133,7 +141,19 @@ func (p *Poller) Start() {
 	p.mu.Lock()
 	p.loopStarted = true
 	p.mu.Unlock()
+	p.wg.Add(1)
 	go p.loop()
+	if p.notifyPath != "" {
+		// Seed the baseline mtime so the first observed change is a real
+		// touch, not the file's pre-existing state at startup.
+		if info, err := os.Stat(p.notifyPath); err == nil {
+			p.mu.Lock()
+			p.notifyMtime = info.ModTime().UnixNano()
+			p.mu.Unlock()
+		}
+		p.wg.Add(1)
+		go p.notifyLoop()
+	}
 }
 
 // Stop halts the poller. Idempotent — safe whether Start launched the
@@ -151,12 +171,12 @@ func (p *Poller) Stop() {
 	}
 	close(p.done)
 	if started {
-		<-p.stopped
+		p.wg.Wait()
 	}
 }
 
 func (p *Poller) loop() {
-	defer close(p.stopped)
+	defer p.wg.Done()
 	t := time.NewTicker(p.interval)
 	defer t.Stop()
 	if p.logger != nil {
@@ -326,4 +346,59 @@ func pollerDiffNameStatus(ctx context.Context, repoPath, oldSHA, newSHA string) 
 		return nil, err
 	}
 	return parseDiffNameStatus(out), nil
+}
+
+// notifyFileInterval is the fast poll cadence for the agent-triggered
+// notify file — tight enough for sub-second re-index latency, cheap enough
+// (one stat per tick) to run alongside the adaptive poller.
+const notifyFileInterval = 250 * time.Millisecond
+
+// notifyFilePath resolves the sentinel file an external trigger (a
+// post-checkout hook, or an agent that just wrote files) touches to force
+// an immediate reconcile. GORTEX_NOTIFY_FILE overrides the per-repo default
+// of <root>/.gortex/reindex.notify.
+func notifyFilePath(root string) string {
+	if env := strings.TrimSpace(os.Getenv("GORTEX_NOTIFY_FILE")); env != "" {
+		return env
+	}
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, ".gortex", "reindex.notify")
+}
+
+// notifyLoop watches the notify file's mtime on a tight cadence and runs a
+// full poll cycle (HEAD + filesystem sweep) the instant it is touched, so an
+// agent or git hook can force a sub-second reconcile instead of waiting out
+// the adaptive interval. A missing file is a cheap no-op until it appears;
+// the file's first sighting only seeds the baseline (it is not itself a
+// trigger).
+func (p *Poller) notifyLoop() {
+	defer p.wg.Done()
+	t := time.NewTicker(notifyFileInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-p.done:
+			return
+		case <-t.C:
+			info, err := os.Stat(p.notifyPath)
+			if err != nil {
+				continue
+			}
+			mt := info.ModTime().UnixNano()
+			p.mu.Lock()
+			prev := p.notifyMtime
+			p.notifyMtime = mt
+			p.mu.Unlock()
+			if prev == 0 || mt == prev {
+				continue
+			}
+			if p.logger != nil {
+				p.logger.Debug("watcher: notify file touched; forcing reconcile",
+					zap.String("notify", p.notifyPath))
+			}
+			p.poll()
+		}
+	}
 }
