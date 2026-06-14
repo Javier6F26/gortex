@@ -537,6 +537,11 @@ func (s *Server) handleEditFile(ctx context.Context, req mcp.CallToolRequest) (*
 
 	matches := findEOLMatches(fileStr, oldString)
 	count := matches.count
+	if expected := req.GetInt("expected_occurrences", 0); expected > 0 && count != expected {
+		return mcp.NewToolResultError(fmt.Sprintf(
+			"expected_occurrences=%d but old_string matches %d location(s) — refusing the edit so a wrong-cardinality replacement can't slip through. Adjust the fragment or the expected count.",
+			expected, count)), nil
+	}
 	if count == 0 {
 		return mcp.NewToolResultError(
 			"old_string not found in file. Use get_file_summary or get_editing_context to inspect the current content."), nil

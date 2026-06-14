@@ -146,6 +146,7 @@ func (s *Server) registerCodingTools() {
 			mcp.WithString("old_string", mcp.Required(), mcp.Description("Exact text to replace (must be unique unless replace_all=true). CRLF/LF line-ending differences against the file are tolerated.")),
 			mcp.WithString("new_string", mcp.Required(), mcp.Description("Replacement text")),
 			mcp.WithBoolean("replace_all", mcp.Description("Replace every occurrence instead of requiring uniqueness (default: false)")),
+			mcp.WithNumber("expected_occurrences", mcp.Description("Guard: refuse the edit unless old_string matches exactly this many locations. Pairs with replace_all to assert the cardinality of a sweep (e.g. expected_occurrences:7 replace_all:true). Omit or 0 to disable the check.")),
 			mcp.WithBoolean("dry_run", mcp.Description("Validate the replacement and report what would change without writing (default: false)")),
 			mcp.WithString("base_sha", mcp.Description("Optional git blob SHA-1 the caller observed at read time. When set, the call refuses to write if the on-disk file's current SHA differs (drift guard against silent clobbers).")),
 			mcp.WithBoolean("allow_parse_errors", mcp.Description("Bypass the pre-write parse gate. By default an edit that would introduce new tree-sitter parse errors (leaving the file more syntactically broken than before) is refused before the atomic write; set true to write anyway.")),
