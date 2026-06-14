@@ -2744,6 +2744,31 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		langCoverage[lang] = true
 	}
 
+	// Skip rollup: count synthetic file nodes by skip_reason so an agent
+	// can see WHY a file is missing from the graph (size / timeout /
+	// minified / parse_failed / parse_panic) instead of guessing.
+	skipped := map[string]int{}
+	for n := range s.graph.NodesByKind(graph.KindFile) {
+		if n == nil || n.Meta == nil {
+			continue
+		}
+		if reason, _ := n.Meta["skip_reason"].(string); reason != "" {
+			skipped[reason]++
+		}
+	}
+
+	// Density plausibility: even a trivial source file yields a file node
+	// plus at least one symbol, so a populated graph averaging barely more
+	// than one node per file means extraction produced little beyond the
+	// file shells — a broken grammar or an aborted reindex. A soft warning,
+	// never a reject.
+	var nodesPerFile float64
+	fileNodes := stats.ByKind[string(graph.KindFile)]
+	if fileNodes > 0 {
+		nodesPerFile = math.Round(float64(stats.TotalNodes)/float64(fileNodes)*100) / 100
+	}
+	densityDegenerate := fileNodes >= 5 && nodesPerFile > 0 && nodesPerFile < 1.2
+
 	lastIndexTime := s.indexer.LastIndexTime()
 	lastIndexStr := ""
 	if !lastIndexTime.IsZero() {
@@ -2769,6 +2794,14 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 			recommendation = msg + " " + recommendation
 		}
 	}
+	if densityDegenerate {
+		msg := "Index has files but almost no symbol nodes (nodes_per_file < 1.2) — extraction produced little beyond file shells. Re-index with index_repository path \".\"; if it persists the language grammar may be broken or the files unsupported."
+		if recommendation == "" {
+			recommendation = msg
+		} else {
+			recommendation = msg + " " + recommendation
+		}
+	}
 
 	result := map[string]any{
 		"health_score":         healthScore,
@@ -2779,6 +2812,10 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		"node_count":           stats.TotalNodes,
 		"edge_count":           stats.TotalEdges,
 		"edges_ok":             edgesOK,
+		"nodes_per_file":       nodesPerFile,
+	}
+	if len(skipped) > 0 {
+		result["skipped"] = skipped
 	}
 	if len(parseErrors) > 0 {
 		result["parse_failures"] = parseErrors
