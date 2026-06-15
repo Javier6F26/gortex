@@ -1914,7 +1914,7 @@ func (e *GoExtractor) emitConst(m parser.QueryResult, filePath, fileID string, s
 	// const-identifier dispatch name to its value across files. Computed
 	// constants (iota, expressions) carry no literal and are skipped.
 	if kind == graph.KindConstant {
-		if v, ok := goConstLiteralValue(def.Node, src); ok {
+		if v, ok := goConstLiteralValue(def.Node, name, src); ok {
 			result.ConstValues = append(result.ConstValues, parser.ConstValue{
 				NodeID: id, FilePath: filePath, Value: v,
 			})
@@ -1990,30 +1990,48 @@ func goFuncSingleReturnLiteral(declNode *sitter.Node, src []byte) (string, bool)
 	return "", false
 }
 
-// goConstLiteralValue extracts the literal value of a single-spec
-// const_spec (`const X = "literal"` / `const X = 42`) from the spec's
-// value field, when that value is a string or numeric literal. Returns
-// ("", false) for computed / multi-value / non-literal specs.
-func goConstLiteralValue(constSpec *sitter.Node, src []byte) (string, bool) {
+// goConstLiteralValue extracts the literal value of a const_spec
+// (`const X = "literal"` / `const X = 42`) from the spec's value field,
+// when that value is a string or numeric literal. Returns ("", false)
+// for computed / multi-value / non-literal specs.
+//
+// constSpec may be the const_spec itself or the enclosing
+// const_declaration. For a grouped block (`const ( A = ...; B = ... )`)
+// the declaration holds several specs; name selects the matching one so
+// each member's value is captured independently (not just single-spec
+// blocks). For a single-spec block name still selects correctly.
+func goConstLiteralValue(constSpec *sitter.Node, name string, src []byte) (string, bool) {
 	if constSpec == nil {
 		return "", false
 	}
 	spec := constSpec
 	if spec.Type() != "const_spec" {
-		// def captures the const_declaration; descend to the lone spec.
-		var found *sitter.Node
+		// def captures the const_declaration; pick the spec whose name
+		// field matches the const being emitted (grouped blocks hold
+		// several), falling back to the lone spec when there is exactly
+		// one and no name match (defensive).
+		var found, only *sitter.Node
 		count := 0
 		for i := 0; i < int(spec.NamedChildCount()); i++ {
 			c := spec.NamedChild(i)
-			if c != nil && c.Type() == "const_spec" {
+			if c == nil || c.Type() != "const_spec" {
+				continue
+			}
+			count++
+			only = c
+			if nameNode := c.ChildByFieldName("name"); nameNode != nil && nameNode.Content(src) == name {
 				found = c
-				count++
+				break
 			}
 		}
-		if count != 1 || found == nil {
+		switch {
+		case found != nil:
+			spec = found
+		case count == 1 && only != nil:
+			spec = only
+		default:
 			return "", false
 		}
-		spec = found
 	}
 	valueList := spec.ChildByFieldName("value")
 	if valueList == nil || valueList.NamedChildCount() != 1 {
