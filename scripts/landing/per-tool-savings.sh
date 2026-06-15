@@ -31,9 +31,9 @@ generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 TOTAL_CALLS="$(echo "$SAVINGS_JSON" | jq -r '.calls_counted')"
 TOTAL_SAVED="$(echo "$SAVINGS_JSON" | jq -r '.tokens_saved')"
 TOTAL_RETURNED="$(echo "$SAVINGS_JSON" | jq -r '.tokens_returned')"
-HEADLINE_COST_OPUS="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-opus-4"]')"
-HEADLINE_COST_SONNET="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-sonnet-4"]')"
-HEADLINE_COST_HAIKU="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-haiku-4.5"]')"
+HEADLINE_COST_OPUS="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-opus-4-8"]')"
+HEADLINE_COST_SONNET="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-sonnet-4-6"]')"
+HEADLINE_COST_HAIKU="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["claude-haiku-4-5"]')"
 HEADLINE_COST_GPT4O="$(echo "$SAVINGS_JSON" | jq -r '.cost_avoided_usd["gpt-4o"]')"
 EFFICIENCY="$(echo "$SAVINGS_JSON" | jq -r 'if .tokens_returned > 0 then ((.tokens_saved + .tokens_returned) / .tokens_returned) else 0 end')"
 
@@ -52,9 +52,9 @@ cat > "$OUT" <<EOF
 | Tokens saved (vs naive file reads) | **$TOTAL_SAVED** |
 | Tokens returned | $TOTAL_RETURNED |
 | Efficiency ratio | $(printf '%.1fx' "$EFFICIENCY") |
-| USD avoided · claude-opus-4 | **\$$(printf '%.2f' "$HEADLINE_COST_OPUS")** |
-| USD avoided · claude-sonnet-4 | \$$(printf '%.2f' "$HEADLINE_COST_SONNET") |
-| USD avoided · claude-haiku-4.5 | \$$(printf '%.2f' "$HEADLINE_COST_HAIKU") |
+| USD avoided · claude-opus-4-8 | **\$$(printf '%.2f' "$HEADLINE_COST_OPUS")** |
+| USD avoided · claude-sonnet-4-6 | \$$(printf '%.2f' "$HEADLINE_COST_SONNET") |
+| USD avoided · claude-haiku-4-5 | \$$(printf '%.2f' "$HEADLINE_COST_HAIKU") |
 | USD avoided · gpt-4o | \$$(printf '%.2f' "$HEADLINE_COST_GPT4O") |
 
 ## By language

@@ -6,22 +6,27 @@ import (
 )
 
 func TestCostAvoided_Known(t *testing.T) {
-	// Claude Opus 4: $15 / 1M input → 1M tokens saved = $15.
-	got := CostAvoided(1_000_000, "claude-opus-4")
-	if got < 14.99 || got > 15.01 {
-		t.Errorf("CostAvoided(1M, claude-opus-4) = %.4f, want ≈15.00", got)
+	// Claude Opus 4.8: $5 / 1M input → 1M tokens saved = $5.
+	got := CostAvoided(1_000_000, "claude-opus-4-8")
+	if got < 4.99 || got > 5.01 {
+		t.Errorf("CostAvoided(1M, claude-opus-4-8) = %.4f, want ≈5.00", got)
 	}
 	// GPT-4o-mini: $0.15 / 1M → 100k tokens saved = $0.015.
 	got = CostAvoided(100_000, "gpt-4o-mini")
 	if got < 0.0149 || got > 0.0151 {
 		t.Errorf("CostAvoided(100k, gpt-4o-mini) = %.4f, want ≈0.015", got)
 	}
+	// DeepSeek chat: $0.27 / 1M → 1M tokens saved = $0.27 (cross-provider).
+	got = CostAvoided(1_000_000, "deepseek-chat")
+	if got < 0.2699 || got > 0.2701 {
+		t.Errorf("CostAvoided(1M, deepseek-chat) = %.4f, want ≈0.27", got)
+	}
 }
 
 func TestCostAvoided_FuzzyMatch(t *testing.T) {
-	// Substring matches so "opus" resolves to claude-opus-4.
+	// Substring matches so "opus" resolves to a claude-opus-4-x row.
 	if CostAvoided(1_000_000, "opus") == 0 {
-		t.Error("CostAvoided with fuzzy model name 'opus' should resolve to claude-opus-4")
+		t.Error("CostAvoided with fuzzy model name 'opus' should resolve to a claude-opus row")
 	}
 	// Unrelated name → 0.
 	if got := CostAvoided(1_000_000, "nonexistent-model"); got != 0 {
@@ -40,7 +45,12 @@ func TestCostAvoided_ZeroOrNegative(t *testing.T) {
 
 func TestCostAvoidedAll_IncludesDefaults(t *testing.T) {
 	all := CostAvoidedAll(1_000_000)
-	wantModels := []string{"claude-opus-4", "claude-sonnet-4", "claude-haiku-4.5", "gpt-4o", "gpt-4o-mini"}
+	wantModels := []string{
+		"claude-mythos-preview", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5",
+		"gpt-5.5", "gpt-5.4", "gpt-4.1", "gpt-4o", "o4-mini",
+		"gemini-3.1-pro", "gemini-3.5-flash", "gemini-2.5-pro",
+		"deepseek-chat", "deepseek-reasoner",
+	}
 	for _, m := range wantModels {
 		if _, ok := all[m]; !ok {
 			t.Errorf("CostAvoidedAll missing model %q", m)

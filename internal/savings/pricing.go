@@ -16,18 +16,43 @@ type Price struct {
 }
 
 // defaultPricing is the built-in table used when no override is configured.
-// Input-token list prices in USD per 1M tokens, current as of Opus 4.8 /
-// Fable 5. Tokens saved are billed at the input rate. Users can override via
+// Input-token list prices in USD per 1M tokens, covering the providers
+// gortex's LLM features talk to: Anthropic, OpenAI (also reachable via
+// Azure), Google Gemini and DeepSeek. Bedrock-hosted Anthropic/OpenAI ids
+// resolve through findPrice's substring match. Tokens saved are billed at
+// the input rate. Users can override the whole table via
 // GORTEX_MODEL_PRICING_JSON='[{"model":"...","usd_per_m_input":N},...]'.
 var defaultPricing = []Price{
-	{"claude-fable-5", 10.00},
+	// Anthropic — claude-opus-4-8 is the headline default (see savings.go);
+	// claude-mythos-preview is the current preview flagship.
+	{"claude-mythos-preview", 10.00},
 	{"claude-opus-4-8", 5.00},
 	{"claude-opus-4-7", 5.00},
 	{"claude-opus-4-6", 5.00},
 	{"claude-sonnet-4-6", 3.00},
 	{"claude-haiku-4-5", 1.00},
+	// OpenAI (also reachable via Azure).
+	{"gpt-5.5", 5.00},
+	{"gpt-5.4", 2.50},
+	{"gpt-5.4-mini", 0.75},
+	{"gpt-5.4-nano", 0.20},
+	{"gpt-4.1", 2.00},
+	{"gpt-4.1-mini", 0.40},
+	{"gpt-4.1-nano", 0.10},
 	{"gpt-4o", 2.50},
 	{"gpt-4o-mini", 0.15},
+	{"o3", 2.00},
+	{"o4-mini", 1.10},
+	// Google Gemini — gemini-2.5-pro is gortex's Gemini default.
+	{"gemini-3.1-pro", 2.00},
+	{"gemini-3.5-flash", 1.50},
+	{"gemini-3.1-flash-lite", 0.25},
+	{"gemini-2.5-pro", 1.25},
+	{"gemini-2.5-flash", 0.30},
+	{"gemini-2.5-flash-lite", 0.10},
+	// DeepSeek — deepseek-chat / deepseek-reasoner are gortex's configured ids.
+	{"deepseek-chat", 0.27},
+	{"deepseek-reasoner", 0.42},
 }
 
 // Pricing returns the active pricing table — default unless overridden by
