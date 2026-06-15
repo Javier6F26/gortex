@@ -3,7 +3,6 @@ package lsp
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/lspuri"
 	"github.com/zzet/gortex/internal/semantic"
 )
 
@@ -747,14 +747,7 @@ func (p *Provider) DiagnosticsSnapshot() map[string][]Diagnostic {
 // uriToAbsPath converts a file:// URI to an absolute filesystem path.
 // Returns "" for non-file URIs or malformed input.
 func uriToAbsPath(uri string) string {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return ""
-	}
-	if parsed.Scheme != "" && parsed.Scheme != "file" {
-		return ""
-	}
-	return parsed.Path
+	return lspuri.URIToAbsPath(uri)
 }
 
 // openDocument sends textDocument/didOpen for a file. Tracks version
@@ -1459,10 +1452,9 @@ func (p *Provider) subtypes(item TypeHierarchyItem) ([]TypeHierarchyItem, error)
 	return items, nil
 }
 
-// pathToURI converts a file path to a file:// URI.
+// pathToURI converts a file path to a file:// URI (Windows-correct).
 func pathToURI(path string) string {
-	absPath, _ := filepath.Abs(path)
-	return "file://" + absPath
+	return lspuri.PathToURI(path)
 }
 
 // buildWorkspaceFolders returns the LSP workspaceFolders list — the
@@ -1493,21 +1485,9 @@ func buildWorkspaceFolders(primary string, additional []string) []WorkspaceFolde
 	return folders
 }
 
-// uriToPath converts a file:// URI to a repo-relative path.
+// uriToPath converts a file:// URI to a repo-relative path (Windows-correct).
 func uriToPath(uri, repoRoot string) string {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return ""
-	}
-	absPath := parsed.Path
-	if !strings.HasPrefix(absPath, repoRoot) {
-		return ""
-	}
-	rel, err := filepath.Rel(repoRoot, absPath)
-	if err != nil {
-		return ""
-	}
-	return filepath.ToSlash(rel)
+	return lspuri.URIToRepoRel(uri, repoRoot)
 }
 
 // identifierColumn returns the 0-based column of the first

@@ -45,6 +45,7 @@ import (
 	"github.com/zzet/gortex/internal/analysis"
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/lspuri"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 )
@@ -823,13 +824,13 @@ func normaliseEditURI(raw string) string {
 	if raw == "" {
 		return ""
 	}
-	if stripped, ok := strings.CutPrefix(raw, "file://"); ok {
-		// Drop the optional `localhost` host part. uriToAbsPath
-		// handles malformed input gracefully so any failure falls
-		// back to the raw string.
-		stripped = strings.TrimPrefix(stripped, "localhost")
-		if stripped != "" {
-			return stripped
+	if strings.HasPrefix(raw, "file://") {
+		// lspuri.URIToAbsPath parses the URI: drops the optional host
+		// (e.g. localhost), decodes %xx, and fixes the Windows
+		// drive-letter / separator shape. Any parse failure falls back
+		// to the raw string.
+		if p := lspuri.URIToAbsPath(raw); p != "" {
+			return p
 		}
 	}
 	return raw

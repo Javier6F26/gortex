@@ -11,6 +11,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/zzet/gortex/internal/lspuri"
 	"github.com/zzet/gortex/internal/semantic/lsp"
 )
 
@@ -257,15 +258,10 @@ func hashDiagnostics(diags []lsp.Diagnostic) string {
 }
 
 // pathToFileURI converts an absolute filesystem path to a file:// URI.
-// Centralised so push payloads match the URI shape MCP clients expect.
+// Centralised (via internal/lspuri) so push payloads match the URI shape
+// MCP clients expect — Windows-correct (drive letter + separators).
 func pathToFileURI(absPath string) string {
-	if absPath == "" {
-		return ""
-	}
-	if absPath[0] == '/' {
-		return "file://" + absPath
-	}
-	return "file:///" + absPath
+	return lspuri.PathToURI(absPath)
 }
 
 // registerDiagnosticsTools wires the subscribe/unsubscribe MCP tools.

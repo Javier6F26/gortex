@@ -2,7 +2,6 @@ package lsp
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,6 +10,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/zzet/gortex/internal/lspuri"
 )
 
 // ResolverHelper adapts one or more *Provider instances for resolve-
@@ -395,11 +396,7 @@ func uriToAbsLocalPath(uri string) string {
 		return ""
 	}
 	if strings.HasPrefix(uri, "file://") {
-		parsed, err := url.Parse(uri)
-		if err != nil {
-			return ""
-		}
-		return parsed.Path
+		return lspuri.URIToAbsPath(uri)
 	}
 	// Some servers (rare) reply with a bare absolute path.
 	if filepath.IsAbs(uri) {
