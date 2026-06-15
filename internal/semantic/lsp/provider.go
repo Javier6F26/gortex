@@ -1160,11 +1160,6 @@ func (p *Provider) getSource(repoRoot, relPath string) []byte {
 	return p.sourceCache[filepath.Join(repoRoot, relPath)]
 }
 
-// hover queries hover info for a position.
-func (p *Provider) hover(repoRoot, relPath string, line, col int) (*HoverResult, error) {
-	return p.hoverWith(p.client, repoRoot, relPath, line, col)
-}
-
 // hoverWith issues textDocument/hover against an explicit client.
 // PURPOSE — race-free per-goroutine hover during concurrent enrichment.
 // RATIONALE — enrichment goroutines pass the client they captured

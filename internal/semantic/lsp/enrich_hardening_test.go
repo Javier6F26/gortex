@@ -61,14 +61,6 @@ func (s *instrumentedServer) stats() (peak, opens, closes int) {
 	return s.maxOpen, s.totalOpen, s.totalClose
 }
 
-func (s *instrumentedServer) notifications() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, len(s.notifLog))
-	copy(out, s.notifLog)
-	return out
-}
-
 func (s *instrumentedServer) recordOpen(uri string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,7 +201,7 @@ func seedRepo(t *testing.T, n int) (string, graph.Store) {
 	g := graph.New()
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("F%d", i)
-		sb.WriteString(fmt.Sprintf("func %s() {}\n", name))
+		fmt.Fprintf(&sb, "func %s() {}\n", name)
 		g.AddNode(&graph.Node{
 			ID: "main.go::" + name, Kind: graph.KindFunction, Name: name,
 			FilePath: "main.go", StartLine: 3 + i, EndLine: 3 + i, Language: "go",
