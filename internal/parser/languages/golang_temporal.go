@@ -734,7 +734,7 @@ func goTemporalEnvDefaultName(callNode *sitter.Node, name string, src []byte) (s
 	resolvedOK := false
 	envReadSeen := false
 	for _, a := range assigns {
-		rhs := goAssignRHSExpr(a)
+		rhs := goAssignRHSExpr(a, name, src)
 		switch {
 		case rhs == nil:
 			resolved, resolvedOK, envReadSeen = "", false, false
@@ -795,10 +795,11 @@ func goTemporalVarTrace(callNode *sitter.Node, name string, src []byte) (litDef,
 		}
 		if (n.Type() == "short_var_declaration" || n.Type() == "assignment_statement") &&
 			n.StartByte() < limit && goAssignHasTarget(n, name, src) {
-			if r := goAssignRHSExpr(n); r != nil {
-				rhs = r
-				assigns++
-			}
+			// Count every assignment to `name` (the single-assignment guard
+			// below relies on the total); rhs is the index-matched value, which
+			// may be nil for a multi-value call.
+			assigns++
+			rhs = goAssignRHSExpr(n, name, src)
 		}
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			walk(n.NamedChild(i))
@@ -1016,15 +1017,39 @@ func goAssignHasTarget(assign *sitter.Node, name string, src []byte) bool {
 	return false
 }
 
-// goAssignRHSExpr returns the first right-hand expression of an
-// assignment (the value for a single-target assign, or the lone call for
-// a multi-return `a, b := f()`), or nil.
-func goAssignRHSExpr(assign *sitter.Node) *sitter.Node {
+// goAssignRHSExpr returns the right-hand expression assigned to `name`,
+// matching the RHS position to the matched LHS target position for a
+// parallel assignment (`a, name := x, "v"` → "v"). A single RHS shared by
+// multiple targets is a multi-value call (`a, b := f()`) with no per-target
+// literal to trace, so it returns nil. Returns nil when `name` is not a
+// target of the assignment.
+func goAssignRHSExpr(assign *sitter.Node, name string, src []byte) *sitter.Node {
+	left := assign.ChildByFieldName("left")
 	right := assign.ChildByFieldName("right")
-	if right == nil || right.NamedChildCount() == 0 {
+	if left == nil || right == nil || right.NamedChildCount() == 0 {
 		return nil
 	}
-	return right.NamedChild(0)
+	idx := -1
+	for i := 0; i < int(left.NamedChildCount()); i++ {
+		c := left.NamedChild(i)
+		if c != nil && c.Type() == "identifier" && c.Content(src) == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return nil
+	}
+	// Parallel assignment: take the RHS at the matched target position.
+	if left.NamedChildCount() == right.NamedChildCount() {
+		return right.NamedChild(idx)
+	}
+	// Single target, single value.
+	if left.NamedChildCount() == 1 && right.NamedChildCount() == 1 {
+		return right.NamedChild(0)
+	}
+	// Multi-value call (`a, b := f()`): no per-target literal to trace.
+	return nil
 }
 
 // goIsEnvRead reports whether a call_expression is `os.Getenv(...)` or
