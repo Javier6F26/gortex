@@ -124,26 +124,51 @@ func normalizeToolMode(mode string) string {
 // unrecognised preset name is logged and downgraded to the full surface
 // (fail-open — a typo never silently strands an agent with no tools).
 func newToolPolicy(cfg ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
-	preset := strings.ToLower(strings.TrimSpace(cfg.Preset))
-	set, denyMutating, known := builtinToolPresetSet(preset)
-	if !known {
-		if logger != nil {
-			logger.Warn("unknown MCP tool preset; serving the full surface",
-				zap.String("preset", cfg.Preset),
-				zap.Strings("known", builtinPresetNames))
-		}
-		preset, set, denyMutating = "full", nil, false
-	}
-	if preset == "" || preset == "all" {
-		preset = "full"
-	}
+	rawPreset := strings.ToLower(strings.TrimSpace(cfg.Preset))
 	allow := toToolSet(cfg.Allow)
 	deny := toToolSet(cfg.Deny)
-	active := set != nil || denyMutating || len(allow) > 0 || len(deny) > 0
+
+	var (
+		explicit     map[string]bool
+		denyMutating bool
+		label        string
+	)
+	switch {
+	case rawPreset == "":
+		// No named preset. An explicit allow list (e.g. --tools
+		// search_symbols,edit_file) IS the surface; otherwise the full
+		// surface, minus any deny.
+		if len(allow) > 0 {
+			explicit = allow
+			label = "custom"
+		} else {
+			label = "full"
+		}
+	default:
+		set, dm, known := builtinToolPresetSet(rawPreset)
+		if known {
+			explicit = set
+			denyMutating = dm
+			label = rawPreset
+			if label == "all" {
+				label = "full"
+			}
+		} else {
+			// A typo'd preset fails open to the full surface (never
+			// strands an agent with no tools); allow deltas stay additive.
+			if logger != nil {
+				logger.Warn("unknown MCP tool preset; serving the full surface",
+					zap.String("preset", cfg.Preset),
+					zap.Strings("known", builtinPresetNames))
+			}
+			label = "full"
+		}
+	}
+	active := explicit != nil || denyMutating || len(allow) > 0 || len(deny) > 0
 	return &toolPolicy{
-		preset:       preset,
+		preset:       label,
 		mode:         normalizeToolMode(cfg.Mode),
-		explicit:     set,
+		explicit:     explicit,
 		denyMutating: denyMutating,
 		allow:        allow,
 		deny:         deny,
@@ -202,11 +227,30 @@ func toolPolicyConfigFromEnv() (ToolPolicyConfig, bool) {
 	return cfg, true
 }
 
-// parseToolSpec parses a spec like "edit,+find_files,-write_file": the
-// first bare token is the preset; +name adds an allow delta, -name a
-// deny delta.
+// isKnownPresetName reports whether name is one of the built-in preset
+// names (full / readonly / edit / nav + aliases).
+func isKnownPresetName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return false
+	}
+	_, _, known := builtinToolPresetSet(name)
+	return known
+}
+
+// parseToolSpec parses a spec into a ToolPolicyConfig. The grammar is:
+//
+//   - the first bare token that names a built-in preset is the preset
+//     (full / readonly / edit / nav); any further bare tokens are added
+//     to the allow set — so "edit,find_files" means the edit preset plus
+//     find_files;
+//   - if the first bare token is NOT a known preset, every bare token is
+//     an explicit tool name — so "search_symbols,edit_file" means exactly
+//     those two tools (an expert allow list, no preset);
+//   - +name / -name are always allow / deny deltas.
 func parseToolSpec(spec string) ToolPolicyConfig {
 	var cfg ToolPolicyConfig
+	presetTaken := false
 	for _, tok := range strings.Split(spec, ",") {
 		tok = strings.TrimSpace(tok)
 		if tok == "" {
@@ -217,10 +261,11 @@ func parseToolSpec(spec string) ToolPolicyConfig {
 			cfg.Allow = append(cfg.Allow, strings.TrimPrefix(tok, "+"))
 		case strings.HasPrefix(tok, "-"):
 			cfg.Deny = append(cfg.Deny, strings.TrimPrefix(tok, "-"))
+		case !presetTaken && isKnownPresetName(tok):
+			cfg.Preset = tok
+			presetTaken = true
 		default:
-			if cfg.Preset == "" {
-				cfg.Preset = tok
-			}
+			cfg.Allow = append(cfg.Allow, tok)
 		}
 	}
 	return cfg
@@ -260,6 +305,40 @@ func mergeToolPolicyEnv(base ToolPolicyConfig) ToolPolicyConfig {
 // env overrides applied on top.
 func resolveToolPolicy(base ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
 	return newToolPolicy(mergeToolPolicyEnv(base), logger)
+}
+
+// ToolSurface is a resolved tool-visibility predicate usable outside the
+// MCP server — the stdio proxy uses it to filter a daemon's tools/list
+// and gate calls per connection, so a client can scope its own pipe
+// (gortex mcp --tools / GORTEX_TOOLS) while the daemon stays full. Built
+// from the same ToolPolicyConfig + GORTEX_TOOLS env as the server.
+type ToolSurface struct{ p *toolPolicy }
+
+// NewToolSurface resolves a config (with the GORTEX_TOOLS env overrides
+// applied) into a queryable surface.
+func NewToolSurface(base ToolPolicyConfig, logger *zap.Logger) *ToolSurface {
+	return &ToolSurface{p: resolveToolPolicy(base, logger)}
+}
+
+// Active reports whether the surface restricts anything at all.
+func (s *ToolSurface) Active() bool { return s != nil && s.p.isActive() }
+
+// Allows reports whether a tool name is visible in this surface. A nil
+// or inactive surface allows everything.
+func (s *ToolSurface) Allows(name string) bool {
+	if s == nil {
+		return true
+	}
+	return s.p.allows(name)
+}
+
+// Preset returns the resolved preset label (full / readonly / edit / nav
+// / custom) for logging.
+func (s *ToolSurface) Preset() string {
+	if s == nil || s.p == nil {
+		return "full"
+	}
+	return s.p.preset
 }
 
 // toolPolicyBaseFromOptions extracts the config-supplied tool policy

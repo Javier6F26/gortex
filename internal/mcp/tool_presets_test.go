@@ -88,10 +88,44 @@ func TestToolPolicy_ModesAndUnknown(t *testing.T) {
 }
 
 func TestParseToolSpec(t *testing.T) {
+	// Preset + deltas.
 	preset, allow, deny := ParseToolSpec("edit,+find_files,-write_file")
 	require.Equal(t, "edit", preset)
 	require.Equal(t, []string{"find_files"}, allow)
 	require.Equal(t, []string{"write_file"}, deny)
+
+	// A known preset followed by a bare tool name → preset + allow delta.
+	preset, allow, _ = ParseToolSpec("edit,find_files")
+	require.Equal(t, "edit", preset)
+	require.Equal(t, []string{"find_files"}, allow)
+
+	// No known preset → every bare token is an explicit tool name.
+	preset, allow, _ = ParseToolSpec("search_symbols,edit_file,find_files")
+	require.Equal(t, "", preset)
+	require.Equal(t, []string{"search_symbols", "edit_file", "find_files"}, allow)
+}
+
+func TestToolPolicy_ExplicitList(t *testing.T) {
+	// An explicit comma list (no preset) is exactly that surface.
+	p := newToolPolicy(ToolPolicyConfig{Allow: []string{"search_symbols", "edit_file"}}, zap.NewNop())
+	require.True(t, p.isActive())
+	require.Equal(t, "custom", p.preset)
+	require.True(t, p.allows("search_symbols"))
+	require.True(t, p.allows("edit_file"))
+	require.True(t, p.allows("tool_profile")) // always kept
+	require.False(t, p.allows("analyze"))
+	require.False(t, p.allows("write_file"))
+
+	// End-to-end through the spec parser + env resolution.
+	cfg := func(spec string) ToolPolicyConfig {
+		pr, al, dn := ParseToolSpec(spec)
+		return ToolPolicyConfig{Preset: pr, Allow: al, Deny: dn}
+	}
+	surface := NewToolSurface(cfg("find_files,get_symbol_source"), zap.NewNop())
+	require.True(t, surface.Active())
+	require.True(t, surface.Allows("find_files"))
+	require.True(t, surface.Allows("get_symbol_source"))
+	require.False(t, surface.Allows("edit_file"))
 }
 
 func TestToolPolicy_EnvOverride(t *testing.T) {
