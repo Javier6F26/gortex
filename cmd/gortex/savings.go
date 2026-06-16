@@ -13,6 +13,7 @@ import (
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/progress"
 	"github.com/zzet/gortex/internal/savings"
+	"github.com/zzet/gortex/internal/tokens"
 	"github.com/zzet/gortex/internal/tui"
 )
 
@@ -25,6 +26,11 @@ var (
 	savingsBarCells int
 	savingsUTC      bool
 )
+
+// defaultHeadlineModel is the model the headline "Cost avoided" figure is
+// priced against when the caller doesn't pass --model. Set to the model
+// gortex itself runs on so the dollar figure reflects real usage.
+const defaultHeadlineModel = "claude-opus-4-8"
 
 var savingsCmd = &cobra.Command{
 	Use:   "savings",
@@ -118,14 +124,26 @@ func runSavings(_ *cobra.Command, _ []string) error {
 	}
 	buckets := savings.BuildDashboard(events, snap.Totals, allPerTool, now, loc)
 
-	if savingsJSON {
-		return emitSavingsJSON(snap, buckets, dbPath)
+	// Per-model / per-client breakdowns (all time). Only populated for
+	// calls whose model the host surfaced (model) or whose client the
+	// initialize handshake captured (client).
+	modelTotals, err := store.ModelTotals(time.Time{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex savings] per-model aggregate failed: %v\n", err)
 	}
-	emitSavingsDashboard(snap, buckets, dbPath)
+	clientTotals, err := store.ClientTotals(time.Time{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[gortex savings] per-client aggregate failed: %v\n", err)
+	}
+
+	if savingsJSON {
+		return emitSavingsJSON(snap, buckets, modelTotals, clientTotals, dbPath)
+	}
+	emitSavingsDashboard(snap, buckets, modelTotals, clientTotals, dbPath)
 	return nil
 }
 
-func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path string) error {
+func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, modelTotals, clientTotals []savings.DimTotal, path string) error {
 	bucketJSON := make([]map[string]any, 0, len(buckets))
 	for _, b := range buckets {
 		entry := map[string]any{
@@ -171,6 +189,35 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path string) e
 	if len(snap.PerLanguage) > 0 {
 		out["per_language"] = snap.PerLanguage
 	}
+	// Per-model actual attribution: tokens_saved is rescaled into the
+	// model's own tokenizer (cl100k retained as tokens_saved_cl100k) and
+	// the cost is that model's real rate — not the all-models
+	// counterfactual that cost_avoided_usd carries.
+	if len(modelTotals) > 0 {
+		models := make([]map[string]any, 0, len(modelTotals))
+		for _, m := range modelTotals {
+			adj := tokens.ScaleFromCL100K(m.Name, m.TokensSaved)
+			models = append(models, map[string]any{
+				"model":               m.Name,
+				"calls_counted":       m.CallsCounted,
+				"tokens_saved_cl100k": m.TokensSaved,
+				"tokens_saved":        adj,
+				"cost_avoided_usd":    savings.CostAvoided(adj, m.Name),
+			})
+		}
+		out["per_model"] = models
+	}
+	if len(clientTotals) > 0 {
+		clients := make([]map[string]any, 0, len(clientTotals))
+		for _, c := range clientTotals {
+			clients = append(clients, map[string]any{
+				"client":        c.Name,
+				"calls_counted": c.CallsCounted,
+				"tokens_saved":  c.TokensSaved,
+			})
+		}
+		out["per_client"] = clients
+	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
@@ -184,7 +231,7 @@ func emitSavingsJSON(snap savings.File, buckets []savings.Bucket, path string) e
 // On a TTY we wrap the header in a styled banner + stat-strip card; on a
 // non-TTY (output piped into grep / a file) we preserve the bare text
 // header so script parsers keep matching.
-func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path string) {
+func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, modelTotals, clientTotals []savings.DimTotal, path string) {
 	tty := progress.IsTTY(os.Stdout) && !noProgress
 
 	if tty {
@@ -275,6 +322,45 @@ func emitSavingsDashboard(snap savings.File, buckets []savings.Bucket, path stri
 		}
 	}
 
+	// Per-model ACTUAL attribution — only the models the host actually
+	// surfaced (via the hook model hint). Unlike the counterfactual table
+	// above, these tokens are rescaled into each model's own tokenizer and
+	// priced at that model's real rate, so the dollar figure reflects the
+	// model the agent truly ran on.
+	if len(modelTotals) > 0 {
+		fmt.Println()
+		fmt.Println("Cost avoided per model (actual — attributed via host model hint):")
+		nameWidth := 0
+		for _, m := range modelTotals {
+			if l := len(m.Name); l > nameWidth {
+				nameWidth = l
+			}
+		}
+		for _, m := range modelTotals {
+			adj := tokens.ScaleFromCL100K(m.Name, m.TokensSaved)
+			fmt.Printf("  %-*s %s   (%s calls · %s tokens saved)\n",
+				nameWidth, m.Name, formatUSD(savings.CostAvoided(adj, m.Name)),
+				humanInt(m.CallsCounted), humanInt(adj))
+		}
+	}
+
+	// Per-client breakdown — which agent app drove the savings (claude-code
+	// / cursor / …), captured from the MCP initialize handshake.
+	if len(clientTotals) > 0 {
+		fmt.Println()
+		fmt.Println("Savings by client:")
+		nameWidth := 0
+		for _, c := range clientTotals {
+			if l := len(c.Name); l > nameWidth {
+				nameWidth = l
+			}
+		}
+		for _, c := range clientTotals {
+			fmt.Printf("  %-*s  %s calls · %s tokens saved\n",
+				nameWidth, c.Name, humanInt(c.CallsCounted), humanInt(c.TokensSaved))
+		}
+	}
+
 	// --verbose: per-tool breakdown inside each bucket. Hidden by
 	// default because the headline 3-row dashboard is what the user
 	// asked for; this is the deep-dive.
@@ -335,6 +421,12 @@ func pickHeadlineCost(costs map[string]float64, preferred string) (float64, stri
 	}
 	if len(costs) == 0 {
 		return 0, "n/a"
+	}
+	// Default the headline to the model gortex itself runs on, so the figure
+	// reflects real usage rather than the priciest entry in the table. Falls
+	// through to the highest-value pick when that model isn't priced.
+	if v, ok := costs[defaultHeadlineModel]; ok {
+		return v, defaultHeadlineModel
 	}
 	var bestName string
 	var bestVal float64

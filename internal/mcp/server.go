@@ -24,6 +24,7 @@ import (
 	"github.com/zzet/gortex/internal/llm"
 	"github.com/zzet/gortex/internal/llm/registry"
 	"github.com/zzet/gortex/internal/llm/svc"
+	"github.com/zzet/gortex/internal/modelhint"
 	"github.com/zzet/gortex/internal/platform"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/review"
@@ -31,6 +32,7 @@ import (
 	"github.com/zzet/gortex/internal/search"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/server/hub"
+	"github.com/zzet/gortex/internal/tokens"
 )
 
 // Version is set at build time.
@@ -558,6 +560,19 @@ type tokenStats struct {
 	parent         *tokenStats // process-wide aggregate (nil for the root)
 	repoPath       string      // forwarded to savings for per-repo aggregation
 	sessionID      string      // rides on persisted events; "" for the shared default
+	clientName     string      // MCP client app (claude-code / cursor / …) from initialize; rides on events
+}
+
+// setClientName records the MCP client app on the session's tokenStats so
+// per-call savings observations can be attributed to it. Mirrors the
+// sessionState.recordClientName the daemon dispatcher already calls.
+func (ts *tokenStats) setClientName(name string) {
+	if ts == nil || name == "" {
+		return
+	}
+	ts.mu.Lock()
+	ts.clientName = name
+	ts.mu.Unlock()
 }
 
 // record adds a single savings observation. node is the symbol whose
@@ -579,6 +594,7 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 	parent := ts.parent
 	fallbackRepo := ts.repoPath
 	sessionID := ts.sessionID
+	clientName := ts.clientName
 	ts.mu.Unlock()
 
 	// Fan out to the process-wide aggregate so graph_stats called
@@ -607,6 +623,21 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 		language = node.Language
 	}
 
+	// Model attribution: the MCP protocol never tells a tool server which
+	// LLM is calling, but the host's hook layer can — it drops a model
+	// hint keyed by the session's working directory that we read back
+	// here. Best-effort: an absent/stale hint leaves the model empty and
+	// the dashboard falls back to its provider-neutral estimate. Keyed by
+	// the InitSavings root path (the cwd the connection was established
+	// in), with the hint's own global-last fallback inside Read.
+	var model string
+	if h, ok := modelhint.Read(fallbackRepo); ok {
+		model = h.Model
+		if clientName == "" {
+			clientName = h.Client
+		}
+	}
+
 	// Forward to the persistent store outside our lock — its own
 	// synchronization guards concurrent writers, and the ledger write
 	// shouldn't block new record() calls on the hot path.
@@ -616,6 +647,8 @@ func (ts *tokenStats) record(node *graph.Node, tool string, returned, fullFile i
 			Language:  language,
 			Tool:      tool,
 			SessionID: sessionID,
+			Model:     model,
+			Client:    clientName,
 			Returned:  returned,
 			Saved:     saved,
 		})
@@ -706,9 +739,14 @@ func (s *Server) NoteSessionClient(sessionID, name, version string) {
 		if s.session != nil {
 			s.session.recordClientName(name)
 		}
+		s.tokenStats.setClientName(name)
 		return
 	}
-	s.sessions.get(sessionID).session.recordClientName(name)
+	entry := s.sessions.get(sessionID)
+	entry.session.recordClientName(name)
+	// Mirror onto the session's tokenStats so per-call savings
+	// observations carry the client app for the per-client breakdown.
+	entry.tokenStats.setClientName(name)
 	_ = version // reserved for per-version capability gates
 }
 
@@ -1603,6 +1641,36 @@ func (s *Server) cumulativeSavingsSnapshot() map[string]any {
 		"tokens_returned":  snap.Totals.TokensReturned,
 		"calls_counted":    snap.Totals.CallsCounted,
 		"cost_avoided_usd": costs,
+	}
+	// cost_avoided_usd above is a counterfactual — the same neutral token
+	// count priced against every model. When the host surfaced the model
+	// that actually drove calls (via the hook model-hint bridge), add the
+	// real per-model attribution: tokens rescaled into the model's own
+	// tokenizer and priced at that model's rate. per_client mirrors it for
+	// the MCP client app.
+	if models, err := store.ModelTotals(time.Time{}); err == nil && len(models) > 0 {
+		rows := make([]map[string]any, 0, len(models))
+		for _, m := range models {
+			adj := tokens.ScaleFromCL100K(m.Name, m.TokensSaved)
+			rows = append(rows, map[string]any{
+				"model":            m.Name,
+				"calls_counted":    m.CallsCounted,
+				"tokens_saved":     adj,
+				"cost_avoided_usd": savings.CostAvoided(adj, m.Name),
+			})
+		}
+		out["per_model_actual"] = rows
+	}
+	if clients, err := store.ClientTotals(time.Time{}); err == nil && len(clients) > 0 {
+		rows := make([]map[string]any, 0, len(clients))
+		for _, c := range clients {
+			rows = append(rows, map[string]any{
+				"client":        c.Name,
+				"calls_counted": c.CallsCounted,
+				"tokens_saved":  c.TokensSaved,
+			})
+		}
+		out["per_client"] = rows
 	}
 	if snap.DroppedObservations > 0 {
 		out["dropped_observations"] = snap.DroppedObservations

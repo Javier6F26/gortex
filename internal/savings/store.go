@@ -62,8 +62,13 @@ type Observation struct {
 	Language  string
 	Tool      string
 	SessionID string
-	Returned  int64
-	Saved     int64
+	// Model is the LLM model that drove the call when known (resolved by
+	// the recorder from the host's model hint); Client is the MCP client
+	// app from the initialize handshake. Both may be empty.
+	Model    string
+	Client   string
+	Returned int64
+	Saved    int64
 }
 
 // Store is the token-savings ledger. All operations are safe for
@@ -183,6 +188,8 @@ func (s *Store) AddObservation(o Observation) {
 			Tool:      o.Tool,
 			Repo:      o.Repo,
 			Language:  o.Language,
+			Model:     o.Model,
+			Client:    o.Client,
 			Returned:  o.Returned,
 			Saved:     o.Saved,
 		})
@@ -225,6 +232,8 @@ func (s *Store) AddObservation(o Observation) {
 		Repo:      o.Repo,
 		Language:  o.Language,
 		Tool:      o.Tool,
+		Model:     o.Model,
+		Client:    o.Client,
 		Returned:  o.Returned,
 		Saved:     o.Saved,
 	})
@@ -339,9 +348,55 @@ func (s *Store) EventsSince(since time.Time) ([]Event, error) {
 			Repo:      r.Repo,
 			Language:  r.Language,
 			Tool:      r.Tool,
+			Model:     r.Model,
+			Client:    r.Client,
 			Returned:  r.Returned,
 			Saved:     r.Saved,
 		})
+	}
+	return out, nil
+}
+
+// ModelTotals returns the per-model aggregate over events with TS >= since
+// (zero = all time), tokens-saved descending. Only calls with a resolved
+// model are counted — clients that don't surface their model are absent.
+func (s *Store) ModelTotals(since time.Time) ([]DimTotal, error) {
+	return s.dimTotals(since, AggregateByModel, func(t time.Time) ([]persistence.SavingsDimRow, error) {
+		return s.sc.SavingsModelTotals(t)
+	})
+}
+
+// ClientTotals returns the per-MCP-client aggregate over events with
+// TS >= since (zero = all time), tokens-saved descending.
+func (s *Store) ClientTotals(since time.Time) ([]DimTotal, error) {
+	return s.dimTotals(since, AggregateByClient, func(t time.Time) ([]persistence.SavingsDimRow, error) {
+		return s.sc.SavingsClientTotals(t)
+	})
+}
+
+// dimTotals is the shared model/client breakdown: aggregate in SQL when
+// sidecar-backed, fold the in-memory event log otherwise.
+func (s *Store) dimTotals(since time.Time, memAgg func([]Event) []DimTotal, scQuery func(time.Time) ([]persistence.SavingsDimRow, error)) ([]DimTotal, error) {
+	if s == nil {
+		return nil, nil
+	}
+	if s.sc == nil {
+		s.mu.Lock()
+		events := FilterSince(s.memEvents, since)
+		s.mu.Unlock()
+		return memAgg(events), nil
+	}
+	rows, err := scQuery(since)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DimTotal, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, DimTotal{Name: r.Name, Totals: Totals{
+			TokensSaved:    r.Saved,
+			TokensReturned: r.Returned,
+			CallsCounted:   r.Calls,
+		}})
 	}
 	return out, nil
 }

@@ -10,9 +10,9 @@ import (
 
 func TestMedianSavedTokens_CL100k(t *testing.T) {
 	rows := []tokensMetric{
-		{Case: "a", JSONTokens: 100, GCXTokens: 80},   // saved 20
-		{Case: "b", JSONTokens: 200, GCXTokens: 150},  // saved 50
-		{Case: "c", JSONTokens: 300, GCXTokens: 270},  // saved 30
+		{Case: "a", JSONTokens: 100, GCXTokens: 80},  // saved 20
+		{Case: "b", JSONTokens: 200, GCXTokens: 150}, // saved 50
+		{Case: "c", JSONTokens: 300, GCXTokens: 270}, // saved 30
 	}
 	if got := medianSavedTokens(rows, false); got != 30 {
 		t.Errorf("median = %d, want 30 (sorted [20,30,50] → middle)", got)
@@ -56,11 +56,13 @@ func TestRenderUSDCard_PopulatesAllModels(t *testing.T) {
 	card := renderUSDCard(rows, 1000)
 	for _, want := range []string{
 		"USD savings projection",
-		"claude-opus-4",
-		"claude-sonnet-4",
-		"claude-haiku-4.5",
+		"claude-opus-4-8",
+		"claude-sonnet-4-6",
+		"claude-haiku-4-5",
 		"gpt-4o",
 		"gpt-4o-mini",
+		"gemini-2.5-pro",
+		"deepseek-chat",
 		"$/M input",
 		"$/day",
 		"$/month",
@@ -77,26 +79,26 @@ func TestRenderUSDCard_ScalingByResponsesPerDay(t *testing.T) {
 	}
 	c1 := renderUSDCard(rows, 1)
 	c1000 := renderUSDCard(rows, 1000)
-	// At 1M tokens/response × $15/M input, per-response = $15.00.
-	if !strings.Contains(c1, "$15.00") {
-		t.Errorf("1 resp/day USD card missing $15.00:\n%s", c1)
+	// At 1M tokens/response × $5/M input (claude-opus-4-8), per-response = $5.00.
+	if !strings.Contains(c1, "$5.00") {
+		t.Errorf("1 resp/day USD card missing $5.00:\n%s", c1)
 	}
-	// At 1000 resp/day, daily ≈ $15,000 — confirm 4-figure dollar magnitude.
-	if !strings.Contains(c1000, "$15000.00") {
-		t.Errorf("1000 resp/day USD card missing $15000.00:\n%s", c1000)
+	// At 1000 resp/day, daily = $5,000 — confirm the figure scales linearly.
+	if !strings.Contains(c1000, "$5000.00") {
+		t.Errorf("1000 resp/day USD card missing $5000.00:\n%s", c1000)
 	}
 }
 
 func TestRenderUSDCard_OpusUsesOpus47TokensWhenAvailable(t *testing.T) {
-	// cl100k=100 tokens, opus47=1_000_000. For claude-opus-4, the
-	// card must use the opus47 figure (so the row shows $15.00 at
-	// 1 resp/day, not the cl100k $0.0015).
+	// cl100k=100 tokens, opus47=1_000_000. For the claude-opus-4-x rows,
+	// the card must use the opus47 figure (so an opus row shows $5.00 at
+	// 1 resp/day and $5/M input, not the cl100k $0.0005).
 	rows := []tokensMetric{
 		{Case: "a", JSONTokens: 100, GCXTokens: 0, JSONTokensOpus47: 1_000_000, GCXTokensOpus47: 0},
 	}
 	card := renderUSDCard(rows, 1)
-	if !strings.Contains(card, "$15.00") {
-		t.Errorf("opus row should use opus47 tokens (=$15 at 1M saved); got:\n%s", card)
+	if !strings.Contains(card, "$5.00") {
+		t.Errorf("opus row should use opus47 tokens (=$5 at 1M saved × $5/M); got:\n%s", card)
 	}
 }
 

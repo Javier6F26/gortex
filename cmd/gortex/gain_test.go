@@ -206,12 +206,12 @@ func TestRenderGainProjection_HeadlineMarker(t *testing.T) {
 	rows := []tokensMetric{
 		{Case: "a", JSONTokens: 100, GCXTokens: 80},
 	}
-	renderGainProjection(&buf, rows, 1000, "claude-opus-4")
+	renderGainProjection(&buf, rows, 1000, "claude-opus-4-8")
 	out := buf.String()
-	if !strings.Contains(out, "*claude-opus-4") {
+	if !strings.Contains(out, "*claude-opus-4-8") {
 		t.Errorf("headline model should be marked with *: %s", out)
 	}
-	if !strings.Contains(out, "*headlined: claude-opus-4") {
+	if !strings.Contains(out, "*headlined: claude-opus-4-8") {
 		t.Errorf("footer should name the headlined model: %s", out)
 	}
 }

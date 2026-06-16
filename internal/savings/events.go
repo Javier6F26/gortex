@@ -25,8 +25,66 @@ type Event struct {
 	Repo      string    `json:"repo,omitempty"`
 	Language  string    `json:"lang,omitempty"`
 	Tool      string    `json:"tool,omitempty"`
-	Returned  int64     `json:"returned"`
-	Saved     int64     `json:"saved"`
+	// Model is the LLM model that drove the call when the host surfaced
+	// it (via the model-hint bridge); Client is the MCP client app from
+	// the initialize handshake. Both omit when unknown.
+	Model    string `json:"model,omitempty"`
+	Client   string `json:"client,omitempty"`
+	Returned int64  `json:"returned"`
+	Saved    int64  `json:"saved"`
+}
+
+// DimTotal is one row of a per-dimension breakdown (per-model or
+// per-client), carrying the dimension value plus its rolled-up totals.
+type DimTotal struct {
+	Name string
+	Totals
+}
+
+// AggregateByModel folds events into a per-model breakdown sorted by
+// tokens-saved descending. Events with no attributed model are skipped,
+// so the result is the "per known model" view (rows need not sum to the
+// grand total).
+func AggregateByModel(events []Event) []DimTotal {
+	return aggregateByDim(events, func(e Event) string { return e.Model })
+}
+
+// AggregateByClient folds events into a per-MCP-client breakdown sorted
+// by tokens-saved descending. Events with no client are skipped.
+func AggregateByClient(events []Event) []DimTotal {
+	return aggregateByDim(events, func(e Event) string { return e.Client })
+}
+
+// aggregateByDim is the shared fold for the per-model / per-client
+// breakdowns. The empty key is dropped so unattributed calls don't
+// masquerade as a named bucket.
+func aggregateByDim(events []Event, key func(Event) string) []DimTotal {
+	per := make(map[string]*Totals)
+	for _, ev := range events {
+		name := key(ev)
+		if name == "" {
+			continue
+		}
+		t := per[name]
+		if t == nil {
+			t = &Totals{}
+			per[name] = t
+		}
+		t.TokensSaved += ev.Saved
+		t.TokensReturned += ev.Returned
+		t.CallsCounted++
+	}
+	rows := make([]DimTotal, 0, len(per))
+	for name, t := range per {
+		rows = append(rows, DimTotal{Name: name, Totals: *t})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if a, b := rows[i].TokensSaved, rows[j].TokensSaved; a != b {
+			return a > b
+		}
+		return rows[i].Name < rows[j].Name
+	})
+	return rows
 }
 
 // LoadEvents reads a flat-file era JSONL log at path and returns events

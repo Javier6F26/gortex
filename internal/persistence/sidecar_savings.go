@@ -28,8 +28,13 @@ type SavingsEvent struct {
 	Tool      string
 	Repo      string
 	Language  string
-	Returned  int64
-	Saved     int64
+	// Model is the LLM model that drove the call when known (resolved
+	// from the host's hook-supplied model hint); Client is the MCP
+	// client app from the initialize handshake. Both may be empty.
+	Model    string
+	Client   string
+	Returned int64
+	Saved    int64
 }
 
 // SavingsTotalsRow is the aggregate for one savings_totals bucket.
@@ -63,8 +68,8 @@ func (s *SidecarStore) AddSavingsObservation(ev SavingsEvent) error {
 	tsN := ts.UTC().UnixNano()
 
 	if _, err := tx.Exec(
-		`INSERT INTO savings_events (ts, session_id, tool, repo, language, returned, saved) VALUES (?,?,?,?,?,?,?)`,
-		tsN, ev.SessionID, ev.Tool, ev.Repo, ev.Language, ev.Returned, ev.Saved,
+		`INSERT INTO savings_events (ts, session_id, tool, repo, language, model, client, returned, saved) VALUES (?,?,?,?,?,?,?,?,?)`,
+		tsN, ev.SessionID, ev.Tool, ev.Repo, ev.Language, ev.Model, ev.Client, ev.Returned, ev.Saved,
 	); err != nil {
 		return fmt.Errorf("persistence: savings event: %w", err)
 	}
@@ -156,7 +161,7 @@ func (s *SidecarStore) SavingsEventsSince(since time.Time) ([]SavingsEvent, erro
 		return nil, nil
 	}
 	rows, err := s.db.Query(
-		`SELECT ts, session_id, tool, repo, language, returned, saved
+		`SELECT ts, session_id, tool, repo, language, model, client, returned, saved
 		 FROM savings_events WHERE ts >= ? ORDER BY ts, id`,
 		unixOrZero(since),
 	)
@@ -169,7 +174,7 @@ func (s *SidecarStore) SavingsEventsSince(since time.Time) ([]SavingsEvent, erro
 	for rows.Next() {
 		var ev SavingsEvent
 		var tsN int64
-		if err := rows.Scan(&tsN, &ev.SessionID, &ev.Tool, &ev.Repo, &ev.Language, &ev.Returned, &ev.Saved); err != nil {
+		if err := rows.Scan(&tsN, &ev.SessionID, &ev.Tool, &ev.Repo, &ev.Language, &ev.Model, &ev.Client, &ev.Returned, &ev.Saved); err != nil {
 			return nil, err
 		}
 		ev.TS = time.Unix(0, tsN).UTC()
@@ -229,8 +234,8 @@ func (s *SidecarStore) ImportLegacySavings(buckets map[string]SavingsTotalsRow, 
 	}
 	for _, ev := range events {
 		if _, err := tx.Exec(
-			`INSERT INTO savings_events (ts, session_id, tool, repo, language, returned, saved) VALUES (?,?,?,?,?,?,?)`,
-			unixOrZero(ev.TS), ev.SessionID, ev.Tool, ev.Repo, ev.Language, ev.Returned, ev.Saved,
+			`INSERT INTO savings_events (ts, session_id, tool, repo, language, model, client, returned, saved) VALUES (?,?,?,?,?,?,?,?,?)`,
+			unixOrZero(ev.TS), ev.SessionID, ev.Tool, ev.Repo, ev.Language, ev.Model, ev.Client, ev.Returned, ev.Saved,
 		); err != nil {
 			return fmt.Errorf("persistence: savings import event: %w", err)
 		}
@@ -297,6 +302,57 @@ type SavingsToolRow struct {
 	Saved    int64
 	Returned int64
 	Calls    int64
+}
+
+// SavingsDimRow is one row of a per-dimension (model / client) aggregate.
+type SavingsDimRow struct {
+	Name     string
+	Saved    int64
+	Returned int64
+	Calls    int64
+}
+
+// SavingsModelTotals aggregates events per attributed model over
+// ts >= since (zero = all time), tokens-saved descending. Rows with no
+// model attribution are excluded — this is the "per known model" view.
+func (s *SidecarStore) SavingsModelTotals(since time.Time) ([]SavingsDimRow, error) {
+	return s.savingsDimTotals("model", since)
+}
+
+// SavingsClientTotals aggregates events per MCP client over ts >= since
+// (zero = all time), tokens-saved descending. Rows with no client are
+// excluded.
+func (s *SidecarStore) SavingsClientTotals(since time.Time) ([]SavingsDimRow, error) {
+	return s.savingsDimTotals("client", since)
+}
+
+// savingsDimTotals is the shared GROUP BY for the model / client
+// breakdowns. column is a fixed, caller-controlled identifier (never
+// user input), so interpolating it into the statement is safe.
+func (s *SidecarStore) savingsDimTotals(column string, since time.Time) ([]SavingsDimRow, error) {
+	if s == nil {
+		return nil, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT `+column+`, SUM(saved), SUM(returned), COUNT(1)
+		 FROM savings_events WHERE ts >= ? AND `+column+` <> ''
+		 GROUP BY `+column+` ORDER BY SUM(saved) DESC, `+column,
+		unixOrZero(since),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("persistence: savings %s totals: %w", column, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []SavingsDimRow
+	for rows.Next() {
+		var r SavingsDimRow
+		if err := rows.Scan(&r.Name, &r.Saved, &r.Returned, &r.Calls); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // ResetSavings wipes the savings ledger (events, totals, meta) in one

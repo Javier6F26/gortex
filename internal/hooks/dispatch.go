@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/zzet/gortex/internal/modelhint"
 )
 
 // Mode selects the posture of the Claude Code PreToolUse / PostToolUse
@@ -108,6 +110,7 @@ func Run(port int, mode Mode) {
 
 	switch peek.HookEventName {
 	case "PreToolUse":
+		captureModelHint(data)
 		runPreToolUse(data, port, mode)
 	case "PostToolUse":
 		runPostToolUse(data, port)
@@ -116,8 +119,37 @@ func Run(port int, mode Mode) {
 	case "Stop":
 		runPostTask(data, port)
 	case "SessionStart":
+		captureModelHint(data)
 		runSessionStart(data)
 	case "UserPromptSubmit":
 		runUserPromptSubmit(data)
 	}
+}
+
+// captureModelHint extracts the active LLM model from a hook payload and
+// records it through the model-hint bridge, so the (separate-process)
+// daemon's savings recorder can attribute per-call token savings to the
+// model that drove the call. The model arrives two ways: SessionStart
+// carries it as a top-level `model` field, while PreToolUse does not —
+// there we read the most recent assistant turn from the session
+// transcript, which also catches a mid-session `/model` switch. Entirely
+// best-effort: any gap leaves the model unknown and savings stay
+// provider-neutral.
+func captureModelHint(data []byte) {
+	var in struct {
+		CWD            string `json:"cwd"`
+		Model          string `json:"model"`
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if json.Unmarshal(data, &in) != nil {
+		return
+	}
+	model := strings.TrimSpace(in.Model)
+	if model == "" && in.TranscriptPath != "" {
+		model = modelFromTranscript(in.TranscriptPath)
+	}
+	if model == "" {
+		return
+	}
+	modelhint.Write(in.CWD, model, "claude-code")
 }

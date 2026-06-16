@@ -145,11 +145,15 @@ CREATE TABLE IF NOT EXISTS savings_events (
 	tool        TEXT NOT NULL DEFAULT '',
 	repo        TEXT NOT NULL DEFAULT '',
 	language    TEXT NOT NULL DEFAULT '',
+	model       TEXT NOT NULL DEFAULT '',
+	client      TEXT NOT NULL DEFAULT '',
 	returned    INTEGER NOT NULL DEFAULT 0,
 	saved       INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_savings_events_ts   ON savings_events (ts);
-CREATE INDEX IF NOT EXISTS idx_savings_events_tool ON savings_events (tool, ts);
+CREATE INDEX IF NOT EXISTS idx_savings_events_ts     ON savings_events (ts);
+CREATE INDEX IF NOT EXISTS idx_savings_events_tool   ON savings_events (tool, ts);
+CREATE INDEX IF NOT EXISTS idx_savings_events_model  ON savings_events (model, ts);
+CREATE INDEX IF NOT EXISTS idx_savings_events_client ON savings_events (client, ts);
 
 CREATE TABLE IF NOT EXISTS savings_totals (
 	bucket   TEXT NOT NULL PRIMARY KEY,
@@ -186,6 +190,15 @@ var (
 	sidecarMu    sync.Mutex
 	sidecarCache = map[string]*SidecarStore{}
 )
+
+// addColumnIfMissing runs ALTER TABLE ... ADD COLUMN, swallowing the
+// "duplicate column name" error a table that already has the column
+// returns. Best-effort: it lets a sidecar created before a column
+// existed gain it without a versioned-migration framework, and a fresh
+// database (which already has the column via the schema) is unaffected.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) {
+	_, _ = db.Exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + decl)
+}
 
 // OpenSidecar opens (or creates) the sidecar DB at path, reusing an
 // already-open handle for the same absolute path. An empty path yields
@@ -227,6 +240,13 @@ func OpenSidecar(path string) (*SidecarStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("persistence: sidecar schema: %w", err)
 	}
+	// Idempotent column additions for sidecar databases created before
+	// these columns existed. CREATE TABLE IF NOT EXISTS won't alter an
+	// existing table, so ALTER the columns in and tolerate the
+	// "duplicate column" error that fresh databases (which already have
+	// them) return.
+	addColumnIfMissing(db, "savings_events", "model", "TEXT NOT NULL DEFAULT ''")
+	addColumnIfMissing(db, "savings_events", "client", "TEXT NOT NULL DEFAULT ''")
 
 	st := &SidecarStore{db: db}
 	sidecarCache[abs] = st

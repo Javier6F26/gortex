@@ -156,7 +156,7 @@ func TestEmitSavingsDashboard_RendersThreeBuckets(t *testing.T) {
 			savingsVerbose = oldVerbose
 			savingsBarCells = oldCells
 		}()
-		emitSavingsDashboard(snap, buckets, "/tmp/sidecar.sqlite")
+		emitSavingsDashboard(snap, buckets, nil, nil, "/tmp/sidecar.sqlite")
 	})
 
 	for _, want := range []string{
@@ -187,7 +187,7 @@ func TestEmitSavingsDashboard_EmptyTotals(t *testing.T) {
 		{Label: "All time"},
 	}
 	out := captureStdout(t, func() {
-		emitSavingsDashboard(snap, buckets, "/tmp/sidecar.sqlite")
+		emitSavingsDashboard(snap, buckets, nil, nil, "/tmp/sidecar.sqlite")
 	})
 	if !strings.Contains(out, "No source-reading tool calls recorded yet") {
 		t.Errorf("empty totals should show the no-data hint, got:\n%s", out)

@@ -138,6 +138,29 @@ func CountForInt64(model, text string) int64 {
 	return int64(CountFor(model, text))
 }
 
+// ScaleFromCL100K converts a token count already measured in cl100k_base
+// into the given model's tokenizer-family count, applying the same
+// calibration ratio CountFor uses. It lets a caller that only kept a
+// provider-neutral cl100k count (the savings ledger) recover a per-model
+// figure without re-tokenizing the original text.
+//
+// For Claude / DeepSeek — families CountFor itself encodes with
+// cl100k_base and then scales — this is exact-equivalent to having called
+// CountFor on the source. For the OpenAI-o200k / Gemini families CountFor
+// re-encodes with o200k_base (ratio 1.0); here we have no o200k count, so
+// we approximate it by the cl100k count (the two run within a few percent
+// on mixed code). An empty or unknown model returns n unchanged.
+func ScaleFromCL100K(model string, n int64) int64 {
+	if n <= 0 {
+		return n
+	}
+	spec := specForModel(model)
+	if spec.ratio == exactRatio {
+		return n
+	}
+	return int64(math.Round(float64(n) * spec.ratio))
+}
+
 // EncodingForModel returns the tiktoken encoding name (cl100k_base or
 // o200k_base) that CountFor uses for the given model id.
 func EncodingForModel(model string) string {
