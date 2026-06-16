@@ -235,6 +235,8 @@ gortex daemon uninstall-service # remove unit, stop service
 
 On macOS the unit lands at `~/Library/LaunchAgents/com.zzet.gortex.plist`; on Linux at `~/.config/systemd/user/com.zzet.gortex.service`. After `install-service`, plain `gortex daemon start / stop` still work — they just fight the service for socket ownership, so prefer `gortex daemon service-status` and `launchctl` / `systemctl --user` commands for lifecycle.
 
+If you run an XDG layout (any absolute `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_CACHE_HOME`), `install-service` captures those values into the unit so the supervised daemon resolves the same paths as your shell — service supervisors otherwise start with a near-empty environment and the daemon would fall back to `~/.gortex`. Re-run `install-service` if you later change where those variables point.
+
 ### How it works
 
 - `gortex mcp` (what Claude Code spawns via `.mcp.json`) auto-detects the daemon. If reachable, it acts as a thin stdio ↔ socket proxy (~5 MB per client). If not, it falls back to the embedded server — global mode is never "required."

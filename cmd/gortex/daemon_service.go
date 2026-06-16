@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +62,64 @@ func init() {
 	daemonCmd.AddCommand(daemonInstallServiceCmd)
 	daemonCmd.AddCommand(daemonUninstallServiceCmd)
 	daemonCmd.AddCommand(daemonServiceStatusCmd)
+}
+
+// serviceEnvVar is a single environment entry rendered into a service
+// unit. Render helpers escape Value for the target format.
+type serviceEnvVar struct{ Key, Value string }
+
+// xdgServiceEnv captures the XDG base-directory overrides in effect when
+// the service unit is written, so the supervised daemon resolves the
+// same config / data / cache locations as the shell that installed it.
+//
+// launchd and systemd --user start the daemon with a near-empty
+// environment — they do NOT inherit the XDG_* variables a user exports
+// from their shell or session manager. Without this capture the daemon
+// falls back to ~/.gortex even though the user opted into an XDG layout
+// (see internal/platform/xdg.go), silently splitting their state across
+// two trees. Re-run install-service to re-capture changed values.
+//
+// Only absolute values are propagated — the rule platform.unifiedDir
+// itself applies when honouring an override (a relative XDG path is
+// ignored per the XDG Base Directory spec). XDG_RUNTIME_DIR is
+// deliberately excluded: the init system sets it per session, so pinning
+// an install-time value would point the daemon socket at a stale dir.
+func xdgServiceEnv() []serviceEnvVar {
+	var out []serviceEnvVar
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"} {
+		if v := os.Getenv(name); v != "" && filepath.IsAbs(v) {
+			out = append(out, serviceEnvVar{Key: name, Value: v})
+		}
+	}
+	return out
+}
+
+// xmlEscape renders s safe for an XML text node (the launchd plist) so a
+// home path containing an XML metacharacter can't produce a malformed,
+// unloadable plist.
+func xmlEscape(s string) string {
+	var b strings.Builder
+	if err := xml.EscapeText(&b, []byte(s)); err != nil {
+		return s
+	}
+	return b.String()
+}
+
+// systemdEnvValue renders a value safe for a systemd Environment= line.
+// `%` is escaped to `%%` because systemd treats it as a specifier
+// introducer across the whole unit file (systemd.unit(5)) — an
+// unescaped `%d` in a path would expand to a directory specifier and
+// silently change the value the daemon sees. Values containing
+// whitespace are additionally double-quoted (with embedded quotes /
+// backslashes escaped) per systemd's quoting rules. Plain paths (the
+// common case) pass through unchanged.
+func systemdEnvValue(v string) string {
+	v = strings.ReplaceAll(v, "%", "%%")
+	if !strings.ContainsAny(v, " \t") {
+		return v
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return `"` + r.Replace(v) + `"`
 }
 
 // runDaemonInstallService writes the unit file and enables + starts it.
@@ -134,6 +193,11 @@ func runDaemonServiceStatus(cmd *cobra.Command, _ []string) error {
 //
 // StandardOutPath / StandardErrorPath redirect logs into the same file
 // `gortex daemon logs` tails, so users don't need to remember two paths.
+//
+// EnvironmentVariables carries PATH (so a Homebrew-installed binary is
+// found in launchd's minimal environment) plus any XDG_* overrides that
+// were in effect at install time — see xdgServiceEnv for why that
+// capture is necessary.
 const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -161,10 +225,37 @@ const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+{{- range .EnvVars}}
+        <key>{{.Key}}</key>
+        <string>{{.Value}}</string>
+{{- end}}
     </dict>
 </dict>
 </plist>
 `
+
+// renderLaunchdPlist fills launchdPlistTemplate. String values are
+// XML-escaped so a path containing an XML metacharacter can't produce a
+// malformed, unloadable plist.
+func renderLaunchdPlist(label, exe, logPath string, env []serviceEnvVar) (string, error) {
+	data := struct {
+		Label, Exe, LogPath string
+		EnvVars             []serviceEnvVar
+	}{
+		Label:   xmlEscape(label),
+		Exe:     xmlEscape(exe),
+		LogPath: xmlEscape(logPath),
+		EnvVars: make([]serviceEnvVar, len(env)),
+	}
+	for i, e := range env {
+		data.EnvVars[i] = serviceEnvVar{Key: e.Key, Value: xmlEscape(e.Value)}
+	}
+	var buf bytes.Buffer
+	if err := template.Must(template.New("plist").Parse(launchdPlistTemplate)).Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
 
 func launchdPlistPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -183,15 +274,11 @@ func installLaunchd(w io.Writer, exe string) error {
 		return fmt.Errorf("ensure LaunchAgents dir: %w", err)
 	}
 
-	var buf bytes.Buffer
-	if err := template.Must(template.New("plist").Parse(launchdPlistTemplate)).Execute(&buf, map[string]string{
-		"Label":   daemonServiceName,
-		"Exe":     exe,
-		"LogPath": daemon.LogFilePath(),
-	}); err != nil {
+	plist, err := renderLaunchdPlist(daemonServiceName, exe, daemon.LogFilePath(), xdgServiceEnv())
+	if err != nil {
 		return fmt.Errorf("render plist: %w", err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
 		return fmt.Errorf("write plist: %w", err)
 	}
 	// -w persists the load across reboots; without it the service
@@ -254,7 +341,9 @@ func statusLaunchd(w io.Writer) error {
 // systemdUnitTemplate renders a user-level systemd service. Type=simple
 // because `gortex daemon start` (without --detach) runs in the
 // foreground; Restart=on-failure covers the crash-restart case without
-// pounding on successful exits.
+// pounding on successful exits. Environment= lines carry any XDG_*
+// overrides that were in effect at install time so the supervised daemon
+// resolves the same paths as the installing shell — see xdgServiceEnv.
 const systemdUnitTemplate = `[Unit]
 Description=Gortex code intelligence daemon
 Documentation=https://github.com/zzet/gortex
@@ -263,6 +352,9 @@ After=network.target
 [Service]
 Type=simple
 ExecStart={{.Exe}} daemon start
+{{- range .EnvVars}}
+Environment={{.Key}}={{.Value}}
+{{- end}}
 Restart=on-failure
 RestartSec=2
 StandardOutput=append:{{.LogPath}}
@@ -271,6 +363,23 @@ StandardError=append:{{.LogPath}}
 [Install]
 WantedBy=default.target
 `
+
+// renderSystemdUnit fills systemdUnitTemplate, quoting Environment=
+// values that need it.
+func renderSystemdUnit(exe, logPath string, env []serviceEnvVar) (string, error) {
+	data := struct {
+		Exe, LogPath string
+		EnvVars      []serviceEnvVar
+	}{Exe: exe, LogPath: logPath, EnvVars: make([]serviceEnvVar, len(env))}
+	for i, e := range env {
+		data.EnvVars[i] = serviceEnvVar{Key: e.Key, Value: systemdEnvValue(e.Value)}
+	}
+	var buf bytes.Buffer
+	if err := template.Must(template.New("unit").Parse(systemdUnitTemplate)).Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
 
 func systemdUnitPath() (string, error) {
 	home, err := os.UserHomeDir()
@@ -289,14 +398,11 @@ func installSystemd(w io.Writer, exe string) error {
 		return fmt.Errorf("ensure systemd user dir: %w", err)
 	}
 
-	var buf bytes.Buffer
-	if err := template.Must(template.New("unit").Parse(systemdUnitTemplate)).Execute(&buf, map[string]string{
-		"Exe":     exe,
-		"LogPath": daemon.LogFilePath(),
-	}); err != nil {
+	unit, err := renderSystemdUnit(exe, daemon.LogFilePath(), xdgServiceEnv())
+	if err != nil {
 		return fmt.Errorf("render unit: %w", err)
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("write unit: %w", err)
 	}
 	if err := runCmd(w, "systemctl", "--user", "daemon-reload"); err != nil {
