@@ -47,6 +47,8 @@ var (
 	daemonBackend               string
 	daemonBackendPath           string
 	daemonBackendBufferPoolMB   uint64
+	daemonTools                 string
+	daemonToolsMode             string
 )
 
 var daemonCmd = &cobra.Command{
@@ -115,6 +117,10 @@ func init() {
 		"path to the on-disk backend's store file (its parent directory is created if absent). Defaults to ~/.gortex/store/store.sqlite; ignored when --backend is memory")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
 		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
+	daemonStartCmd.Flags().StringVar(&daemonTools, "tools", "",
+		"restrict the published MCP tool surface to a preset: full|readonly|edit|nav (optionally with ,+tool / ,-tool deltas). GORTEX_TOOLS overrides this")
+	daemonStartCmd.Flags().StringVar(&daemonToolsMode, "tools-mode", "",
+		"how a --tools preset hides tools: hide (remove from tools/list + block calls) or defer (keep reachable via tools_search). Default hide")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
@@ -648,7 +654,18 @@ func spawnDetachedDaemon() error {
 		return fmt.Errorf("open log file: %w", err)
 	}
 	child := exec.Command(exe, "daemon", "start")
-	child.Env = append(os.Environ(), "GORTEX_DAEMON_CHILD=1")
+	childEnv := append(os.Environ(), "GORTEX_DAEMON_CHILD=1")
+	// --detach re-execs `daemon start` with no flags, so the tool-preset
+	// selection must travel to the child via env (the GORTEX_TOOLS
+	// override path), mirroring how --embeddings propagates. Appended
+	// last so an explicit flag wins over any inherited GORTEX_TOOLS.
+	if daemonTools != "" {
+		childEnv = append(childEnv, "GORTEX_TOOLS="+daemonTools)
+	}
+	if daemonToolsMode != "" {
+		childEnv = append(childEnv, "GORTEX_TOOLS_MODE="+daemonToolsMode)
+	}
+	child.Env = childEnv
 	child.Stdout = logFile
 	child.Stderr = logFile
 	child.Stdin = nil

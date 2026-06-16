@@ -121,6 +121,10 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	gc, _ := config.LoadGlobal()
+	// Fold --tools / --tools-mode into mcp.tools (flag overrides config;
+	// GORTEX_TOOLS still overrides). Survives --detach because the
+	// re-exec'd child re-parses the same flags.
+	applyToolPresetFlags(cfg, daemonTools, daemonToolsMode)
 
 	ss, err := serverstack.NewSharedServer(serverstack.SharedServerConfig{
 		Lifecycle:    serverstack.LifecycleDaemon,

@@ -433,6 +433,12 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	}
 	s.MultiIndexer = mi
 
+	toolPolicyCfg := gortexmcp.ToolPolicyConfig{
+		Preset: conf.MCP.Tools.Preset,
+		Mode:   conf.MCP.Tools.Mode,
+		Allow:  conf.MCP.Tools.Allow,
+		Deny:   conf.MCP.Tools.Deny,
+	}
 	var multiOpts []gortexmcp.MultiRepoOptions
 	if mi != nil || cm != nil {
 		multiOpts = append(multiOpts, gortexmcp.MultiRepoOptions{
@@ -441,6 +447,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			ActiveProject:  cfg.ActiveProject,
 			ScopeWorkspace: cfg.ScopeWorkspace,
 			ScopeProject:   cfg.ScopeProject,
+			ToolPolicy:     &toolPolicyCfg,
 		})
 	}
 

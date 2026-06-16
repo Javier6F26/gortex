@@ -400,6 +400,15 @@ type Server struct {
 	// is explicitly disabled — see lazyEnabledFromEnv.
 	lazy *lazyToolRegistry
 
+	// toolPolicy restricts the published tool surface to a named preset
+	// / allow-deny set (see tool_presets.go). Resolved at construction
+	// from MultiRepoOptions.ToolPolicy (the mcp.tools config block) plus
+	// the GORTEX_TOOLS / GORTEX_TOOLS_MODE env overrides. Nil or
+	// inactive means the full surface. Enforced in hide mode by
+	// toolSurfaceFilter + checkToolGate and in defer mode by the lazy
+	// registry's eager predicate.
+	toolPolicy *toolPolicy
+
 	// toolBudgetOnce / toolBudgetCached memoise the project-size-scaled
 	// exploration-call budget appended to navigation tools' descriptions
 	// (see tool_budget.go). Computed once from the graph node count.
@@ -958,6 +967,10 @@ type MultiRepoOptions struct {
 	// ScopeProject narrows further inside ScopeWorkspace (no effect
 	// without it).
 	ScopeProject string
+	// ToolPolicy restricts the published MCP tool surface to a named
+	// preset / allow-deny set (the `mcp.tools` config block). Nil leaves
+	// the full surface; GORTEX_TOOLS / GORTEX_TOOLS_MODE still override.
+	ToolPolicy *ToolPolicyConfig
 }
 
 // serverInstructions is the server-level `instructions` field returned
@@ -1054,7 +1067,16 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// tools_search uses to migrate a tool from deferred → live on
 	// first use. See lazy_tools.go for the hot-set selection rules.
 	s.sanitizeInjection = sanitizeEnabledFromEnv()
-	s.lazy = newLazyToolRegistry(lazyEnabledFromEnv())
+	// Tool-surface preset (mcp.tools config + GORTEX_TOOLS env). In
+	// defer mode the preset's allow-set becomes the lazy registry's
+	// eager surface; hide mode is enforced later by toolSurfaceFilter /
+	// checkToolGate. Resolved before the register sweep so every
+	// addTool sees the policy.
+	s.toolPolicy = resolveToolPolicy(toolPolicyBaseFromOptions(opts), logger)
+	s.lazy = newLazyToolRegistry(lazyEnabledFromEnv() || s.toolPolicy.deferMode())
+	if s.toolPolicy.deferMode() {
+		s.lazy.SetEagerPredicate(s.toolPolicy.allows)
+	}
 	s.attachLazyRegistry()
 	s.registerToolsSearch()
 
