@@ -42,6 +42,8 @@ var (
 	mcpSemanticMode    string
 	mcpNoDaemon        bool
 	mcpForceProxy      bool
+	mcpTools           string
+	mcpToolsMode       string
 )
 
 var mcpCmd = &cobra.Command{
@@ -72,6 +74,8 @@ func init() {
 	mcpCmd.Flags().StringVar(&mcpSemanticMode, "semantic-mode", "typecheck", "Go analysis mode: typecheck or callgraph")
 	mcpCmd.Flags().BoolVar(&mcpNoDaemon, "no-daemon", false, "deprecated no-op (warns when set); the embedded server is used automatically when no daemon is available")
 	mcpCmd.Flags().BoolVar(&mcpForceProxy, "proxy", false, "require a running daemon and proxy through it (error if unavailable)")
+	mcpCmd.Flags().StringVar(&mcpTools, "tools", "", "restrict the published MCP tool surface to a preset: full|readonly|edit|nav (optionally with ,+tool / ,-tool deltas). GORTEX_TOOLS overrides this")
+	mcpCmd.Flags().StringVar(&mcpToolsMode, "tools-mode", "", "how a --tools preset hides tools: hide (remove from tools/list + block calls) or defer (keep reachable via tools_search). Default hide")
 	rootCmd.AddCommand(mcpCmd)
 }
 
@@ -106,7 +110,7 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// presence + GORTEX_AUTOSTART, never by the flag.
 	switch resolveDaemonDecision() {
 	case daemonReady, daemonAutostarted:
-		ran, proxyErr := runProxy(cmd.Context())
+		ran, proxyErr := runProxy(cmd.Context(), proxyToolSurface())
 		if proxyErr != nil {
 			return proxyErr
 		}
@@ -130,6 +134,9 @@ func runMCP(cmd *cobra.Command, args []string) error {
 	// Resolve the embedded semantic decision: --no-semantic forces off,
 	// --semantic forces on, otherwise semantic.enabled in config decides.
 	cfg.Semantic.Enabled = !mcpNoSemantic && (mcpSemantic || cfg.Semantic.Enabled)
+	// Fold --tools / --tools-mode into the mcp.tools config the server
+	// stack reads (flag overrides config; GORTEX_TOOLS still overrides).
+	applyToolPresetFlags(cfg, mcpTools, mcpToolsMode)
 
 	// Side-store layout for the embedded path: every store partitions
 	// per-repo under the indexed repo path, and the notebook is repo-local

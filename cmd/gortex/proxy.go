@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
+	gortexmcp "github.com/zzet/gortex/internal/mcp"
 )
 
 // runProxy relays MCP JSON-RPC traffic between stdio (the MCP client) and
@@ -21,7 +22,7 @@ import (
 // Returns (true, nil) when the proxy ran and finished cleanly. Returns
 // (false, nil) when the daemon isn't reachable — the caller should fall
 // back to embedded mode. Any other error is a real problem.
-func runProxy(ctx context.Context) (ran bool, err error) {
+func runProxy(ctx context.Context, surface *gortexmcp.ToolSurface) (ran bool, err error) {
 	cwd, wdErr := resolveLaunchCWD()
 	if wdErr != nil {
 		return false, fmt.Errorf("cwd: %w", wdErr)
@@ -51,18 +52,29 @@ func runProxy(ctx context.Context) (ran bool, err error) {
 	// We run both on goroutines and exit when either side hits EOF.
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
+	var outMu sync.Mutex // serialises the two writers into os.Stdout
 	wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		err := pumpLines(os.Stdin, client.Conn)
-		errCh <- err
-	}()
-	go func() {
-		defer wg.Done()
-		err := pumpLines(client.Conn, os.Stdout)
-		errCh <- err
-	}()
+	if surface.Active() {
+		fmt.Fprintf(os.Stderr, "[gortex mcp] tool surface restricted (preset %q)\n", surface.Preset())
+		go func() {
+			defer wg.Done()
+			errCh <- pumpRequestsFiltered(os.Stdin, client.Conn, os.Stdout, &outMu, surface)
+		}()
+		go func() {
+			defer wg.Done()
+			errCh <- pumpResponsesFiltered(client.Conn, os.Stdout, &outMu, surface)
+		}()
+	} else {
+		go func() {
+			defer wg.Done()
+			errCh <- pumpLines(os.Stdin, client.Conn)
+		}()
+		go func() {
+			defer wg.Done()
+			errCh <- pumpLines(client.Conn, os.Stdout)
+		}()
+	}
 
 	// Orphan watchdog: if our parent (the MCP client) dies, stdin EOF is the
 	// normal shutdown signal — but a client that is SIGKILLed, or whose stdin

@@ -3,6 +3,7 @@
 Gortex exposes a knowledge-graph query surface over the [Model Context Protocol](https://modelcontextprotocol.io): **100+ tools, 16 resources, 3 prompts**. Agents call the same surface from stdio, the daemon Unix socket, or the MCP 2026 Streamable HTTP endpoint.
 
 - [Tool discovery (lazy mode)](#tool-discovery-lazy-mode)
+- [Restricting the tool surface (presets)](#restricting-the-tool-surface-presets)
 - [Core navigation](#core-navigation)
 - [Graph traversal](#graph-traversal)
 - [Search & traversal extensions](#search--traversal-extensions)
@@ -43,7 +44,66 @@ By default the server publishes the entire tool surface in the initial `tools/li
 {"name":"tools_search","arguments":{"query":"memories invariants"}}
 ```
 
-Returned tools are auto-promoted (`promote:false` opts out) and the server fires `notifications/tools/list_changed`. The `tool_profile` tool reports the active surface — which tools are live vs. deferred, their scopes, and (with a `tool` argument) a single tool's enabled status.
+Returned tools are auto-promoted (`promote:false` opts out) and the server fires `notifications/tools/list_changed`. The `tool_profile` tool reports the active surface — which tools are live vs. deferred, their scopes and categories, the active preset (below), and (with a `tool` argument) a single tool's enabled status.
+
+## Restricting the tool surface (presets)
+
+The full ~170-tool surface is more than many agents need. A **tool preset** restricts what the server publishes — the basis for a minimal, headless editing harness (an agent on a trusted box driving a remote daemon through a small, fixed tool set).
+
+Four built-in presets:
+
+| Preset | Surface |
+|--------|---------|
+| `full` (default) | every tool |
+| `readonly` | everything except the mutating tools (`edit_file`, `write_file`, `index_repository`, …) |
+| `edit` | the minimal headless editing set — orient + navigate + mutate + verify (`smart_context`, `search_symbols`, `find_files`, `edit_file`, `verify_change`, `get_test_targets`, …) |
+| `nav` | read-only navigation / exploration; no editors |
+
+`tool_profile` and `tools_search` are always kept. Layer per-tool deltas on any preset with `allow` / `deny`.
+
+**Two modes** (`mode`, default `hide`):
+
+- `hide` — non-allowed tools are removed from `tools/list` **and** calls to them are hard-blocked. The locked-down surface; works on every client.
+- `defer` — non-allowed tools are kept out of the cold `tools/list` but stay reachable through `tools_search` (the lazy-discovery path). Only effective on clients that honour `notifications/tools/list_changed`.
+
+Select a preset three ways (precedence: **env > flag > config > default**):
+
+```yaml
+# .gortex.yaml — config file
+mcp:
+  tools:
+    preset: edit          # full | readonly | edit | nav
+    mode: hide            # hide | defer
+    allow: [find_files]   # add tools on top of the preset
+    deny: [write_file]    # remove tools from the preset
+```
+
+```bash
+# env (overrides config) — spec is "preset,+add,-remove"
+export GORTEX_TOOLS="edit,+analyze,-write_file"
+export GORTEX_TOOLS_MODE=hide
+
+# CLI flags (override config; env still wins)
+gortex mcp --tools edit --tools-mode hide
+gortex daemon start --tools readonly      # propagates to the detached child
+```
+
+**Per-connection (client-driven) scoping.** The selectors above applied to `gortex daemon start` narrow the *whole daemon* for every client. To let one client pick its own surface while the daemon keeps serving the full set to everyone else, set `--tools` / `GORTEX_TOOLS` on that client's **`gortex mcp`** invocation — the stdio proxy filters just that connection's `tools/list` and blocks calls to tools outside the set. Because the filter applies from the first `tools/list`, it works on **every** MCP client (no `tools/list_changed` dependency).
+
+```jsonc
+// An MCP client config giving this client a minimal editing surface,
+// against a daemon that still serves the full catalogue to others:
+{
+  "command": "gortex",
+  "args": ["mcp", "--tools", "search_symbols,find_files,edit_file,verify_change"],
+  // or: "args": ["mcp", "--tools", "edit"]  (a named preset)
+  // or: "env": { "GORTEX_TOOLS": "readonly" }
+}
+```
+
+A spec whose first token isn't a known preset (`search_symbols,find_files,…`) is an **explicit allow list** — exactly those tools — for experts who want to hand-pick the surface. A known preset followed by names (`edit,find_files`) keeps preset semantics plus the extra tools.
+
+`tool_profile` reports the active `preset` / `preset_mode`, the narrowed `live` set, and a `categories{}` map grouping every tool into a functional family (nav / read / edit / analysis / review / pr / memory / overlay / subscription / enrich / workspace / admin) for prefix-style filtering.
 
 **Prompt-injection screening.** Every tool call is screened by middleware that scans arguments and result text for injection patterns. On a hit it attaches a non-blocking `_meta.gortex_security` advisory — the call still succeeds and the result body is never mutated. Disable with `GORTEX_MCP_SANITIZE=0`.
 
@@ -54,6 +114,7 @@ Returned tools are auto-promoted (`promote:false` opts out) and the server fires
 | `graph_stats` | Node/edge counts by kind, language, per-repo stats, session token savings, and an `edge_identity_revisions` counter (edges re-keyed when their provenance changed) |
 | `search_symbols` | Find symbols by name (replaces Grep). Inline `kind:`/`lang:`/`path:` field clauses + `query_class` / `max_per_file` tuning; accepts `repo`, `project`, `ref`, `scope` params. `corpus: code\|docs\|all` selects the corpus (`docs` has its own retrieval channel + prose-tuned ranking); `vocab_anchored: true` constrains LLM expansion to the repo's own vocabulary; a zero-result identifier query is auto-decomposed into leaf terms (`decomposed: true`) |
 | `search_text` | Trigram-accelerated literal (or `regexp: true`) code search across the repo — the alt grep backbone. Returns file/line/text rows, each carrying the enclosing symbol (`symbol_id` / `symbol_name`) |
+| `find_files` | Find source files by **name** — the file-name counterpart of `search_symbols`. `query` (basename/path substring, ranked exact > prefix > substring) and/or `glob` (e.g. `internal/**/*_test.go`), with optional `fuzzy` subsequence matching and `path` / `repo` scoping. File nodes are excluded from the symbol index, so `search_symbols kind:file` cannot return them — use this |
 | `winnow_symbols` | Structured constraint-chain retrieval — `kind`, `language`, `community`, `path_prefix`, `min_fan_in`, `min_fan_out`, `min_churn`, `text_match` with per-axis score contributions |
 | `get_symbol` | Symbol location and signature (replaces Read). Accepts `repo`, `project`, `ref` params |
 | `get_file_summary` | All symbols and imports in a file. Accepts `repo`, `project`, `ref`, `max_bytes` / `max_tokens` budget caps |

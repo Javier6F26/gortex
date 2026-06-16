@@ -97,6 +97,7 @@ func findAndCallHandler(srv *Server, name string, ctx context.Context, req mcpli
 		"get_repo_outline":      srv.handleGetRepoOutline,
 		"suggest_queries":       srv.handleSuggestQueries,
 		"search_text":           srv.handleSearchText,
+		"find_files":            srv.handleFindFiles,
 		"get_untested_symbols":  srv.handleGetUntestedSymbols,
 		"winnow_symbols":        srv.handleWinnowSymbols,
 		"edit_file":             srv.handleEditFile,

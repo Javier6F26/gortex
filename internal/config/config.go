@@ -1457,8 +1457,22 @@ func (e EmbeddingConfig) EmbeddingProviderOrDefault() string {
 }
 
 type MCPConfig struct {
-	Transport string `mapstructure:"transport" yaml:"transport,omitempty"`
-	Port      int    `mapstructure:"port"      yaml:"port,omitempty"`
+	Transport string         `mapstructure:"transport" yaml:"transport,omitempty"`
+	Port      int            `mapstructure:"port"      yaml:"port,omitempty"`
+	Tools     MCPToolsConfig `mapstructure:"tools"     yaml:"tools,omitempty"`
+}
+
+// MCPToolsConfig selects which MCP tools the server publishes. Preset is
+// one of full (default) / readonly / edit / nav; Allow / Deny are
+// per-tool deltas layered on the preset; Mode is "hide" (remove
+// non-allowed tools from tools/list and hard-block calls) or "defer"
+// (hide from the cold tools/list but keep reachable via tools_search).
+// GORTEX_TOOLS / GORTEX_TOOLS_MODE override these at runtime.
+type MCPToolsConfig struct {
+	Preset string   `mapstructure:"preset" yaml:"preset,omitempty"`
+	Mode   string   `mapstructure:"mode"   yaml:"mode,omitempty"`
+	Allow  []string `mapstructure:"allow"  yaml:"allow,omitempty"`
+	Deny   []string `mapstructure:"deny"   yaml:"deny,omitempty"`
 }
 
 // Default returns a Config with sensible defaults.

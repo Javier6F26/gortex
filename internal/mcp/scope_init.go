@@ -73,6 +73,7 @@ var defaultToolScopes = map[string]ToolScope{
 	"get_untested_symbols": ScopeRepo,
 	"suggest_queries":      ScopeRepo,
 	"search_text":          ScopeRepo,
+	"find_files":           ScopeRepo,
 
 	// File / repo-level summaries.
 	"get_file_summary":    ScopeRepo,

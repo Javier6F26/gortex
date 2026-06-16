@@ -34,6 +34,7 @@ import (
 // state" consult daemon.MutatingTools (internal/daemon/mutating.go).
 var hotEagerTools = map[string]bool{
 	"search_symbols":       true,
+	"find_files":           true,
 	"find_usages":          true,
 	"find_implementations": true,
 	"find_overrides":       true,
@@ -114,6 +115,13 @@ type lazyToolRegistry struct {
 	// fires notifications/tools/list_changed).
 	promote func(*deferredTool)
 	enabled bool
+	// eager, when non-nil, replaces the hotEagerTools membership test
+	// in IsDeferred — a tool ships eagerly iff eager(name) is true.
+	// Set by a defer-mode tool preset (SetEagerPredicate) so the
+	// eager surface follows the preset's allow-set instead of the
+	// hard-coded hot set. Set once at construction before the register
+	// sweep, so no mutex is needed.
+	eager func(string) bool
 }
 
 func newLazyToolRegistry(enabled bool) *lazyToolRegistry {
@@ -159,7 +167,21 @@ func (r *lazyToolRegistry) IsDeferred(name string) bool {
 	if name == LazyToolsSearchName {
 		return false
 	}
+	if r.eager != nil {
+		return !r.eager(name)
+	}
 	return !hotEagerTools[name]
+}
+
+// SetEagerPredicate overrides the hotEagerTools membership test used by
+// IsDeferred: once set, a tool is eager iff f(name) is true. A defer-
+// mode tool preset wires this so the cold tools/list carries exactly
+// the preset's allow-set. Call before any Register (construction time).
+func (r *lazyToolRegistry) SetEagerPredicate(f func(string) bool) {
+	if r == nil {
+		return
+	}
+	r.eager = f
 }
 
 // Register stashes a tool in the deferred set. The caller has already

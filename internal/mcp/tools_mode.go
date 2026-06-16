@@ -48,6 +48,19 @@ func (s *Server) toolSurfaceFilter(ctx context.Context, tools []mcp.Tool) []mcp.
 		}
 		tools = kept
 	}
+	// Tool-surface preset (hide mode): keep only the tools in the active
+	// preset's allow-set so a headless / restricted harness sees exactly
+	// its surface and nothing else.
+	if s.toolPolicy.hideMode() {
+		kept := make([]mcp.Tool, 0, len(tools))
+		for _, t := range tools {
+			if !s.toolPolicy.allows(t.Name) {
+				continue
+			}
+			kept = append(kept, t)
+		}
+		tools = kept
+	}
 	// Per-host adaptation: drop tools the host duplicates and apply any
 	// host-specific description overrides (see host_context.go).
 	return s.sessionHostContext(ctx).apply(tools)
@@ -64,7 +77,26 @@ func (s *Server) checkToolGate(ctx context.Context, toolName string) *mcp.CallTo
 	if blocked := s.checkWorkflowGate(ctx, toolName); blocked != nil {
 		return blocked
 	}
+	if blocked := s.checkToolPresetGate(toolName); blocked != nil {
+		return blocked
+	}
 	return nil
+}
+
+// checkToolPresetGate hard-blocks calls to tools outside the active
+// hide-mode preset, so a client that hard-codes a hidden tool name can't
+// bypass the restricted surface. Defer mode needs no gate — non-allowed
+// tools simply aren't registered live until tools_search promotes them.
+func (s *Server) checkToolPresetGate(toolName string) *mcp.CallToolResult {
+	if !s.toolPolicy.hideMode() || s.toolPolicy.allows(toolName) {
+		return nil
+	}
+	return NewStructuredErrorResult(StructuredError{
+		ErrorCode: ErrCodeToolBlockedByMode,
+		Message: fmt.Sprintf("%q is not part of the active tool preset %q — it has been removed from this "+
+			"server's tool surface. Call tool_profile to see the available tools.", toolName, s.toolPolicy.preset),
+		Data: map[string]any{"tool": toolName, "preset": s.toolPolicy.preset},
+	})
 }
 
 // checkPlanningModeGate blocks editing tools while the session is in
