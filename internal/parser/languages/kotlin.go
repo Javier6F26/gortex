@@ -437,6 +437,13 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 
 	ownerInfo := kotlinResolveMemberOwner(def.Node, src)
 	owner, ownerKind := ownerInfo.name, ownerInfo.kind
+	if ownerKind == "" {
+		// Extension function: `fun Receiver.name()` attributes to the receiver
+		// type even though it is declared at the top level.
+		if recv := kotlinExtensionReceiver(def.Node, src); recv != "" {
+			owner, ownerKind = recv, "extension"
+		}
+	}
 	if ownerKind != "" {
 		id := filePath + "::" + owner + "." + name
 		if seen[id] {
@@ -694,6 +701,43 @@ func kotlinStampModMeta(meta map[string]any, isAsync bool, kmpRole string) {
 	if kmpRole != "" {
 		meta["kmp_role"] = kmpRole
 	}
+}
+
+// kotlinExtensionReceiver returns the receiver type of an extension function
+// (`fun Foo.bar()` -> "Foo"), or "" when fn is not an extension. A leading
+// type-parameter list and the receiver's own generic arguments are stripped, and
+// a dotted receiver is reduced to its last segment.
+func kotlinExtensionReceiver(fn *sitter.Node, src []byte) string {
+	if fn == nil {
+		return ""
+	}
+	header := fn.Content(src)
+	fi := strings.Index(header, "fun ")
+	if fi < 0 {
+		return ""
+	}
+	header = strings.TrimSpace(header[fi+4:])
+	if strings.HasPrefix(header, "<") {
+		if i := strings.IndexByte(header, '>'); i >= 0 {
+			header = strings.TrimSpace(header[i+1:])
+		}
+	}
+	if p := strings.IndexByte(header, '('); p >= 0 {
+		header = header[:p]
+	}
+	header = strings.TrimSpace(header)
+	dot := strings.LastIndexByte(header, '.')
+	if dot < 0 {
+		return ""
+	}
+	recv := strings.TrimSpace(header[:dot])
+	if i := strings.IndexByte(recv, '<'); i >= 0 {
+		recv = recv[:i]
+	}
+	if i := strings.LastIndexByte(recv, '.'); i >= 0 {
+		recv = recv[i+1:]
+	}
+	return strings.TrimSpace(recv)
 }
 
 func (e *KotlinExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {
