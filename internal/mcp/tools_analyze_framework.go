@@ -108,7 +108,16 @@ func routeMethodAndPath(n *graph.Node) (string, string) {
 	if n == nil {
 		return "", ""
 	}
-	meta := n.Meta
+	// The route fields live in the nested contract_meta map — the
+	// contract's own Meta, copied in wholesale at node-build time. The
+	// node's top-level Meta only carries type/role/symbol_id/line/
+	// confidence, so reading these keys off n.Meta directly always
+	// missed. Fall back to the top level for any node that does stamp
+	// them there.
+	meta, _ := n.Meta["contract_meta"].(map[string]any)
+	if meta == nil {
+		meta = n.Meta
+	}
 	method, _ := meta["method"].(string)
 	path, _ := meta["path"].(string)
 	if path != "" || method != "" {
