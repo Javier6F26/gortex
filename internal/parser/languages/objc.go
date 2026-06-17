@@ -167,6 +167,51 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		emitImport(string(src[m[2]:m[3]]), lineAt(src, m[0]))
 	}
 
+	// Message-send call edges: attribute each [recv selector:...] to the method
+	// whose body it appears in. This is the no-LSP call graph for Objective-C.
+	methodRanges := objcMethodRanges(src, lines, filePath)
+	for _, ms := range objcMessageSends(src) {
+		from := objcEnclosing(methodRanges, ms.line)
+		if from == "" {
+			continue
+		}
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: from, To: "unresolved::" + ms.selector,
+			Kind: graph.EdgeReferences, FilePath: filePath, Line: ms.line,
+		})
+	}
+
+	// @property declarations become field members of their enclosing class.
+	classRanges := objcClassRanges(src, lines, filePath)
+	for _, m := range objcPropertyRe.FindAllSubmatchIndex(src, -1) {
+		name := string(src[m[2]:m[3]])
+		line := lineAt(src, m[0])
+		propID := filePath + "::" + name + "#prop"
+		if seen[propID] {
+			continue
+		}
+		seen[propID] = true
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: propID, Kind: graph.KindField, Name: name,
+			FilePath: filePath, StartLine: line, EndLine: line, Language: "objc",
+		})
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: fileNode.ID, To: propID, Kind: graph.EdgeDefines, FilePath: filePath, Line: line,
+		})
+		if owner := objcEnclosing(classRanges, line); owner != "" {
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: propID, To: owner, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: line,
+			})
+		}
+	}
+
+	// typedef NS_ENUM / NS_OPTIONS become named type nodes.
+	for _, m := range objcTypedefRe.FindAllSubmatchIndex(src, -1) {
+		name := string(src[m[2]:m[3]])
+		line := lineAt(src, m[0])
+		add(name, graph.KindType, line, line)
+	}
+
 	return result, nil
 }
 
