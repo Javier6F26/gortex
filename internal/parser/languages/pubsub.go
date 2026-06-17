@@ -124,6 +124,10 @@ var pubsubLibraries = []pubsubLibrary{
 	{"eventemitter3", "eventemitter"},
 	{"eventemitter", "eventemitter"},
 	{"nats", "nats"},
+	// React Native's NativeEventEmitter / DeviceEventEmitter is imported from
+	// the react-native package; its addListener handlers pair with a native
+	// module's sendEventWithName: emit on the rn_native_event bridge.
+	{"react-native", rnNativeEventTransport},
 }
 
 // inferPubsubTransport scans a file's import paths for a recognised
@@ -158,6 +162,13 @@ func resolvePubsubTransport(c pubsubClassification, importPaths []string) (strin
 	transport, imported := inferPubsubTransport(importPaths)
 	if c.weak && !imported {
 		return "", false
+	}
+	// A React Native NativeEventEmitter import re-homes the generic
+	// EventEmitter subscribe/publish family onto the native bridge channel so
+	// a JS addListener pairs with a native sendEvent — the rn_ transport wins
+	// over the method's generic eventemitter hint.
+	if imported && strings.HasPrefix(transport, "rn_") {
+		return transport, true
 	}
 	if c.hint != "" {
 		return c.hint, true

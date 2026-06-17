@@ -175,6 +175,11 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 		})
 	}
 
+	// React Native native event emits pair with the JS addListener handler.
+	mineRNNativeEmits(src, rnSwiftSendEventRe, func(line int) string {
+		return findEnclosingFunc(funcRanges, line)
+	}, filePath, "swift", result)
+
 	// Expo Modules native DSL (Name/Function/AsyncFunction) → synthetic
 	// JS-callable method nodes for the Expo bridge synthesizer.
 	emitExpoModuleNodes(src, filePath, "swift", fileID, result, seen)

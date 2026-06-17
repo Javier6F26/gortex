@@ -205,6 +205,11 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 	}
 
+	// React Native native event emits pair with the JS addListener handler.
+	mineRNNativeEmits(src, rnObjCSendEventRe, func(line int) string {
+		return objcEnclosing(methodRanges, line)
+	}, filePath, "objc", result)
+
 	// @property declarations become field members of their enclosing class.
 	classRanges := objcClassRanges(src, lines, filePath)
 	for _, m := range objcPropertyRe.FindAllSubmatchIndex(src, -1) {
