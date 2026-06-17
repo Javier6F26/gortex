@@ -52,6 +52,38 @@ func TestResolveSwiftObjCBridge_BindsSelector(t *testing.T) {
 	require.NotNil(t, rev, "objc→swift bridge edge (bidirectional)")
 }
 
+func TestResolveSwiftObjCBridge_CandidateBridge(t *testing.T) {
+	g := graph.New()
+	// A Swift method with no @objc selector metadata — only its base name.
+	g.AddNode(&graph.Node{
+		ID: "ios/VC.swift::VC.cellForRow", Kind: graph.KindMethod, Name: "cellForRow",
+		FilePath: "ios/VC.swift", StartLine: 20, Language: "swift",
+	})
+	objcMethodNode(g, "ios/Legacy.m::cellForRowAtIndexPath:", "cellForRowAtIndexPath:")
+
+	assert.Equal(t, 1, ResolveSwiftObjCBridge(g))
+
+	fwd := bridgeEdgeBetween(g, "ios/VC.swift::VC.cellForRow", "ios/Legacy.m::cellForRowAtIndexPath:")
+	require.NotNil(t, fwd, "candidate swift→objc bridge")
+	assert.Equal(t, "cellForRowAtIndexPath:", fwd.Meta["objc_selector"])
+	rev := bridgeEdgeBetween(g, "ios/Legacy.m::cellForRowAtIndexPath:", "ios/VC.swift::VC.cellForRow")
+	require.NotNil(t, rev, "candidate objc→swift bridge (bidirectional)")
+}
+
+func TestSwiftObjCBaseNameCandidates(t *testing.T) {
+	cases := map[string][]string{
+		"cellForRowAtIndexPath:":            {"cellForRowAtIndexPath", "cellForRow"},
+		"moveFrom:to:":                      {"moveFrom", "move"},
+		"initWithFrame:":                    {"initWithFrame", "init"},
+		"tableView:numberOfRowsInSection:":  {"tableView"},
+		"viewDidLoad":                       {"viewDidLoad"},
+		"dataForKey:":                       {"dataForKey", "data"},
+	}
+	for sel, want := range cases {
+		assert.ElementsMatch(t, want, swiftObjCBaseNameCandidates(sel), "selector %q", sel)
+	}
+}
+
 func TestResolveSwiftObjCBridge_ExplicitSelector(t *testing.T) {
 	g := graph.New()
 	swiftMethodNode(g, "ios/App.swift::Mover.moveCustom", "customMove:")

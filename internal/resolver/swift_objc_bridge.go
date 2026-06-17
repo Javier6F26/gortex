@@ -31,6 +31,7 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 	}
 
 	objcBySelector := map[string][]*graph.Node{}
+	swiftByName := map[string][]*graph.Node{}
 	var swiftMethods []*graph.Node
 	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction) {
 		if n == nil {
@@ -42,6 +43,9 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 				objcBySelector[n.Name] = append(objcBySelector[n.Name], n)
 			}
 		case "swift":
+			if n.Name != "" {
+				swiftByName[n.Name] = append(swiftByName[n.Name], n)
+			}
 			if n.Meta != nil {
 				if sel, _ := n.Meta["objc_selector"].(string); sel != "" {
 					swiftMethods = append(swiftMethods, n)
@@ -49,38 +53,50 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 			}
 		}
 	}
-	if len(objcBySelector) == 0 || len(swiftMethods) == 0 {
+	if len(objcBySelector) == 0 || len(swiftByName) == 0 {
 		return 0
 	}
 
 	var batch []*graph.Edge
-	bridged := 0
+	bridged := map[string]bool{}
+	link := func(sm, om *graph.Node, sel string) {
+		if sm.ID == om.ID {
+			return
+		}
+		batch = append(batch,
+			swiftObjCBridgeEdge(sm, om, sel),
+			swiftObjCBridgeEdge(om, sm, sel),
+		)
+		bridged[sm.ID] = true
+	}
+
+	// Exact pass: a Swift @objc method declares the selector it is exposed
+	// under; bind it to the ObjC method node of the same selector.
 	for _, sm := range swiftMethods {
 		sel, _ := sm.Meta["objc_selector"].(string)
-		matches := objcBySelector[sel]
-		if len(matches) == 0 {
-			continue
+		for _, om := range objcBySelector[sel] {
+			link(sm, om, sel)
 		}
-		linked := false
-		for _, om := range matches {
-			if om.ID == sm.ID {
-				continue
+	}
+
+	// Candidate pass: for Swift methods without explicit selector metadata,
+	// reverse the importer's naming rules — derive the Swift base names each
+	// ObjC selector could surface under and bind by name. graph.AddEdge dedupes,
+	// so a method matched by both passes counts once.
+	for sel, objcNodes := range objcBySelector {
+		for _, cand := range swiftObjCBaseNameCandidates(sel) {
+			for _, sm := range swiftByName[cand] {
+				for _, om := range objcNodes {
+					link(sm, om, sel)
+				}
 			}
-			batch = append(batch,
-				swiftObjCBridgeEdge(sm, om, sel),
-				swiftObjCBridgeEdge(om, sm, sel),
-			)
-			linked = true
-		}
-		if linked {
-			bridged++
 		}
 	}
 
 	for _, e := range batch {
 		g.AddEdge(e)
 	}
-	return bridged
+	return len(bridged)
 }
 
 // swiftObjCBridgeEdge builds one direction of the cross-language bridge.
