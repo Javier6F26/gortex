@@ -323,6 +323,10 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 
 	doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash)
 	visibility := swiftVisibility(def.Node, src)
+	sig, returnType, isAsync, isStatic := swiftFunctionDetails(def.Node, src)
+	if sig == "" {
+		sig = "func " + name + "(...)"
+	}
 
 	if typeName, ok := findEnclosingSwiftType(typeRanges, startLine); ok {
 		id := filePath + "::" + typeName + "." + name
@@ -332,9 +336,10 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		seen[id] = true
 		meta := map[string]any{
 			"receiver":   typeName,
-			"signature":  "func " + name + "(...)",
+			"signature":  sig,
 			"visibility": visibility,
 		}
+		swiftStampFuncMeta(meta, returnType, isAsync, isStatic)
 		if doc != "" {
 			meta["doc"] = doc
 		}
@@ -363,9 +368,10 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 	}
 	seen[id] = true
 	meta := map[string]any{
-		"signature":  "func " + name + "(...)",
+		"signature":  sig,
 		"visibility": visibility,
 	}
+	swiftStampFuncMeta(meta, returnType, isAsync, isStatic)
 	if doc != "" {
 		meta["doc"] = doc
 	}
@@ -378,6 +384,62 @@ func (e *SwiftExtractor) emitFunction(m parser.QueryResult, filePath, fileID str
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
 	emitSwiftAnnotationEdges(def.Node, id, filePath, src, result, annotationSeen)
+}
+
+// swiftFunctionDetails parses a function declaration's header for its real
+// signature, return type, and async/static modifier flags. The body is dropped
+// at the first brace; modifiers precede `func` and the return type follows `->`.
+func swiftFunctionDetails(decl *sitter.Node, src []byte) (signature, returnType string, isAsync, isStatic bool) {
+	if decl == nil {
+		return "", "", false, false
+	}
+	header := decl.Content(src)
+	if i := strings.IndexByte(header, '{'); i >= 0 {
+		header = header[:i]
+	}
+	header = strings.Join(strings.Fields(header), " ")
+	isAsync = swiftHasWord(header, "async")
+	fi := strings.Index(header, "func ")
+	if fi < 0 {
+		return strings.TrimSpace(header), "", isAsync, false
+	}
+	isStatic = swiftHasWord(header[:fi], "static") || swiftHasWord(header[:fi], "class")
+	signature = strings.TrimSpace(header[fi:])
+	if ri := strings.Index(signature, "->"); ri >= 0 {
+		rt := strings.TrimSpace(signature[ri+2:])
+		if wi := strings.Index(rt, " where "); wi >= 0 {
+			rt = strings.TrimSpace(rt[:wi])
+		}
+		rt = strings.TrimPrefix(rt, "some ")
+		rt = strings.TrimPrefix(rt, "any ")
+		returnType = strings.TrimSpace(rt)
+	}
+	return signature, returnType, isAsync, isStatic
+}
+
+// swiftHasWord reports whether word appears as a standalone space-delimited
+// token in s.
+func swiftHasWord(s, word string) bool {
+	for _, f := range strings.Fields(s) {
+		if f == word {
+			return true
+		}
+	}
+	return false
+}
+
+// swiftStampFuncMeta records the return type and async/static flags on a
+// function or method node's Meta when present.
+func swiftStampFuncMeta(meta map[string]any, returnType string, isAsync, isStatic bool) {
+	if returnType != "" {
+		meta["return_type"] = returnType
+	}
+	if isAsync {
+		meta["is_async"] = true
+	}
+	if isStatic {
+		meta["is_static"] = true
+	}
 }
 
 // swiftVisibility scans a declaration's leading modifier children for
