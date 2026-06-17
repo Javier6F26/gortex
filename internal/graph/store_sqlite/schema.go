@@ -16,7 +16,14 @@ package store_sqlite
 //     IGNORE on that constraint matches the in-memory "second AddEdge
 //     for the same key is a no-op" semantics.
 //
-//   - meta is a gob-encoded blob. nil / empty Meta is stored as NULL.
+//   - meta is a JSON document (see meta_json.go). nil / empty Meta is
+//     stored as NULL. Four universal, hot-read node keys are promoted to
+//     their own nullable columns (signature / visibility / doc /
+//     external): they are stripped from the JSON blob on write and
+//     restored into Meta on read, so the in-memory map is unchanged. A
+//     NULL column means "not set" (legacy gob rows predate the columns
+//     and keep their values in the blob). Existing databases gain the
+//     columns via ALTER on the next Open (ensureNodeColumns).
 //
 //   - Secondary indexes mirror the in-memory store's hot lookup paths:
 //     nodes_by_name      -- FindNodesByName / FindNodesByNameInRepo
@@ -45,6 +52,10 @@ CREATE TABLE IF NOT EXISTS nodes (
     repo_prefix   TEXT NOT NULL DEFAULT '',
     workspace_id  TEXT NOT NULL DEFAULT '',
     project_id    TEXT NOT NULL DEFAULT '',
+    signature     TEXT,
+    visibility    TEXT,
+    doc           TEXT,
+    external      INTEGER,
     meta          BLOB
 ) WITHOUT ROWID;
 

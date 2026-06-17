@@ -2,10 +2,12 @@ package store_sqlite
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/gob"
 	"encoding/json"
 
 	"github.com/zzet/gortex/internal/contracts"
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // Node / edge Meta is a map[string]any persisted in the `meta` column.
@@ -352,4 +354,131 @@ func decodeMetaGob(b []byte) (map[string]any, error) {
 		return nil, err
 	}
 	return m, nil
+}
+
+// -- promoted node columns ------------------------------------------------
+//
+// signature / visibility / doc / external are universal, hot-read node
+// keys. They are lifted into dedicated nullable columns: stripped from the
+// JSON blob on write (extractPromotedMeta) and restored into Meta on read
+// (restorePromotedMeta), so the in-memory map is unchanged while the keys
+// become queryable and the common blob shrinks.
+
+var promotedMetaColumns = []struct {
+	name string
+	ddl  string
+}{
+	{"signature", "signature TEXT"},
+	{"visibility", "visibility TEXT"},
+	{"doc", "doc TEXT"},
+	{"external", "external INTEGER"},
+}
+
+// ensureNodeColumns adds the promoted columns to a nodes table created
+// before they existed. A fresh DB already has them from the DDL, so this is
+// a no-op; an older DB is altered in place (ADD COLUMN defaults to NULL).
+func ensureNodeColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(nodes)`)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, c := range promotedMetaColumns {
+		if existing[c.name] {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE nodes ADD COLUMN ` + c.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// extractPromotedMeta splits the promoted keys out of m into typed column
+// values and returns the remaining map destined for the JSON blob. m is
+// not mutated; a copy is made only when a promoted key is present and has
+// the expected type (otherwise the value stays in the blob).
+func extractPromotedMeta(m map[string]any) (sig, vis, doc sql.NullString, ext sql.NullBool, rest map[string]any) {
+	rest = m
+	if len(m) == 0 {
+		return
+	}
+	has := false
+	for _, c := range promotedMetaColumns {
+		if _, ok := m[c.name]; ok {
+			has = true
+			break
+		}
+	}
+	if !has {
+		return
+	}
+	rest = make(map[string]any, len(m))
+	for k, v := range m {
+		switch k {
+		case "signature":
+			if s, ok := v.(string); ok {
+				sig = sql.NullString{String: s, Valid: true}
+				continue
+			}
+		case "visibility":
+			if s, ok := v.(string); ok {
+				vis = sql.NullString{String: s, Valid: true}
+				continue
+			}
+		case "doc":
+			if s, ok := v.(string); ok {
+				doc = sql.NullString{String: s, Valid: true}
+				continue
+			}
+		case "external":
+			if b, ok := v.(bool); ok {
+				ext = sql.NullBool{Bool: b, Valid: true}
+				continue
+			}
+		}
+		rest[k] = v
+	}
+	return
+}
+
+// restorePromotedMeta writes the non-NULL promoted columns back into the
+// node's Meta. A NULL column is left alone so a legacy gob row's blob value
+// survives.
+func restorePromotedMeta(n *graph.Node, sig, vis, doc sql.NullString, ext sql.NullBool) {
+	if !sig.Valid && !vis.Valid && !doc.Valid && !ext.Valid {
+		return
+	}
+	if n.Meta == nil {
+		n.Meta = make(map[string]any, 4)
+	}
+	if sig.Valid {
+		n.Meta["signature"] = sig.String
+	}
+	if vis.Valid {
+		n.Meta["visibility"] = vis.String
+	}
+	if doc.Valid {
+		n.Meta["doc"] = doc.String
+	}
+	if ext.Valid {
+		n.Meta["external"] = ext.Bool
+	}
 }

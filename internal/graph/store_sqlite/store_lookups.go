@@ -12,7 +12,11 @@ import (
 // (queryNodesSQL / queryEdgesSQL / lookupChunkSize / minInt). SQLite's
 // planner drives every one through the existing secondary indexes.
 
-const lookupNodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+// lookupNodeCols is the canonical node column list (and scan order) for
+// every node-shaped SELECT in the package. It must stay in sync with
+// scanNode. The promoted columns (signature/visibility/doc/external)
+// precede meta.
+const lookupNodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, signature, visibility, doc, external, meta`
 const lookupEdgeCols = `from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta`
 
 // FindNodesByNameContaining returns nodes whose Name contains substr,
