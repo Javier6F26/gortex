@@ -1940,6 +1940,9 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 			sym.StartLine > 0 && sym.EndLine > 0 {
 			if absPath, err := s.resolveNodePath(sym); err == nil {
 				if source, _, totalFileChars, err := s.readLinesForCtx(ctx, absPath, sym.StartLine, sym.EndLine, 0); err == nil {
+					if red, did := s.maybeRedactConfigLeaf(sym.Language, sym.FilePath, false, source); did {
+						source = red
+					}
 					entry["source"] = source
 					sourcesEmbedded++
 					returned := tokens.CachedCountInt64(source)

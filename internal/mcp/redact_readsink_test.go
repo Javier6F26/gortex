@@ -53,3 +53,22 @@ func TestHandleGetSymbolSource_Redact(t *testing.T) {
 		t.Errorf("allow_secrets should serve verbatim: did=%v out=%q", did, raw)
 	}
 }
+
+func TestSmartContext_Redact(t *testing.T) {
+	s := &Server{} // nil configManager → redaction enabled by default
+
+	// smart_context always withholds config-leaf secrets from an embedded
+	// source snippet (the manifest and flat embed paths both pass
+	// allowSecrets=false — the explicit override lives on the read tools).
+	const src = "db:\n  access_key: AKIAIOSFODNN7EXAMPLE\n"
+	out, did := s.maybeRedactConfigLeaf("yaml", "deploy/secrets.yaml", false, src)
+	if !did {
+		t.Fatalf("smart_context should withhold a config-leaf secret, got none: %q", out)
+	}
+	if strings.Contains(out, "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("secret value survived redaction in smart_context: %q", out)
+	}
+	if !strings.Contains(out, "access_key:") {
+		t.Errorf("benign key framing was dropped: %q", out)
+	}
+}

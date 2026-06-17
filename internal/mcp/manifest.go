@@ -239,6 +239,12 @@ func (s *Server) manifestSymbolSource(ctx context.Context, n *graph.Node) string
 	if err != nil {
 		return ""
 	}
+	// smart_context is an assembly surface, so config-leaf secrets are always
+	// withheld here — the explicit-read override lives on read_file /
+	// get_symbol_source. A no-op for ordinary code symbols.
+	if red, did := s.maybeRedactConfigLeaf(n.Language, n.FilePath, false, src); did {
+		src = red
+	}
 	return src
 }
 
