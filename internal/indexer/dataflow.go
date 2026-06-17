@@ -40,14 +40,15 @@ import (
 // re-run of this pass becomes a no-op.
 func (idx *Indexer) materializeDataflowParams() {
 	g := idx.graph
-	edges := g.AllEdges()
-	for _, e := range edges {
-		switch e.Kind {
-		case graph.EdgeArgOf:
-			rewriteArgOf(g, e)
-		case graph.EdgeReturnsTo:
-			rewriteReturnsTo(g, e)
-		}
+	// Only arg_of / returns_to edges are rewritten here. Fetch exactly
+	// those kinds — each an edges_by_kind index probe on the sqlite
+	// backend — instead of scanning (and meta-decoding) the whole edge
+	// set; every other edge in the graph is irrelevant to this pass.
+	for e := range g.EdgesByKind(graph.EdgeArgOf) {
+		rewriteArgOf(g, e)
+	}
+	for e := range g.EdgesByKind(graph.EdgeReturnsTo) {
+		rewriteReturnsTo(g, e)
 	}
 }
 

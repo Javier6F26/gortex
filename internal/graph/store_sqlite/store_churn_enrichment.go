@@ -9,8 +9,8 @@ import (
 // Compile-time assertions that the SQLite Store satisfies the optional
 // git-churn enrichment sidecar capabilities (change A: enrichment moved
 // out of nodes.meta into a typed table so the node hot path stops
-// gob-encoding rarely-read data and get_churn_rate reads via an index
-// instead of an AllNodes scan).
+// encoding rarely-read data into the meta blob and get_churn_rate reads
+// via an index instead of an AllNodes scan).
 var (
 	_ graph.ChurnEnrichmentWriter = (*Store)(nil)
 	_ graph.ChurnEnrichmentReader = (*Store)(nil)
@@ -123,7 +123,7 @@ func (s *Store) DeleteChurn(nodeIDs []string) error {
 // ChurnRows returns every churn row for repoPrefix; an EMPTY repoPrefix
 // returns ALL rows across repos. This is an index-only read over the
 // (small) enriched set — the whole point of the sidecar, replacing the
-// AllNodes()+gob-decode scan get_churn_rate used to do.
+// AllNodes()+meta-decode scan get_churn_rate used to do.
 func (s *Store) ChurnRows(repoPrefix string) []graph.ChurnEnrichment {
 	var (
 		rows *sql.Rows

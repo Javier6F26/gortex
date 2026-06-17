@@ -6,7 +6,7 @@ import (
 
 // Compile-time assertions that the SQLite Store satisfies the optional
 // constant-value persistence capability. A KindConstant node's literal
-// value lives in this queryable sidecar (not the gob-encoded Meta blob)
+// value lives in this queryable sidecar (not the JSON Meta blob)
 // so the resolver can dereference a const-identifier dispatch name across
 // files without an unindexable per-node blob decode.
 var (

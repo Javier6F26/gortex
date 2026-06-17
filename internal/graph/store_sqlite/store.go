@@ -11,8 +11,9 @@
 // fans out 8 concurrent writers; reads still run concurrently under
 // WAL mode.
 //
-// Meta maps are encoded with gob; an empty / nil Meta is stored as
-// NULL so the common case adds no row weight beyond the column header.
+// Meta maps are encoded as JSON (see meta_json.go); an empty / nil Meta
+// is stored as NULL so the common case adds no row weight beyond the
+// column header.
 //
 // EdgeIdentityRevisions is tracked in memory (atomic counter) -- it
 // mirrors the in-memory store's monotonic "provenance churn" signal
@@ -21,9 +22,7 @@
 package store_sqlite
 
 import (
-	"bytes"
 	"database/sql"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"iter"
@@ -186,6 +185,13 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite edges_external index: %w", err)
 	}
+	// Add the promoted node columns to databases created before they
+	// existed (CREATE TABLE IF NOT EXISTS won't alter an existing table).
+	// Must run before prepare(), whose node INSERT references them.
+	if err := ensureNodeColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite node columns: %w", err)
+	}
 
 	s := &Store{db: db, dbPath: path}
 	// Initialise the bundle cache at construction so its pointer is
@@ -309,10 +315,10 @@ func (s *Store) prepare() error {
 		*out = st
 	}
 
-	const nodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+	const nodeCols = lookupNodeCols
 
 	prep(&s.stmtInsertNode,
-		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	prep(&s.stmtGetNode,
 		`SELECT `+nodeCols+` FROM nodes WHERE id = ?`)
 	prep(&s.stmtGetNodeByQual,
@@ -404,29 +410,8 @@ func (s *Store) prepare() error {
 	return err
 }
 
-// -- meta encode/decode ----------------------------------------------------
-
-func encodeMeta(m map[string]any) ([]byte, error) {
-	if len(m) == 0 {
-		return nil, nil
-	}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(m); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func decodeMeta(b []byte) (map[string]any, error) {
-	if len(b) == 0 {
-		return nil, nil
-	}
-	var m map[string]any
-	if err := gob.NewDecoder(bytes.NewReader(b)).Decode(&m); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
+// encodeMeta / decodeMeta live in meta_json.go (JSON codec + the
+// metaWire typed DTO + the legacy-gob dual-read fallback).
 
 // -- row scanners ---------------------------------------------------------
 
@@ -434,13 +419,16 @@ func scanNode(scanner interface {
 	Scan(...any) error
 }) (*graph.Node, error) {
 	var (
-		n        graph.Node
-		metaBlob []byte
+		n             graph.Node
+		metaBlob      []byte
+		sig, vis, doc sql.NullString
+		ext           sql.NullBool
 	)
 	err := scanner.Scan(
 		&n.ID, &n.Kind, &n.Name, &n.QualName, &n.FilePath,
 		&n.StartLine, &n.EndLine, &n.Language,
-		&n.RepoPrefix, &n.WorkspaceID, &n.ProjectID, &metaBlob,
+		&n.RepoPrefix, &n.WorkspaceID, &n.ProjectID,
+		&sig, &vis, &doc, &ext, &metaBlob,
 	)
 	if err != nil {
 		return nil, err
@@ -452,6 +440,10 @@ func scanNode(scanner interface {
 		}
 		n.Meta = m
 	}
+	// Restore the promoted columns into Meta. They are authoritative for
+	// rows written after the promotion; a NULL column (legacy gob rows)
+	// is left alone so the blob-carried value survives.
+	restorePromotedMeta(&n, sig, vis, doc, ext)
 	return &n, nil
 }
 
@@ -511,14 +503,16 @@ func (s *Store) AddNode(n *graph.Node) {
 }
 
 func (s *Store) insertNodeLocked(stmt *sql.Stmt, n *graph.Node) error {
-	metaBlob, err := encodeMeta(n.Meta)
+	sig, vis, doc, ext, blobMeta := extractPromotedMeta(n.Meta)
+	metaBlob, err := encodeMeta(blobMeta)
 	if err != nil {
 		return err
 	}
 	_, err = stmt.Exec(
 		n.ID, string(n.Kind), n.Name, n.QualName, n.FilePath,
 		n.StartLine, n.EndLine, n.Language,
-		n.RepoPrefix, n.WorkspaceID, n.ProjectID, metaBlob,
+		n.RepoPrefix, n.WorkspaceID, n.ProjectID,
+		sig, vis, doc, ext, metaBlob,
 	)
 	return err
 }
@@ -1329,10 +1323,7 @@ FROM edges WHERE kind = ?`, string(kind))
 // NodesByKind: indexed SELECT on the (kind) column.
 func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	return func(yield func(*graph.Node) bool) {
-		out := s.queryNodesSQL(`
-SELECT id, kind, name, qual_name, file_path, start_line, end_line, language,
-       repo_prefix, workspace_id, project_id, meta
-FROM nodes WHERE kind = ?`, string(kind))
+		out := s.queryNodesSQL(`SELECT `+lookupNodeCols+` FROM nodes WHERE kind = ?`, string(kind))
 		for _, n := range out {
 			if !yield(n) {
 				return
@@ -1430,7 +1421,7 @@ func (s *Store) GetNodesByIDs(ids []string) map[string]*graph.Node {
 		uniq = append(uniq, id)
 	}
 	out := make(map[string]*graph.Node, len(uniq))
-	const nodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+	const nodeCols = lookupNodeCols
 	for i := 0; i < len(uniq); i += lookupChunkSize {
 		end := minInt(i+lookupChunkSize, len(uniq))
 		chunk := uniq[i:end]
@@ -1471,7 +1462,7 @@ func (s *Store) FindNodesByNames(names []string) map[string][]*graph.Node {
 		uniq = append(uniq, name)
 	}
 	out := make(map[string][]*graph.Node, len(uniq))
-	const nodeCols = `id, kind, name, qual_name, file_path, start_line, end_line, language, repo_prefix, workspace_id, project_id, meta`
+	const nodeCols = lookupNodeCols
 	for i := 0; i < len(uniq); i += lookupChunkSize {
 		end := minInt(i+lookupChunkSize, len(uniq))
 		chunk := uniq[i:end]

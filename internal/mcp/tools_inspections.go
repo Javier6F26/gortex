@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/zzet/gortex/internal/analysis"
@@ -336,8 +338,16 @@ func runCoverageGapsInspection(s *Server, scope inspectionScope) []inspectionVio
 	return out
 }
 
+// staleInspectionDays mirrors analyze stale_code's default threshold: a
+// function/method whose latest blame authorship is older than this is
+// surfaced as a stale_code inspection.
+const staleInspectionDays = 365
+
 func runStaleCodeInspection(s *Server, scope inspectionScope) []inspectionViolation {
 	out := make([]inspectionViolation, 0)
+	now := time.Now().Unix()
+	cutoff := now - staleInspectionDays*24*3600
+	blame := blameRowsByID(s.graph)
 	for _, n := range s.graph.AllNodes() {
 		if n.Kind != graph.KindFunction && n.Kind != graph.KindMethod {
 			continue
@@ -345,16 +355,18 @@ func runStaleCodeInspection(s *Server, scope inspectionScope) []inspectionViolat
 		if !scope.keep(n.FilePath) {
 			continue
 		}
-		ts, ok := n.Meta["last_authored"].(string)
-		if !ok {
+		// last_authored is a nested map (commit / email / timestamp),
+		// primarily from the blame sidecar and falling back to the
+		// node's meta — lastAuthoredFrom normalises both. Reading it as
+		// a bare string (as this inspection once did) always missed.
+		la, ok := lastAuthoredFrom(blame, n)
+		if !ok || la.Timestamp == 0 || la.Timestamp > cutoff {
 			continue
 		}
-		// We only surface what blame already marked stale via meta.
-		// The full age computation lives in analyze stale_code; for
-		// the inspection surface, presence of a `stale` tag in meta
-		// is the cheapest filter.
-		if isStale, _ := n.Meta["is_stale"].(bool); !isStale {
-			continue
+		ageDays := (now - la.Timestamp) / (24 * 3600)
+		msg := fmt.Sprintf("stale: %s last authored %dd ago", n.Name, ageDays)
+		if la.Email != "" {
+			msg += " by " + la.Email
 		}
 		out = append(out, inspectionViolation{
 			Inspection: "stale_code",
@@ -362,7 +374,7 @@ func runStaleCodeInspection(s *Server, scope inspectionScope) []inspectionViolat
 			File:       n.FilePath,
 			Line:       n.StartLine,
 			SymbolID:   n.ID,
-			Message:    "stale: " + n.Name + " last authored " + ts,
+			Message:    msg,
 		})
 	}
 	return out

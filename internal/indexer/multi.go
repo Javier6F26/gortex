@@ -2237,15 +2237,16 @@ func (mi *MultiIndexer) ReconcileContractEdges() int {
 	type edgeKey struct{ from, to string }
 	var stale []edgeKey
 	var staleTopicProduces, staleTopicConsumes []edgeKey
-	for _, e := range g.AllEdges() {
-		switch e.Kind {
-		case graph.EdgeMatches:
-			stale = append(stale, edgeKey{e.From, e.To})
-		case graph.EdgeProducesTopic:
-			staleTopicProduces = append(staleTopicProduces, edgeKey{e.From, e.To})
-		case graph.EdgeConsumesTopic:
-			staleTopicConsumes = append(staleTopicConsumes, edgeKey{e.From, e.To})
-		}
+	// Collect only the three reconciled edge kinds via the edges_by_kind
+	// index, rather than scanning (and meta-decoding) the whole edge set.
+	for e := range g.EdgesByKind(graph.EdgeMatches) {
+		stale = append(stale, edgeKey{e.From, e.To})
+	}
+	for e := range g.EdgesByKind(graph.EdgeProducesTopic) {
+		staleTopicProduces = append(staleTopicProduces, edgeKey{e.From, e.To})
+	}
+	for e := range g.EdgesByKind(graph.EdgeConsumesTopic) {
+		staleTopicConsumes = append(staleTopicConsumes, edgeKey{e.From, e.To})
 	}
 	for _, k := range stale {
 		g.RemoveEdge(k.from, k.to, graph.EdgeMatches)

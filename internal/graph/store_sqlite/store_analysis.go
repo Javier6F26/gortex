@@ -7,7 +7,7 @@ package store_sqlite
 //
 // Shape: push the structural filter into one indexed SELECT via the raw-
 // SQL helpers (queryNodesSQL / s.db.Query), then do any Meta-dependent
-// (gob-decoded) or distinct-counting filtering in Go. No new prepared
+// (JSON-decoded) or distinct-counting filtering in Go. No new prepared
 // statements are added — every query rides the secondary indexes already
 // created in schema.go (edges_by_from / edges_by_to / nodes_by_kind).
 
@@ -97,7 +97,7 @@ ORDER BY n.id`
 // IfaceImplementsRows returns one row per EdgeImplements edge whose
 // target is a KindInterface carrying Meta["methods"]. The interface's
 // decoded Meta rides on the row (callers pull the "methods" field, which
-// gob round-trips as []string or []any). Interfaces with no Meta or no
+// round-trips as []string or []any). Interfaces with no Meta or no
 // "methods" key are elided server-side.
 func (s *Store) IfaceImplementsRows() []graph.IfaceImplementsRow {
 	q := `SELECT e.from_id, n.id, n.meta
@@ -457,7 +457,7 @@ func (s *Store) ThrowerErrorSurface(pathPrefix string) []graph.ThrowerErrorRow {
 	// Pass 2: attach the literal error messages each thrower emits. Join
 	// each thrower's EdgeEmits out-edges to KindString targets and filter
 	// Meta["context"] == "error_msg" Go-side (the context lives in the
-	// gob-encoded Meta blob).
+	// JSON Meta blob).
 	for _, id := range order {
 		acc := accums[id]
 		mq := `SELECT n.name, n.meta
