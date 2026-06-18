@@ -540,6 +540,7 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	}
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

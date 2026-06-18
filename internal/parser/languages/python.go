@@ -356,6 +356,7 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	MaybeEnrichDatabricks(filePath, fileID, src, result)
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

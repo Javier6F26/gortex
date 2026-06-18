@@ -898,6 +898,9 @@ const (
 	RefContextAttribute     = "attribute"
 	RefContextGenericArg    = "generic_arg"
 	RefContextCall          = "call"
+	// RefContextCallback marks a function referenced as a value to be invoked
+	// later — registered as a callback / handler rather than called directly.
+	RefContextCallback = "callback"
 )
 
 // RefContextOf classifies the reference context of an edge given the kind
@@ -923,6 +926,11 @@ func RefContextOf(e *Edge, fromKind NodeKind) string {
 	if e.Meta != nil {
 		if c, _ := e.Meta["ref_context"].(string); c != "" {
 			return c
+		}
+		// A bound callback registration is a value-use of the function, not a
+		// type reference — classify it so find_usages can filter callbacks.
+		if v, _ := e.Meta["via"].(string); v == "callback_registration" {
+			return RefContextCallback
 		}
 	}
 	switch e.Kind {

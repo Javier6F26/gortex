@@ -166,6 +166,7 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	emitRailsCallbacks(root, src, filePath, result)
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

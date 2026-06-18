@@ -188,6 +188,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	emitExpoModuleNodes(src, filePath, "swift", fileID, result, seen)
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

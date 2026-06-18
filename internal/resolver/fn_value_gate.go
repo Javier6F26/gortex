@@ -60,9 +60,10 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 			continue
 		}
 		target := resolveFnValueName(g, e.FilePath, name)
-		if target == "" {
-			// Unbound identifier — a local, a parameter, or a name defined
-			// nowhere in this file: reject rather than fabricate an edge.
+		if target == "" || target == e.From {
+			// Unbound (a local / param / undefined name) or a self-reference
+			// (a function's own declaration token): reject rather than
+			// fabricate an edge.
 			continue
 		}
 		landed = append(landed, &graph.Edge{

@@ -298,6 +298,7 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	emitExpoModuleNodes(src, filePath, "kotlin", fileID, result, seen)
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

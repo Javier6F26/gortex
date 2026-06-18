@@ -75,6 +75,7 @@ func (e *PascalExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 
 	// Same-file constant value references → impact-radius reads.
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 
 	return result, nil
 }

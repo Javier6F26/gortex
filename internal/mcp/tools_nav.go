@@ -228,7 +228,30 @@ func navCallees(eng engineLike, id string) []*graph.Node {
 
 // navCallers returns the distinct callers of id.
 func navCallers(eng engineLike, id string) []*graph.Node {
-	return navNeighbours(eng, eng.GetInEdges(id), graph.EdgeCalls, false)
+	callers := navNeighbours(eng, eng.GetInEdges(id), graph.EdgeCalls, false)
+	// A function registered as a callback is invoked through its registrar,
+	// which static call extraction can't see — so include the registrars as
+	// callers (via the resolver's callback-registration reference edges).
+	seen := make(map[string]bool, len(callers))
+	for _, n := range callers {
+		seen[n.ID] = true
+	}
+	for _, e := range eng.GetInEdges(id) {
+		if e.Kind != graph.EdgeReferences || e.Meta == nil || e.From == "" {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "callback_registration" {
+			continue
+		}
+		if seen[e.From] {
+			continue
+		}
+		if n := eng.GetSymbol(e.From); n != nil {
+			seen[e.From] = true
+			callers = append(callers, n)
+		}
+	}
+	return callers
 }
 
 // navSiblings returns the other members of id's parent. The parent is

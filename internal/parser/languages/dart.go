@@ -62,6 +62,7 @@ func (e *DartExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	e.extractCalls(root, src, filePath, result, imports)
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

@@ -45,6 +45,7 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	e.walkNode(root, src, filePath, fileNode, result, seen, "")
 
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
 }
 

@@ -1228,6 +1228,7 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 
 	// Same-file constant/variable value references → impact-radius reads.
 	captureValueRefCandidates(result, root, filePath, src)
+	captureFnValueCandidates(result, root, filePath, src)
 
 	return result, nil
 }

@@ -3,6 +3,7 @@ package languages
 import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
+	sitter "github.com/zzet/gortex/internal/parser/tsitter"
 )
 
 // Function-as-value capture.
@@ -42,6 +43,85 @@ type FnValueCandidate struct {
 	Name     string
 	FilePath string
 	Line     int
+}
+
+// captureFnValueCandidates records a function-as-value candidate for every
+// identifier in the parse tree that names a same-file function/method yet is
+// NOT in callee position — i.e. a function passed by bare name as a call
+// argument, assigned to a field/variable, or placed in an initializer, rather
+// than invoked. The resolver's ResolveFnValueCallbacks then binds each to its
+// definition as a tiered callback-registration edge, recovering a real
+// dependency that static call extraction misses (callers(handler) was empty).
+//
+// It is grammar-agnostic in two ways: it keys on `identifier` leaf nodes, and
+// it distinguishes a call from a value by a source-level check — an identifier
+// immediately followed (past whitespace) by '(' is the callee of a call (an
+// existing call edge), so only the non-called uses become candidates. That also
+// excludes a function's own `name(params)` declaration. Pre-filtering to names
+// the file actually declares means it never emits a candidate that cannot bind.
+// Call it once at the end of an extractor's Extract with the parse-tree root.
+func captureFnValueCandidates(result *parser.ExtractionResult, root *sitter.Node, filePath string, src []byte) {
+	if root == nil || result == nil {
+		return
+	}
+	funcs := map[string]bool{}
+	for _, n := range result.Nodes {
+		if n == nil || n.FilePath != filePath {
+			continue
+		}
+		if n.Kind == graph.KindFunction || n.Kind == graph.KindMethod {
+			funcs[n.Name] = true
+		}
+	}
+	if len(funcs) == 0 {
+		return
+	}
+	funcRanges := buildFuncRanges(result)
+	if len(funcRanges) == 0 {
+		return
+	}
+	var cands []FnValueCandidate
+	seen := map[string]bool{}
+	walkNodes(root, func(n *sitter.Node) {
+		if n.Type() != "identifier" {
+			return
+		}
+		name := n.Content(src)
+		if !funcs[name] {
+			return
+		}
+		if byteAfterIdentIsParen(src, int(n.EndByte())) {
+			return // callee of a call, not a value use
+		}
+		line := int(n.StartPoint().Row) + 1
+		fromID := findEnclosingFunc(funcRanges, line)
+		if fromID == "" {
+			return
+		}
+		key := fromID + "\x00" + name
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		cands = append(cands, FnValueCandidate{FromID: fromID, Name: name, FilePath: filePath, Line: line})
+	})
+	EmitFnValueCandidates(result, cands)
+}
+
+// byteAfterIdentIsParen reports whether the first non-whitespace byte at or
+// after i is '(' — i.e. the preceding identifier is being called.
+func byteAfterIdentIsParen(src []byte, i int) bool {
+	for i < len(src) {
+		switch src[i] {
+		case ' ', '\t', '\r', '\n':
+			i++
+		case '(':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // EmitFnValueCandidates appends one placeholder reference edge per candidate to
