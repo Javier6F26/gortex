@@ -204,3 +204,24 @@ func TestScalaExtractor_CallSites(t *testing.T) {
 
 // Unused import to suppress compiler error for fmt if needed.
 var _ = fmt.Sprint
+
+// TestScalaExtensionAndPackageScope is part of the C9 set: a Scala 3 extension
+// method attributes to its receiver type, and package scope is stamped.
+func TestScalaExtensionAndPackageScope(t *testing.T) {
+	src := []byte("package com.app.util\n" +
+		"extension (s: String)\n" +
+		"  def shout: String = s.toUpperCase\n")
+	res, err := NewScalaExtractor().Extract("e.scala", src)
+	require.NoError(t, err)
+	var shout *graph.Node
+	for _, n := range res.Nodes {
+		if n.Name == "shout" {
+			shout = n
+		}
+	}
+	require.NotNil(t, shout, "extension method should be a node")
+	assert.Equal(t, graph.KindMethod, shout.Kind)
+	assert.Equal(t, "String", shout.Meta["receiver"], "attributed to the extended type")
+	assert.Equal(t, true, shout.Meta["extension"])
+	assert.Equal(t, "com.app.util", shout.Meta["scope_pkg"])
+}

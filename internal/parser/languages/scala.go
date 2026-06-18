@@ -47,6 +47,7 @@ func (e *ScalaExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 
 	MaybeEnrichDatabricks(filePath, fileNode.ID, src, result)
 
+	stampScopePkg(result, scalaPackageName(root, src))
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
@@ -66,6 +67,8 @@ func (e *ScalaExtractor) extractAll(
 			e.extractObject(node, src, filePath, fileNode, result, seen, annotationSeen)
 		case "enum_definition":
 			e.extractEnum(node, src, filePath, fileNode, result, seen)
+		case "extension_definition":
+			e.extractExtension(node, src, filePath, fileNode, result, seen)
 		case "import_declaration":
 			e.extractImport(node, src, filePath, fileNode, result)
 		case "function_definition", "function_declaration":
@@ -340,6 +343,10 @@ func (e *ScalaExtractor) emitScalaField(member *sitter.Node, src []byte, filePat
 	meta := map[string]any{"receiver": ownerName}
 	if t := member.Type(); t == "var_definition" || t == "var_declaration" {
 		meta["mutable"] = true
+	} else {
+		// A `val` is an immutable value — mark it so value-reference analysis
+		// can treat it as a stable value rather than mutable state.
+		meta["immutable"] = true
 	}
 	typ := scalaTypeAnnotation(member, src)
 	if typ != "" {
@@ -355,6 +362,89 @@ func (e *ScalaExtractor) emitScalaField(member *sitter.Node, src []byte, filePat
 	if typ != "" {
 		result.Edges = append(result.Edges, &graph.Edge{From: id, To: "unresolved::" + typ, Kind: graph.EdgeTypedAs, FilePath: filePath, Line: line})
 	}
+}
+
+// extractExtension models a Scala 3 `extension (x: T) def m = ...` block: each
+// method is attributed to the extended (receiver) type as an extension member,
+// so `value.m` resolves to it even though m is declared outside T's body.
+func (e *ScalaExtractor) extractExtension(node *sitter.Node, src []byte, filePath string, fileNode *graph.Node, result *parser.ExtractionResult, seen map[string]bool) {
+	recv := scalaExtensionReceiver(node, src)
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		fn := node.NamedChild(i)
+		if fn.Type() != "function_definition" && fn.Type() != "function_declaration" {
+			continue
+		}
+		mName := scalaFindChildIdentifier(fn, src)
+		if mName == "" {
+			continue
+		}
+		owner := recv
+		if owner == "" {
+			owner = "extension"
+		}
+		line := int(fn.StartPoint().Row) + 1
+		id, ok := disambiguateID(seen, filePath+"::"+owner+"."+mName, line)
+		if !ok {
+			continue
+		}
+		meta := map[string]any{"extension": true}
+		if recv != "" {
+			meta["receiver"] = recv
+		}
+		if rt := scalaReturnType(fn, src); rt != "" {
+			meta["return_type"] = rt
+		}
+		result.Nodes = append(result.Nodes, &graph.Node{
+			ID: id, Kind: graph.KindMethod, Name: mName,
+			FilePath: filePath, StartLine: line, EndLine: int(fn.EndPoint().Row) + 1,
+			Language: "scala", Meta: meta,
+		})
+		result.Edges = append(result.Edges, &graph.Edge{From: fileNode.ID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: line})
+		if recv != "" {
+			result.Edges = append(result.Edges, &graph.Edge{From: id, To: "unresolved::" + recv, Kind: graph.EdgeMemberOf, FilePath: filePath, Line: line})
+		}
+	}
+}
+
+// scalaExtensionReceiver returns the extended type named in an extension's
+// receiver parameter `(x: T)`, or "".
+func scalaExtensionReceiver(node *sitter.Node, src []byte) string {
+	for i := 0; i < int(node.NamedChildCount()); i++ {
+		p := node.NamedChild(i)
+		if p.Type() != "parameters" {
+			continue
+		}
+		for j := 0; j < int(p.NamedChildCount()); j++ {
+			param := p.NamedChild(j)
+			if param.Type() != "parameter" {
+				continue
+			}
+			for k := 0; k < int(param.NamedChildCount()); k++ {
+				t := param.NamedChild(k)
+				if t.Type() == "type_identifier" || t.Type() == "generic_type" {
+					return scalaBaseType(strings.TrimSpace(t.Content(src)))
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// scalaPackageName returns the dotted name of the file's `package` clause, or "".
+func scalaPackageName(root *sitter.Node, src []byte) string {
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		c := root.NamedChild(i)
+		if c.Type() != "package_clause" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			id := c.NamedChild(j)
+			if id.Type() == "package_identifier" {
+				return strings.TrimSpace(id.Content(src))
+			}
+		}
+	}
+	return ""
 }
 
 // scalaTypeAnnotation returns the base type named in a `val/var name: Type = ...`

@@ -230,8 +230,14 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			continue
 		}
 		seen[id] = true
+		// A top-level `const val` is a compile-time constant; classify it as
+		// KindConstant so it joins the value-reference impact surface.
+		propKind := graph.KindVariable
+		if kotlinPropertyIsConst(p.defNode, src) {
+			propKind = graph.KindConstant
+		}
 		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: id, Kind: graph.KindVariable, Name: p.name,
+			ID: id, Kind: propKind, Name: p.name,
 			FilePath: filePath, StartLine: p.line, EndLine: p.endLine,
 			Language: "kotlin",
 		})
@@ -297,9 +303,29 @@ func (e *KotlinExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	// JS-callable method nodes for the Expo bridge synthesizer.
 	emitExpoModuleNodes(src, filePath, "kotlin", fileID, result, seen)
 
+	stampScopePkg(result, kotlinPackageName(root, src))
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
+}
+
+// kotlinPackageName returns the dotted name from the file's `package` header,
+// or "". It scans by content prefix so it is robust to the grammar's exact node
+// name for the header.
+func kotlinPackageName(root *sitter.Node, src []byte) string {
+	for i := 0; i < int(root.ChildCount()); i++ {
+		c := root.Child(i)
+		txt := strings.TrimSpace(c.Content(src))
+		if !strings.HasPrefix(txt, "package") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(txt, "package"))
+		if cut := strings.IndexAny(rest, "\n\r;"); cut >= 0 {
+			rest = rest[:cut]
+		}
+		return strings.TrimSpace(rest)
+	}
+	return ""
 }
 
 // --- Per-match emit helpers -----------------------------------------
@@ -384,10 +410,10 @@ func (e *KotlinExtractor) emitClassOrInterface(m parser.QueryResult, filePath, f
 		entryStart := int(entry.StartPoint().Row) + 1
 		entryEnd := int(entry.EndPoint().Row) + 1
 		result.Nodes = append(result.Nodes, &graph.Node{
-			ID: entryID, Kind: graph.KindVariable, Name: entryName,
+			ID: entryID, Kind: graph.KindEnumMember, Name: entryName,
 			FilePath: filePath, StartLine: entryStart, EndLine: entryEnd,
 			Language: "kotlin",
-			Meta:     map[string]any{"receiver": name, "kind": "enum_entry"},
+			Meta:     map[string]any{"receiver": name, "enum": id},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: entryID, To: id, Kind: graph.EdgeMemberOf,

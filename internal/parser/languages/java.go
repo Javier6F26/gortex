@@ -427,6 +427,7 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		})
 	}
 
+	stampScopePkg(result, javaPackageName(root, src))
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
 	return result, nil
@@ -596,12 +597,12 @@ func (e *JavaExtractor) emitEnumMember(m parser.QueryResult, filePath string, sr
 	enumID := filePath + "::" + enumName
 	memberID := enumID + "." + memberName
 	result.Nodes = append(result.Nodes, &graph.Node{
-		ID: memberID, Kind: graph.KindVariable, Name: memberName,
+		ID: memberID, Kind: graph.KindEnumMember, Name: memberName,
 		FilePath:  filePath,
 		StartLine: def.StartLine + 1,
 		EndLine:   def.EndLine + 1,
 		Language:  "java",
-		Meta:      map[string]any{"receiver": enumName, "kind": "enum_member"},
+		Meta:      map[string]any{"receiver": enumName, "enum": enumID},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: memberID, To: enumID, Kind: graph.EdgeMemberOf,
@@ -840,8 +841,14 @@ func (e *JavaExtractor) emitField(m parser.QueryResult, filePath, fileID string,
 	if v, ok := javaStaticFinalStringValue(def.Node, src); ok {
 		meta["value"] = v
 	}
+	// `static final` is a Java compile-time constant — classify it as
+	// KindConstant so it joins the value-reference impact surface.
+	fieldKind := graph.KindField
+	if javaIsStaticFinal(def.Node, src) {
+		fieldKind = graph.KindConstant
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
-		ID: id, Kind: graph.KindField, Name: name,
+		ID: id, Kind: fieldKind, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "java",
 		Meta:     meta,
@@ -862,6 +869,69 @@ func (e *JavaExtractor) emitField(m parser.QueryResult, filePath, fileID string,
 // reads the `modifiers` child. Used to index Java string constants into the
 // resolver's constVal so a cross-language const-ref Temporal dispatch
 // resolves.
+// javaIsStaticFinal reports whether a field declaration carries both `static`
+// and `final` — the Java compile-time-constant shape.
+func javaIsStaticFinal(decl *sitter.Node, src []byte) bool {
+	if decl == nil {
+		return false
+	}
+	hasStatic, hasFinal := false, false
+	for i := 0; i < int(decl.ChildCount()); i++ {
+		c := decl.Child(i)
+		if c == nil || c.Type() != "modifiers" {
+			continue
+		}
+		for j := 0; j < int(c.ChildCount()); j++ {
+			switch c.Child(j).Type() {
+			case "static":
+				hasStatic = true
+			case "final":
+				hasFinal = true
+			}
+		}
+	}
+	return hasStatic && hasFinal
+}
+
+// javaPackageName returns the dotted name of the file's `package` declaration,
+// or "".
+func javaPackageName(root *sitter.Node, src []byte) string {
+	for i := 0; i < int(root.NamedChildCount()); i++ {
+		c := root.NamedChild(i)
+		if c.Type() != "package_declaration" {
+			continue
+		}
+		for j := 0; j < int(c.NamedChildCount()); j++ {
+			id := c.NamedChild(j)
+			if t := id.Type(); t == "scoped_identifier" || t == "identifier" {
+				return strings.TrimSpace(id.Content(src))
+			}
+		}
+	}
+	return ""
+}
+
+// stampScopePkg records the enclosing package on every type/member node so a
+// JVM symbol is attributable to its package without re-deriving it.
+func stampScopePkg(result *parser.ExtractionResult, pkg string) {
+	if pkg == "" {
+		return
+	}
+	for _, n := range result.Nodes {
+		if n == nil {
+			continue
+		}
+		switch n.Kind {
+		case graph.KindType, graph.KindInterface, graph.KindMethod, graph.KindField,
+			graph.KindConstant, graph.KindVariable, graph.KindEnumMember:
+			if n.Meta == nil {
+				n.Meta = map[string]any{}
+			}
+			n.Meta["scope_pkg"] = pkg
+		}
+	}
+}
+
 func javaStaticFinalStringValue(decl *sitter.Node, src []byte) (string, bool) {
 	if decl == nil {
 		return "", false

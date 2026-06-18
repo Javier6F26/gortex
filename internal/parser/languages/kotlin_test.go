@@ -140,7 +140,7 @@ func TestKotlinExtractor_EnumClass(t *testing.T) {
 
 	entries := map[string]bool{}
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_entry" {
+		if n.Kind == graph.KindEnumMember {
 			entries[n.Name] = true
 		}
 	}
@@ -638,4 +638,21 @@ fun run(list: List<Int>) {
 		assert.Nil(t, compute.Meta["receiver_type"],
 			"implicit lambda `it` must not be resolved against the outer type env")
 	}
+}
+
+// TestKotlinConstClassificationAndPackageScope is part of the C9 set: a
+// top-level `const val` classifies as a constant and package scope is stamped.
+func TestKotlinConstClassificationAndPackageScope(t *testing.T) {
+	src := []byte("package com.app\nconst val MAX = 10\nval other = 2\n")
+	res, err := NewKotlinExtractor().Extract("a.kt", src)
+	require.NoError(t, err)
+	byName := map[string]*graph.Node{}
+	for _, n := range res.Nodes {
+		byName[n.Name] = n
+	}
+	require.NotNil(t, byName["MAX"])
+	assert.Equal(t, graph.KindConstant, byName["MAX"].Kind, "const val → constant")
+	assert.Equal(t, "com.app", byName["MAX"].Meta["scope_pkg"])
+	require.NotNil(t, byName["other"])
+	assert.Equal(t, "com.app", byName["other"].Meta["scope_pkg"])
 }

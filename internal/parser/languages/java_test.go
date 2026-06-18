@@ -62,7 +62,7 @@ func TestJavaExtractor_Enum(t *testing.T) {
 
 	members := map[string]bool{}
 	for _, n := range result.Nodes {
-		if n.Kind == graph.KindVariable && n.Meta != nil && n.Meta["kind"] == "enum_member" {
+		if n.Kind == graph.KindEnumMember {
 			members[n.Name] = true
 		}
 	}
@@ -488,4 +488,29 @@ public class Reader {
 			t.Fatalf("noThrows shouldn't have EdgeThrows, got %v", e)
 		}
 	}
+}
+
+// TestJavaConstClassificationAndPackageScope is part of the C9 set: `static
+// final` fields classify as constants, enum members become enum-member nodes,
+// and every type/member carries its package scope.
+func TestJavaConstClassificationAndPackageScope(t *testing.T) {
+	src := []byte("package com.app.core;\n" +
+		"public class C {\n" +
+		"  public static final int MAX = 10;\n" +
+		"  private int y;\n" +
+		"}\n" +
+		"enum E { A, B }\n")
+	res, err := NewJavaExtractor().Extract("C.java", src)
+	require.NoError(t, err)
+	byName := map[string]*graph.Node{}
+	for _, n := range res.Nodes {
+		byName[n.Name] = n
+	}
+	require.NotNil(t, byName["MAX"])
+	assert.Equal(t, graph.KindConstant, byName["MAX"].Kind, "static final → constant")
+	assert.Equal(t, graph.KindField, byName["y"].Kind)
+	assert.Equal(t, "com.app.core", byName["MAX"].Meta["scope_pkg"])
+	assert.Equal(t, "com.app.core", byName["C"].Meta["scope_pkg"])
+	require.NotNil(t, byName["A"])
+	assert.Equal(t, graph.KindEnumMember, byName["A"].Kind, "enum member node")
 }
