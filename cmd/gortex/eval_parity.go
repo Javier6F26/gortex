@@ -58,15 +58,15 @@ func runEvalParity(cmd *cobra.Command, args []string) error {
 		if parityLang != "" && repo.Language != parityLang {
 			continue
 		}
-		fmt.Fprintf(cmd.ErrOrStderr(), "[gortex eval parity] %-10s %s\n", repo.Language, repo.URL)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex eval parity] %-10s %s\n", repo.Language, repo.URL)
 		dir, err := parity.EnsureRepo(cacheDir, repo)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  clone failed: %v — skipping\n", err)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  clone failed: %v — skipping\n", err)
 			continue
 		}
 		g, err := indexRepoForInit(ctx, dir, zap.NewNop())
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "  index failed: %v — skipping\n", err)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  index failed: %v — skipping\n", err)
 			continue
 		}
 		for _, c := range parity.CoverageOf(g) {
@@ -74,7 +74,7 @@ func runEvalParity(cmd *cobra.Command, args []string) error {
 				continue // a Go repo may carry a few yaml/json files; measure its own language
 			}
 			measured = append(measured, c)
-			fmt.Fprintf(cmd.ErrOrStderr(), "  coverage %.1f%% (%d/%d files)\n", c.Coverage*100, c.CoveredFiles, c.SymbolFiles)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "  coverage %.1f%% (%d/%d files)\n", c.Coverage*100, c.CoveredFiles, c.SymbolFiles)
 		}
 	}
 
@@ -83,7 +83,7 @@ func runEvalParity(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(out))
 		return nil
 	}
 
@@ -92,16 +92,16 @@ func runEvalParity(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(baseline) == 0 {
-		fmt.Fprintln(cmd.ErrOrStderr(), "[gortex eval parity] no committed baseline yet — run with --update and commit the output to internal/eval/parity/baseline.json")
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "[gortex eval parity] no committed baseline yet — run with --update and commit the output to internal/eval/parity/baseline.json")
 		return nil
 	}
 	regs := baseline.Check(measured, parityEpsilon)
 	for _, r := range regs {
-		fmt.Fprintf(cmd.ErrOrStderr(), "[gortex eval parity] REGRESSION %s: %.1f%% < baseline %.1f%%\n", r.Language, r.Measured*100, r.Baseline*100)
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "[gortex eval parity] REGRESSION %s: %.1f%% < baseline %.1f%%\n", r.Language, r.Measured*100, r.Baseline*100)
 	}
 	if len(regs) > 0 {
 		return fmt.Errorf("%d language(s) regressed below the parity baseline", len(regs))
 	}
-	fmt.Fprintln(cmd.ErrOrStderr(), "[gortex eval parity] all measured languages hold or beat the baseline")
+	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "[gortex eval parity] all measured languages hold or beat the baseline")
 	return nil
 }
