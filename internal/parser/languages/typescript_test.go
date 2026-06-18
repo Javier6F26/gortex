@@ -1004,3 +1004,64 @@ import { foo } from "./local";
 	require.NotNil(t, local)
 	assert.Equal(t, false, local.Meta["is_external"])
 }
+
+// TestInterfaceMemberTypeReferences is part of the C10 set: a TS interface
+// references the types used by its property and method-return members.
+func TestInterfaceMemberTypeReferences(t *testing.T) {
+	src := []byte("interface Svc {\n  repo: Repository;\n  find(id: string): User;\n}\n")
+	res, err := NewTypeScriptExtractor().Extract("m.ts", src)
+	require.NoError(t, err)
+	refs := map[string]string{}
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeReferences && e.From == "m.ts::Svc" {
+			ctx, _ := e.Meta["ref_context"].(string)
+			refs[e.To] = ctx
+		}
+	}
+	assert.Equal(t, "field", refs["unresolved::Repository"], "property type ref")
+	assert.Equal(t, "return_type", refs["unresolved::User"], "method return type ref")
+}
+
+// TestInstantiateNewExpression is part of the C10 set: `new Foo()` produces a
+// typed instantiation edge attributed to the enclosing function.
+func TestInstantiateNewExpression(t *testing.T) {
+	src := []byte("class Foo {}\nfunction make() {\n  const a = new Foo();\n  return a;\n}\n")
+	res, err := NewTypeScriptExtractor().Extract("m.ts", src)
+	require.NoError(t, err)
+	var sawInst bool
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeInstantiates && e.From == "m.ts::make" && e.To == "unresolved::Foo" {
+			sawInst = true
+		}
+	}
+	assert.True(t, sawInst, "new Foo() should emit an instantiation edge from make")
+}
+
+// TestTemplateExprCallMining is part of the C10 set: a call inside a template
+// substitution is mined as a call, a tagged-template tag is a call (not a
+// function-as-value), and both are attributed to the enclosing function.
+func TestTemplateExprCallMining(t *testing.T) {
+	src := []byte("function tag(s){return s}\nfunction y(x){return x}\n" +
+		"function f() {\n  const a = `${y(1)} done`;\n  const b = tag`x ${y(2)}`;\n}\n")
+	res, err := NewTypeScriptExtractor().Extract("m.ts", src)
+	require.NoError(t, err)
+	var callY, callTag, fnvalTag bool
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeCalls && e.From == "m.ts::f" && e.To == "unresolved::y" {
+			callY = true
+		}
+		if e.Kind == graph.EdgeCalls && e.From == "m.ts::f" && e.To == "unresolved::tag" {
+			callTag = true
+		}
+		if e.Meta != nil {
+			if v, _ := e.Meta["via"].(string); v == "callback_candidate" {
+				if nm, _ := e.Meta["fn_value_name"].(string); nm == "tag" {
+					fnvalTag = true
+				}
+			}
+		}
+	}
+	assert.True(t, callY, "a call inside a template substitution is mined")
+	assert.True(t, callTag, "a tagged-template tag is a call")
+	assert.False(t, fnvalTag, "a tagged-template tag is NOT a function-as-value candidate")
+}

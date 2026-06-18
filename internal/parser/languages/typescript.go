@@ -343,6 +343,41 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	// range map used to attribute calls to their caller.
 	funcRanges := buildFuncRanges(result)
 
+	// Instantiation edges: `new Foo(...)` constructs Foo. Emitted as a typed
+	// EdgeInstantiates (not a flat call) attributed to the enclosing function,
+	// so the resolver lands it on the class and impact/trace see construction.
+	walkNodes(root, func(n *sitter.Node) {
+		if n.Type() != "new_expression" {
+			return
+		}
+		ctor := n.ChildByFieldName("constructor")
+		if ctor == nil {
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if t := c.Type(); t == "identifier" || t == "member_expression" || t == "generic_type" {
+					ctor = c
+					break
+				}
+			}
+		}
+		if ctor == nil {
+			return
+		}
+		tname := tsCtorTypeName(ctor, src)
+		if tname == "" {
+			return
+		}
+		line := int(n.StartPoint().Row) + 1
+		callerID := findEnclosingFunc(funcRanges, line)
+		if callerID == "" {
+			callerID = filePath
+		}
+		result.Edges = append(result.Edges, &graph.Edge{
+			From: callerID, To: "unresolved::" + tname, Kind: graph.EdgeInstantiates,
+			FilePath: filePath, Line: line, Origin: graph.OriginASTResolved,
+		})
+	})
+
 	// Store-factory destructuring: `const {a,b} = useStore.getState()` binds
 	// later bare `a()` / `b()` calls to the store's actions.
 	destructured := map[string]string{} // local action name → store binding
@@ -811,6 +846,84 @@ func (e *TypeScriptExtractor) emitInterface(m parser.QueryResult, filePath, file
 		From: fileID, To: id, Kind: graph.EdgeDefines,
 		FilePath: filePath, Line: def.StartLine + 1,
 	})
+	if def.Node != nil {
+		emitTSInterfaceMemberTypeRefs(def.Node, src, id, filePath, result)
+	}
+}
+
+// emitTSInterfaceMemberTypeRefs emits a type-reference edge from an interface to
+// every named type used as a property type or method return type — so the
+// types an interface depends on are traversable (a contract's dependency
+// surface), which name-only member extraction misses.
+func emitTSInterfaceMemberTypeRefs(ifaceNode *sitter.Node, src []byte, ifaceID, filePath string, result *parser.ExtractionResult) {
+	var body *sitter.Node
+	for i := 0; i < int(ifaceNode.NamedChildCount()); i++ {
+		c := ifaceNode.NamedChild(i)
+		if c.Type() == "interface_body" || c.Type() == "object_type" {
+			body = c
+			break
+		}
+	}
+	if body == nil {
+		return
+	}
+	seen := map[string]bool{}
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		member := body.NamedChild(i)
+		ctx := ""
+		switch member.Type() {
+		case "property_signature":
+			ctx = "field"
+		case "method_signature":
+			ctx = "return_type"
+		default:
+			continue
+		}
+		line := int(member.StartPoint().Row) + 1
+		// Only the member's OWN type_annotation (property type / return type) —
+		// parameter types live inside formal_parameters, a separate child.
+		for j := 0; j < int(member.NamedChildCount()); j++ {
+			ta := member.NamedChild(j)
+			if ta.Type() != "type_annotation" {
+				continue
+			}
+			walkNodes(ta, func(n *sitter.Node) {
+				if n.Type() != "type_identifier" {
+					return
+				}
+				tname := n.Content(src)
+				if tname == "" || seen[tname] {
+					return
+				}
+				seen[tname] = true
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: ifaceID, To: "unresolved::" + tname, Kind: graph.EdgeReferences,
+					FilePath: filePath, Line: line, Meta: map[string]any{"ref_context": ctx},
+				})
+			})
+		}
+	}
+}
+
+// tsCtorTypeName returns the constructed type name from a new_expression's
+// constructor node (bare identifier, `ns.Foo` member access, or `Foo<T>`).
+func tsCtorTypeName(ctor *sitter.Node, src []byte) string {
+	switch ctor.Type() {
+	case "identifier", "type_identifier":
+		return ctor.Content(src)
+	case "member_expression":
+		if p := ctor.ChildByFieldName("property"); p != nil {
+			return p.Content(src)
+		}
+	case "generic_type":
+		for i := 0; i < int(ctor.NamedChildCount()); i++ {
+			c := ctor.NamedChild(i)
+			if t := c.Type(); t == "type_identifier" || t == "identifier" {
+				return c.Content(src)
+			}
+		}
+	}
+	return ""
 }
 
 func (e *TypeScriptExtractor) emitTypeAlias(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult) {

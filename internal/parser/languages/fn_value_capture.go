@@ -90,8 +90,8 @@ func captureFnValueCandidates(result *parser.ExtractionResult, root *sitter.Node
 		if !funcs[name] {
 			return
 		}
-		if byteAfterIdentIsParen(src, int(n.EndByte())) {
-			return // callee of a call, not a value use
+		if byteAfterIdentStartsCall(src, int(n.EndByte())) {
+			return // callee of a call (incl. tagged template), not a value use
 		}
 		line := int(n.StartPoint().Row) + 1
 		fromID := findEnclosingFunc(funcRanges, line)
@@ -108,14 +108,16 @@ func captureFnValueCandidates(result *parser.ExtractionResult, root *sitter.Node
 	EmitFnValueCandidates(result, cands)
 }
 
-// byteAfterIdentIsParen reports whether the first non-whitespace byte at or
-// after i is '(' — i.e. the preceding identifier is being called.
-func byteAfterIdentIsParen(src []byte, i int) bool {
+// byteAfterIdentStartsCall reports whether the first non-whitespace byte at or
+// after i begins a call of the preceding identifier — '(' for an ordinary call
+// or '`' for a tagged-template call (`tag`...``). Either means the identifier is
+// a callee, not a function-as-value reference.
+func byteAfterIdentStartsCall(src []byte, i int) bool {
 	for i < len(src) {
 		switch src[i] {
 		case ' ', '\t', '\r', '\n':
 			i++
-		case '(':
+		case '(', '`':
 			return true
 		default:
 			return false
