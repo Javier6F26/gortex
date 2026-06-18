@@ -63,6 +63,7 @@ const (
 	SynthClosureCollection = "closure-collection"
 	SynthReactSetState     = "react-setstate"
 	SynthFlutterSetState   = "flutter-setstate"
+	SynthKMPExpectActual   = "kmp-expect-actual"
 	SynthExpoModules       = "expo-modules-bridge"
 	SynthFabric            = "fabric-codegen"
 	SynthMyBatis           = "mybatis"
@@ -128,6 +129,7 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthClosureCollection, fn: ResolveClosureCollectionCalls},
 		synthFunc{name: SynthReactSetState, fn: ResolveReactSetStateCalls},
 		synthFunc{name: SynthFlutterSetState, fn: ResolveFlutterSetStateCalls},
+		synthFunc{name: SynthKMPExpectActual, fn: ResolveKMPExpectActual},
 		synthFunc{name: SynthExpoModules, fn: ResolveExpoModuleBridge},
 		synthFunc{name: SynthFabric, fn: ResolveFabricComponents},
 		synthFunc{name: SynthMyBatis, fn: ResolveMyBatisCalls},
