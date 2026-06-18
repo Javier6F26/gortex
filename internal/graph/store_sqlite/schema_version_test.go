@@ -105,7 +105,7 @@ func TestOpenRebuildsNewerDB(t *testing.T) {
 		}
 	})
 
-	s2, err := Open(path)
+	s2, err := Open(path, WithRebuild()) // simulate the daemon: holds the lock, may rebuild
 	if err != nil {
 		t.Fatalf("reopen newer DB: %v", err)
 	}
@@ -116,6 +116,46 @@ func TestOpenRebuildsNewerDB(t *testing.T) {
 	if n := nodeCount(t, s2.db); n != 0 {
 		t.Fatalf("node count after rebuild = %d, want 0 (newer DB must be wiped)", n)
 	}
+}
+
+// TestOpenRefusesWipeWithoutOptIn: the default Open must NOT destroy an
+// incompatible on-disk database. Without WithRebuild it returns
+// ErrSchemaRebuildRequired and leaves the file (and its rows) intact, so a
+// caller that does not hold the store lock cannot silently corrupt a store
+// another process may have open.
+func TestOpenRefusesWipeWithoutOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "store.sqlite")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("first open: %v", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO nodes (id, kind, name, file_path) VALUES ('n1','func','Foo','f.go')`); err != nil {
+		t.Fatalf("seed node: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	withRawDB(t, path, func(db *sql.DB) {
+		if _, err := db.Exec(`PRAGMA user_version = 999`); err != nil {
+			t.Fatalf("set future version: %v", err)
+		}
+	})
+
+	if _, err := Open(path); !errors.Is(err, ErrSchemaRebuildRequired) {
+		t.Fatalf("Open without WithRebuild = %v, want ErrSchemaRebuildRequired", err)
+	}
+	withRawDB(t, path, func(db *sql.DB) {
+		if n := nodeCount(t, db); n != 1 {
+			t.Fatalf("node count = %d after a refused wipe, want 1 (the file must be untouched)", n)
+		}
+		var v int
+		if err := db.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+			t.Fatalf("read user_version: %v", err)
+		}
+		if v != 999 {
+			t.Fatalf("user_version = %d after a refused wipe, want 999 (unchanged)", v)
+		}
+	})
 }
 
 // TestPlanSchemaMigration covers the pure decision logic, including the
@@ -272,7 +312,7 @@ func TestOpenWithInPlaceMigration(t *testing.T) {
 		return err
 	}}
 
-	s2, err := openWith(path, 2, []schemaMigration{v2})
+	s2, err := openWith(path, 2, []schemaMigration{v2}, false) // in-place never wipes
 	if err != nil {
 		t.Fatalf("openWith v2 in-place: %v", err)
 	}
@@ -311,7 +351,7 @@ func TestOpenWithInPlaceFailureDoesNotStamp(t *testing.T) {
 	boom := schemaMigration{version: 2, name: "boom", inPlace: func(*sql.Tx) error {
 		return sql.ErrConnDone
 	}}
-	if _, err := openWith(path, 2, []schemaMigration{boom}); err == nil {
+	if _, err := openWith(path, 2, []schemaMigration{boom}, false); err == nil {
 		t.Fatal("expected openWith to fail when an in-place step errors")
 	}
 
@@ -333,7 +373,7 @@ func TestOpenWithMemoryUnderWipePlanStampsWithoutError(t *testing.T) {
 	rebuildV2 := schemaMigration{version: 2, name: "typed-col", rebuild: true}
 	// stored==0, current==2, a pending rebuild => plan.wipe==true; the memory
 	// guard must skip the wipe and stamp anyway.
-	s, err := openWith(":memory:", 2, []schemaMigration{rebuildV2})
+	s, err := openWith(":memory:", 2, []schemaMigration{rebuildV2}, false) // memory never wipes
 	if err != nil {
 		t.Fatalf("openWith :memory: under wipe plan: %v", err)
 	}
@@ -362,7 +402,7 @@ func TestNeedsRebuildSignalAfterWipe(t *testing.T) {
 			t.Fatalf("set future version: %v", err)
 		}
 	})
-	s2, err := Open(path)
+	s2, err := Open(path, WithRebuild()) // daemon-equivalent: lock held, rebuild permitted
 	if err != nil {
 		t.Fatalf("reopen newer DB: %v", err)
 	}

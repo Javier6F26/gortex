@@ -152,22 +152,51 @@ func (s *Store) NeedsRebuild() bool { return s.wiped }
 //
 // Pass ":memory:" for an ephemeral in-process database (handy for
 // tests when you don't need on-disk persistence).
-func Open(path string) (*Store, error) {
-	return openWith(path, currentSchemaVersion, schemaMigrations)
+//
+// By default Open will NOT destroy an incompatible on-disk database: if the
+// stored schema version requires a rebuild (a newer build's DB, or an older
+// one crossing a rebuild migration) it returns ErrSchemaRebuildRequired and
+// leaves the file untouched. Pass WithRebuild to permit the drop-and-recreate
+// — only a caller that holds exclusive access to the store may do so (see
+// WithRebuild).
+func Open(path string, opts ...Option) (*Store, error) {
+	var o openOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return openWith(path, currentSchemaVersion, schemaMigrations, o.allowRebuild)
 }
 
-// openWith is Open parameterised by the target schema version and migration
-// registry so tests can drive the baseline / in-place / rebuild arms without
-// mutating package globals. Open always passes the package defaults
-// (currentSchemaVersion, schemaMigrations).
+// Option configures Open.
+type Option func(*openOptions)
+
+type openOptions struct {
+	allowRebuild bool
+}
+
+// WithRebuild permits Open to drop and recreate an on-disk database whose
+// schema version is incompatible (a newer build's, or an older one crossing a
+// migration that an in-place ALTER cannot satisfy).
 //
-// Precondition for the on-disk wipe path: the caller must hold exclusive
-// access to the store file. The daemon does — it takes an exclusive flock on
-// <store>.lock before Open for the only writable on-disk sqlite lifecycle (see
-// serverstack.NewSharedServer) — so the os.Remove here cannot race another
-// process. A future caller that opens an on-disk sqlite store WITHOUT that
-// lock must not reach a wipe plan.
-func openWith(path string, current int, migrations []schemaMigration) (*Store, error) {
+// The caller MUST hold exclusive cross-process access to the store file —
+// removing a SQLite file another process has open silently splits its state.
+// The daemon satisfies this: it takes an exclusive flock on <store>.lock for
+// the writable on-disk sqlite lifecycle and passes this option only in that
+// branch (see serverstack.NewSharedServer / OpenBackend). Without it, a wipe
+// plan yields ErrSchemaRebuildRequired and the file is left intact, so a
+// caller that does not hold the lock cannot corrupt a live store.
+func WithRebuild() Option { return func(o *openOptions) { o.allowRebuild = true } }
+
+// ErrSchemaRebuildRequired is returned by Open when an on-disk database needs a
+// destructive rebuild but the caller did not pass WithRebuild (i.e. cannot
+// prove it holds the store lock).
+var ErrSchemaRebuildRequired = errors.New("store_sqlite: on-disk schema is incompatible and must be rebuilt; reopen with WithRebuild while holding the store lock")
+
+// openWith is Open parameterised by the target schema version, migration
+// registry, and rebuild permission so tests can drive the baseline / in-place
+// / rebuild arms without mutating package globals. Open passes the package
+// defaults (currentSchemaVersion, schemaMigrations) and the WithRebuild flag.
+func openWith(path string, current int, migrations []schemaMigration, allowRebuild bool) (*Store, error) {
 	// Pragmas: WAL + synchronous=NORMAL is the standard write-heavy
 	// embedded tradeoff. cache_size(-32768) gives each pooled connection a
 	// 32 MiB page cache; temp_store(MEMORY) keeps GROUP BY / ORDER BY scratch
@@ -213,6 +242,13 @@ func openWith(path string, current int, migrations []schemaMigration) (*Store, e
 	plan := planSchemaMigrationWith(stored, current, migrations)
 	didWipe := false
 	if plan.wipe && !isMemoryPath(path) {
+		// Refuse the destructive rebuild unless the caller proved it holds
+		// exclusive access (WithRebuild). This keeps the file safe even if a
+		// future caller reaches a wipe plan without the daemon's store lock.
+		if !allowRebuild {
+			_ = db.Close()
+			return nil, ErrSchemaRebuildRequired
+		}
 		if err := db.Close(); err != nil {
 			return nil, fmt.Errorf("sqlite close for rebuild: %w", err)
 		}
