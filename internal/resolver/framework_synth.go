@@ -61,6 +61,7 @@ const (
 	SynthReactNativePair   = "react-native-native-pair"
 	SynthObserverChannel   = "observer-channel"
 	SynthClosureCollection = "closure-collection"
+	SynthReactSetState     = "react-setstate"
 	SynthExpoModules       = "expo-modules-bridge"
 	SynthFabric            = "fabric-codegen"
 	SynthMyBatis           = "mybatis"
@@ -124,6 +125,7 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthReactNativePair, fn: ResolveReactNativeNativePairing},
 		synthFunc{name: SynthObserverChannel, fn: ResolveObserverChannelCalls},
 		synthFunc{name: SynthClosureCollection, fn: ResolveClosureCollectionCalls},
+		synthFunc{name: SynthReactSetState, fn: ResolveReactSetStateCalls},
 		synthFunc{name: SynthExpoModules, fn: ResolveExpoModuleBridge},
 		synthFunc{name: SynthFabric, fn: ResolveFabricComponents},
 		synthFunc{name: SynthMyBatis, fn: ResolveMyBatisCalls},
