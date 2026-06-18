@@ -278,6 +278,45 @@ func (e *Engine) ShortestPath(src, sink string, opts Options) Result {
 }
 
 // search holds the mutable state of one bidirectional sweep.
+// AnchoredPath pairs a pack root with its shortest call-path to the anchor.
+type AnchoredPath struct {
+	Root string `json:"root"`
+	Path Path   `json:"path"`
+}
+
+// PathsToAnchor returns, for each root that can reach the anchor over the
+// CALLS-class graph, the shortest root→anchor path. It is the multi-root entry
+// the in-pack call-paths section uses: the anchor is the focus symbol and the
+// roots are the pack's other seed symbols, so the result shows how each seed
+// reaches the focus. Roots that cannot reach the anchor (and the anchor itself)
+// are omitted, duplicate roots are de-duped, and results are ordered shortest
+// path first so the tightest connections lead.
+func (e *Engine) PathsToAnchor(roots []string, anchor string, opts Options) []AnchoredPath {
+	if e == nil || e.g == nil || anchor == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []AnchoredPath
+	for _, root := range roots {
+		if root == "" || root == anchor || seen[root] {
+			continue
+		}
+		seen[root] = true
+		res := e.ShortestPath(root, anchor, opts)
+		if !res.Found || len(res.Paths) == 0 {
+			continue
+		}
+		out = append(out, AnchoredPath{Root: root, Path: res.Paths[0]})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Path.Length != out[j].Path.Length {
+			return out[i].Path.Length < out[j].Path.Length
+		}
+		return out[i].Root < out[j].Root
+	})
+	return out
+}
+
 type search struct {
 	eng      *Engine
 	opts     Options

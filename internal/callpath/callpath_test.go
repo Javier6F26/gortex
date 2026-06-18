@@ -283,3 +283,42 @@ func TestShortestPath_IncludeReferencesFalse(t *testing.T) {
 		t.Errorf("expected no pure-call path, got %+v", res.Paths)
 	}
 }
+
+func TestPathsToAnchor(t *testing.T) {
+	// c→anchor (len 1); a→b→anchor (len 2); d has no route to anchor.
+	g := newGraph("a", "b", "c", "d", "anchor")
+	calls(g, "a", "b")
+	calls(g, "b", "anchor")
+	calls(g, "c", "anchor")
+
+	got := New(g).PathsToAnchor([]string{"a", "c", "d", "anchor", "a"}, "anchor", Options{})
+
+	// d (no path) and anchor (== anchor) and the duplicate a are dropped.
+	if len(got) != 2 {
+		t.Fatalf("expected 2 anchored paths, got %d: %+v", len(got), got)
+	}
+	// Ordered shortest first: c (len 1) before a (len 2).
+	if got[0].Root != "c" || got[0].Path.Length != 1 {
+		t.Errorf("first should be c (len 1), got %+v", got[0])
+	}
+	if got[1].Root != "a" || got[1].Path.Length != 2 {
+		t.Errorf("second should be a (len 2), got %+v", got[1])
+	}
+	want := []string{"a", "b", "anchor"}
+	if len(got[1].Path.Nodes) != 3 {
+		t.Fatalf("a path nodes = %v", got[1].Path.Nodes)
+	}
+	for i := range want {
+		if got[1].Path.Nodes[i] != want[i] {
+			t.Errorf("a path = %v, want %v", got[1].Path.Nodes, want)
+		}
+	}
+}
+
+func TestPathsToAnchor_EmptyAnchor(t *testing.T) {
+	g := newGraph("a", "anchor")
+	calls(g, "a", "anchor")
+	if got := New(g).PathsToAnchor([]string{"a"}, "", Options{}); got != nil {
+		t.Errorf("empty anchor should return nil, got %+v", got)
+	}
+}
