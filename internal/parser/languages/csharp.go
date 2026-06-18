@@ -50,6 +50,8 @@ const qCSharpAll = `
   (enum_declaration
     name: (identifier) @enum.name) @enum.def
 
+  (anonymous_object_creation_expression) @anon.def
+
   (method_declaration
     name: (identifier) @method.name) @method.def
 
@@ -175,6 +177,9 @@ func (e *CSharpExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 
 		case m.Captures["enum.def"] != nil:
 			e.emitContainer(m, "enum", graph.KindType, filePath, fileID, src, result, seen, annotationSeen, localInterfaces)
+
+		case m.Captures["anon.def"] != nil:
+			e.emitAnonymousType(m, filePath, fileID, result, seen)
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, fileID, src, result, seen, annotationSeen, ifaceMethods)
@@ -353,6 +358,33 @@ func (e *CSharpExtractor) emitContainer(m parser.QueryResult, kind string, nodeK
 	case "class", "struct", "record":
 		emitCSharpBaseList(id, def.Node, src, filePath, localInterfaces, result)
 	}
+}
+
+// emitAnonymousType indexes a C# anonymous type — `new { Name = ..., Age = ... }`
+// — as a synthetic KindType node with an EdgeExtends to object, its implicit
+// base. C# anonymous types are nameless compiler-generated classes that derive
+// directly from System.Object; surfacing each instantiation as a distinct type
+// keeps the graph's type set complete and gives the projection a node to anchor
+// to, rather than vanishing into the expression that produced it.
+func (e *CSharpExtractor) emitAnonymousType(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+	def := m.Captures["anon.def"]
+	line := def.StartLine + 1
+	name := fmt.Sprintf("anon@%d", line)
+	id := filePath + "::" + name
+	if seen[id] {
+		return
+	}
+	seen[id] = true
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID: id, Kind: graph.KindType, Name: name,
+		FilePath: filePath, StartLine: line, EndLine: def.EndLine + 1,
+		Language: "csharp",
+		Meta:     map[string]any{"anonymous": true},
+	})
+	result.Edges = append(result.Edges,
+		&graph.Edge{From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: line},
+		&graph.Edge{From: id, To: "unresolved::object", Kind: graph.EdgeExtends, FilePath: filePath, Line: line, Origin: graph.OriginASTInferred},
+	)
 }
 
 // csharpVisibility scans a declaration's modifier children for an

@@ -32,6 +32,9 @@ const qJavaAll = `
   (enum_declaration
     name: (identifier) @enum.name) @enum.def
 
+  (object_creation_expression
+    (class_body)) @anon.def
+
   (method_declaration
     name: (identifier) @method.name) @method.def
 
@@ -199,6 +202,9 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 		case m.Captures["enum.def"] != nil:
 			e.emitEnum(m, filePath, fileID, src, result, seen, annotationSeen)
+
+		case m.Captures["anon.def"] != nil:
+			e.emitAnonymousClass(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["method.def"] != nil:
 			e.emitMethod(m, filePath, fileID, src, result, seen, annotationSeen, ifaceMethods, rnModules)
@@ -457,6 +463,38 @@ func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 	emitJavaGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 	// JPA model attribution: @Entity / @Table → EdgeModelsTable.
 	emitJavaORMEdges(def.Node, src, id, name, filePath, result)
+}
+
+// emitAnonymousClass indexes a Java anonymous class — `new T() { ...members }`
+// — as a synthetic KindType node with an EdgeExtends to the instantiated type
+// T. The anonymous subclass implicitly extends (for a class) or implements
+// (for an interface) T; we cannot tell which at extraction time, so we emit
+// `extends` and let the interface→implementation resolver, which handles both,
+// bridge T's methods to the overrides. Without a node for the anonymous class
+// the override site is invisible to call resolution.
+func (e *JavaExtractor) emitAnonymousClass(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
+	def := m.Captures["anon.def"]
+	baseType := inferTypeFromJavaNewExpr(def.Node, src)
+	if baseType == "" {
+		return
+	}
+	line := def.StartLine + 1
+	name := fmt.Sprintf("%s$anon@%d", baseType, line)
+	id := filePath + "::" + name
+	if seen[id] {
+		return
+	}
+	seen[id] = true
+	result.Nodes = append(result.Nodes, &graph.Node{
+		ID: id, Kind: graph.KindType, Name: name,
+		FilePath: filePath, StartLine: line, EndLine: def.EndLine + 1,
+		Language: "java",
+		Meta:     map[string]any{"anonymous": true, "scope_parent": baseType},
+	})
+	result.Edges = append(result.Edges,
+		&graph.Edge{From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: line},
+		&graph.Edge{From: id, To: "unresolved::" + baseType, Kind: graph.EdgeExtends, FilePath: filePath, Line: line, Origin: graph.OriginASTInferred},
+	)
 }
 
 // javaVisibility scans the `modifiers` child of a Java declaration for
