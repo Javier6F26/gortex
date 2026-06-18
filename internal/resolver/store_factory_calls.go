@@ -63,7 +63,7 @@ func ResolveStoreFactoryCalls(g graph.Store) int {
 		if binding == "" || action == "" {
 			continue
 		}
-		cands := index[binding][action]
+		cands := sameBoundaryCandidates(g, e.From, index[binding][action])
 		target := pickStoreAction(g, e, cands)
 
 		want := "unresolved::*." + action

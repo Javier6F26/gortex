@@ -109,6 +109,9 @@ func ResolveObserverChannelCalls(g graph.Store) int {
 				if cb == disp.ID {
 					continue
 				}
+				if !sameDispatchBoundary(disp, g.GetNode(cb)) {
+					continue
+				}
 				batch = append(batch, observerChannelEdge(disp, cb, field))
 				synthesized++
 			}

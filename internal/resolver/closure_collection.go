@@ -76,6 +76,9 @@ func ResolveClosureCollectionCalls(g graph.Store) int {
 				if d.ID == r.ID {
 					continue
 				}
+				if !sameDispatchBoundary(d, r) {
+					continue
+				}
 				batch = append(batch, closureCollectionEdge(d, r, field))
 				synthesized++
 			}

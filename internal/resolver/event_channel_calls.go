@@ -130,6 +130,9 @@ func ResolveEventChannelCalls(g graph.Store) int {
 				if em.from == "" || to == "" || em.from == to {
 					continue
 				}
+				if !sameDispatchBoundaryIDs(g, em.from, to) {
+					continue
+				}
 				k := pairKey{from: em.from, to: to}
 				if cur, ok := rep[k]; !ok || em.line < cur.line {
 					rep[k] = em

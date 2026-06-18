@@ -70,3 +70,37 @@ func TestResolveClosureCollectionCalls_Idempotent(t *testing.T) {
 	}
 	assert.Equal(t, 1, count)
 }
+
+// TestNoCrossRepoSpeculativeDispatch is the B5 named test: a dispatcher and a
+// registrar that share a generic field name but live in different workspaces
+// (repos) must NOT be paired — the multi-repo graph's reach must not fan a
+// generic name across unrelated repositories.
+func TestNoCrossRepoSpeculativeDispatch(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "a.swift::A.fire", Kind: graph.KindMethod, Name: "fire", FilePath: "a.swift", StartLine: 5,
+		Language: "swift", WorkspaceID: "repoA", Meta: map[string]any{"cc_dispatch_field": "handlers"},
+	})
+	g.AddNode(&graph.Node{
+		ID: "b.swift::B.register", Kind: graph.KindMethod, Name: "register", FilePath: "b.swift", StartLine: 9,
+		Language: "swift", WorkspaceID: "repoB", Meta: map[string]any{"cc_append_field": "handlers"},
+	})
+	assert.Equal(t, 0, ResolveClosureCollectionCalls(g), "a generic field name must not cross-pair between repos")
+	assert.Nil(t, ccEdgeBetween(g, "a.swift::A.fire", "b.swift::B.register"))
+}
+
+// TestRepoScopedDispatchSameWorkspacePairs confirms the gate does not break the
+// legitimate single-workspace (incl. monorepo) case: same WorkspaceID still
+// pairs, so the precision gain is a strict win, not a recall regression.
+func TestRepoScopedDispatchSameWorkspacePairs(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "a.swift::A.fire", Kind: graph.KindMethod, Name: "fire", FilePath: "a.swift", StartLine: 5,
+		Language: "swift", WorkspaceID: "mono", Meta: map[string]any{"cc_dispatch_field": "handlers"},
+	})
+	g.AddNode(&graph.Node{
+		ID: "b.swift::B.register", Kind: graph.KindMethod, Name: "register", FilePath: "b.swift", StartLine: 9,
+		Language: "swift", WorkspaceID: "mono", Meta: map[string]any{"cc_append_field": "handlers"},
+	})
+	assert.Equal(t, 1, ResolveClosureCollectionCalls(g), "same-workspace pairing must still synthesize the edge")
+}
