@@ -460,7 +460,7 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		// walk_graph / get_callers / get_call_chain etc. surfaced
 		// duplicate-looking rows that an agent couldn't tell apart and
 		// couldn't jump to.
-		[]string{"from", "to", "kind", "origin", "tier", "confidence", "label", "line", "file_path"},
+		[]string{"from", "to", "kind", "origin", "tier", "via", "confidence", "label", "line", "file_path"},
 		edgeMeta...,
 	)
 	for _, e := range sg.Edges {
@@ -472,7 +472,13 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 		if tier == "" {
 			tier = graph.ResolvedBy(e.Origin)
 		}
-		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, tier, e.Confidence, label, e.Line, e.FilePath); err != nil {
+		via := e.Via
+		if via == "" && e.Meta != nil {
+			if v, _ := e.Meta["via"].(string); v != "" {
+				via = graph.ViaLabelFor(v)
+			}
+		}
+		if err := edgeEnc.WriteRow(e.From, e.To, string(e.Kind), e.Origin, tier, via, e.Confidence, label, e.Line, e.FilePath); err != nil {
 			return nil, err
 		}
 	}

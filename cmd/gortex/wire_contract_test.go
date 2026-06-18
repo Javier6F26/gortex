@@ -143,12 +143,13 @@ func wireContractGolden(name string) string {
 		// ProjectID, were added.
 		return "3b8920ab88d05028e215d68d5917445e2e6d05bdad23aef6dcdf6c9920647823"
 	case "graph.Edge":
-		// Bumped when ReturnUsage was added — the per-call-site return-value
-		// consumption label (discarded / assigned / returned / …) populated on
-		// demand at extraction and query time. Additive: gob decodes older
-		// snapshots with ReturnUsage blank, and it is recomputed.
-		// (Previously bumped when Context, then Tier, were added.)
-		return "f537793b5542de95a9a4f383e6ed02317ac416c529b187e02fa60dccef1112d0"
+		// Bumped when Via was added — the human-readable synthesizer
+		// provenance label (Swift↔ObjC bridge / observer channel / …) derived
+		// from Meta["via"] and populated on demand by enrichSubGraphEdges.
+		// Additive: gob decodes older snapshots with Via blank, and it is
+		// recomputed; not part of the edge identity / dedup key.
+		// (Previously bumped when ReturnUsage, Context, then Tier, were added.)
+		return "74bade3c02d830002638d866730c21e3c3004bb519dbce102830b52247baed66"
 	case "snapshotHeader":
 		// Bumped when the VectorIndex / VectorDims / VectorCount fields
 		// were added (additive — gob decodes unknown fields as zero).

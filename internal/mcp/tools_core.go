@@ -660,6 +660,11 @@ func enrichSubGraphEdges(sg *query.SubGraph) {
 			e.Origin = graph.DefaultOriginFor(e.Kind, e.Confidence, src)
 		}
 		e.Tier = graph.ResolvedBy(e.Origin)
+		if e.Meta != nil {
+			if v, _ := e.Meta["via"].(string); v != "" {
+				e.Via = graph.ViaLabelFor(v)
+			}
+		}
 	}
 }
 

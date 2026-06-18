@@ -574,12 +574,51 @@ type Edge struct {
 	// can ask "who actually uses the return?" before changing a return
 	// signature. Not part of the edge identity / dedup key.
 	ReturnUsage string `json:"return_usage,omitempty"`
+	// Via is the human-readable provenance of a synthesized edge — the
+	// framework-dispatch synthesizer that produced it (Swift↔ObjC bridge,
+	// observer channel, React setState, …), derived from Meta["via"]. Empty
+	// on directly-extracted edges; populated on demand by enrichSubGraphEdges
+	// so traversal tools can render a "— via X" suffix. Not part of the edge
+	// identity / dedup key.
+	Via string `json:"via,omitempty"`
 	// Meta is intentionally excluded from JSON. It holds internal
 	// instrumentation (semantic_source, provider hints, etc.) that agents
 	// don't consume but that adds measurable bytes to every edge in
 	// responses returning hundreds of call-graph edges. Internal callers
 	// can still read/write the field; external MCP consumers don't see it.
 	Meta map[string]any `json:"-"`
+}
+
+// ViaLabelFor maps a synthesizer Meta["via"] value to a human-readable
+// provenance label for the "— via X" suffix on traversal output. Unmapped
+// values pass through verbatim; an empty via yields an empty label.
+func ViaLabelFor(via string) string {
+	switch via {
+	case "":
+		return ""
+	case "swift.objc.bridge":
+		return "Swift↔ObjC bridge"
+	case "observer.channel":
+		return "observer channel"
+	case "closure.collection":
+		return "closure collection"
+	case "react.setstate":
+		return "React setState"
+	case "flutter.setstate":
+		return "Flutter setState"
+	case "kmp.expect-actual":
+		return "KMP expect/actual"
+	case "rn.native.pair":
+		return "RN native pairing"
+	case "rn.bridge", "rn.native":
+		return "RN bridge"
+	case "event.channel":
+		return "event channel"
+	case "store-factory":
+		return "store factory"
+	default:
+		return via
+	}
 }
 
 // IdentityHash returns the edge's provenance-bearing identity: a stable
