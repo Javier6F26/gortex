@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zzet/gortex/internal/platform"
+	"github.com/zzet/gortex/internal/telemetry"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -30,6 +32,40 @@ var rootCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, format+"\n", a...)
 		})
 	},
+	// Runs after every subcommand (no subcommand defines its own
+	// PersistentPostRun, so cobra falls through to the root's). Records the
+	// command that just ran for opt-in anonymous usage telemetry. Fail-silent
+	// and consent-gated, so a default run touches no disk and never affects
+	// the command's exit.
+	PersistentPostRun: func(cmd *cobra.Command, args []string) {
+		recordCLIUsage(cmd, telemetry.NewStore(platform.TelemetryDir()), os.Getenv)
+	},
+}
+
+// cliCommandDim renders a cobra command's path below the root as a dim-safe
+// token — "gortex daemon start" → "daemon.start", "gortex review" → "review".
+// Returns "" for the bare root (nothing meaningful ran).
+func cliCommandDim(cmd *cobra.Command) string {
+	path := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
+	return strings.ReplaceAll(path, " ", ".")
+}
+
+// recordCLIUsage counts the CLI command that just ran under the cli_command
+// metric, gated on consent. It is fail-silent and builds the recorder only when
+// consent is enabled, so a default (telemetry-off) invocation never opens the
+// telemetry directory. getenv is injected for tests.
+func recordCLIUsage(cmd *cobra.Command, store *telemetry.Store, getenv func(string) string) {
+	consent := telemetry.ResolveConsent(telemetry.ConsentConfig{}, getenv)
+	if !consent.Enabled {
+		return
+	}
+	dim := cliCommandDim(cmd)
+	if dim == "" {
+		return
+	}
+	rec := telemetry.NewRecorder(consent, store)
+	rec.Record("cli_command", dim)
+	rec.Flush()
 }
 
 func init() {
