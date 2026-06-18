@@ -53,20 +53,21 @@ const (
 // label (for the report grouping) and as the value stamped on each
 // landed edge, so the two never drift.
 const (
-	SynthGRPCStub        = "grpc-stub"
-	SynthTemporalStub    = "temporal-stub"
-	SynthEventChannel    = "event-channel"
-	SynthSwiftObjC       = "swift-objc-bridge"
-	SynthReactNative     = "react-native-bridge"
-	SynthReactNativePair = "react-native-native-pair"
-	SynthObserverChannel = "observer-channel"
-	SynthExpoModules     = "expo-modules-bridge"
-	SynthFabric          = "fabric-codegen"
-	SynthMyBatis         = "mybatis"
-	SynthRustScope       = "rust-scope"
-	SynthSQLCallsite     = "sql-callsite"
-	SynthStoreFactory    = "store-factory"
-	SynthSpeculative     = "speculative-dispatch"
+	SynthGRPCStub          = "grpc-stub"
+	SynthTemporalStub      = "temporal-stub"
+	SynthEventChannel      = "event-channel"
+	SynthSwiftObjC         = "swift-objc-bridge"
+	SynthReactNative       = "react-native-bridge"
+	SynthReactNativePair   = "react-native-native-pair"
+	SynthObserverChannel   = "observer-channel"
+	SynthClosureCollection = "closure-collection"
+	SynthExpoModules       = "expo-modules-bridge"
+	SynthFabric            = "fabric-codegen"
+	SynthMyBatis           = "mybatis"
+	SynthRustScope         = "rust-scope"
+	SynthSQLCallsite       = "sql-callsite"
+	SynthStoreFactory      = "store-factory"
+	SynthSpeculative       = "speculative-dispatch"
 )
 
 // StampSynthesized marks an edge as the product of a framework
@@ -122,6 +123,7 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthReactNative, fn: ResolveReactNativeBridge},
 		synthFunc{name: SynthReactNativePair, fn: ResolveReactNativeNativePairing},
 		synthFunc{name: SynthObserverChannel, fn: ResolveObserverChannelCalls},
+		synthFunc{name: SynthClosureCollection, fn: ResolveClosureCollectionCalls},
 		synthFunc{name: SynthExpoModules, fn: ResolveExpoModuleBridge},
 		synthFunc{name: SynthFabric, fn: ResolveFabricComponents},
 		synthFunc{name: SynthMyBatis, fn: ResolveMyBatisCalls},
