@@ -33,20 +33,29 @@ var templateBuiltins = map[string]bool{
 // framework special elements (svelte:, astro:) are skipped.
 func mineTemplateComponentUsages(src []byte, filePath, componentID string, result *parser.ExtractionResult) {
 	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
-	seen := map[string]bool{}
-	for _, m := range templateTagRe.FindAllSubmatch(tmpl, -1) {
-		raw := string(m[1])
+	for _, idx := range templateTagRe.FindAllSubmatchIndex(tmpl, -1) {
+		// idx[0:2] spans the whole `<Tag` match; idx[2:4] is the captured name.
+		raw := string(tmpl[idx[2]:idx[3]])
 		if !isComponentTagName(raw) {
 			continue
 		}
 		name := componentRefName(raw)
-		if name == "" || templateBuiltins[name] || seen[name] {
+		if name == "" || templateBuiltins[name] {
 			continue
 		}
-		seen[name] = true
+		// One positioned edge per render site — NOT deduplicated by name. The
+		// tag's line comes from its byte offset (blanked <script>/<style>
+		// blocks preserve newlines, so offsets still map to source lines), and
+		// each edge carries Origin=OriginASTResolved plus Meta[template]=true so
+		// find_usages reports every render location with a line number, an AST
+		// provenance tier, and a template-vs-code role — where a name-deduped
+		// single reference would collapse repeated renders into one position.
+		line := 1 + strings.Count(string(tmpl[:idx[0]]), "\n")
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: componentID, To: "unresolved::" + name,
 			Kind: graph.EdgeReferences, FilePath: filePath,
+			Line: line, Origin: graph.OriginASTResolved,
+			Meta: map[string]any{"template": true},
 		})
 	}
 }

@@ -901,6 +901,11 @@ const (
 	// RefContextCallback marks a function referenced as a value to be invoked
 	// later — registered as a callback / handler rather than called directly.
 	RefContextCallback = "callback"
+	// RefContextTemplate marks a reference that originates from a markup
+	// template render site (`<Child />` in a Vue/Svelte/Astro component) rather
+	// than from code. find_usages can then separate "rendered here" usages from
+	// code-level references and show each positioned render location.
+	RefContextTemplate = "template"
 )
 
 // RefContextOf classifies the reference context of an edge given the kind
@@ -931,6 +936,11 @@ func RefContextOf(e *Edge, fromKind NodeKind) string {
 		// type reference — classify it so find_usages can filter callbacks.
 		if v, _ := e.Meta["via"].(string); v == "callback_registration" {
 			return RefContextCallback
+		}
+		// A markup render site (`<Child />`) is a template usage, not a code
+		// type reference — classify it so find_usages can isolate render sites.
+		if t, _ := e.Meta["template"].(bool); t {
+			return RefContextTemplate
 		}
 	}
 	switch e.Kind {
