@@ -1922,6 +1922,7 @@ func (s *Server) handleGetFileSummary(ctx context.Context, req mcp.CallToolReque
 		"truncated":   sg.Truncated,
 		"etag":        etag,
 	}
+	s.attachFileDependents(result, fp)
 	if payload, merr := json.Marshal(result); merr == nil {
 		s.recordFileBaselineSavings(ctx, "get_file_summary", fp, summaryLang, string(payload))
 	}

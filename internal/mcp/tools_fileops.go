@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -772,6 +773,72 @@ func matchLocationsHint(fileStr, oldString string) string {
 // compress_bodies=true. Path resolution shares the same rules as
 // edit_file / write_file (absolute, repo-prefixed, or
 // single-repo-root-relative); the file does not need to be indexed.
+// fileDependents returns the distinct source files that import the given file —
+// the files a change to it would ripple into. Only import edges into the file
+// node count, so the header reflects real file-to-file dependencies.
+func (s *Server) fileDependents(fileID string) []string {
+	if s.graph == nil || fileID == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var deps []string
+	for _, e := range s.graph.GetInEdges(fileID) {
+		if e == nil || e.Kind != graph.EdgeImports {
+			continue
+		}
+		f := s.fileOfNode(e.From)
+		if f == "" || f == fileID || seen[f] {
+			continue
+		}
+		seen[f] = true
+		deps = append(deps, f)
+	}
+	sort.Strings(deps)
+	return deps
+}
+
+// fileOfNode returns the source file a node belongs to: a file node is its own
+// file, any other node reports its FilePath; falls back to the id.
+func (s *Server) fileOfNode(id string) string {
+	if n := s.graph.GetNode(id); n != nil {
+		if n.Kind == graph.KindFile {
+			return n.ID
+		}
+		if n.FilePath != "" {
+			return n.FilePath
+		}
+	}
+	return id
+}
+
+// fileDependentsNote renders a one-line dependents header: how many files import
+// this file, and the first few of them.
+func fileDependentsNote(deps []string) string {
+	if len(deps) == 0 {
+		return ""
+	}
+	shown := deps
+	suffix := ""
+	if len(shown) > 5 {
+		shown = shown[:5]
+		suffix = fmt.Sprintf(" (+%d more)", len(deps)-5)
+	}
+	noun := "files import"
+	if len(deps) == 1 {
+		noun = "file imports"
+	}
+	return fmt.Sprintf("↑ %d %s this file: %s%s", len(deps), noun, strings.Join(shown, ", "), suffix)
+}
+
+// attachFileDependents records the dependents list + one-line header on a file
+// tool's result map, when the file has any importers.
+func (s *Server) attachFileDependents(result map[string]any, fileID string) {
+	if deps := s.fileDependents(fileID); len(deps) > 0 {
+		result["dependents"] = deps
+		result["dependents_header"] = fileDependentsNote(deps)
+	}
+}
+
 func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rawPath, err := req.RequireString("path")
 	if err != nil {
@@ -924,6 +991,8 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 		}
 		s.tokenStatsFor(ctx).record(s.fileAttributionNode(relPath, language), "read_file", returned, fullFile)
 	}
+
+	s.attachFileDependents(result, relPath)
 
 	if s.isTOON(ctx, req) {
 		return returnTOON(result)
