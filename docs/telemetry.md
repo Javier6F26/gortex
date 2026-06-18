@@ -14,6 +14,8 @@ gortex telemetry off      # disable and delete any buffered, unsent data
 - `telemetry off` prints `Telemetry disabled — buffered data cleared.` — it deletes all buffered daily rollups and the send marker (the anonymous install id is intentionally kept).
 - `telemetry status` prints the state and the precedence rung that decided it (`decided by: env | do_not_track | config | default`), the ingest endpoint (`not configured — nothing is transmitted` when unset), the anonymous install id, and a one-line summary of what is collected.
 
+`gortex install` also offers the choice: pass `--telemetry` / `--no-telemetry`, or use the **Anonymous telemetry** toggle in the interactive wizard. A toggle takes effect on a running daemon within a few seconds (it re-reads consent on the record and send paths) — no restart needed.
+
 ## How consent is decided
 
 Consent resolves through a fixed four-rung precedence (**highest wins**):
