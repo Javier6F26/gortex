@@ -357,6 +357,9 @@ func (e *CSharpExtractor) extractCSharp(filePath string, src []byte) (*parser.Ex
 	// interop. Stamped onto the file node.
 	detectDotNetSurfaces(src, result)
 
+	// Same-file constant/variable value references → impact-radius reads.
+	captureValueRefCandidates(result, root, filePath, src)
+
 	return result, hadError, nil
 }
 

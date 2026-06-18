@@ -1226,6 +1226,9 @@ func (e *GoExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRe
 	// WebSocket upgrade handlers → real-time endpoint edges.
 	emitGoWebSocketEdges(src, filePath, result)
 
+	// Same-file constant/variable value references → impact-radius reads.
+	captureValueRefCandidates(result, root, filePath, src)
+
 	return result, nil
 }
 

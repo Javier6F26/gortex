@@ -44,6 +44,7 @@ func (e *PHPExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 	// Walk the AST manually since PHP tree-sitter queries can be tricky.
 	e.walkNode(root, src, filePath, fileNode, result, seen, "")
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 

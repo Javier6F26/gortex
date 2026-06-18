@@ -47,6 +47,7 @@ func (e *ScalaExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 
 	MaybeEnrichDatabricks(filePath, fileNode.ID, src, result)
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 

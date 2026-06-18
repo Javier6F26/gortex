@@ -422,6 +422,7 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 		fileNode.Meta["test_runner"] = runner
 	}
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 

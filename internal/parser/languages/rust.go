@@ -323,6 +323,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 		}
 	}
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 

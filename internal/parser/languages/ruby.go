@@ -165,6 +165,7 @@ func (e *RubyExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	// Rails-style callback dispatch — preserves legacy behaviour exactly.
 	emitRailsCallbacks(root, src, filePath, result)
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 

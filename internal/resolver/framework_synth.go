@@ -73,6 +73,7 @@ const (
 	SynthSpeculative       = "speculative-dispatch"
 	SynthFnValue           = SynthFnValueCallback
 	SynthPascalFormName    = SynthPascalForm
+	SynthValueRefName      = SynthValueRef
 )
 
 // StampSynthesized marks an edge as the product of a framework
@@ -151,6 +152,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		synthFunc{name: SynthFnValue, fn: ResolveFnValueCallbacks},
 		// Pascal unit ↔ form (.pas/.dfm) pairing by same-dir basename.
 		synthFunc{name: SynthPascalFormName, fn: ResolvePascalForms},
+		// Same-file distinctive value references → EdgeReads to the constant,
+		// so a config constant's blast radius reaches every reader.
+		synthFunc{name: SynthValueRefName, fn: ResolveValueRefs},
 	}
 }
 

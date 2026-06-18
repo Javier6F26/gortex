@@ -187,6 +187,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	// JS-callable method nodes for the Expo bridge synthesizer.
 	emitExpoModuleNodes(src, filePath, "swift", fileID, result, seen)
 
+	captureValueRefCandidates(result, root, filePath, src)
 	return result, nil
 }
 
