@@ -262,6 +262,8 @@ Gortex captures every large tool response into a bounded per-session ring; these
 | `index_health` | Health score, parse failures, stale files, language coverage |
 | `get_symbol_history` | Symbols modified this session with counts; flags churning (3+ edits) |
 
+The in-graph coverage tools above (`analyze kind=coverage*`, `index_health` language coverage) have an offline, whole-corpus counterpart for regression testing: the `gortex eval parity` CLI benchmarks per-language *resolved cross-file-dependent* coverage against a frozen baseline and is CI-fenced three ways — a per-language coverage floor, a frozen at-or-beyond-parity language count, and per-feature extraction goldens. See [features.md](features.md#coverage-churn-ownership).
+
 ## Code generation
 
 | Tool | Description |
