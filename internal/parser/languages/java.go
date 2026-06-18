@@ -26,6 +26,9 @@ const qJavaAll = `
   (interface_declaration
     name: (identifier) @iface.name) @iface.def
 
+  (annotation_type_declaration
+    name: (identifier) @iface.name) @iface.def
+
   (enum_declaration
     name: (identifier) @enum.name) @enum.def
 
@@ -120,9 +123,9 @@ func (e *JavaExtractor) Extensions() []string { return []string{".java"} }
 // --- Deferred match buffers ----------------------------------------
 
 type javaDeferredCall struct {
-	name       string       // method name
-	receiver   string       // selector receiver text (empty for plain call)
-	line       int          // 1-based call_expression start line
+	name       string // method name
+	receiver   string // selector receiver text (empty for plain call)
+	line       int    // 1-based call_expression start line
 	isSelector bool
 	// tempStartWorkflow is the workflow type name when this call starts a
 	// Temporal workflow (`client.newWorkflowStub(OrderWorkflow.class, …)`
