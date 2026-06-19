@@ -23,24 +23,25 @@ import (
 // kept separate to avoid cross-pollination when wiring from the
 // interactive wizard or the --json reporters.
 var (
-	installYes         bool
-	installInteractive bool
-	installAgents      string
-	installPrintConfig string
-	installAgentsSkip  string
-	installJSON        bool
-	installDryRun      bool
-	installForce       bool
-	installHooks       = true
-	installNoHooks     bool
-	installHookMode    string
-	installClaudeMd    = true
-	installNoClaudeMd  bool
-	installStartDaemon bool
-	installTrackRepo   bool
-	installTrackPath   string
-	installTelemetry   bool
-	installNoTelemetry bool
+	installYes             bool
+	installInteractive     bool
+	installAgents          string
+	installPrintConfig     string
+	installAgentsSkip      string
+	installJSON            bool
+	installDryRun          bool
+	installForce           bool
+	installHooks           = true
+	installNoHooks         bool
+	installHookMode        string
+	installClaudeMd        = true
+	installNoClaudeMd      bool
+	installClaudeConfigDir string
+	installStartDaemon     bool
+	installTrackRepo       bool
+	installTrackPath       string
+	installTelemetry       bool
+	installNoTelemetry     bool
 )
 
 var installCmd = &cobra.Command{
@@ -72,6 +73,8 @@ func init() {
 			"or 'nudge' (soft-deny once per burst of consecutive non-symbolic calls, then let the next call proceed)")
 	installCmd.Flags().BoolVar(&installClaudeMd, "claude-md", true, "merge Gortex rule block into ~/.claude/CLAUDE.md; use --no-claude-md to skip")
 	installCmd.Flags().BoolVar(&installNoClaudeMd, "no-claude-md", false, "skip the ~/.claude/CLAUDE.md rule block (inverse of --claude-md)")
+	installCmd.Flags().StringVar(&installClaudeConfigDir, "claude-config-dir", "", "Claude Code config root to write into (skills/commands/agents/settings/CLAUDE.md/.claude.json); overrides $CLAUDE_CONFIG_DIR, defaults to ~/.claude. Useful for installing into a non-active profile or CI sandbox")
+	installCmd.Flags().StringVar(&installClaudeConfigDir, "config-root", "", "alias for --claude-config-dir")
 	installCmd.Flags().BoolVar(&installStartDaemon, "start", false, "start the daemon immediately after setup (detached)")
 	installCmd.Flags().BoolVar(&installTrackRepo, "track", false, "track a repository with the daemon after setup")
 	installCmd.Flags().StringVar(&installTrackPath, "track-path", ".", "repository to track when --track is set (default: current directory)")
@@ -96,6 +99,18 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 	}
 	if home == "" {
 		return fmt.Errorf("gortex install needs a home directory; $HOME is empty")
+	}
+
+	// An explicit --claude-config-dir / --config-root pins the Claude
+	// Code config root for every adapter write below (and the banner),
+	// overriding $CLAUDE_CONFIG_DIR. Resolve to an absolute path so a
+	// relative flag doesn't depend on the daemon's later cwd.
+	if installClaudeConfigDir != "" {
+		abs, err := filepath.Abs(installClaudeConfigDir)
+		if err != nil {
+			return fmt.Errorf("resolve --claude-config-dir: %w", err)
+		}
+		claudecode.SetConfigDirOverride(abs)
 	}
 
 	// --print-config <agent>: a zero-write dry-run of one adapter's planned
@@ -153,7 +168,7 @@ func runInstall(cmd *cobra.Command, _ []string) (err error) {
 	prog.Start("Installing gortex")
 	if installClaudeMd && !installDryRun {
 		prog.Sub(fmt.Sprintf("merging %s (use --no-claude-md to skip)",
-			filepath.Join(home, ".claude", "CLAUDE.md")))
+			claudecode.UserClaudeMdPath(home)))
 	}
 
 	// Buffer chatty adapter logs while the animation is running. On success

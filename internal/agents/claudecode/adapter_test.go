@@ -237,6 +237,135 @@ func TestClaudeCodeGlobalModeHonorsClaudeConfigDir(t *testing.T) {
 	}
 }
 
+// TestClaudeCodeConfigDirOverrideBeatsEnv verifies the explicit
+// override (set by `gortex install --claude-config-dir`) wins over
+// $CLAUDE_CONFIG_DIR, and that neither the env dir nor HOME is touched
+// when the override is active.
+func TestClaudeCodeConfigDirOverrideBeatsEnv(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = true
+
+	envDir := filepath.Join(t.TempDir(), "env-profile")
+	overrideDir := filepath.Join(t.TempDir(), "flag-profile")
+	t.Setenv("CLAUDE_CONFIG_DIR", envDir)
+	SetConfigDirOverride(overrideDir)
+	t.Cleanup(func() { SetConfigDirOverride("") })
+
+	a := New()
+	if _, err := a.Apply(env, agents.ApplyOpts{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	for _, p := range []string{
+		filepath.Join(overrideDir, ".claude.json"),
+		filepath.Join(overrideDir, "settings.json"),
+		filepath.Join(overrideDir, "CLAUDE.md"),
+	} {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("missing override artifact %s: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(envDir); err == nil {
+		t.Errorf("env-profile dir should be untouched when the override is set")
+	}
+	if _, err := os.Stat(filepath.Join(env.Home, ".claude")); err == nil {
+		t.Errorf("HOME .claude should be untouched when the override is set")
+	}
+}
+
+// TestClaudeCodeRemoveGlobal is the round-trip contract for `gortex
+// uninstall --global`: after an install, RemoveGlobal must delete the
+// owned skills/commands/agents and strip the Gortex portion of every
+// merged file while preserving the user's own content (other MCP
+// servers, personal CLAUDE.md prose). GlobalArtifacts must report an
+// empty footprint afterward.
+func TestClaudeCodeRemoveGlobal(t *testing.T) {
+	env, _ := agentstest.NewEnv(t)
+	env.Mode = agents.ModeGlobal
+	env.InstallGlobalInstructions = true
+
+	configDir := filepath.Join(env.Home, ".claude")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A non-gortex MCP server and personal CLAUDE.md prose must survive.
+	if err := os.WriteFile(filepath.Join(env.Home, ".claude.json"),
+		[]byte(`{"mcpServers":{"other":{"command":"x"}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "CLAUDE.md"),
+		[]byte("# My rules\n\nBe terse.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := New()
+	if _, err := a.Apply(env, agents.ApplyOpts{}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if got := GlobalArtifacts(env.Home); len(got) == 0 {
+		t.Fatal("expected a non-empty footprint after install")
+	}
+
+	removed, failures := a.RemoveGlobal(env, agents.ApplyOpts{})
+	if len(failures) != 0 {
+		t.Fatalf("RemoveGlobal failures: %v", failures)
+	}
+	if removed == 0 {
+		t.Fatal("expected RemoveGlobal to remove at least one artifact")
+	}
+
+	// Owned files deleted.
+	for name := range GlobalSkills {
+		if _, err := os.Stat(filepath.Join(configDir, "skills", name)); err == nil {
+			t.Errorf("skill %s not removed", name)
+		}
+	}
+	for name := range SlashCommands {
+		if _, err := os.Stat(filepath.Join(configDir, "commands", name)); err == nil {
+			t.Errorf("command %s not removed", name)
+		}
+	}
+	for name := range SubAgents {
+		if _, err := os.Stat(filepath.Join(configDir, "agents", name)); err == nil {
+			t.Errorf("sub-agent %s not removed", name)
+		}
+	}
+
+	// CLAUDE.md: gortex block stripped, personal prose preserved.
+	md, _ := os.ReadFile(filepath.Join(configDir, "CLAUDE.md"))
+	if strings.Contains(string(md), agents.GlobalRulesStartMarker) {
+		t.Errorf("CLAUDE.md still carries the gortex marker:\n%s", md)
+	}
+	if !strings.Contains(string(md), "Be terse.") {
+		t.Errorf("CLAUDE.md lost personal content:\n%s", md)
+	}
+
+	// settings.json: gortex permission gone.
+	if settings, _ := os.ReadFile(filepath.Join(configDir, "settings.json")); strings.Contains(string(settings), "mcp__gortex__") {
+		t.Errorf("settings.json still allows mcp__gortex__:\n%s", settings)
+	}
+
+	// settings.local.json: gortex hooks gone.
+	if local, _ := os.ReadFile(filepath.Join(configDir, "settings.local.json")); strings.Contains(string(local), "gortex") {
+		t.Errorf("settings.local.json still references gortex:\n%s", local)
+	}
+
+	// .claude.json: gortex server gone, the user's other server kept.
+	mcp, _ := os.ReadFile(filepath.Join(env.Home, ".claude.json"))
+	if strings.Contains(string(mcp), `"gortex"`) {
+		t.Errorf(".claude.json still has the gortex server:\n%s", mcp)
+	}
+	if !strings.Contains(string(mcp), `"other"`) {
+		t.Errorf(".claude.json lost the user's other server:\n%s", mcp)
+	}
+
+	// Nothing left to clean.
+	if got := GlobalArtifacts(env.Home); len(got) != 0 {
+		t.Errorf("GlobalArtifacts should be empty after RemoveGlobal, got %v", got)
+	}
+}
+
 // TestClaudeCodeGlobalMode_NoClaudeMd skips the rule block when the
 // caller opts out via InstallGlobalInstructions=false (i.e.
 // `gortex install --no-claude-md`).

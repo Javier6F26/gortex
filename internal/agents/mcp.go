@@ -28,6 +28,28 @@ func UpsertMCPServer(root map[string]any, serverName string, entry map[string]an
 	return true
 }
 
+// RemoveMCPServer deletes serverName from the {"mcpServers": {...}}
+// map, pruning the parent key when removal leaves it empty. Returns
+// true when the map was modified. Counterpart to UpsertMCPServer for
+// uninstall paths — all other servers (and the user's other config)
+// are left untouched.
+func RemoveMCPServer(root map[string]any, serverName string) (changed bool) {
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, exists := servers[serverName]; !exists {
+		return false
+	}
+	delete(servers, serverName)
+	if len(servers) == 0 {
+		delete(root, "mcpServers")
+	} else {
+		root["mcpServers"] = servers
+	}
+	return true
+}
+
 // UpsertMCPServerWithMigration is like UpsertMCPServer but also
 // rewrites entries that look Gortex-authored (any `gortex mcp ...`
 // stanza) even without opts.Force. This lets `gortex install` swap

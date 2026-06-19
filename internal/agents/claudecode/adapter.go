@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -276,6 +277,240 @@ func (a *Adapter) applyGlobal(env agents.Env, opts agents.ApplyOpts, res *agents
 	return nil
 }
 
+// RemoveGlobal undoes applyGlobal: it strips the Gortex footprint
+// from the user-level Claude Code config — the MCP server stanza, the
+// permission allow-entry, the hook entries, the CLAUDE.md rule block,
+// and the curated skills / commands / sub-agents. Merged files keep
+// every non-Gortex key (other MCP servers, the user's own
+// permissions / hooks, hand-written CLAUDE.md prose); owned files
+// (skills / commands / agents) are deleted outright. The config root
+// honors the --claude-config-dir override / $CLAUDE_CONFIG_DIR /
+// the ~/.claude default. Returns the number of artifacts
+// removed-or-cleaned and any per-artifact failures — a partial clean
+// still reports rather than aborting. Invoked by `gortex uninstall
+// --global`.
+func (a *Adapter) RemoveGlobal(env agents.Env, opts agents.ApplyOpts) (removed int, failures []string) {
+	w := env.Stderr
+	if env.Home == "" {
+		return 0, []string{"global cleanup requires a resolved home directory"}
+	}
+
+	count := func(action agents.FileAction, err error, label string) {
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", label, err))
+			return
+		}
+		if action.Action != agents.ActionSkip {
+			removed++
+		}
+	}
+
+	// 1. ~/.claude.json — drop the "gortex" MCP server stanza.
+	mcpPath := userClaudeJSONPath(env.Home)
+	mcpAction, err := removeGlobalMCPConfig(w, mcpPath, opts)
+	count(mcpAction, err, mcpPath)
+
+	// 2. settings.json — drop the mcp__gortex__* permission entry.
+	settingsPath := userSettingsPath(env.Home)
+	permAction, err := removeGlobalPermissions(w, settingsPath, opts)
+	count(permAction, err, settingsPath)
+
+	// 3. settings.local.json — drop the Gortex hook entries.
+	localPath := userSettingsLocalPath(env.Home)
+	hookAction, err := removeGlobalHooks(w, localPath, opts)
+	count(hookAction, err, localPath)
+
+	// 4. CLAUDE.md — strip the marker-fenced rule block. An empty
+	// body makes UpsertMarkedBlock remove the block in place,
+	// preserving any surrounding user prose.
+	mdPath := userClaudeMdPath(env.Home)
+	mdAction, err := agents.UpsertMarkedBlock(w, mdPath, "",
+		agents.GlobalRulesStartMarker, agents.GlobalRulesEndMarker, opts)
+	count(mdAction, err, mdPath)
+
+	// 5. skills / commands / agents — delete the owned files.
+	ownedRemoved, ownedFailures := removeGlobalOwnedFiles(w, env.Home, opts)
+	removed += ownedRemoved
+	failures = append(failures, ownedFailures...)
+
+	return removed, failures
+}
+
+// GlobalArtifacts returns the user-level Claude Code paths gortex
+// install manages that currently carry a Gortex footprint — the MCP
+// config, settings files, and CLAUDE.md when they contain Gortex
+// entries, plus every installed skill / command / sub-agent. Sorted
+// for stable output. The config root honors the --claude-config-dir
+// override / $CLAUDE_CONFIG_DIR. Used by `gortex uninstall --global`
+// to preview the blast radius before deleting.
+func GlobalArtifacts(home string) []string {
+	configDir := userClaudeConfigDir(home)
+	var present []string
+
+	// Merged files: list only when they actually carry a Gortex
+	// footprint, so the preview (and its count) matches what
+	// RemoveGlobal will really touch.
+	if fileContains(userClaudeJSONPath(home), `"gortex"`) {
+		present = append(present, userClaudeJSONPath(home))
+	}
+	if fileContains(userSettingsPath(home), "mcp__gortex__") {
+		present = append(present, userSettingsPath(home))
+	}
+	if fileContains(userSettingsLocalPath(home), "gortex") {
+		present = append(present, userSettingsLocalPath(home))
+	}
+	if fileContains(userClaudeMdPath(home), agents.GlobalRulesStartMarker) {
+		present = append(present, userClaudeMdPath(home))
+	}
+
+	// Owned files: present on disk == installed by us.
+	for name := range GlobalSkills {
+		if p := filepath.Join(configDir, "skills", name); pathExists(p) {
+			present = append(present, p)
+		}
+	}
+	for name := range SlashCommands {
+		if p := filepath.Join(configDir, "commands", name); pathExists(p) {
+			present = append(present, p)
+		}
+	}
+	for name := range SubAgents {
+		if p := filepath.Join(configDir, "agents", name); pathExists(p) {
+			present = append(present, p)
+		}
+	}
+
+	sort.Strings(present)
+	return present
+}
+
+// removeGlobalMCPConfig drops the gortex MCP server from a
+// {"mcpServers": {...}} config, leaving the user's other servers
+// intact. A missing file or absent stanza is a no-op skip.
+func removeGlobalMCPConfig(w io.Writer, path string, opts agents.ApplyOpts) (agents.FileAction, error) {
+	return agents.MergeJSON(w, path, func(root map[string]any, _ bool) (bool, error) {
+		return agents.RemoveMCPServer(root, "gortex"), nil
+	}, opts)
+}
+
+// removeGlobalPermissions drops the mcp__gortex__* entry from
+// permissions.allow, pruning the allow list / permissions map when
+// removal leaves them empty. User-added allow entries survive.
+func removeGlobalPermissions(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agents.FileAction, error) {
+	return agents.MergeJSON(w, settingsPath, func(settings map[string]any, _ bool) (bool, error) {
+		perms, ok := settings["permissions"].(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		allow, ok := perms["allow"].([]any)
+		if !ok {
+			return false, nil
+		}
+		kept := make([]any, 0, len(allow))
+		removedAny := false
+		for _, entry := range allow {
+			if s, ok := entry.(string); ok && strings.Contains(s, "mcp__gortex__") {
+				removedAny = true
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		if !removedAny {
+			return false, nil
+		}
+		if len(kept) == 0 {
+			delete(perms, "allow")
+		} else {
+			perms["allow"] = kept
+		}
+		if len(perms) == 0 {
+			delete(settings, "permissions")
+		}
+		return true, nil
+	}, opts)
+}
+
+// removeGlobalHooks drops every Gortex-owned hook entry across the
+// events the installer writes, pruning the hooks map when removal
+// leaves it empty. Hooks owned by other tools survive.
+func removeGlobalHooks(w io.Writer, settingsPath string, opts agents.ApplyOpts) (agents.FileAction, error) {
+	return agents.MergeJSON(w, settingsPath, func(settings map[string]any, _ bool) (bool, error) {
+		hooks, ok := settings["hooks"].(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		removed := 0
+		for _, event := range []string{"PreToolUse", "PreCompact", "PostToolUse", "Stop", "SessionStart", "UserPromptSubmit"} {
+			removed += removeGortexHookEntries(hooks, event)
+		}
+		if removed == 0 {
+			return false, nil
+		}
+		if len(hooks) == 0 {
+			delete(settings, "hooks")
+		}
+		return true, nil
+	}, opts)
+}
+
+// removeGlobalOwnedFiles deletes the user-level skills / commands /
+// sub-agents the installer owns. Skills are directories
+// ($DIR/skills/<name>/); commands and agents are single files. A
+// not-yet-installed artifact is silently skipped; DryRun counts the
+// target without touching disk.
+func removeGlobalOwnedFiles(w io.Writer, home string, opts agents.ApplyOpts) (removed int, failures []string) {
+	configDir := userClaudeConfigDir(home)
+	type target struct {
+		path string
+		dir  bool
+	}
+	var targets []target
+	for name := range GlobalSkills {
+		targets = append(targets, target{filepath.Join(configDir, "skills", name), true})
+	}
+	for name := range SlashCommands {
+		targets = append(targets, target{filepath.Join(configDir, "commands", name), false})
+	}
+	for name := range SubAgents {
+		targets = append(targets, target{filepath.Join(configDir, "agents", name), false})
+	}
+	for _, t := range targets {
+		if !pathExists(t.path) {
+			continue // not installed — nothing to remove
+		}
+		if opts.DryRun {
+			removed++
+			continue
+		}
+		var err error
+		if t.dir {
+			err = os.RemoveAll(t.path)
+		} else {
+			err = os.Remove(t.path)
+		}
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", t.path, err))
+			continue
+		}
+		logf(w, "[gortex uninstall] removed %s", t.path)
+		removed++
+	}
+	return removed, failures
+}
+
+func fileContains(path, needle string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), needle)
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // installPermissions merges an {"permissions": {"allow":
 // ["mcp__gortex__*"]}} stanza into settings.json. Preserves any
 // user-added entries; short-circuits when a gortex rule is already
@@ -430,6 +665,13 @@ func userClaudeMdPath(home string) string {
 	return filepath.Join(userClaudeConfigDir(home), "CLAUDE.md")
 }
 
+// UserClaudeMdPath is the resolved user-level CLAUDE.md path Claude
+// Code reads every session, honoring the --claude-config-dir override
+// / $CLAUDE_CONFIG_DIR / the ~/.claude default. Exported so the
+// installer banner names the real destination instead of a hardcoded
+// ~/.claude path.
+func UserClaudeMdPath(home string) string { return userClaudeMdPath(home) }
+
 func userClaudeConfigDir(home string) string {
 	if dir := claudeConfigDirOverride(); dir != "" {
 		return dir
@@ -437,7 +679,23 @@ func userClaudeConfigDir(home string) string {
 	return filepath.Join(home, ".claude")
 }
 
+// configDirOverride, when non-empty, pins the Claude Code config root
+// for the rest of the process regardless of $CLAUDE_CONFIG_DIR. It is
+// set by `gortex install --claude-config-dir` / `gortex uninstall
+// --global --claude-config-dir` so an operator can target a
+// non-active profile or a CI sandbox without exporting the env var.
+// Precedence: flag override > $CLAUDE_CONFIG_DIR > ~/.claude default.
+var configDirOverride string
+
+// SetConfigDirOverride pins the Claude Code config root for the rest
+// of this process. An empty string clears the override so the env var
+// / default resume.
+func SetConfigDirOverride(dir string) { configDirOverride = strings.TrimSpace(dir) }
+
 func claudeConfigDirOverride() string {
+	if configDirOverride != "" {
+		return configDirOverride
+	}
 	return strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
 }
 
