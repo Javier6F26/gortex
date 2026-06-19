@@ -112,6 +112,7 @@ type Store struct {
 
 	stmtInsertEdge       *sql.Stmt
 	stmtOutEdges         *sql.Stmt
+	stmtOutEdgesLight    *sql.Stmt
 	stmtInEdges          *sql.Stmt
 	stmtRepoEdges        *sql.Stmt
 	stmtAllEdges         *sql.Stmt
@@ -391,7 +392,7 @@ func (s *Store) Close() error {
 		s.stmtRepoNodeCount, s.stmtRepoEdgeCount,
 		s.stmtAllRepoCountsNodes, s.stmtAllRepoCountsEdges,
 		s.stmtStatsByKind, s.stmtStatsByLanguage,
-		s.stmtInsertEdge, s.stmtOutEdges, s.stmtInEdges,
+		s.stmtInsertEdge, s.stmtOutEdges, s.stmtOutEdgesLight, s.stmtInEdges,
 		s.stmtRepoEdges,
 		s.stmtAllEdges, s.stmtEdgeCount, s.stmtRemoveEdge,
 		s.stmtUpdateEdgeOrigin, s.stmtUpdateEdgeAttrs, s.stmtSelectEdgeOrigin, s.stmtDeleteEdgeByKey,
@@ -479,6 +480,9 @@ func (s *Store) prepare() error {
 		`INSERT OR IGNORE INTO edges (`+edgeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
 	prep(&s.stmtOutEdges,
 		`SELECT `+edgeCols+` FROM edges WHERE from_id = ?`)
+	const edgeColsLight = `from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo`
+	prep(&s.stmtOutEdgesLight,
+		`SELECT `+edgeColsLight+` FROM edges WHERE from_id = ?`)
 	prep(&s.stmtInEdges,
 		`SELECT `+edgeCols+` FROM edges WHERE to_id = ?`)
 	prep(&s.stmtRepoEdges,
@@ -577,6 +581,30 @@ func scanEdge(scanner interface {
 		}
 		e.Meta = m
 	}
+	return &e, nil
+}
+
+// scanEdgeLight scans an edge WITHOUT decoding its meta blob -- for hot
+// read paths (dataflow call-target lookup) that read only endpoints,
+// kind, and line. Skipping the meta column avoids the JSON decode + map
+// allocation that dominates large edge scans on this backend; the
+// returned edge's Meta is nil.
+func scanEdgeLight(scanner interface {
+	Scan(...any) error
+}) (*graph.Edge, error) {
+	var (
+		e         graph.Edge
+		crossRepo int64
+	)
+	err := scanner.Scan(
+		&e.From, &e.To, &e.Kind, &e.FilePath, &e.Line,
+		&e.Confidence, &e.ConfidenceLabel, &e.Origin, &e.Tier,
+		&crossRepo,
+	)
+	if err != nil {
+		return nil, err
+	}
+	e.CrossRepo = crossRepo != 0
 	return &e, nil
 }
 
@@ -1110,6 +1138,13 @@ func (s *Store) GetOutEdges(nodeID string) []*graph.Edge {
 	return s.queryEdges(s.stmtOutEdges, nodeID)
 }
 
+// GetOutEdgesLight returns a node's out-edges without decoding the
+// per-edge Meta blob -- for hot dataflow lookups that need only
+// endpoints/kind/line. The returned edges have a nil Meta.
+func (s *Store) GetOutEdgesLight(nodeID string) []*graph.Edge {
+	return s.queryEdgesLight(s.stmtOutEdgesLight, nodeID)
+}
+
 func (s *Store) GetInEdges(nodeID string) []*graph.Edge {
 	return s.queryEdges(s.stmtInEdges, nodeID)
 }
@@ -1142,6 +1177,28 @@ func (s *Store) queryEdges(stmt *sql.Stmt, args ...any) []*graph.Edge {
 	var out []*graph.Edge
 	for rows.Next() {
 		e, err := scanEdge(rows)
+		if err != nil {
+			panicOnFatal(err)
+			return out
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// queryEdgesLight mirrors queryEdges but scans each row without its
+// meta blob (scanEdgeLight), leaving Meta nil. Only for callers that
+// never read edge Meta.
+func (s *Store) queryEdgesLight(stmt *sql.Stmt, args ...any) []*graph.Edge {
+	rows, err := stmt.Query(args...)
+	if err != nil {
+		panicOnFatal(err)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	var out []*graph.Edge
+	for rows.Next() {
+		e, err := scanEdgeLight(rows)
 		if err != nil {
 			panicOnFatal(err)
 			return out

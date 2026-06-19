@@ -179,8 +179,22 @@ func rewriteReturnsTo(g graph.Store, e *graph.Edge) {
 // unresolved target string so we don't lift to the wrong call when
 // two calls live on the same line. Falls back to the first match
 // otherwise.
+// outEdgeLightStore is implemented by backends that can return a node's
+// out-edges without decoding the per-edge Meta blob. findCallTarget reads
+// only endpoints/kind/line, so it opts into the cheaper fetch when the
+// backend offers it (the sqlite backend, where the Meta JSON-decode
+// otherwise dominates this hot lookup); other stores fall back.
+type outEdgeLightStore interface {
+	GetOutEdgesLight(nodeID string) []*graph.Edge
+}
+
 func findCallTarget(g graph.Store, callerID string, line int, calleeText string) string {
-	out := g.GetOutEdges(callerID)
+	var out []*graph.Edge
+	if ls, ok := g.(outEdgeLightStore); ok {
+		out = ls.GetOutEdgesLight(callerID)
+	} else {
+		out = g.GetOutEdges(callerID)
+	}
 	var fallback string
 	for _, e := range out {
 		if e.Kind != graph.EdgeCalls {
