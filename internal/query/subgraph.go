@@ -48,6 +48,12 @@ type SubGraph struct {
 	// walk dropped one or more dynamic-dispatch / unresolved out-edges: the
 	// reachable set is then a floor, not exhaustive. Omitted when false.
 	LowerBound bool `json:"lower_bound,omitempty"`
+	// DynamicBoundaries enriches a dispatch-bounded result with the body-level
+	// {site, form, key, candidate-shortlist} of each runtime-dispatch site in
+	// the seed symbol — so an agent reads "static path ends HERE, form X, key
+	// Y, candidates A/B" instead of spiralling through the source. Computed on
+	// demand (find_usages / smart_context / explore); never persisted.
+	DynamicBoundaries []graph.DynamicBoundary `json:"dynamic_boundaries,omitempty"`
 	// Boundaries names the unresolved/dispatch sites that made the result a
 	// floor. Populated only by call-graph traversals; omitted when empty.
 	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`

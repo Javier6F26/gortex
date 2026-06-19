@@ -2042,6 +2042,12 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 	if bs := graph.CallerBoundaries(s.graph, []string{id}, 0); len(bs) > 0 {
 		sg.Boundaries = bs
 		sg.LowerBound = graph.LowerBoundCaveat(bs)
+		// The reach is a floor because dispatch is dynamic — scan the seed's
+		// body for the exact runtime-dispatch sites so the agent gets
+		// {site, form, key, candidates} instead of a read-spiral.
+		if db := s.dynamicBoundariesForSymbol(s.graph.GetNode(id)); len(db) > 0 {
+			sg.DynamicBoundaries = db
+		}
 	}
 	annotateProxyFreshness(sg)
 	return s.returnSubGraph(ctx, req, sg)

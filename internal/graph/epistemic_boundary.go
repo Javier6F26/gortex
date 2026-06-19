@@ -25,6 +25,20 @@ type EpistemicBoundary struct {
 	Direction string         `json:"direction"` // "callers" | "callees"
 }
 
+// DynamicBoundary enriches an EpistemicBoundary with the body-level detail an
+// agent needs to cross a runtime-dispatch site without a read-spiral: the SITE
+// (file:line), the dispatch FORM, the KEY selector, and a candidate-target
+// shortlist. Like EpistemicBoundary it is an attribute of a query result, not a
+// graph element — it is computed on demand by scanning the disconnected
+// symbol's body, never persisted.
+type DynamicBoundary struct {
+	Site       string   `json:"site"` // file:line of the dispatch
+	Form       string   `json:"form"` // reflection | computed_member | event_bus
+	Key        string   `json:"key"`  // the selector expression / event name
+	Candidates []string `json:"candidates,omitempty"`
+	AgentNamed bool     `json:"agent_named,omitempty"`
+}
+
 // BoundaryReason classifies why a boundary makes the count a floor. The
 // vocabulary aligns with the resolution-outcomes taxonomy's dynamic-dispatch
 // concept while staying graph-local (no name-resolution needed to compute it).
