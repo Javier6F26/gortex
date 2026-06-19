@@ -64,7 +64,9 @@ func TestDispatcher_UntrackedCWD_ReturnsStructuredError(t *testing.T) {
 	d, _ := trackedPathMCPSetup(t, tracked)
 
 	sess := &daemon.Session{ID: "sess_x", CWD: untracked}
-	frame := []byte(`{"jsonrpc":"2.0","id":7,"method":"graph_stats","params":{}}`)
+	// A real tool invocation arrives as tools/call — that's the only frame
+	// the method-aware gate refuses for an untracked cwd.
+	frame := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}`)
 
 	reply, err := d.Dispatch(context.Background(), sess, frame)
 	require.NoError(t, err)
@@ -288,7 +290,7 @@ func TestDispatcher_UnreachableCWD_StillRejected(t *testing.T) {
 	assert.False(t, d.cwdReachable(stranger))
 
 	sess := &daemon.Session{ID: "sess_stranger", CWD: stranger}
-	frame := []byte(`{"jsonrpc":"2.0","id":4,"method":"graph_stats","params":{}}`)
+	frame := []byte(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}`)
 	reply, err := d.Dispatch(context.Background(), sess, frame)
 	require.NoError(t, err)
 
@@ -299,6 +301,70 @@ func TestDispatcher_UnreachableCWD_StillRejected(t *testing.T) {
 	data, ok := errObj["data"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "repo_not_tracked", data["error_code"])
+}
+
+// TestDispatcher_UntrackedHandshake_SurvivesWithInactiveVariant proves the
+// F4 contract: an MCP session opened in a cwd that no tracked repo covers must
+// still complete its handshake. initialize flows through and the response
+// carries the inactive-instructions variant (telling the agent to run `gortex
+// track <cwd>`); tools/list answers an empty track-only list; only tools/call
+// is refused with the structured repo_not_tracked error. This beats
+// codegraph's silent empty-list — the agent gets an actionable affordance, not
+// a dead connection.
+func TestDispatcher_UntrackedHandshake_SurvivesWithInactiveVariant(t *testing.T) {
+	tracked := t.TempDir()
+	untracked := t.TempDir() // a sibling the dispatcher does not cover
+
+	d, _ := trackedPathMCPSetup(t, tracked)
+	sess := &daemon.Session{ID: "sess_handshake", CWD: untracked}
+
+	dispatch := func(t *testing.T, frame string) map[string]any {
+		t.Helper()
+		reply, err := d.Dispatch(context.Background(), sess, []byte(frame))
+		require.NoError(t, err)
+		require.NotNil(t, reply, "handshake frame must produce a reply")
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal(reply, &parsed))
+		return parsed
+	}
+
+	t.Run("initialize_flows_through_with_inactive_instructions", func(t *testing.T) {
+		parsed := dispatch(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}`)
+
+		// The handshake SUCCEEDS — no error object, the connection lives.
+		_, isErr := parsed["error"]
+		assert.False(t, isErr, "untracked initialize must not error: %v", parsed)
+
+		result, ok := parsed["result"].(map[string]any)
+		require.True(t, ok, "initialize must return a result object: %v", parsed)
+
+		instr, ok := result["instructions"].(string)
+		require.True(t, ok, "initialize result must carry instructions")
+		assert.Contains(t, instr, "INACTIVE", "instructions must flag the inactive state")
+		assert.Contains(t, instr, "gortex track "+untracked,
+			"instructions must carry the cwd-specific track affordance")
+	})
+
+	t.Run("tools_list_returns_empty_track_only", func(t *testing.T) {
+		parsed := dispatch(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`)
+
+		result, ok := parsed["result"].(map[string]any)
+		require.True(t, ok, "tools/list must return a result object: %v", parsed)
+		tools, ok := result["tools"].([]any)
+		require.True(t, ok, "tools/list result must carry a tools array")
+		assert.Empty(t, tools, "untracked tools/list must be an empty track-only list")
+	})
+
+	t.Run("tools_call_still_refused", func(t *testing.T) {
+		parsed := dispatch(t, `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"graph_stats","arguments":{}}}`)
+
+		errObj, ok := parsed["error"].(map[string]any)
+		require.True(t, ok, "untracked tools/call must still be refused: %v", parsed)
+		data, ok := errObj["data"].(map[string]any)
+		require.True(t, ok, "refusal must carry machine-readable data")
+		assert.Equal(t, "repo_not_tracked", data["error_code"])
+		assert.Equal(t, untracked, data["path"])
+	})
 }
 
 // writeFile is a tiny helper to keep test setup readable.

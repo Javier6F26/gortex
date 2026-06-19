@@ -79,7 +79,15 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 	// also counts as reachable — otherwise the cwd-walk priority
 	// chain in RouteForCwd would be dead code from the dispatcher's
 	// perspective.
-	if sess.CWD != "" && !d.cwdReachable(sess.CWD) {
+	// Method-aware untracked gate (F4): a tracked cwd is REQUIRED only for
+	// tools/call — that's the frame that needs the graph. initialize and
+	// tools/list flow through so the MCP handshake SURVIVES an untracked cwd:
+	// initialize returns the inactive-instructions variant (run `gortex track`)
+	// and tools/list answers an empty/track-only list, instead of a
+	// connection-poisoning errored initialize. Only tools/call is refused (with
+	// the structured not-tracked error the agent can act on).
+	untracked := sess.CWD != "" && !d.cwdReachable(sess.CWD)
+	if untracked && peekFrameMethod(frame) == "tools/call" {
 		return d.notTrackedError(sess, frame), nil
 	}
 
@@ -125,7 +133,56 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 			zap.String("session_id", sess.ID), zap.Error(err))
 		return nil, fmt.Errorf("marshal reply: %w", err)
 	}
+	// For an untracked cwd, rewrite the surviving initialize / tools/list
+	// response into its inactive variant: the agent gets the actionable
+	// "run gortex track" instructions and an empty track-only tool list.
+	if untracked {
+		out = rewriteUntrackedResponse(peekFrameMethod(frame), out, sess.CWD)
+	}
 	return out, nil
+}
+
+// peekFrameMethod extracts the JSON-RPC method from a raw frame, or "" when it
+// can't be parsed (a malformed frame the server below will reject anyway).
+func peekFrameMethod(frame []byte) string {
+	var peek struct {
+		Method string `json:"method"`
+	}
+	_ = json.Unmarshal(frame, &peek)
+	return peek.Method
+}
+
+// rewriteUntrackedResponse swaps a successful initialize / tools/list response
+// for its untracked-cwd variant: initialize carries the inactive instructions
+// (with the cwd-specific `gortex track` affordance) and tools/list is emptied,
+// so the handshake completes gracefully instead of erroring. Non-initialize /
+// non-tools/list frames, error responses, and unparseable bodies pass through
+// unchanged.
+func rewriteUntrackedResponse(method string, out []byte, cwd string) []byte {
+	if len(out) == 0 {
+		return out
+	}
+	var resp map[string]any
+	if json.Unmarshal(out, &resp) != nil {
+		return out
+	}
+	result, ok := resp["result"].(map[string]any)
+	if !ok {
+		return out // an error response or non-object result — leave it
+	}
+	switch method {
+	case "initialize":
+		result["instructions"] = gortexmcp.ServerInstructionsUntracked(cwd)
+	case "tools/list":
+		result["tools"] = []any{}
+	default:
+		return out
+	}
+	resp["result"] = result
+	if rewritten, mErr := json.Marshal(resp); mErr == nil {
+		return rewritten
+	}
+	return out
 }
 
 // SessionEnded implements daemon.SessionEndedHook. When a proxy

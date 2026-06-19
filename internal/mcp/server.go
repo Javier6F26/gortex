@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"sort"
@@ -989,6 +990,23 @@ const serverInstructions = `Gortex is a code-intelligence graph server — it in
 - Before editing, call get_editing_context on the file; for refactors use edit_symbol / rename_symbol / batch_edit.
 - The cold tools/list shows a core set — call tools_search to discover the rest of the catalogue on demand.
 - Pass format:"gcx" to list-shaped tools for a compact, round-trippable wire format (~27% fewer tokens).`
+
+// ServerInstructionsUntracked is the inactive-state `instructions` variant
+// returned when a session's cwd is not covered by any tracked repo. Rather than
+// poisoning the connection with an errored initialize, the handshake succeeds
+// and the response tells the agent exactly how to activate the server — the
+// actionable affordance codegraph's silent empty-list lacks.
+func ServerInstructionsUntracked(cwd string) string {
+	target := cwd
+	if strings.TrimSpace(target) == "" {
+		target = "."
+	}
+	return fmt.Sprintf("Gortex is connected but INACTIVE for this directory: %q is not covered by any tracked repository, "+
+		"so the graph tools have nothing to answer with yet.\n\n"+
+		"To activate: run `gortex track %s` (or `gortex index .`), then reconnect — the full tool catalogue and the "+
+		"graph become available.\n\n"+
+		"Until then tools/list is intentionally empty; fall back to your own file reads and text search.", target, target)
+}
 
 // NewServer creates an MCP server with all Gortex tools registered.
 func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watcher *indexer.Watcher, logger *zap.Logger, guardRules []config.GuardRule, opts ...MultiRepoOptions) *Server {
