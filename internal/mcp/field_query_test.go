@@ -98,3 +98,39 @@ func TestApplyFieldFilters(t *testing.T) {
 		t.Errorf("no clauses must keep all nodes, got %d", len(got))
 	}
 }
+
+// TestNameClauseFilter proves the name: clause both parses out of the query and
+// post-filters nodes by a case-insensitive substring of the symbol name —
+// "search for X but only nodes whose name contains Y".
+func TestNameClauseFilter(t *testing.T) {
+	fq := parseFieldQuery("auth name:Handler kind:function")
+	if fq.Name != "Handler" {
+		t.Errorf("name clause not parsed: fq.Name=%q, want Handler", fq.Name)
+	}
+	if fq.Kind != "function" {
+		t.Errorf("kind clause lost: fq.Kind=%q", fq.Kind)
+	}
+	if fq.Text != "auth" {
+		t.Errorf("residual text=%q, want auth", fq.Text)
+	}
+	if !fq.hasFieldFilters() {
+		t.Error("hasFieldFilters should be true when name: is set")
+	}
+
+	nodes := []*graph.Node{
+		{ID: "a", Name: "AuthHandler", Kind: graph.KindType},
+		{ID: "b", Name: "authMiddleware", Kind: graph.KindFunction},
+		{ID: "c", Name: "RequestHandler", Kind: graph.KindType},
+	}
+	got := applyFieldFilters(nodes, fieldQuery{Name: "handler"})
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	if !ids["a"] || !ids["c"] {
+		t.Errorf("name:handler should keep AuthHandler + RequestHandler, got %v", ids)
+	}
+	if ids["b"] {
+		t.Error("name:handler should have dropped authMiddleware")
+	}
+}

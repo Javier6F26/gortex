@@ -9,17 +9,19 @@ import (
 
 // bigramIndexEnabled reports whether the bigram side index should be
 // built on Add/Remove and consulted by the engine's typo-rescue tier.
-// Disabled by default — it adds measurable per-symbol indexing cost
-// (bigramize + atomic-map writes per token) that only earns its keep
-// when agents actually typo. Users who want typo-tolerant recall opt
-// in via GORTEX_BIGRAM_TYPOS=1 (or true / yes / on). Read once at
-// backend construction so the flag can't toggle mid-session.
+// Default ON: the typo-rescue tier only fires when the primary search
+// returns ZERO results (see the rescue-on-empty caller), so the index
+// earns its keep — an empty result set is exactly when a typo is the
+// likely cause and the bigram overlap is the cheapest way to recover
+// recall. A perf-sensitive operator on a very large index can opt OUT
+// with GORTEX_BIGRAM_TYPOS=0 (or false / no / off). Read once at backend
+// construction so the flag can't toggle mid-session.
 func bigramIndexEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GORTEX_BIGRAM_TYPOS"))) {
-	case "1", "true", "yes", "on", "y":
-		return true
+	case "0", "false", "no", "off", "n":
+		return false
 	}
-	return false
+	return true
 }
 
 // bigramIndex is an inverted index from bigram key → docID set, built

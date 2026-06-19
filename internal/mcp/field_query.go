@@ -18,13 +18,14 @@ type fieldQuery struct {
 	Path    string // path: clause — file-path substring
 	Repo    string // repo: clause — repository prefix
 	Project string // project: clause — project slug
+	Name    string // name: clause — symbol-name substring post-filter
 }
 
 // hasFieldFilters reports whether any post-filter clause (kind / lang
 // / path / repo) was supplied. project: is excluded — it merges into
 // the query scope rather than acting as a post-filter.
 func (fq fieldQuery) hasFieldFilters() bool {
-	return fq.Kind != "" || fq.Lang != "" || fq.Path != "" || fq.Repo != ""
+	return fq.Kind != "" || fq.Lang != "" || fq.Path != "" || fq.Repo != "" || fq.Name != ""
 }
 
 // parseFieldQuery splits a raw search string into its free text and
@@ -55,6 +56,8 @@ func parseFieldQuery(raw string) fieldQuery {
 			fq.Repo = value
 		case "project":
 			fq.Project = value
+		case "name":
+			fq.Name = value
 		default:
 			text = append(text, tok)
 		}
@@ -99,7 +102,8 @@ func applyFieldFilters(nodes []*graph.Node, fq fieldQuery) []*graph.Node {
 	lang := normalizeLang(fq.Lang)
 	path := strings.ToLower(strings.TrimSpace(fq.Path))
 	repo := strings.TrimSpace(fq.Repo)
-	if lang == "" && path == "" && repo == "" {
+	name := strings.ToLower(strings.TrimSpace(fq.Name))
+	if lang == "" && path == "" && repo == "" && name == "" {
 		return nodes
 	}
 	out := make([]*graph.Node, 0, len(nodes))
@@ -111,6 +115,11 @@ func applyFieldFilters(nodes []*graph.Node, fq fieldQuery) []*graph.Node {
 			continue
 		}
 		if repo != "" && n.RepoPrefix != "" && n.RepoPrefix != repo {
+			continue
+		}
+		// name: is a case-insensitive substring post-filter on the symbol's
+		// own name — narrows "search for X but only nodes whose name contains Y".
+		if name != "" && !strings.Contains(strings.ToLower(n.Name), name) {
 			continue
 		}
 		out = append(out, n)

@@ -136,6 +136,11 @@ type Indexer struct {
 	dirIgnore     *excludes.Hierarchical
 	dirIgnoreOnce sync.Once
 	rootPath      string
+	// projectName is the repo's own name (go.mod module / package.json /
+	// dir), computed once per index. Stripped from the BM25-indexed file
+	// path so a query word matching it doesn't earn a useless uniform
+	// path-field boost across every document. "" disables the de-weighting.
+	projectName string
 	logger        *zap.Logger
 
 	// Crash-isolation parser pool, lazily created and then reused
@@ -392,13 +397,16 @@ func (idx *Indexer) swappable() *search.Swappable {
 // the body is what carries the search signal, so the section text
 // (Meta["section_text"]) is indexed alongside the breadcrumb name
 // -- a prose query then ranks the section, not just a heading match.
-func searchIndexFields(n *graph.Node) []string {
+func searchIndexFields(n *graph.Node, projectName string) []string {
+	// The project-name path segment is stripped from the INDEXED path (not the
+	// stored FilePath) so it contributes no uniform path-field boost.
+	indexedPath := search.StripProjectNameFromPath(n.FilePath, projectName)
 	if n.Kind == graph.KindDoc {
 		body, _ := n.Meta["section_text"].(string)
-		return []string{n.Name, n.FilePath, body}
+		return []string{n.Name, indexedPath, body}
 	}
 	sig, _ := n.Meta["signature"].(string)
-	return []string{n.Name, n.FilePath, sig}
+	return []string{n.Name, indexedPath, sig}
 }
 
 // vectorSearcherDelegate is the search.VectorDelegate-shaped
@@ -459,8 +467,8 @@ func isSymbolSearcherBackend(b search.Backend) bool {
 // in-process BM25 corpus contract — the same query produces the
 // same recall against either backend. Joined with spaces so the
 // downstream COPY FROM sees a single STRING column value.
-func ftsTokensFor(n *graph.Node) string {
-	fields := searchIndexFields(n)
+func ftsTokensFor(n *graph.Node, projectName string) string {
+	fields := searchIndexFields(n, projectName)
 	if n.QualName != "" {
 		// QualName carries the dotted form (`pkg.Sub.Type.Method`)
 		// that adds qualifier-hop recall ("auth" matching
@@ -558,7 +566,7 @@ func (idx *Indexer) snapshotBleveEntries() []bleveUpgradeEntry {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		out = append(out, bleveUpgradeEntry{id: n.ID, fields: searchIndexFields(n)})
+		out = append(out, bleveUpgradeEntry{id: n.ID, fields: searchIndexFields(n, idx.projectName)})
 	}
 	return out
 }
@@ -1795,6 +1803,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		return nil, err
 	}
 	idx.rootPath = absRoot
+	idx.projectName = search.DetectProjectName(absRoot)
 
 	reporter.Report("walking files", 0, 0)
 
@@ -2005,7 +2014,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				if hasFTS && idx.shouldIndexForSearch(n) {
 					ftsItems = append(ftsItems, graph.SymbolFTSItem{
 						NodeID: n.ID,
-						Tokens: ftsTokensFor(n),
+						Tokens: ftsTokensFor(n, idx.projectName),
 					})
 				}
 				nodeBuf = append(nodeBuf, n)
@@ -2814,9 +2823,9 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		idx.search.Add(n.ID, searchIndexFields(n)...)
+		idx.search.Add(n.ID, searchIndexFields(n, idx.projectName)...)
 		if searcher != nil {
-			if err := searcher.UpsertSymbolFTS(n.ID, ftsTokensFor(n)); err != nil {
+			if err := searcher.UpsertSymbolFTS(n.ID, ftsTokensFor(n, idx.projectName)); err != nil {
 				idx.logger.Debug("indexer: backend FTS upsert failed",
 					zap.String("id", n.ID),
 					zap.Error(err))
@@ -3481,7 +3490,7 @@ func (idx *Indexer) buildSearchIndex() {
 		if !idx.shouldIndexForSearch(n) {
 			continue
 		}
-		idx.search.Add(n.ID, searchIndexFields(n)...)
+		idx.search.Add(n.ID, searchIndexFields(n, idx.projectName)...)
 	}
 
 	// Build vector index if embedder is available.

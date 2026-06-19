@@ -61,11 +61,12 @@ func TestBM25_BigramCandidates_ExplicitAPI(t *testing.T) {
 	assert.Empty(t, b.Search("valiadate", 10))
 }
 
-func TestBM25_BigramDefaultsOff(t *testing.T) {
-	// With no env var, Add/Remove must cost nothing extra and
-	// BigramCandidates must return nil — the "zero-cost when
-	// unused" property that makes this flag safe to leave off.
-	t.Setenv("GORTEX_BIGRAM_TYPOS", "")
+func TestBM25_BigramOptOut(t *testing.T) {
+	// The bigram index defaults ON now — the typo-rescue tier fires only on
+	// zero-result queries, so it earns its keep. A perf-sensitive operator
+	// opts OUT with GORTEX_BIGRAM_TYPOS=0, restoring the zero-cost path where
+	// Add/Remove cost nothing extra and BigramCandidates returns nil.
+	t.Setenv("GORTEX_BIGRAM_TYPOS", "0")
 
 	b := NewBM25()
 	defer b.Close()

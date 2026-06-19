@@ -876,8 +876,11 @@ func (e *Engine) gatherBackendCandidates(query string, limit int, opts QueryOpti
 	// nothing else surfaced, query is one indivisible 4+ char token,
 	// backend can provide candidates. The bigram backend also returns
 	// raw IDs — batch-materialise them too rather than fall back to
-	// per-id GetNode.
-	if len(cands) == 0 && len(query) >= 4 && !strings.ContainsAny(query, " /.:_-") {
+	// per-id GetNode. A query with a separator OR an internal-uppercase
+	// camelCase boundary is decomposable, so it is left for the handler's
+	// leaf-decomposition rescue (more precise than fuzzy bigram overlap) —
+	// the bigram tier serves true atomic-token typos only.
+	if len(cands) == 0 && len(query) >= 4 && !strings.ContainsAny(query, " /.:_-") && !hasInternalUppercase(query) {
 		if bg, ok := backend.(bigramProvider); ok {
 			keys := len(query) - 1
 			minOverlap := (keys + 1) / 2
@@ -1041,6 +1044,19 @@ func (e *Engine) Stats() *graph.GraphStats {
 // bfs performs breadth-first traversal from nodeID.
 // If forward is true, follows outgoing edges; if false, follows incoming.
 // If edgeKinds is nil, follows all edge kinds bidirectionally (for cluster).
+// hasInternalUppercase reports whether s carries a camelCase boundary — an
+// uppercase letter anywhere but the first byte. Such a query decomposes into
+// multiple leaf tokens, so the bigram typo-rescue tier defers to the handler's
+// leaf-decomposition rescue for it.
+func hasInternalUppercase(s string) bool {
+	for i := 1; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
 // defaultDispatchFanout bounds how many overriders one interface/abstract
 // method expands to during polymorphic dispatch expansion, so a hub interface
 // with hundreds of implementors cannot blow up a call-chain walk.
