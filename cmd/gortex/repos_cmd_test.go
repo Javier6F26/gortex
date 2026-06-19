@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/persistence"
 )
 
@@ -80,10 +82,34 @@ func reposTestEnv(t *testing.T, repos []config.RepoEntry) {
 	cfgFile = gcPath
 	prevCache := reposCacheDir
 	reposCacheDir = filepath.Join(root, "cache")
+	prevBackend := reposBackendPath
+	// Isolate the SQLite freshness store at a per-test path so the
+	// command never reads the developer's real ~/.gortex/store. Tests
+	// that exercise the repo_index_state path seed this file; the rest
+	// leave it absent so describeRepo falls back to the snapshot store.
+	reposBackendPath = filepath.Join(root, "store", "store.sqlite")
 	t.Cleanup(func() {
 		cfgFile = prevCfg
 		reposCacheDir = prevCache
+		reposBackendPath = prevBackend
 	})
+}
+
+// seedIndexState writes a repo_index_state freshness row into the test's
+// isolated SQLite backend store — the same table `gortex index` / daemon
+// warmup write, and the authoritative source describeRepo reads first.
+func seedIndexState(t *testing.T, prefix, sha string, dirty bool, indexedAt time.Time) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(reposBackendPath), 0o755))
+	st, err := store_sqlite.Open(reposBackendPath)
+	require.NoError(t, err)
+	require.NoError(t, st.SetRepoIndexState(graph.RepoIndexState{
+		RepoPrefix: prefix,
+		IndexedSHA: sha,
+		Dirty:      dirty,
+		IndexedAt:  indexedAt.Unix(),
+	}))
+	require.NoError(t, st.Close())
 }
 
 // seedSnapshot writes a persisted index snapshot for (repoPath, branch,
@@ -253,6 +279,142 @@ func TestRunRepos_StaleWhenBranchSlotMissing(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.False(t, got[0].Indexed, "a snapshot on a different branch must not count")
 	assert.True(t, got[0].Stale)
+}
+
+// TestRunRepos_IndexStateFreshness covers the primary freshness source:
+// the daemon's repo_index_state rows (keyed by repo prefix). This is the
+// path that was dead before — `gortex repos` read only the embedded-server
+// snapshot store, which the daemon never writes, so every daemon-indexed
+// repo wrongly reported "never indexed".
+func TestRunRepos_IndexStateFreshness(t *testing.T) {
+	base := t.TempDir()
+	freshDir := filepath.Join(base, "alpha")
+	staleDir := filepath.Join(base, "beta")
+	dirtyDir := filepath.Join(base, "gamma")
+	neverDir := filepath.Join(base, "delta")
+
+	freshHead := gitInitRepo(t, freshDir)
+	oldHead := gitInitRepo(t, staleDir)
+	dirtyHead := gitInitRepo(t, dirtyDir)
+	gitInitRepo(t, neverDir)
+
+	reposTestEnv(t, []config.RepoEntry{
+		{Path: freshDir, Name: "alpha"},
+		{Path: staleDir, Name: "beta"},
+		{Path: dirtyDir, Name: "gamma"},
+		{Path: neverDir, Name: "delta"},
+	})
+
+	indexedAt := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+	// alpha: indexed at the exact current HEAD → fresh.
+	seedIndexState(t, "alpha", freshHead, false, indexedAt)
+	// beta: indexed at the old HEAD, then HEAD advances → stale.
+	seedIndexState(t, "beta", oldHead, false, indexedAt)
+	newHead := gitCommitMore(t, staleDir, "second.txt")
+	require.NotEqual(t, oldHead, newHead)
+	// gamma: indexed at the current HEAD but from a dirty tree → fresh + dirty.
+	seedIndexState(t, "gamma", dirtyHead, true, indexedAt)
+	// delta: no row → never indexed.
+
+	reposJSON = true
+	t.Cleanup(func() { reposJSON = false })
+
+	cmd, buf := newReposCmd()
+	require.NoError(t, runRepos(cmd, nil))
+
+	var got []repoStatus
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Len(t, got, 4)
+	byName := map[string]repoStatus{}
+	for _, e := range got {
+		byName[e.Name] = e
+	}
+
+	alpha := byName["alpha"]
+	assert.True(t, alpha.Indexed)
+	assert.False(t, alpha.Stale, "index commit matches HEAD → fresh")
+	assert.Equal(t, freshHead, alpha.IndexedCommit)
+	assert.False(t, alpha.IndexedDirty)
+	require.NotNil(t, alpha.LastIndexed)
+	assert.Equal(t, indexedAt.Unix(), alpha.LastIndexed.Unix())
+
+	beta := byName["beta"]
+	assert.True(t, beta.Indexed)
+	assert.True(t, beta.Stale, "HEAD advanced past the indexed commit → stale")
+	assert.Equal(t, oldHead, beta.IndexedCommit)
+	assert.Equal(t, newHead, beta.HeadCommit)
+
+	gamma := byName["gamma"]
+	assert.True(t, gamma.Indexed)
+	assert.False(t, gamma.Stale, "a dirty-tree index whose commit matches HEAD is still fresh")
+	assert.True(t, gamma.IndexedDirty, "dirty provenance is surfaced")
+
+	delta := byName["delta"]
+	assert.False(t, delta.Indexed, "no repo_index_state row → never indexed")
+	assert.True(t, delta.Stale)
+	assert.Nil(t, delta.LastIndexed)
+}
+
+// TestRunRepos_IndexStateLoneRepoEmptyPrefix covers single-repo (lone) mode,
+// where the index is keyed under the empty repo prefix. A single tracked
+// repo must match that "" row even though its resolved prefix is its name.
+func TestRunRepos_IndexStateLoneRepoEmptyPrefix(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "solo")
+	head := gitInitRepo(t, dir)
+
+	reposTestEnv(t, []config.RepoEntry{{Path: dir, Name: "solo"}})
+	indexedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	// Lone-repo mode writes the freshness row under the empty prefix.
+	seedIndexState(t, "", head, false, indexedAt)
+
+	reposJSON = true
+	t.Cleanup(func() { reposJSON = false })
+	cmd, buf := newReposCmd()
+	require.NoError(t, runRepos(cmd, nil))
+
+	var got []repoStatus
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	require.Len(t, got, 1)
+	assert.True(t, got[0].Indexed, "the empty-prefix lone-repo row must count for a single tracked repo")
+	assert.False(t, got[0].Stale)
+	assert.Equal(t, head, got[0].IndexedCommit)
+}
+
+// TestRunRepos_IndexStateBeatsSnapshot proves the repo_index_state row is the
+// authoritative source: when both a freshness row and a (stale) snapshot
+// exist, the row wins.
+func TestRunRepos_IndexStateBeatsSnapshot(t *testing.T) {
+	base := t.TempDir()
+	dirA := filepath.Join(base, "one")
+	dirB := filepath.Join(base, "two")
+	headA := gitInitRepo(t, dirA)
+	gitInitRepo(t, dirB)
+
+	reposTestEnv(t, []config.RepoEntry{
+		{Path: dirA, Name: "one"},
+		{Path: dirB, Name: "two"},
+	})
+	indexedAt := time.Now().Add(-time.Minute).Truncate(time.Second)
+	// Snapshot says an old/wrong commit; the index-state row says HEAD.
+	seedSnapshot(t, dirA, "main", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", indexedAt)
+	seedIndexState(t, "one", headA, false, indexedAt)
+
+	reposJSON = true
+	t.Cleanup(func() { reposJSON = false })
+	cmd, buf := newReposCmd()
+	require.NoError(t, runRepos(cmd, nil))
+
+	var got []repoStatus
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+	byName := map[string]repoStatus{}
+	for _, e := range got {
+		byName[e.Name] = e
+	}
+	one := byName["one"]
+	assert.True(t, one.Indexed)
+	assert.Equal(t, headA, one.IndexedCommit, "repo_index_state row wins over the snapshot store")
+	assert.False(t, one.Stale)
 }
 
 // TestShortSHA covers the table SHA abbreviation helper.
