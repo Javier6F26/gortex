@@ -76,6 +76,24 @@ type QueryOptions struct {
 	// "who depends on X *in production*" without test-noise dilution.
 	ExcludeTests bool `json:"exclude_tests,omitempty"`
 
+	// IncludeDispatch makes a forward call-graph walk (get_call_chain /
+	// trace / callees) polymorphic-dispatch aware: when the chain reaches an
+	// interface / abstract method, it also expands through that method's
+	// EdgeOverrides in-edges to the concrete implementations that override
+	// it. The dedicated override edges are recorded AS-IS — never synthesized
+	// into fake `calls` edges — so find_implementations / get_class_hierarchy
+	// stay precise while a trace auto-reaches the impls. Off by default.
+	IncludeDispatch bool `json:"include_dispatch,omitempty"`
+	// DispatchMinTier gates which override edges qualify for dispatch
+	// expansion by minimum provenance tier (see graph.Origin* constants);
+	// "" admits every override edge. Lets a caller demand, e.g., only
+	// LSP-confirmed overrides — a min_tier control codegraph cannot offer.
+	DispatchMinTier string `json:"dispatch_min_tier,omitempty"`
+	// DispatchFanout caps how many overriders a single method expands to
+	// (0 → defaultDispatchFanout), bounding the blow-up on a hub interface
+	// implemented by hundreds of types.
+	DispatchFanout int `json:"dispatch_fanout,omitempty"`
+
 	// SearchTimings, when non-nil, is populated by the search hot path
 	// (SearchSymbolsScoped → gatherBackendCandidates) with per-phase
 	// wall-clock breakdowns. Used by the MCP search_symbols handler's

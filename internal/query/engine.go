@@ -1041,6 +1041,11 @@ func (e *Engine) Stats() *graph.GraphStats {
 // bfs performs breadth-first traversal from nodeID.
 // If forward is true, follows outgoing edges; if false, follows incoming.
 // If edgeKinds is nil, follows all edge kinds bidirectionally (for cluster).
+// defaultDispatchFanout bounds how many overriders one interface/abstract
+// method expands to during polymorphic dispatch expansion, so a hub interface
+// with hundreds of implementors cannot blow up a call-chain walk.
+const defaultDispatchFanout = 24
+
 func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds []graph.EdgeKind) *SubGraph {
 	if opts.Depth <= 0 {
 		opts.Depth = 3
@@ -1206,6 +1211,49 @@ func (e *Engine) bfs(nodeID string, opts QueryOptions, forward bool, edgeKinds [
 					}
 					if len(allNodes) >= opts.Limit {
 						truncated = true
+						break
+					}
+				}
+				if len(allNodes) >= opts.Limit {
+					break
+				}
+			}
+		}
+
+		// Polymorphic dispatch expansion: on a forward call walk, a node that
+		// is an interface / abstract method is also expanded through its
+		// EdgeOverrides IN-edges to the concrete implementations, so the trace
+		// auto-reaches the impls. The override edge is recorded unchanged (not
+		// faked into a call), gated by DispatchMinTier and capped per method.
+		if opts.IncludeDispatch && forward && len(allNodes) < opts.Limit {
+			fanout := opts.DispatchFanout
+			if fanout <= 0 {
+				fanout = defaultDispatchFanout
+			}
+			for _, cur := range frontier {
+				expanded := 0
+				for _, edge := range e.g.GetInEdges(cur) {
+					if edge.Kind != graph.EdgeOverrides {
+						continue
+					}
+					if opts.DispatchMinTier != "" {
+						origin := edge.Origin
+						if origin == "" {
+							origin = graph.DefaultOriginFor(edge.Kind, edge.Confidence, "")
+						}
+						if !graph.MeetsMinTier(origin, opts.DispatchMinTier) {
+							continue
+						}
+					}
+					var impl *graph.Node
+					if !graph.IsUnresolvedTarget(edge.From) && !strings.HasPrefix(edge.From, "external::") {
+						impl = e.g.GetNode(edge.From)
+					}
+					if id := admit(edge, edge.From, impl); id != "" {
+						next = append(next, id)
+					}
+					expanded++
+					if expanded >= fanout || len(allNodes) >= opts.Limit {
 						break
 					}
 				}
