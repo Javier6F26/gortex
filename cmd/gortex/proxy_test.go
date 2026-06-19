@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -214,5 +215,67 @@ func TestOrphanWatch_Disarms(t *testing.T) {
 			default:
 			}
 		})
+	}
+}
+
+// TestColdStartHandshakeStaticTools proves the proxy can answer the handshake
+// frames locally before the daemon connects: initialize and tools/list get a
+// synthesized response (id echoed), while tools/call is left for the daemon.
+func TestColdStartHandshakeStaticTools(t *testing.T) {
+	// initialize → a static result carrying serverInfo + instructions.
+	reply, ok := answerColdStart([]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`), nil)
+	if !ok {
+		t.Fatal("initialize must be answerable at cold start")
+	}
+	var initResp struct {
+		ID     json.RawMessage `json:"id"`
+		Result struct {
+			ServerInfo   struct{ Name string `json:"name"` } `json:"serverInfo"`
+			Instructions string                              `json:"instructions"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(reply, &initResp); err != nil {
+		t.Fatalf("initialize reply not JSON: %v", err)
+	}
+	if initResp.Result.ServerInfo.Name != "gortex" {
+		t.Errorf("serverInfo.name = %q, want gortex", initResp.Result.ServerInfo.Name)
+	}
+	if string(initResp.ID) != "1" {
+		t.Errorf("request id not echoed: %s", initResp.ID)
+	}
+	if initResp.Result.Instructions == "" {
+		t.Error("cold-start initialize must carry instructions")
+	}
+
+	// tools/list → the static cold-start core set.
+	reply, ok = answerColdStart([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`), nil)
+	if !ok {
+		t.Fatal("tools/list must be answerable at cold start")
+	}
+	var listResp struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(reply, &listResp); err != nil {
+		t.Fatalf("tools/list reply not JSON: %v", err)
+	}
+	if len(listResp.Result.Tools) != len(coldStartTools) {
+		t.Errorf("cold-start tools = %d, want %d", len(listResp.Result.Tools), len(coldStartTools))
+	}
+	names := map[string]bool{}
+	for _, tl := range listResp.Result.Tools {
+		names[tl.Name] = true
+	}
+	if !names["smart_context"] || !names["search_symbols"] {
+		t.Errorf("cold-start list must include the hot tools; got %v", names)
+	}
+
+	// tools/call must NOT be answered locally — it needs the daemon (or the
+	// embedded fallback).
+	if _, ok := answerColdStart([]byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x"}}`), nil); ok {
+		t.Error("tools/call must not be answered at cold start")
 	}
 }

@@ -262,6 +262,36 @@ func (r *SessionRegistry) Count() int {
 	return len(r.sessions)
 }
 
+// SweepDead removes every session whose originating client process (by its
+// handshake PID) is no longer alive, closing the session's connection. Sessions
+// with no recorded PID (0 — detached/HTTP transports, or a client that reported
+// none) are left untouched, since liveness can't be judged from a PID we don't
+// have. Returns the removed sessions so the caller can log / adjust metrics.
+// isAlive is injected (platform.ProcessAlive in production) so the sweep is
+// testable without spawning real processes.
+func (r *SessionRegistry) SweepDead(isAlive func(int) bool) []*Session {
+	r.mu.Lock()
+	var dead []*Session
+	for id, s := range r.sessions {
+		if s.ClientPID <= 0 || isAlive(s.ClientPID) {
+			continue
+		}
+		dead = append(dead, s)
+		delete(r.sessions, id)
+		if s.Conn != nil {
+			delete(r.byConn, s.Conn)
+		}
+	}
+	r.mu.Unlock()
+	// Close connections outside the lock — Close can block.
+	for _, s := range dead {
+		if s.Conn != nil {
+			_ = s.Conn.Close()
+		}
+	}
+	return dead
+}
+
 // All returns a snapshot of every live session. The caller must not
 // mutate the returned Session objects; they're shared with the registry.
 func (r *SessionRegistry) All() []*Session {

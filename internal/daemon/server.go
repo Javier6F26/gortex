@@ -230,6 +230,9 @@ func (s *Server) Serve() error {
 			zap.String("addr", s.httpListener.Addr().String()))
 	}
 	s.Logger.Info("daemon: serving", zap.String("socket", s.SocketPath))
+	// Background hygiene: reap sessions whose client process died without a
+	// clean disconnect, and (opt-in) auto-exit after an idle window.
+	go s.runMaintenance()
 	var emfileBackoff time.Duration
 	for {
 		conn, err := s.listener.Accept()
@@ -270,6 +273,78 @@ func (s *Server) Serve() error {
 		s.trackConn(conn)
 		go s.handle(conn)
 	}
+}
+
+// deadPeerSweepInterval is how often runMaintenance reaps dead-peer sessions.
+// A var so tests can shorten it.
+var deadPeerSweepInterval = 30 * time.Second
+
+// runMaintenance is the daemon's background hygiene loop: every
+// deadPeerSweepInterval it sweeps sessions whose originating client process has
+// died (platform.ProcessAlive), and — when GORTEX_DAEMON_IDLE_TIMEOUT is set —
+// it shuts the daemon down after that long with no live sessions. Exits on the
+// shutdown signal.
+func (s *Server) runMaintenance() {
+	idle := IdleTimeoutFromEnv()
+	tick := deadPeerSweepInterval
+	if idle > 0 && idle/4 < tick {
+		tick = idle / 4 // sample often enough to honour a short idle window
+	}
+	if tick <= 0 {
+		tick = deadPeerSweepInterval
+	}
+	t := time.NewTicker(tick)
+	defer t.Stop()
+
+	var idleSince time.Time
+	for {
+		select {
+		case <-s.shutdown:
+			return
+		case <-t.C:
+			for _, sd := range s.sessions.SweepDead(platform.ProcessAlive) {
+				s.Logger.Info("daemon: swept dead session",
+					zap.String("session_id", sd.ID), zap.Int("client_pid", sd.ClientPID))
+				if sd.Conn != nil {
+					s.untrackConn(sd.Conn)
+				}
+			}
+			if idle <= 0 {
+				continue
+			}
+			if s.sessions.Count() > 0 {
+				idleSince = time.Time{}
+				continue
+			}
+			if idleSince.IsZero() {
+				idleSince = time.Now()
+				continue
+			}
+			if time.Since(idleSince) >= idle {
+				s.Logger.Info("daemon: idle timeout reached, shutting down",
+					zap.Duration("idle_timeout", idle))
+				_ = s.Shutdown()
+				return
+			}
+		}
+	}
+}
+
+// IdleTimeoutFromEnv reads the opt-in GORTEX_DAEMON_IDLE_TIMEOUT — a Go
+// duration (e.g. "30m", "2h"). Returns 0 (disabled) when unset, empty, or
+// unparseable, so the daemon only ever auto-exits when the user asked it to.
+func IdleTimeoutFromEnv() time.Duration { return parseIdleTimeout(os.Getenv("GORTEX_DAEMON_IDLE_TIMEOUT")) }
+
+func parseIdleTimeout(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
 }
 
 // handle runs the per-connection lifecycle: handshake → dispatch loop →

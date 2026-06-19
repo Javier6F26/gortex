@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -48,14 +50,23 @@ func stateDir() (string, bool) {
 //  3. The per-user state dir — $HOME/.gortex/cache on macOS/Linux,
 //     %USERPROFILE%\.gortex\cache on Windows.
 //
-// AF_UNIX socket paths have a length limit (~104 bytes on macOS, 108 on
-// Linux and Windows). We don't enforce that here — the listener fails
-// loudly if the path is too long, and the fix is to set
-// $GORTEX_DAEMON_SOCKET to a shorter path rather than silently truncating.
+// AF_UNIX socket paths have a length limit (~104 bytes on macOS, 108 on Linux
+// and Windows). An auto-computed path that would exceed it — a deeply-nested
+// home directory, a long $XDG_RUNTIME_DIR — is replaced by a short, stable
+// temp-dir fallback (clampSocketPath) so the listener binds instead of failing.
+// An explicit $GORTEX_DAEMON_SOCKET override is honoured verbatim: the user
+// chose that path and gets a loud failure if it's too long, never a silent
+// redirect.
 func SocketPath() string {
 	if override := os.Getenv("GORTEX_DAEMON_SOCKET"); override != "" {
 		return override
 	}
+	return clampSocketPath(autoSocketPath())
+}
+
+// autoSocketPath computes the daemon's default socket path from the runtime /
+// state directories, before any length clamping.
+func autoSocketPath() string {
 	if rt := os.Getenv("XDG_RUNTIME_DIR"); rt != "" && runtime.GOOS == "linux" {
 		return filepath.Join(rt, "gortex.sock")
 	}
@@ -65,6 +76,28 @@ func SocketPath() string {
 	// Fall back to the temp dir as a last resort; the daemon must start
 	// somewhere.
 	return filepath.Join(os.TempDir(), "gortex.sock")
+}
+
+// socketAddrMax is the AF_UNIX sun_path limit for the current OS: 104 bytes on
+// macOS/BSD, 108 on Linux and Windows. A path whose length reaches this fails
+// the bind, so we clamp strictly below it.
+func socketAddrMax() int {
+	if runtime.GOOS == "darwin" {
+		return 104
+	}
+	return 108
+}
+
+// clampSocketPath returns p unchanged when it is short enough to bind, else a
+// short temp-dir fallback derived from a stable hash of p — so two daemons that
+// would have used different over-long paths still get distinct sockets.
+func clampSocketPath(p string) string {
+	if len(p) < socketAddrMax() {
+		return p
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(p))
+	return filepath.Join(os.TempDir(), fmt.Sprintf("gx-%08x.sock", h.Sum32()))
 }
 
 // PIDFilePath returns the path of the daemon PID file. The daemon writes

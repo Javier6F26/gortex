@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,74 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 )
+
+// coldStartTools is the static core catalogue the proxy answers a cold-start
+// tools/list with — the hot tools every client needs first — before the
+// daemon's full live list arrives. Deliberately small; the client refreshes on
+// the daemon's tools/list_changed notification once the connection is live.
+var coldStartTools = []string{
+	"smart_context", "search_symbols", "find_usages", "get_callers",
+	"get_symbol_source", "get_file_summary", "read_file", "get_repo_outline",
+}
+
+// answerColdStart returns a locally-synthesized JSON-RPC response for a frame
+// that can be answered without the daemon — initialize and tools/list — so an
+// MCP client completes its handshake immediately while the daemon connects in
+// the background. ok is false for any other frame (notably tools/call), which
+// must reach the daemon (or the embedded fallback). The active tool-surface
+// preset is applied to the cold-start list so a restricted session never sees a
+// tool it isn't allowed to call.
+func answerColdStart(frame []byte, surface *gortexmcp.ToolSurface) (reply []byte, ok bool) {
+	var peek struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(frame, &peek) != nil {
+		return nil, false
+	}
+	switch peek.Method {
+	case "initialize":
+		return staticInitializeResult(peek.ID), true
+	case "tools/list":
+		return staticToolsListResult(peek.ID, surface), true
+	default:
+		return nil, false
+	}
+}
+
+// staticInitializeResult builds the cold-start initialize response: enough for
+// the client to proceed, with instructions that the full catalogue is arriving.
+func staticInitializeResult(id json.RawMessage) []byte {
+	return jsonRPCResult(id, map[string]any{
+		"protocolVersion": "2025-06-18",
+		"serverInfo":      map[string]any{"name": "gortex", "version": gortexmcp.Version},
+		"capabilities":    map[string]any{"tools": map[string]any{"listChanged": true}},
+		"instructions":    "Gortex is connecting to its daemon — the full tool catalogue arrives momentarily.",
+	})
+}
+
+// staticToolsListResult answers tools/list with the cold-start core set, minus
+// anything an active surface preset disallows.
+func staticToolsListResult(id json.RawMessage, surface *gortexmcp.ToolSurface) []byte {
+	tools := make([]map[string]any, 0, len(coldStartTools))
+	for _, n := range coldStartTools {
+		if surface != nil && surface.Active() && !surface.Allows(n) {
+			continue
+		}
+		tools = append(tools, map[string]any{"name": n})
+	}
+	return jsonRPCResult(id, map[string]any{"tools": tools})
+}
+
+// jsonRPCResult marshals a JSON-RPC 2.0 success response echoing the request id.
+func jsonRPCResult(id json.RawMessage, result any) []byte {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	})
+	return body
+}
 
 // runProxy relays MCP JSON-RPC traffic between stdio (the MCP client) and
 // the daemon's Unix socket. Exactly what `gortex mcp` does when it
@@ -34,7 +103,13 @@ func runProxy(ctx context.Context, surface *gortexmcp.ToolSurface) (ran bool, er
 	}
 	client, err := daemon.Dial(h)
 	if err != nil {
-		if errors.Is(err, daemon.ErrDaemonUnavailable) {
+		// The daemon isn't running, or it's running a mismatched protocol
+		// version (a stale daemon after an upgrade) — both are recoverable by
+		// falling back to the embedded in-process server.
+		if daemon.ShouldFallBackToEmbedded(err) {
+			if errors.Is(err, daemon.ErrProtocolVersionMismatch) {
+				fmt.Fprintln(os.Stderr, "[gortex mcp] daemon protocol mismatch; falling back to embedded server")
+			}
 			return false, nil
 		}
 		return false, fmt.Errorf("dial daemon: %w", err)

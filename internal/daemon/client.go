@@ -68,6 +68,11 @@ func DialTo(socketPath string, h Handshake) (*Client, error) {
 	}
 	if !ack.OK {
 		_ = conn.Close()
+		// A protocol-version rejection is recoverable: wrap the sentinel so the
+		// proxy can fall back to the embedded server instead of failing.
+		if ack.ErrorCode == ErrProtocolMismatch {
+			return nil, fmt.Errorf("%w: %s", ErrProtocolVersionMismatch, ack.ErrorMsg)
+		}
 		return nil, fmt.Errorf("daemon rejected handshake [%s]: %s", ack.ErrorCode, ack.ErrorMsg)
 	}
 	return &Client{Conn: conn, reader: reader, Ack: ack}, nil
@@ -139,6 +144,23 @@ func (c *Client) ReadMCPFrame() ([]byte, error) {
 // (permissions, handshake rejection, etc.) where silent fallback would
 // mask a bug.
 var ErrDaemonUnavailable = errors.New("daemon unavailable")
+
+// ErrProtocolVersionMismatch is returned by Dial when the daemon answers the
+// handshake with a protocol_mismatch rejection — the running daemon speaks a
+// different wire version than this binary (a stale daemon after an upgrade).
+// Like ErrDaemonUnavailable it is recoverable: the caller should fall back to
+// the embedded in-process server rather than fail, so an in-flight editor
+// session keeps working across a version skew.
+var ErrProtocolVersionMismatch = errors.New("daemon protocol version mismatch")
+
+// ShouldFallBackToEmbedded reports whether a Dial error is one the MCP proxy
+// can recover from by running the embedded in-process server instead: the
+// daemon isn't running, or it is running a mismatched protocol version. Any
+// other error (permissions, a genuinely broken socket) is a real failure the
+// caller must surface.
+func ShouldFallBackToEmbedded(err error) bool {
+	return errors.Is(err, ErrDaemonUnavailable) || errors.Is(err, ErrProtocolVersionMismatch)
+}
 
 // isNoDaemonErr returns true for the subset of dial errors that mean
 // "the daemon probably isn't running" as opposed to "your system is
