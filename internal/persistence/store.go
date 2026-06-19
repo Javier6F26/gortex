@@ -12,10 +12,21 @@ import (
 var ErrNotFound = errors.New("persistence: snapshot not found")
 
 // Snapshot is the unit of persistence — a complete graph state at a point in time.
+// CurrentExtractionVersion is the version of the extraction OUTPUT schema. It
+// is bumped ONLY when a binary actually changes what extraction produces (a new
+// node/edge shape, a corrected graph) — never on a routine version bump. A warm
+// snapshot stays reusable across binary releases that share this version, so a
+// no-op release does not force the full cold rebuild a binary-version-string
+// gate would. Raise it in lockstep with any change that alters indexed output.
+const CurrentExtractionVersion = 1
+
 type Snapshot struct {
-	Version    string `json:"version"`
-	RepoPath   string `json:"repo_path"`
-	CommitHash string `json:"commit_hash"`
+	Version string `json:"version"`
+	// ExtractionVersion is the CurrentExtractionVersion the snapshot was
+	// produced with; warm reuse is gated on it, not the binary version string.
+	ExtractionVersion int    `json:"extraction_version,omitempty"`
+	RepoPath          string `json:"repo_path"`
+	CommitHash        string `json:"commit_hash"`
 	// Branch is the git branch the snapshot was taken on. Snapshots
 	// are keyed by (repo, branch) so a slot survives commits on the
 	// branch; empty for a detached HEAD (keyed by commit instead).

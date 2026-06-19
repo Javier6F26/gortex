@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gofrs/flock"
@@ -24,8 +25,9 @@ func init() {
 }
 
 const (
-	snapshotFile = "snapshot.gob.gz"
-	versionFile  = ".version"
+	snapshotFile          = "snapshot.gob.gz"
+	versionFile           = ".version"
+	extractionVersionFile = ".extraction_version"
 )
 
 // FileStore persists snapshots as gob+gzip files in a directory hierarchy.
@@ -98,6 +100,16 @@ func (fs *FileStore) Check(repoPath, branch, commitHash string) bool {
 
 func (fs *FileStore) Validate(repoPath, branch, commitHash string) bool {
 	dir := fs.entryDir(repoPath, branch, commitHash)
+	// Extraction-version gate: a warm snapshot is reusable across binary
+	// releases that produce the SAME extraction output, so a no-op version
+	// bump no longer forces a full cold rebuild.
+	if data, err := os.ReadFile(filepath.Join(dir, extractionVersionFile)); err == nil {
+		v, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+		return perr == nil && v == CurrentExtractionVersion
+	}
+	// Legacy slot with no extraction-version file: fall back to the exact
+	// binary-version match so pre-existing snapshots still validate (and get
+	// rewritten with an extraction-version marker on the next save).
 	data, err := os.ReadFile(filepath.Join(dir, versionFile))
 	if err != nil {
 		return false
@@ -176,9 +188,13 @@ func (fs *FileStore) Save(snap *Snapshot) error {
 		return fmt.Errorf("persistence: file close: %w", err)
 	}
 
-	// Write version file.
+	// Write version file (binary version — kept for display / diagnostics).
 	if err := os.WriteFile(filepath.Join(dir, versionFile), []byte(fs.version), 0o644); err != nil {
 		return fmt.Errorf("persistence: write version: %w", err)
+	}
+	// Write the extraction-version marker — the value Validate gates reuse on.
+	if err := os.WriteFile(filepath.Join(dir, extractionVersionFile), []byte(strconv.Itoa(CurrentExtractionVersion)), 0o644); err != nil {
+		return fmt.Errorf("persistence: write extraction version: %w", err)
 	}
 
 	return nil

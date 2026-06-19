@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -35,22 +36,42 @@ func (s *Server) freshnessRiderFor(toolName string, req mcp.CallToolRequest) map
 	}
 	stale := s.indexer.IsTrackedStale(rel)
 	mismatch := s.detectWorktreeMismatch()
-	if !stale && !mismatch {
+
+	// Extractor-version staleness: which languages' extractors this binary
+	// bumped since the repo was indexed. Fetched alongside the index state so a
+	// graph indexed by an older extractor is flagged even when the touched
+	// file's content is unchanged — per-language, so the advisory names the
+	// exact languages to reindex rather than implying a full cold rebuild.
+	var indexState graph.RepoIndexState
+	var haveState bool
+	var staleLangs []string
+	if r, ok := graph.Store(s.graph).(graph.RepoIndexStateReader); ok {
+		if st, found, _ := r.GetRepoIndexState(s.indexer.RepoPrefix()); found {
+			indexState, haveState = st, true
+			staleLangs = indexer.ExtractorVersionStaleLangs(st.ExtractorVersions)
+		}
+	}
+
+	if !stale && !mismatch && len(staleLangs) == 0 {
 		return nil
 	}
 	out := map[string]any{"file": rel}
 	if stale {
 		out["stale"] = true
 		out["hint"] = "this file changed on disk since it was last indexed; the graph view may lag the working tree"
-		if r, ok := graph.Store(s.graph).(graph.RepoIndexStateReader); ok {
-			if st, found, _ := r.GetRepoIndexState(s.indexer.RepoPrefix()); found {
-				if st.IndexedSHA != "" {
-					out["indexed_sha"] = shortFreshSHA(st.IndexedSHA)
-				}
-				if st.Dirty {
-					out["working_tree_dirty_at_index"] = true
-				}
+		if haveState {
+			if indexState.IndexedSHA != "" {
+				out["indexed_sha"] = shortFreshSHA(indexState.IndexedSHA)
 			}
+			if indexState.Dirty {
+				out["working_tree_dirty_at_index"] = true
+			}
+		}
+	}
+	if len(staleLangs) > 0 {
+		out["extractor_stale_langs"] = staleLangs
+		if fileLang := indexer.ExtractorLangForFile(rel); fileLang != "" && slices.Contains(staleLangs, fileLang) {
+			out["extractor_stale_hint"] = "this file's language extractor was upgraded since indexing; reindex to pick up the newer extraction (gortex index .)"
 		}
 	}
 	if mismatch {

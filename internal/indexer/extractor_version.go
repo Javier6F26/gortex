@@ -1,7 +1,9 @@
 package indexer
 
 import (
+	"encoding/json"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -69,6 +71,14 @@ var extractorSaltExtLang = map[string]string{
 	".bash":  "bash",
 }
 
+// ExtractorLangForFile returns the extractor-staleness language key for a
+// repo-relative path (by file extension), or "" when the extension carries no
+// extractor-version tracking. Used to tell whether a touched file belongs to a
+// language whose extractor is stale.
+func ExtractorLangForFile(rel string) string {
+	return extractorSaltExtLang[strings.ToLower(filepath.Ext(rel))]
+}
+
 // extractorVersionForLang returns the registered extractor version for a
 // language, defaulting to 1.
 func extractorVersionForLang(lang string) int {
@@ -93,6 +103,42 @@ func merkleSaltFor(rel string) string {
 		return ""
 	}
 	return lang + "@" + strconv.Itoa(v)
+}
+
+// ExtractorVersionStaleLangs reports which languages' extractors have been
+// bumped SINCE the graph was last indexed — comparing the per-language
+// versions persisted on RepoIndexState (a JSON object lang->version) against
+// the running binary's current versions. A language is stale when its stored
+// version is behind the current one: its already-indexed files would
+// re-extract on the next reconcile. Returns the stale languages, sorted.
+//
+// This is the per-LANGUAGE precision that turns "your index is from an older
+// binary" into "reindex only Go + Python" — a scoped reindex instead of a full
+// cold rebuild. An empty/absent stored map (no baseline) reports nothing.
+func ExtractorVersionStaleLangs(storedJSON string) []string {
+	storedJSON = strings.TrimSpace(storedJSON)
+	if storedJSON == "" {
+		return nil
+	}
+	var stored map[string]int
+	if err := json.Unmarshal([]byte(storedJSON), &stored); err != nil || len(stored) == 0 {
+		return nil
+	}
+	return staleLangsBetween(stored, extractorVersionsSnapshot())
+}
+
+// staleLangsBetween returns the languages whose stored version is behind the
+// current version — only languages present in BOTH maps are compared, so a
+// language the stored snapshot never recorded is not spuriously flagged.
+func staleLangsBetween(stored, current map[string]int) []string {
+	var stale []string
+	for lang, storedV := range stored {
+		if cur, ok := current[lang]; ok && storedV < cur {
+			stale = append(stale, lang)
+		}
+	}
+	sort.Strings(stale)
+	return stale
 }
 
 // extractorVersionsSnapshot returns a copy of the current per-language

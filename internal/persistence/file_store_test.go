@@ -2,6 +2,8 @@ package persistence
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -92,9 +94,16 @@ func TestFileStore_Validate_VersionMismatch(t *testing.T) {
 	// Same version validates.
 	assert.True(t, fsV1.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
 
-	// Different version fails.
+	// A different BINARY version now REUSES the slot — the extraction version
+	// (not the binary string) gates reuse, so a no-op release skips the rebuild.
 	fsV2, err := NewFileStore(dir, "0.2.0")
 	require.NoError(t, err)
+	assert.True(t, fsV2.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
+
+	// A LEGACY slot with no extraction-version marker falls back to the exact
+	// binary-version match — so it correctly invalidates across the bump.
+	entry := fsV2.entryDir(snap.RepoPath, snap.Branch, snap.CommitHash)
+	require.NoError(t, os.Remove(filepath.Join(entry, extractionVersionFile)))
 	assert.False(t, fsV2.Validate(snap.RepoPath, snap.Branch, snap.CommitHash))
 }
 
@@ -314,5 +323,43 @@ func TestFileStore_ConcurrentReadWrite(t *testing.T) {
 	close(errs)
 	for e := range errs {
 		require.NoError(t, e, "no reader may observe a torn snapshot")
+	}
+}
+
+// TestSnapshotReuseAcrossBinaryBump proves the warm snapshot is reused across a
+// binary version bump that did NOT change extraction output (the extraction
+// version is the gate, not the binary-version string) — avoiding the needless
+// full cold rebuild a binary-string gate would force on a no-op release — while
+// a genuine extraction-version change still invalidates the slot.
+func TestSnapshotReuseAcrossBinaryBump(t *testing.T) {
+	dir := t.TempDir()
+
+	s1, err := NewFileStore(dir, "0.48.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := testSnapshot()
+	snap.Version = "0.48.0"
+	if err := s1.Save(snap); err != nil {
+		t.Fatal(err)
+	}
+
+	// A newer binary with the SAME extraction version reuses the slot.
+	s2, err := NewFileStore(dir, "0.48.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s2.Validate(snap.RepoPath, snap.Branch, snap.CommitHash) {
+		t.Error("snapshot should be reused across a binary bump with an unchanged extraction version")
+	}
+
+	// Corrupt the extraction-version marker to simulate an extraction-output
+	// change: the slot must now be rejected (cold rebuild).
+	entry := s2.entryDir(snap.RepoPath, snap.Branch, snap.CommitHash)
+	if err := os.WriteFile(filepath.Join(entry, extractionVersionFile), []byte("999"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if s2.Validate(snap.RepoPath, snap.Branch, snap.CommitHash) {
+		t.Error("a changed extraction version must invalidate the snapshot")
 	}
 }
