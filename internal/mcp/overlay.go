@@ -156,6 +156,10 @@ func (s *Server) wrapToolHandler(h mcpserver.ToolHandlerFunc) mcpserver.ToolHand
 		if hErr == nil {
 			if rider := s.freshnessRiderFor(req.Params.Name, req); rider != nil {
 				res = decorateResultWithFreshness(res, rider)
+			} else if isFreshnessListTool(req.Params.Name) {
+				// List tools get a per-file sweep: any hit whose file drifted
+				// or vanished on disk is flagged with per-repo provenance.
+				res = s.decorateListResultWithFreshness(res)
 			}
 		}
 		// Capture large successful responses into the session ring so

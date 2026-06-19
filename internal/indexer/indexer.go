@@ -6329,19 +6329,54 @@ func (idx *Indexer) IsStale(relPath string) bool {
 // mismatch), so a freshness signal never false-positives on a file the
 // index legitimately does not cover.
 func (idx *Indexer) IsTrackedStale(relPath string) bool {
+	return idx.TrackedFileState(relPath) == FileStale
+}
+
+// FileFreshness is the verdict TrackedFileState returns for a tracked file:
+// its indexed view is current, has drifted, or the file is gone from disk.
+type FileFreshness string
+
+const (
+	// FileFresh means the file is not tracked (so no claim is made) or its
+	// on-disk mtime still matches what was indexed.
+	FileFresh FileFreshness = "fresh"
+	// FileStale means the file is tracked and its on-disk mtime differs from
+	// the indexed mtime — the graph view lags the working tree.
+	FileStale FileFreshness = "stale"
+	// FileMissing means the file is tracked in the graph but no longer exists
+	// on disk — it was deleted or moved since indexing. A plain staleness
+	// check folds this into "not stale"; the distinct verdict lets a list
+	// result flag hits that point at vanished files.
+	FileMissing FileFreshness = "missing"
+)
+
+// TrackedFileState classifies one repo-relative file against the indexer's
+// recorded mtimes: fresh (untracked or unchanged), stale (mtime drift), or
+// missing (tracked but absent on disk). Splitting the stat-failure branch out
+// of IsTrackedStale is what lets the freshness rider distinguish a stale hit
+// from one whose underlying file has been deleted.
+func (idx *Indexer) TrackedFileState(relPath string) FileFreshness {
 	relPath = pathkey.Normalize(filepath.ToSlash(relPath))
 
 	idx.mtimeMu.RLock()
 	storedMtime, ok := idx.fileMtimes[relPath]
 	idx.mtimeMu.RUnlock()
 	if !ok {
-		return false
+		return FileFresh
 	}
 
 	absPath := filepath.Join(idx.rootPath, filepath.FromSlash(relPath))
 	info, err := os.Stat(absPath)
 	if err != nil {
-		return false
+		if os.IsNotExist(err) {
+			return FileMissing
+		}
+		// A transient / permission stat error is not evidence of drift —
+		// don't cry wolf for a file we simply could not read.
+		return FileFresh
 	}
-	return info.ModTime().UnixNano() != storedMtime
+	if info.ModTime().UnixNano() != storedMtime {
+		return FileStale
+	}
+	return FileFresh
 }
