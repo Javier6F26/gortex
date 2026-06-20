@@ -60,6 +60,14 @@ func TestSizeSkipNode(t *testing.T) {
 	require.Equal(t, int64(9_000_000), n.Meta["file_size_bytes"])
 }
 
+func TestLargeFileReadParallelism(t *testing.T) {
+	require.Equal(t, 1, largeFileReadParallelism(0))
+	require.Equal(t, 1, largeFileReadParallelism(1))
+	require.Equal(t, 2, largeFileReadParallelism(2))
+	require.Equal(t, 2, largeFileReadParallelism(20))
+	require.Equal(t, int64(16<<20), largeFileReadThresholdBytes)
+}
+
 func TestTimeoutSkipResult(t *testing.T) {
 	r := timeoutSkipResult("huge.ts", "typescript", 10000)
 	require.Len(t, r.Nodes, 1)
@@ -81,7 +89,7 @@ func TestIndex_SizeSkipTelemetry(t *testing.T) {
 
 	result, err := idx.Index(dir)
 	require.NoError(t, err)
-	require.Equal(t, 1, result.FileCount)   // only small.go parsed
+	require.Equal(t, 1, result.FileCount)    // only small.go parsed
 	require.Equal(t, 1, result.SkippedFiles) // big.go skipped
 
 	n := g.GetNode("big.go")

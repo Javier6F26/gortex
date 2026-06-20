@@ -142,7 +142,7 @@ type Indexer struct {
 	// path so a query word matching it doesn't earn a useless uniform
 	// path-field boost across every document. "" disables the de-weighting.
 	projectName string
-	logger        *zap.Logger
+	logger      *zap.Logger
 
 	// Crash-isolation parser pool, lazily created and then reused
 	// across single-file re-indexes so the watcher hot path never
@@ -1898,6 +1898,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		files = append(files, walkedFile{
 			path:      path,
 			lang:      lang,
+			size:      info.Size(),
 			mtimeNano: info.ModTime().UnixNano(),
 		})
 		return nil
@@ -2182,6 +2183,16 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	var skippedByTimeout int64
 	var skippedByMinified int64
 
+	largeReadGate := make(chan struct{}, largeFileReadParallelism(workers))
+	readFile := func(wf walkedFile) ([]byte, error) {
+		if wf.size < largeFileReadThresholdBytes {
+			return os.ReadFile(wf.path)
+		}
+		largeReadGate <- struct{}{}
+		defer func() { <-largeReadGate }()
+		return os.ReadFile(wf.path)
+	}
+
 	// parseChunk runs the per-file worker pool over the supplied
 	// slice. Closure over outer state (errors, counters, contract
 	// registry, parsePool, quarantine) so it can be called multiple
@@ -2203,7 +2214,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						reporter.Report("parsing", int(p), totalFiles)
 					}
 
-					src, err := os.ReadFile(path)
+					src, err := readFile(wf)
 					if err != nil {
 						errMu.Lock()
 						errors = append(errors, IndexError{FilePath: path, Error: err.Error()})

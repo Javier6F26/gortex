@@ -63,7 +63,21 @@ type skippedFile struct {
 type walkedFile struct {
 	path      string
 	lang      string
+	size      int64
 	mtimeNano int64
+}
+
+// Files above this threshold are large enough that reading several of
+// them concurrently can dominate RSS before extraction even starts. Keep
+// normal source-file throughput high while bounding the “few huge PDFs /
+// spreadsheets / vector artifacts” class reported in #120.
+const largeFileReadThresholdBytes int64 = 16 << 20 // 16 MiB
+
+func largeFileReadParallelism(workers int) int {
+	if workers <= 1 {
+		return 1
+	}
+	return min(2, workers)
 }
 
 // extractWithTimeout runs ext.Extract under the per-file extraction
