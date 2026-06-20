@@ -2257,6 +2257,35 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						}
 					}
 
+					relPath, _ := filepath.Rel(absRoot, path)
+					// Streaming content extractors (PDF / office docs) read the
+					// file themselves — one page/slide/sheet at a time — instead
+					// of materialising the whole file. Only the in-process route
+					// streams; the crash-isolation subprocess route keeps bytes.
+					if walkExt, found := idx.registry.GetByLanguage(wf.lang); found && parsePool == nil {
+						if se, ok := walkExt.(parser.StreamingExtractor); ok {
+							result, serr := idx.extractStreaming(se, path, relPath)
+							if parseSem != nil {
+								parseSem.Release(weight)
+							}
+							if serr != nil {
+								errMu.Lock()
+								errors = append(errors, IndexError{FilePath: path, Error: serr.Error()})
+								if result == nil {
+									parseFailedFiles = append(parseFailedFiles, skippedFile{relPath: relPath, lang: wf.lang, cause: serr.Error()})
+								}
+								errMu.Unlock()
+							}
+							if result == nil {
+								continue
+							}
+							idx.applyRepoPrefix(result.Nodes, result.Edges)
+							idx.graph.AddBatch(result.Nodes, result.Edges)
+							idx.persistConstValues(result)
+							continue
+						}
+					}
+
 					src, err := readFile(wf)
 					if err != nil {
 						errMu.Lock()
@@ -2268,7 +2297,6 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 						continue
 					}
 
-					relPath, _ := filepath.Rel(absRoot, path)
 					// Reuse the walk-time language. The walk's
 					// effectiveLanguage call already consulted shebang
 					// bytes via readSniffPrefix (512-byte probe), so a

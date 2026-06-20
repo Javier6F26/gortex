@@ -1,6 +1,10 @@
 package parser
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"io"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // Extractor extracts graph nodes and edges from a single source file.
 type Extractor interface {
@@ -37,6 +41,23 @@ func ApplyPreParse(e Extractor, src []byte) []byte {
 		}
 	}
 	return src
+}
+
+// StreamingExtractor is an optional Extractor capability: an extractor that
+// reads the file itself — one unit (page / slide / sheet) at a time — through
+// an io.ReaderAt, emitting nodes and edges as it goes, instead of receiving the
+// whole file as a byte slice. Content extractors (PDF, office documents)
+// implement it because their inputs are large and their per-unit processing
+// never needs the whole file resident. The indexer prefers this path when it is
+// available (on the in-process route), so peak memory is O(one unit), not
+// O(file).
+//
+// emit is called once per produced node with that node's outgoing edges (pass
+// nil for none). The extractor MUST recover its own per-document panics or
+// return an error; the indexer isolates failures either way.
+type StreamingExtractor interface {
+	Extractor
+	ExtractStream(filePath string, r io.ReaderAt, size int64, emit func(*graph.Node, []*graph.Edge)) error
 }
 
 // ExtractionResult holds the nodes and edges extracted from a single

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"image"
+	"io"
 	"path"
 	"regexp"
 	"strconv"
@@ -158,6 +159,10 @@ func (e *PDFExtractor) Extensions() []string { return []string{".pdf"} }
 // prose search to locate the right document.
 const pdfPageTextCap = 4000
 
+// compile-time guarantee that PDFExtractor offers the streaming route the
+// indexer prefers (one page at a time, never the whole file in memory).
+var _ parser.StreamingExtractor = (*PDFExtractor)(nil)
+
 func (e *PDFExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	result := &parser.ExtractionResult{}
 	sum := sha256.Sum256(src)
@@ -181,30 +186,70 @@ func (e *PDFExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		if err != nil || r == nil {
 			return
 		}
-		pages := r.NumPage()
-		if pages > 0 {
-			fileNode.Meta["pages"] = pages
-		}
-		for i := 1; i <= pages; i++ {
-			text := pdfPageText(r, i)
-			if text == "" {
-				continue
-			}
-			if len(text) > pdfPageTextCap {
-				text = text[:pdfPageTextCap]
-			}
-			pageID := filePath + "::doc:page-" + strconv.Itoa(i)
-			result.Nodes = append(result.Nodes, &graph.Node{
-				ID: pageID, Kind: graph.KindDoc, Name: path.Base(filePath) + " p." + strconv.Itoa(i),
-				FilePath: filePath, StartLine: i, Language: "pdf",
-				Meta: map[string]any{"asset_kind": "pdf_page", "page": i, "section_text": text},
-			})
-			result.Edges = append(result.Edges, &graph.Edge{
-				From: filePath, To: pageID, Kind: graph.EdgeDefines, FilePath: filePath, Line: i,
-			})
-		}
+		pdfEmitPages(filePath, r, fileNode, func(n *graph.Node, edges []*graph.Edge) {
+			result.Nodes = append(result.Nodes, n)
+			result.Edges = append(result.Edges, edges...)
+		})
 	}()
 	return result, nil
+}
+
+// ExtractStream implements parser.StreamingExtractor: it reads the PDF through
+// the supplied io.ReaderAt one page at a time, so a large document is never
+// held whole in memory. It emits one KindFile node plus one KindDoc node per
+// page that has extractable text. The sha256 carried by the byte-path Extract
+// is omitted here — hashing would require a full read, defeating the stream.
+func (e *PDFExtractor) ExtractStream(filePath string, r io.ReaderAt, size int64, emit func(*graph.Node, []*graph.Edge)) error {
+	fileNode := &graph.Node{
+		ID: filePath, Kind: graph.KindFile, Name: filePath,
+		FilePath: filePath, StartLine: 1, Language: "pdf",
+		Meta: map[string]any{
+			"asset_kind": "pdf",
+			"size_bytes": int(size),
+		},
+	}
+	emit(fileNode, nil)
+
+	// The PDF reader can panic on malformed / encrypted documents — keep
+	// extraction failures from killing the pass by recovering and emitting
+	// just the file node.
+	func() {
+		defer func() { _ = recover() }()
+		rd, err := pdf.NewReader(r, size)
+		if err != nil || rd == nil {
+			return
+		}
+		pdfEmitPages(filePath, rd, fileNode, emit)
+	}()
+	return nil
+}
+
+// pdfEmitPages walks every page of r, emitting one capped KindDoc node (plus
+// its defines edge from the file) per page that has extractable text. It stamps
+// fileNode.Meta["pages"] as a side effect. Shared by Extract and ExtractStream.
+func pdfEmitPages(filePath string, r *pdf.Reader, fileNode *graph.Node, emit func(*graph.Node, []*graph.Edge)) {
+	pages := r.NumPage()
+	if pages > 0 {
+		fileNode.Meta["pages"] = pages
+	}
+	for i := 1; i <= pages; i++ {
+		text := pdfPageText(r, i)
+		if text == "" {
+			continue
+		}
+		if len(text) > pdfPageTextCap {
+			text = text[:pdfPageTextCap]
+		}
+		pageID := filePath + "::doc:page-" + strconv.Itoa(i)
+		pageNode := &graph.Node{
+			ID: pageID, Kind: graph.KindDoc, Name: path.Base(filePath) + " p." + strconv.Itoa(i),
+			FilePath: filePath, StartLine: i, Language: "pdf",
+			Meta: map[string]any{"asset_kind": "pdf_page", "page": i, "section_text": text},
+		}
+		emit(pageNode, []*graph.Edge{{
+			From: filePath, To: pageID, Kind: graph.EdgeDefines, FilePath: filePath, Line: i,
+		}})
+	}
 }
 
 // pdfPageText extracts and whitespace-collapses one page's plain text,
