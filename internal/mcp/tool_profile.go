@@ -107,6 +107,10 @@ func (s *Server) handleToolProfile(ctx context.Context, req mcp.CallToolRequest)
 		"deferred":       deferred,
 		"scopes":         scopes,
 		"categories":     toolCategories(append(append([]string{}, live...), deferred...)),
+		// Per-tool metadata catalog (category / mutating / presets /
+		// summary) for every registered tool — the CLI consumes this over
+		// the socket instead of re-deriving each tool's classification.
+		"descriptors": s.ToolDescriptors(),
 	}
 	// Active tool preset (mcp.tools / GORTEX_TOOLS): report the preset
 	// name and mode so an agent knows its surface was deliberately

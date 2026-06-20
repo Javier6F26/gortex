@@ -411,6 +411,21 @@ func (r *lazyToolRegistry) DeferredNames() []string {
 	return out
 }
 
+// DeferredTool returns the registered mcp.Tool for a deferred (or
+// already-promoted) name and whether it was found. Used by the tool
+// catalog to read a deferred tool's Description without promoting it.
+func (r *lazyToolRegistry) DeferredTool(name string) (mcp.Tool, bool) {
+	if r == nil {
+		return mcp.Tool{}, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if dt, ok := r.deferred[name]; ok {
+		return dt.tool, true
+	}
+	return mcp.Tool{}, false
+}
+
 // PromotedNames returns the sorted list of tool names already promoted
 // out of the deferred catalog this session. Test-only helper.
 func (r *lazyToolRegistry) PromotedNames() []string {
