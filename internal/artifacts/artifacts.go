@@ -145,6 +145,21 @@ func materializeOne(g graph.Store, root, rel string, entry config.ArtifactEntry,
 	}, true
 }
 
+// SymbolNameIndex builds a name -> []symbolID index over g for callers that
+// scan many texts against one index (e.g. the content -> code linker). An empty
+// repoPrefix unions every repo. Exposes buildSymbolIndex's bounded, code-only
+// (function / method / type / interface) mapping.
+func SymbolNameIndex(g graph.Store, repoPrefix string) map[string][]string {
+	return buildSymbolIndex(g, repoPrefix)
+}
+
+// ScanSymbolRefs returns the IDs of every symbol whose name appears as a whole
+// token in data, capped and bounded exactly like the artifact reference
+// scanner. Pass an index from SymbolNameIndex.
+func ScanSymbolRefs(data []byte, nameIndex map[string][]string) []string {
+	return scanReferences(data, nameIndex)
+}
+
 // buildSymbolIndex maps every sufficiently-long symbol name to the
 // node IDs that declare it, scoped to repoPrefix.
 func buildSymbolIndex(g graph.Store, repoPrefix string) map[string][]string {

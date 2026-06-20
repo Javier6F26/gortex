@@ -793,6 +793,11 @@ func (idx *Indexer) RunGlobalGraphPasses(ctx context.Context) {
 			zap.Int("edges", spec),
 		)
 	}
+	// Content -> code "why" links. Runs before DetectCrossRepoEdges so a
+	// chunk that motivates a symbol in another repo gets its parallel
+	// cross_repo_motivates edge minted by the cross-repo pass below.
+	reporter.Report("content links (global)", 0, 0)
+	idx.linkContentToCode()
 	// Cross-repo edge layer. Runs after InferImplements / InferOverrides
 	// so cross-repo implements / extends edges pick up their parallel
 	// cross_repo_* edges. No-op on single-repo graphs (no RepoPrefix).
