@@ -210,6 +210,28 @@ func (s *Server) PublishReadiness(phase string, ready bool, extra map[string]any
 	s.readinessBroadcaster.publish(payload)
 }
 
+// ReadinessPhase returns the daemon's last-published warmup phase and whether
+// warmup has completed, read from the readiness broadcaster's last-known
+// state. Returns ("", false) before the first publish. Used by the daemon to
+// stamp the handshake ack (HandshakeAck.WarmupPhase) so a connecting client
+// sees where the daemon is on its warmup curve.
+func (s *Server) ReadinessPhase() (phase string, ready bool) {
+	if s == nil || s.readinessBroadcaster == nil {
+		return "", false
+	}
+	snap := s.readinessBroadcaster.snapshot()
+	if snap == nil {
+		return "", false
+	}
+	if p, ok := snap["phase"].(string); ok {
+		phase = p
+	}
+	if r, ok := snap["ready"].(bool); ok {
+		ready = r
+	}
+	return phase, ready
+}
+
 // registerReadinessTools wires the subscribe / unsubscribe MCP tools
 // for the workspace_readiness channel.
 func (s *Server) registerReadinessTools() {

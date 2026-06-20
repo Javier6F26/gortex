@@ -74,7 +74,7 @@ func init() {
 	mcpCmd.Flags().StringVar(&mcpSemanticMode, "semantic-mode", "typecheck", "Go analysis mode: typecheck or callgraph")
 	mcpCmd.Flags().BoolVar(&mcpNoDaemon, "no-daemon", false, "deprecated no-op (warns when set); the embedded server is used automatically when no daemon is available")
 	mcpCmd.Flags().BoolVar(&mcpForceProxy, "proxy", false, "require a running daemon and proxy through it (error if unavailable)")
-	mcpCmd.Flags().StringVar(&mcpTools, "tools", "", "restrict the published MCP tool surface to a preset: full|readonly|edit|nav (optionally with ,+tool / ,-tool deltas). GORTEX_TOOLS overrides this")
+	mcpCmd.Flags().StringVar(&mcpTools, "tools", "", "restrict the published MCP tool surface to a preset: core (default)|full|readonly|edit|nav (optionally with ,+tool / ,-tool deltas). GORTEX_TOOLS overrides this")
 	mcpCmd.Flags().StringVar(&mcpToolsMode, "tools-mode", "", "how a --tools preset hides tools: hide (remove from tools/list + block calls) or defer (keep reachable via tools_search). Default hide")
 	rootCmd.AddCommand(mcpCmd)
 }
@@ -123,6 +123,20 @@ func runMCP(cmd *cobra.Command, args []string) error {
 
 	logger := newLogger()
 	defer func() { _ = logger.Sync() }()
+
+	// We only reach here when no daemon is available (or autostart is off).
+	// A bare `gortex mcp` with no --index used to serve an EMPTY embedded
+	// graph — every tool returned nothing, which reads to the user as "gortex
+	// is broken." Default the embedded index to the launch cwd so the fallback
+	// serves the user's actual repo instead of nothing. An explicit --index
+	// still wins; an ambiguous cwd (`/`, $HOME) is left unset rather than
+	// indexing the world.
+	if mcpIndex == "" {
+		if cwd, cwdErr := resolveLaunchCWD(); cwdErr == nil && !isAmbiguousLaunchCWD(cwd) {
+			mcpIndex = cwd
+			fmt.Fprintf(os.Stderr, "[gortex] no daemon available; embedded server indexing %s\n", mcpIndex)
+		}
+	}
 
 	// The embedded server runs in single-repo mode over --index: it
 	// indexes that tree and serves the whole graph (no marker handshake,

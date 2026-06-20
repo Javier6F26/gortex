@@ -40,6 +40,14 @@ type Server struct {
 	// Controller handles control-mode RPCs (track/untrack/reload/status/shutdown).
 	Controller Controller
 
+	// Ready, when set, reports whether the daemon has finished warmup and the
+	// current warmup phase. The result is surfaced on every successful
+	// handshake ack (HandshakeAck.Warming / WarmupPhase) so a connecting proxy
+	// or CLI knows the graph is still filling rather than guessing — a session
+	// that connects mid-warmup keeps working and self-heals as the graph fills.
+	// Optional: a nil probe means "assume ready" (control-only test servers).
+	Ready func() (ready bool, phase string)
+
 	// HTTPHandler, when non-nil, is mounted on a TCP listener at
 	// HTTPAddr alongside the unix-socket dispatcher. This is how the
 	// MCP 2026 Streamable HTTP transport reaches the daemon —
@@ -421,6 +429,13 @@ func (s *Server) handshake(conn net.Conn, reader *bufio.Reader) (*Session, error
 		OK:            true,
 		SessionID:     sess.ID,
 		DaemonVersion: s.Version,
+	}
+	// Stamp warmup state so the client can tell a still-warming daemon from a
+	// ready one. The session is established either way — Warming is advisory.
+	if s.Ready != nil {
+		ready, phase := s.Ready()
+		ack.Warming = !ready
+		ack.WarmupPhase = phase
 	}
 	if err := WriteJSONLine(conn, ack); err != nil {
 		_ = s.sessions.Remove(conn)

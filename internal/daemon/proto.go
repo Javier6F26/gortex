@@ -56,6 +56,15 @@ type HandshakeAck struct {
 
 	// For clients that want to compare before trusting the connection.
 	DaemonVersion string `json:"daemon_version,omitempty"`
+
+	// Warming is true when the handshake completed but the daemon has not
+	// finished its warmup pipeline — the graph is still filling, so tool
+	// results may be partial. The session is fully usable; this is advisory
+	// so a connecting proxy / CLI can wait for full data (or just log it)
+	// instead of guessing. WarmupPhase carries the last-published phase name
+	// (snapshot_loaded → parallel_parse → … → ready) when known.
+	Warming     bool   `json:"warming,omitempty"`
+	WarmupPhase string `json:"warmup_phase,omitempty"`
 }
 
 // Error codes reported in HandshakeAck.ErrorCode. Kept small and stable so

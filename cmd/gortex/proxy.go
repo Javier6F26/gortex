@@ -101,24 +101,36 @@ func runProxy(ctx context.Context, surface *gortexmcp.ToolSurface) (ran bool, er
 		CWD:        cwd,
 		ClientName: detectClientName(),
 	}
-	client, err := daemon.Dial(h)
-	if err != nil {
-		// The daemon isn't running, or it's running a mismatched protocol
-		// version (a stale daemon after an upgrade) — both are recoverable by
-		// falling back to the embedded in-process server.
-		if daemon.ShouldFallBackToEmbedded(err) {
-			if errors.Is(err, daemon.ErrProtocolVersionMismatch) {
-				fmt.Fprintln(os.Stderr, "[gortex mcp] daemon protocol mismatch; falling back to embedded server")
-			}
-			return false, nil
-		}
+	client, recoverable, err := dialDaemonWithRetry(ctx, h)
+	if err != nil && !recoverable {
 		return false, fmt.Errorf("dial daemon: %w", err)
+	}
+	if client == nil {
+		// The daemon isn't reachable (even after the retry window) or it's
+		// running a mismatched protocol version — both are recoverable by
+		// falling back to the embedded in-process server.
+		if errors.Is(err, daemon.ErrProtocolVersionMismatch) {
+			fmt.Fprintln(os.Stderr, "[gortex mcp] daemon protocol mismatch; falling back to embedded server")
+		} else {
+			fmt.Fprintln(os.Stderr, "[gortex mcp] daemon unreachable after retry window; falling back to embedded server")
+		}
+		return false, nil
 	}
 	defer client.Close()
 
-	fmt.Fprintf(os.Stderr,
-		"[gortex mcp] proxying to daemon (session %s, default_repo=%q)\n",
-		client.Ack.SessionID, client.Ack.DefaultRepo)
+	// A daemon that is still warming up acks the handshake immediately and
+	// serves whatever the graph holds so far, filling in as warmup completes —
+	// so staying connected is strictly better than dead-ending on an empty
+	// embedded server. Surface the state so the launch log isn't misleading.
+	if client.Ack.Warming {
+		fmt.Fprintf(os.Stderr,
+			"[gortex mcp] proxying to daemon (session %s, daemon warming up — phase %q; graph still filling)\n",
+			client.Ack.SessionID, client.Ack.WarmupPhase)
+	} else {
+		fmt.Fprintf(os.Stderr,
+			"[gortex mcp] proxying to daemon (session %s, default_repo=%q)\n",
+			client.Ack.SessionID, client.Ack.DefaultRepo)
+	}
 
 	// Bidirectional pump:
 	//   stdin → socket (MCP requests from the client)
@@ -196,6 +208,60 @@ var (
 	orphanPollInterval = 5 * time.Second
 	proxyDrainTimeout  = 2 * time.Second
 )
+
+// dialDaemon is the seam runProxy dials through. A package var so tests can
+// substitute a fake without a real socket.
+var dialDaemon = daemon.Dial
+
+// proxyDialRetryWindow bounds how long dialDaemonWithRetry keeps retrying a
+// recoverable "daemon unavailable" dial error before conceding to the embedded
+// server; proxyDialRetryInterval is the gap between attempts. By the time the
+// proxy dials, resolveDaemonDecision has already confirmed the socket is up
+// (daemonReady) or waited for it (daemonAutostarted) — but under a CPU- and
+// GC-saturated warmup the daemon's accept() can briefly exceed the 500ms dial
+// timeout, surfacing as ErrDaemonUnavailable. Retrying rides that window out so
+// a connecting session lands on the real daemon (and self-heals as warmup
+// fills the graph) instead of dead-ending on an empty embedded graph. Vars so
+// tests can shorten them.
+var (
+	proxyDialRetryWindow   = 20 * time.Second
+	proxyDialRetryInterval = 250 * time.Millisecond
+)
+
+// dialDaemonWithRetry dials the daemon, retrying transient "unavailable"
+// errors (socket up but accept() starved by warmup) for a bounded window.
+// Returns:
+//   - (client, false, nil)  on success.
+//   - (nil, false, err)     on a non-recoverable error — the caller surfaces it.
+//   - (nil, true, lastErr)  when the window expires with the daemon still
+//     unreachable, or on a protocol-version mismatch (which never resolves by
+//     waiting) — the caller falls back to the embedded server. lastErr lets the
+//     caller distinguish the mismatch case for logging.
+func dialDaemonWithRetry(ctx context.Context, h daemon.Handshake) (client *daemon.Client, recoverable bool, lastErr error) {
+	deadline := time.Now().Add(proxyDialRetryWindow)
+	for {
+		c, err := dialDaemon(h)
+		if err == nil {
+			return c, false, nil
+		}
+		if !daemon.ShouldFallBackToEmbedded(err) {
+			return nil, false, err
+		}
+		// A protocol-version mismatch is a stale daemon after an upgrade —
+		// waiting can't fix it, so concede to the embedded server now.
+		if errors.Is(err, daemon.ErrProtocolVersionMismatch) {
+			return nil, true, err
+		}
+		if time.Now().After(deadline) {
+			return nil, true, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, true, err
+		case <-time.After(proxyDialRetryInterval):
+		}
+	}
+}
 
 // orphanWatch polls getppid every interval and invokes onOrphan exactly
 // once when the proxy's parent process has gone away — detected as a change
