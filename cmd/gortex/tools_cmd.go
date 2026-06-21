@@ -29,6 +29,7 @@ var toolsCmd = &cobra.Command{
 its category / read-write classification / presets, full-text search the
 catalog, or print one tool's full parameter schema. Requires a running daemon
 that tracks the repo.`,
+	SilenceUsage: true, // subcommands' daemon errors should read cleanly, not dump usage
 }
 
 var toolsListCmd = &cobra.Command{

@@ -119,6 +119,18 @@ func (d *mcpDispatcher) Dispatch(ctx context.Context, sess *daemon.Session, fram
 		}
 	}
 
+	// Promote-on-demand: a tools/call naming a deferred tool (one held out of
+	// the eager tools/list under the defer-mode surface) would otherwise return
+	// "tool not found" — the underlying MCP server only knows live tools until
+	// tools_search promotes them. A direct call by name (the CLI's `gortex call`
+	// and the curated `gortex` verbs reach the daemon this way) promotes it
+	// first, so a known tool name is reachable without a discovery round-trip.
+	// tools_search stays the discovery path; a hide-mode tool is never deferred,
+	// so this never bypasses the hide gate.
+	if name := peekFrameToolName(frame); name != "" {
+		d.srv.EnsureToolPromoted(name)
+	}
+
 	// HandleMessage returns either a JSONRPCResponse, a JSONRPCError, or
 	// nil (the message was a notification). It never panics on malformed
 	// JSON — it returns a JSON-RPC parse-error frame instead.
@@ -150,6 +162,22 @@ func peekFrameMethod(frame []byte) string {
 	}
 	_ = json.Unmarshal(frame, &peek)
 	return peek.Method
+}
+
+// peekFrameToolName returns the tool name of a tools/call frame, or "" when the
+// frame is not a tools/call or can't be parsed. Used to promote a deferred tool
+// on demand before local dispatch (see Dispatch).
+func peekFrameToolName(frame []byte) string {
+	var peek struct {
+		Method string `json:"method"`
+		Params struct {
+			Name string `json:"name"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(frame, &peek) != nil || peek.Method != "tools/call" {
+		return ""
+	}
+	return peek.Params.Name
 }
 
 // rewriteUntrackedResponse swaps a successful initialize / tools/list response

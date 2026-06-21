@@ -49,8 +49,9 @@ calling the daemon (works with no daemon running). Use --format to pick the
 wire format the tool renders (json|gcx|toon|text).
 
 Requires a running daemon that tracks the repo (except for --dry).`,
-	Args: cobra.ExactArgs(1),
-	RunE: runCall,
+	Args:         cobra.ExactArgs(1),
+	SilenceUsage: true, // a tool/daemon error should read cleanly, not dump usage
+	RunE:         runCall,
 }
 
 func init() {

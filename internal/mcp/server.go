@@ -2219,6 +2219,28 @@ func (s *Server) attachLazyRegistry() {
 	}
 }
 
+// EnsureToolPromoted makes a deferred tool callable by name. Under the
+// defer-mode tool surface (the `core` default) a tool that is held out of the
+// eager tools/list lives in the lazy registry and is unknown to the underlying
+// MCP server until tools_search promotes it — so a direct tools/call for it
+// returns "tool not found". A caller that dispatches a tools/call by name —
+// notably the CLI's `gortex call` and the curated `gortex` verbs, which reach
+// the daemon over the same socket — calls this first so the "reachable by name
+// regardless of tools/list visibility" contract actually holds. tools_search
+// stays the discovery path; this only makes an already-known name reachable
+// without a discovery round-trip. It is a no-op (returns false) when there is
+// no lazy registry or the tool is live, absent, or already promoted; a hidden
+// (hide-mode) tool is never deferred, so this never bypasses the hide gate.
+func (s *Server) EnsureToolPromoted(name string) bool {
+	if s == nil || s.lazy == nil || name == "" {
+		return false
+	}
+	if !s.lazy.IsDeferred(name) {
+		return false
+	}
+	return len(s.lazy.Promote(name)) > 0
+}
+
 // SetContractRegistry sets an explicit contract registry override for the MCP
 // server. Used by single-indexer callers and tests. In multi-repo mode the
 // server prefers a freshly-merged registry from MultiIndexer (see
