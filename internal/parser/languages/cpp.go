@@ -119,7 +119,7 @@ func (e *CppExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 			e.emitClass(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["struct.def"] != nil:
-			e.emitStruct(m, filePath, fileID, result, seen)
+			e.emitStruct(m, filePath, fileID, src, result, seen)
 
 		case m.Captures["enum.def"] != nil:
 			e.emitEnum(m, filePath, fileID, result, seen)
@@ -157,6 +157,15 @@ func (e *CppExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 
 	// Resolve call edges against funcRanges.
 	funcRanges := buildFuncRanges(result)
+
+	// Emit type-use edges (EdgeTypedAs) for declaration positions the
+	// per-match pass leaves edge-less: local variable declarations,
+	// function parameters, and return types — each attributed to the
+	// enclosing function/method via funcRanges. Member/field type-uses
+	// are attributed to the owning class/struct node during the body
+	// walk above, so they're already in result.Edges.
+	collectCppTypeUseEdges(root, funcRanges, filePath, src, result)
+
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
@@ -240,6 +249,7 @@ func (e *CppExtractor) walkClassBody(classNode *sitter.Node, src []byte, filePat
 	if body == nil {
 		return
 	}
+	typeSeen := make(map[string]bool)
 	for i := 0; i < int(body.NamedChildCount()); i++ {
 		child := body.NamedChild(i)
 		switch child.Type() {
@@ -247,6 +257,15 @@ func (e *CppExtractor) walkClassBody(classNode *sitter.Node, src []byte, filePat
 			continue
 		case "function_definition":
 			e.addMethodFromNode(child, src, filePath, fileID, className, classID, seen, result)
+		case "field_declaration":
+			// Member/field type-use: a `Foo bar;` member references Foo.
+			// Attribute to the owning class node (the extractor doesn't
+			// materialise a per-field node). Smart-pointer / container
+			// fields unwrap to the inner type via the canonicaliser.
+			line := int(child.StartPoint().Row) + 1
+			if tn := child.ChildByFieldName("type"); tn != nil {
+				emitCppTypeUseEdges(classID, tn.Content(src), filePath, line, result, typeSeen)
+			}
 		case "declaration_list":
 			for j := 0; j < int(child.NamedChildCount()); j++ {
 				gc := child.NamedChild(j)
@@ -317,7 +336,7 @@ func cppReturnType(node *sitter.Node, src []byte) string {
 	return rt
 }
 
-func (e *CppExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
+func (e *CppExtractor) emitStruct(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen map[string]bool) {
 	name := m.Captures["struct.name"].Text
 	def := m.Captures["struct.def"]
 	id := filePath + "::" + name
@@ -333,6 +352,41 @@ func (e *CppExtractor) emitStruct(m parser.QueryResult, filePath, fileID string,
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
+	e.emitCppStructFieldTypeUse(def.Node, id, filePath, src, result)
+}
+
+// emitCppStructFieldTypeUse walks a struct_specifier (or class_specifier)
+// body's direct field_declaration members and emits EdgeTypedAs from the
+// owning type node to each member's referenced type. Structs don't get
+// the inline method/field walk classes do, so this is the field-position
+// type-use pass for them. Methods nested in a struct are handled
+// elsewhere; only data members carry a `type` field here.
+func (e *CppExtractor) emitCppStructFieldTypeUse(structNode *sitter.Node, ownerID, filePath string, src []byte, result *parser.ExtractionResult) {
+	if structNode == nil {
+		return
+	}
+	var body *sitter.Node
+	for i := 0; i < int(structNode.NamedChildCount()); i++ {
+		child := structNode.NamedChild(i)
+		if child.Type() == "field_declaration_list" {
+			body = child
+			break
+		}
+	}
+	if body == nil {
+		return
+	}
+	typeSeen := make(map[string]bool)
+	for i := 0; i < int(body.NamedChildCount()); i++ {
+		child := body.NamedChild(i)
+		if child.Type() != "field_declaration" {
+			continue
+		}
+		line := int(child.StartPoint().Row) + 1
+		if tn := child.ChildByFieldName("type"); tn != nil {
+			emitCppTypeUseEdges(ownerID, tn.Content(src), filePath, line, result, typeSeen)
+		}
+	}
 }
 
 func (e *CppExtractor) emitEnum(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult, seen map[string]bool) {
