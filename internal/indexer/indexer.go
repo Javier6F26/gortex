@@ -1976,6 +1976,20 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	// so disk-non-empty is safe.
 	firstIndex := idx.indexCount.Load() == 0
 	belowShadowMax := len(files) <= shadowMaxFileCount()
+	// The file-count ceiling is blind to the few-huge-files shape: a
+	// content repo of a few hundred PDFs / text dumps / spreadsheets is
+	// far under shadowMaxFileCount yet holds multiple GB that explode
+	// into hundreds of thousands of section nodes. Gate the in-memory
+	// shadow on total input bytes too, so such a repo falls through to
+	// the bounded per-call disk path instead of pinning the whole
+	// post-parse graph in RAM and OOMing (see #120).
+	var totalFileBytes int64
+	for i := range files {
+		totalFileBytes += files[i].size
+	}
+	maxShadowBytes := shadowMaxBytes()
+	belowShadowBytes := totalFileBytes <= maxShadowBytes
+	shadowTaken := blOK && firstIndex && belowShadowMax && belowShadowBytes
 	preNodes := idx.graph.NodeCount()
 	preEdges := idx.graph.EdgeCount()
 	idx.logger.Info("indexer: shadow-swap decision",
@@ -1987,9 +2001,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		zap.Int("files", len(files)),
 		zap.Int("shadow_max_files", shadowMaxFileCount()),
 		zap.Bool("below_shadow_max", belowShadowMax),
-		zap.Bool("shadow_taken", blOK && firstIndex && belowShadowMax),
+		zap.Int64("total_file_bytes", totalFileBytes),
+		zap.Int64("shadow_max_bytes", maxShadowBytes),
+		zap.Bool("below_shadow_bytes", belowShadowBytes),
+		zap.Bool("shadow_taken", shadowTaken),
 	)
-	if blOK && firstIndex && belowShadowMax {
+	if shadowTaken {
 		// Warm-restart safety. `firstIndex` is a PER-INDEXER sentinel, and
 		// a fresh per-repo Indexer is constructed on every daemon restart,
 		// so firstIndex is true on every restart — even when the
@@ -2149,10 +2166,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			}
 		}()
 	} else if diskTarget == nil && idx.graph.NodeCount() == 0 && idx.graph.EdgeCount() == 0 {
-		if _, isBulk := idx.graph.(graph.BulkLoader); isBulk && len(files) > shadowMaxFileCount() {
-			idx.logger.Info("indexer: skipping in-memory shadow above threshold",
+		if _, isBulk := idx.graph.(graph.BulkLoader); isBulk && firstIndex && (!belowShadowMax || !belowShadowBytes) {
+			idx.logger.Info("indexer: skipping in-memory shadow; building against disk store (bounded RAM)",
 				zap.Int("files", len(files)),
-				zap.Int("threshold", shadowMaxFileCount()))
+				zap.Int("file_threshold", shadowMaxFileCount()),
+				zap.Bool("over_file_count", !belowShadowMax),
+				zap.Int64("total_file_bytes", totalFileBytes),
+				zap.Int64("byte_threshold", maxShadowBytes),
+				zap.Bool("over_byte_budget", !belowShadowBytes))
 		}
 	}
 
