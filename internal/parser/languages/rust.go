@@ -527,9 +527,9 @@ func rustTypeParams(item *sitter.Node, src []byte) []map[string]string {
 // emitRustThrowsEdges inspects a function's return type for a Result
 // wrapper and emits an EdgeThrows to the error type when found. Idiom:
 //
-//   fn parse(s: &str) -> Result<i32, ParseError> {…}     → throws ParseError
-//   fn open(p: &Path) -> Result<File, std::io::Error> {…} → throws Error
-//   fn no_error() -> i32 {…}                              → no edge
+//	fn parse(s: &str) -> Result<i32, ParseError> {…}     → throws ParseError
+//	fn open(p: &Path) -> Result<File, std::io::Error> {…} → throws Error
+//	fn no_error() -> i32 {…}                              → no edge
 //
 // `Origin: ASTInferred` because we're pattern-matching the return
 // type text, not type-checking it.
@@ -589,10 +589,10 @@ func rustRawReturnType(node *sitter.Node, src []byte) string {
 // the trailing identifier of the error parameter when the type is a
 // Result. Handles:
 //
-//   Result<T, E>            → E
-//   Result<T, std::io::E>   → E (trailing ident)
-//   Result<T, Box<dyn E>>   → E
-//   anyhow::Result<T>       → "" (single-arg form: error type elided)
+//	Result<T, E>            → E
+//	Result<T, std::io::E>   → E (trailing ident)
+//	Result<T, Box<dyn E>>   → E
+//	anyhow::Result<T>       → "" (single-arg form: error type elided)
 //
 // Returns "" for non-Result returns or when the error type can't be
 // extracted unambiguously.
