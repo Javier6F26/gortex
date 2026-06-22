@@ -424,6 +424,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			out := map[string]any{
 				"uptime_seconds": int64(time.Since(daemonStart).Seconds()),
 				"ready":          controllerCapture.IsReady(),
+				"enriched":       controllerCapture.IsEnriched(),
 				"warmup_seconds": int64(0),
 			}
 			if st, statusErr := controllerCapture.Status(context.Background()); statusErr == nil {
@@ -492,7 +493,11 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	// on disk) so the gob+gzip snapshot is dead weight in that mode.
 	stopSnapshotter := func() {}
 	if mg, ok := state.graph.(*graph.Graph); ok {
-		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsReady, logger)
+		// Gate on IsEnriched, not IsReady: ready now flips once references
+		// resolve (well before enrichment finishes), but a snapshot tick mid-
+		// enrichment still steals shard-lock budget from the enrichment passes
+		// writing those shards — exactly the stall this gate prevents.
+		stopSnapshotter = startPeriodicSnapshots(mg, state.multiIndexer, version, 10*time.Minute, controller.IsEnriched, logger)
 	}
 	defer stopSnapshotter()
 
@@ -523,7 +528,21 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	go func() {
 		start := time.Now()
 		logger.Info("daemon: warmup starting")
-		mw := warmupDaemonState(state, logger)
+		// markReady fires once references are resolved and the graph is
+		// queryable — ahead of the slow enrichment pass — so clients can
+		// start issuing find_usages / get_callers immediately. Enrichment
+		// continues in this goroutine afterward and finishes at MarkEnriched.
+		markReady := func() {
+			elapsed := time.Since(start)
+			controller.MarkReady(elapsed)
+			logger.Info("daemon: graph queryable", zap.Duration("resolve", elapsed))
+			publishReadinessPhase(state, "ready", true, map[string]any{
+				"queryable":      true,
+				"warmup_seconds": int64(elapsed.Seconds()),
+				"warmup_ms":      elapsed.Milliseconds(),
+			})
+		}
+		mw := warmupDaemonState(state, logger, markReady)
 		controller.AttachWatcher(mw)
 		// Wire the daemon's MultiWatcher into the per-server history
 		// surface so `get_recent_changes` and `get_symbol_history` see
@@ -567,9 +586,10 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			state.mcpServer.PrewarmCoChange()
 		}
 		elapsed := time.Since(start)
-		controller.MarkReady(elapsed)
-		logger.Info("daemon: ready", zap.Duration("warmup", elapsed))
-		publishReadinessPhase(state, "ready", true, map[string]any{
+		controller.MarkEnriched(elapsed)
+		logger.Info("daemon: enrichment complete", zap.Duration("warmup", elapsed))
+		publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
+			"enriched":       true,
 			"warmup_seconds": int64(elapsed.Seconds()),
 			"warmup_ms":      elapsed.Milliseconds(),
 		})
@@ -1092,13 +1112,20 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 	t.AppendRow(table.Row{"pid", st.PID})
 	t.AppendRow(table.Row{"socket", st.SocketPath})
 	t.AppendRow(table.Row{"uptime", formatDuration(time.Duration(st.UptimeSeconds) * time.Second)})
-	if st.Ready {
+	switch {
+	case st.Ready && st.EnrichmentComplete:
 		t.AppendRow(table.Row{
 			"state",
-			fmt.Sprintf("ready (warmup %s)", formatDuration(time.Duration(st.WarmupSeconds)*time.Second)),
+			fmt.Sprintf("ready (warmup %s)", formatDuration(time.Duration(st.EnrichSeconds)*time.Second)),
 		})
-	} else {
-		t.AppendRow(table.Row{"state", "warming up (socket reachable, background re-index in progress)"})
+	case st.Ready:
+		t.AppendRow(table.Row{
+			"state",
+			fmt.Sprintf("ready — queryable (resolve %s); enrichment in progress",
+				formatDuration(time.Duration(st.WarmupSeconds)*time.Second)),
+		})
+	default:
+		t.AppendRow(table.Row{"state", "warming up (socket reachable, resolving references)"})
 	}
 	t.AppendRow(table.Row{"sessions", st.Sessions})
 	if st.MemoryBytes > 0 {

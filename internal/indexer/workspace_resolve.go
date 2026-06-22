@@ -274,6 +274,15 @@ func (mi *MultiIndexer) BackfillWorkspaceSlugs() (nodesStamped, contractsStamped
 // the daemon needs to refresh cross-repo edges without re-indexing
 // every file. Idempotent — safe to call repeatedly.
 func (mi *MultiIndexer) RunGlobalResolve() {
+	mi.runCrossRepoResolve(true)
+}
+
+// runCrossRepoResolve runs the cross-repo resolver over the shared graph,
+// lifting references that span repo boundaries. When reconcileContracts is
+// true it also reconciles contract-bridge edges; the pre-enrichment resolve
+// stage (RunPreEnrichResolve) passes false because the contract pass has not
+// committed its nodes yet.
+func (mi *MultiIndexer) runCrossRepoResolve(reconcileContracts bool) {
 	if mi == nil || mi.graph == nil {
 		return
 	}
@@ -285,7 +294,9 @@ func (mi *MultiIndexer) RunGlobalResolve() {
 	cr.SetWorkspaceMembership(mi.workspaceMembershipResolver())
 	mi.applyRemoteStitch(cr)
 	cr.ResolveAll()
-	mi.ReconcileContractEdges()
+	if reconcileContracts {
+		mi.ReconcileContractEdges()
+	}
 }
 
 // crossWorkspaceLookup builds a resolver.CrossWorkspaceDepLookup from

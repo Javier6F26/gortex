@@ -193,12 +193,14 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	}, nil
 }
 
-// warmupDaemonState performs the per-repo TrackRepoCtx loop and brings
-// up the MultiWatcher. Split out from buildDaemonState so the daemon can
-// open its socket and accept connections before this work finishes —
-// re-extracting contracts across many repos can take tens of seconds
-// and there's no reason to make clients wait for it.
-func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWatcher {
+// warmupDaemonState performs the per-repo parse loop, resolves references,
+// runs the background enrichment, and brings up the MultiWatcher. Split out
+// from buildDaemonState so the daemon can open its socket and accept
+// connections before this work finishes. markReady is invoked once references
+// are resolved and the graph is queryable — ahead of the slow enrichment pass
+// — so the daemon reports ready as soon as find_usages / get_callers return
+// complete results, not after enrichment finishes.
+func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func()) *indexer.MultiWatcher {
 	if state.multiIndexer == nil || state.configManager == nil {
 		return nil
 	}
@@ -424,18 +426,47 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		zap.Int("tracked_repos", len(repos)),
 		zap.Bool("global_passes", anyChanged))
 
-	// Drain deferred per-repo passes (ResolveAll / semantic enrich /
-	// contract extract+commit) serially across the indexers the parallel
-	// loop populated. Must run before RunGlobalResolve so cross-repo
-	// resolution sees fully-lifted per-repo placeholder edges.
+	// Resolve references ahead of the slow enrichment pass so find_usages /
+	// get_callers return complete results as soon as the daemon reports ready
+	// — independent of semantic enrichment. RunPreEnrichResolve materialises
+	// go.mod dep nodes, runs the same-repo master resolver, and runs the
+	// cross-repo resolver. On the warm-restart fast path nothing changed, so
+	// the persisted graph already carries resolved edges and we skip straight
+	// to marking ready.
 	if anyChanged {
 		phaseStart = time.Now()
-		publishReadinessPhase(state, "deferred_passes_all", false, nil)
+		publishReadinessPhase(state, "resolve", false, nil)
+		state.multiIndexer.RunPreEnrichResolve(ctx)
+		logger.Info("daemon: warmup phase done",
+			zap.String("phase", "resolve"),
+			zap.Duration("elapsed", time.Since(phaseStart)))
+		publishReadinessPhase(state, "resolve_done", false, map[string]any{
+			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
+		})
+	}
+
+	// References are resolved (or unchanged and already resolved on the warm
+	// path): the graph is queryable. Flip ready before the multi-minute
+	// enrichment so clients can start issuing queries immediately. Everything
+	// below runs in the background after ready and finishes at MarkEnriched.
+	if markReady != nil {
+		markReady()
+	}
+
+	// Drain deferred per-repo passes (semantic enrich / contract
+	// extract+commit) serially across the indexers the parallel loop
+	// populated. These run after ready: enrichment is a precision upgrade on
+	// top of the already-queryable reference graph. RunDeferredPassesAll
+	// re-runs the master resolver at its tail to lift placeholder edges the
+	// enrichment + contract passes add.
+	if anyChanged {
+		phaseStart = time.Now()
+		publishReadinessPhase(state, "deferred_passes_all", true, nil)
 		state.multiIndexer.RunDeferredPassesAll(ctx)
 		logger.Info("daemon: warmup phase done",
 			zap.String("phase", "deferred_passes_all"),
 			zap.Duration("elapsed", time.Since(phaseStart)))
-		publishReadinessPhase(state, "deferred_passes_all_done", false, map[string]any{
+		publishReadinessPhase(state, "deferred_passes_all_done", true, map[string]any{
 			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 		})
 	}
@@ -513,12 +544,12 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// changed too, so ReconcileContractEdges runs again.
 	if anyChanged {
 		phaseStart = time.Now()
-		publishReadinessPhase(state, "global_resolve", false, nil)
+		publishReadinessPhase(state, "global_resolve", true, nil)
 		state.multiIndexer.RunGlobalResolve()
 		logger.Info("daemon: warmup phase done",
 			zap.String("phase", "global_resolve"),
 			zap.Duration("elapsed", time.Since(phaseStart)))
-		publishReadinessPhase(state, "global_resolve_done", false, map[string]any{
+		publishReadinessPhase(state, "global_resolve_done", true, map[string]any{
 			"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 		})
 	}
@@ -532,7 +563,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	// without re-running those passes — the persisted graph already has
 	// the derived edges.
 	phaseStart = time.Now()
-	publishReadinessPhase(state, "end_batch", false, nil)
+	publishReadinessPhase(state, "end_batch", true, nil)
 	if anyChanged {
 		state.multiIndexer.EndBatch()
 	} else {
@@ -541,7 +572,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 	logger.Info("daemon: warmup phase done",
 		zap.String("phase", "end_batch"),
 		zap.Duration("elapsed", time.Since(phaseStart)))
-	publishReadinessPhase(state, "end_batch_done", false, map[string]any{
+	publishReadinessPhase(state, "end_batch_done", true, map[string]any{
 		"elapsed_ms": time.Since(phaseStart).Milliseconds(),
 	})
 
@@ -580,7 +611,7 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger) *indexer.MultiWat
 		return nil
 	}
 	logger.Info("daemon: watching", zap.Int("repos", len(watchCfgs)))
-	publishReadinessPhase(state, "watcher_started", false, map[string]any{
+	publishReadinessPhase(state, "watcher_started", true, map[string]any{
 		"watched_repos": len(watchCfgs),
 	})
 	return mw

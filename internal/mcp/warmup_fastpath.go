@@ -35,20 +35,24 @@ import (
 // completion percentage. The pipeline runs the phases in this strict
 // order:
 //
-//	snapshot_loaded → parallel_parse → parallel_parse_done →
-//	deferred_passes_all → deferred_passes_all_done → global_resolve →
-//	global_resolve_done → end_batch → end_batch_done →
-//	watcher_started → ready
+//	snapshot_loaded → parallel_parse → parallel_parse_done → resolve →
+//	resolve_done → ready (queryable) → deferred_passes_all →
+//	deferred_passes_all_done → global_resolve → global_resolve_done →
+//	end_batch → end_batch_done → watcher_started → enrichment_complete
 //
 // The weights are cost-proportional rather than evenly spaced:
-// parallel_parse (parsing every tracked repo off disk) dominates
-// total warmup time, so it spans 15→55; the resolve / derivation
-// tail moves quickly by comparison. The numbers are derived from the
-// phase the daemon actually reports — never a placeholder.
+// parallel_parse (parsing every tracked repo off disk) dominates total
+// warmup time, so it spans 15→55. `ready` fires at the resolve point —
+// once references are queryable — so the warming envelope clears there;
+// the phases past it report background-enrichment progress and carry
+// ready:true. The numbers are derived from the phase the daemon actually
+// reports — never a placeholder.
 var warmupPhaseProgress = map[string]int{
 	"snapshot_loaded":          5,
 	"parallel_parse":           15,
 	"parallel_parse_done":      55,
+	"resolve":                  57,
+	"resolve_done":             59,
 	"deferred_passes_all":      60,
 	"deferred_passes_all_done": 75,
 	"global_resolve":           78,
@@ -57,6 +61,7 @@ var warmupPhaseProgress = map[string]int{
 	"end_batch_done":           95,
 	"watcher_started":          98,
 	"ready":                    100,
+	"enrichment_complete":      100,
 }
 
 // warmupExemptTools is the set of MCP tools that do NOT depend on the

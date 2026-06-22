@@ -382,16 +382,16 @@ func (mi *MultiIndexer) BeginParallelBatch() {
 	}
 }
 
-// RunDeferredPassesAll runs RunDeferredPasses on every per-repo
-// Indexer that carries a pending contract registry. Pairs with
-// BeginParallelBatch: the parallel loop parses with deferResolve
-// turned on; this serial loop drains the deferred per-repo passes
-// (semantic enrich / contract extract+commit) without racing on the
-// shared graph. The per-repo resolver pass is suppressed on every
-// indexer because resolver.ResolveAll walks the entire shared graph
-// — paying it R times is O(R · E). One global resolver.New(graph).
-// ResolveAll at the end picks up every placeholder edge that the
-// per-repo passes added.
+// RunDeferredPassesAll drains the deferred per-repo passes (semantic
+// enrich / contract extract+commit) serially across the indexers the
+// parallel parse populated. Pairs with BeginParallelBatch: the parallel
+// loop parses with deferResolve on; this serial loop runs the passes that
+// would otherwise race on the shared graph. The references-completeness
+// resolve runs ahead of this in RunPreEnrichResolve (so the daemon can mark
+// itself queryable before enrichment); the per-repo resolver pass is
+// suppressed here because resolver.ResolveAll walks the entire shared graph
+// — paying it R times is O(R · E). One master resolver.New(graph).ResolveAll
+// runs at the end to lift the placeholder edges enrichment + contracts added.
 func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 	mi.mu.RLock()
 	indexers := make([]*Indexer, 0, len(mi.indexers))
@@ -419,24 +419,62 @@ func (mi *MultiIndexer) RunDeferredPassesAll(ctx context.Context) {
 	for _, idx := range indexers {
 		idx.SetSkipResolveInDeferred(false)
 	}
-	if mi.graph != nil {
-		master := resolver.New(mi.graph)
-		master.SetLogger(mi.logger)
-		// Mirror the resolve-time LSP helper onto the master pass
-		// too — RunDeferredPassesAll is where placeholder edges
-		// added by deferred per-repo passes get resolved in batch,
-		// and TS/JS-family edges should pick up LSP-precision
-		// answers here just like the per-repo passes do.
-		if mi.resolverLSPHelper != nil {
-			master.SetLSPHelper(mi.resolverLSPHelper)
-		}
-		master.SetNpmAliasResolver(mi.npmAliasResolver())
-		master.SetPathAliasResolver(mi.pathAliasResolver())
-		master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
-		mt := time.Now()
-		master.ResolveAll()
-		mi.logger.Info("DEFERRED-TIMING master.ResolveAll", zap.Duration("elapsed", time.Since(mt)))
+	// Re-run the master same-repo resolver to lift the placeholder edges the
+	// enrichment + contract passes just added. The references-completeness
+	// resolve already ran ahead of enrichment in RunPreEnrichResolve, so this
+	// is the idempotent catch-up pass for edges minted during enrichment.
+	mi.runMasterResolve()
+}
+
+// runMasterResolve runs one same-repo resolver over the whole shared graph,
+// lifting every placeholder edge to its canonical target. Split out so the
+// pre-enrichment resolve stage (RunPreEnrichResolve) and the post-enrichment
+// catch-up (RunDeferredPassesAll) share one implementation.
+func (mi *MultiIndexer) runMasterResolve() {
+	if mi.graph == nil {
+		return
 	}
+	master := resolver.New(mi.graph)
+	master.SetLogger(mi.logger)
+	// Mirror the resolve-time LSP helper onto the master pass so TS/JS-family
+	// edges pick up LSP-precision answers just like the per-repo passes do.
+	if mi.resolverLSPHelper != nil {
+		master.SetLSPHelper(mi.resolverLSPHelper)
+	}
+	master.SetNpmAliasResolver(mi.npmAliasResolver())
+	master.SetPathAliasResolver(mi.pathAliasResolver())
+	master.SetWorkspaceMembership(mi.workspaceMembershipResolver())
+	mt := time.Now()
+	master.ResolveAll()
+	mi.logger.Info("DEFERRED-TIMING master.ResolveAll", zap.Duration("elapsed", time.Since(mt)))
+}
+
+// RunPreEnrichResolve runs the resolution stage that makes references queryable
+// ahead of the slow semantic-enrichment pass. It materialises go.mod dep
+// contract nodes (so the resolver's import bridge can re-target Go imports of
+// declared modules), runs the same-repo master resolver to lift every
+// parse-time placeholder edge to its canonical target, then runs the cross-repo
+// resolver so references that span repo boundaries resolve too. Contract-bridge
+// reconciliation is intentionally left to RunGlobalResolve, which runs after the
+// contract pass has committed its nodes.
+//
+// The daemon warmup calls this between the parallel parse and the enrichment
+// phase, then marks itself ready — so find_usages / get_callers return complete
+// results as soon as the graph is queryable, independent of enrichment.
+func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context) {
+	mi.mu.RLock()
+	indexers := make([]*Indexer, 0, len(mi.indexers))
+	for _, idx := range mi.indexers {
+		indexers = append(indexers, idx)
+	}
+	mi.mu.RUnlock()
+	for _, idx := range indexers {
+		idx.runDeferredGoMod()
+	}
+	mi.runMasterResolve()
+	// Cross-repo references resolve here too so a multi-repo workspace is fully
+	// queryable at "ready", not just within each repo.
+	mi.runCrossRepoResolve(false)
 }
 
 // runDeferredEnrichParallel runs each indexer's semantic enrichment in a

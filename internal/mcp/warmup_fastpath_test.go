@@ -37,6 +37,8 @@ func TestWarmupStateFromSnapshot_PhaseProgress(t *testing.T) {
 		"snapshot_loaded",
 		"parallel_parse",
 		"parallel_parse_done",
+		"resolve",
+		"resolve_done",
 		"deferred_passes_all",
 		"deferred_passes_all_done",
 		"global_resolve",

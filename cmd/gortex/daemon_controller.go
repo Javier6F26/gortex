@@ -57,13 +57,21 @@ type realController struct {
 	// main to flush savings, close the snapshot store, etc.
 	onShutdown func() error
 
-	// ready flips to true once warmup (per-repo re-index + watcher
-	// startup) finishes. The socket accepts connections before this —
-	// queries against not-yet-indexed repos return partial results
-	// until ready is true. warmupSeconds records how long warmup took
-	// so status can surface it.
+	// ready flips to true once references are resolved and the graph is
+	// queryable — find_usages / get_callers return complete results from
+	// this point. The socket accepts connections before this; queries
+	// against not-yet-resolved repos return partial results until ready.
+	// warmupSeconds records how long the parse + resolve stage took.
+	//
+	// enriched flips to true once the slow semantic-enrichment pass and the
+	// graph-wide derivation passes finish in the background, after ready.
+	// Background timers that must not fight the enrichment pipeline for
+	// shard locks (the periodic snapshotter) gate on enriched, not ready.
+	// enrichSeconds records the full warmup duration.
 	ready         atomic.Bool
 	warmupSeconds atomic.Int64
+	enriched      atomic.Bool
+	enrichSeconds atomic.Int64
 }
 
 // Track indexes a new repository and persists it to the global config.
@@ -773,13 +781,15 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 			NumGC:        mem.NumGC,
 			NumGoroutine: runtime.NumGoroutine(),
 		},
-		PProfAddr:         daemonPProfAddr(),
-		Ready:             c.ready.Load(),
-		WarmupSeconds:     c.warmupSeconds.Load(),
-		Workspaces:        workspaces,
-		ConfiguredServers: c.collectConfiguredServers(),
-		LocalServerSlug:   c.localServerSlug(),
-		LSPRouter:         c.collectLSPRouterStatus(),
+		PProfAddr:          daemonPProfAddr(),
+		Ready:              c.ready.Load(),
+		WarmupSeconds:      c.warmupSeconds.Load(),
+		EnrichmentComplete: c.enriched.Load(),
+		EnrichSeconds:      c.enrichSeconds.Load(),
+		Workspaces:         workspaces,
+		ConfiguredServers:  c.collectConfiguredServers(),
+		LocalServerSlug:    c.localServerSlug(),
+		LSPRouter:          c.collectLSPRouterStatus(),
 	}, nil
 	// MCPSessions is populated by the daemon Server (it owns the
 	// SessionRegistry — the controller doesn't have a back-pointer).
@@ -912,18 +922,37 @@ func (c *realController) AttachWatcher(mw *indexer.MultiWatcher) {
 	c.multiWatcher = mw
 }
 
-// MarkReady flips the ready flag and records how long warmup took.
-// Safe to call concurrently with Status (atomic loads on the read side).
+// MarkReady flips the ready flag once references are resolved and the graph
+// is queryable, recording how long the parse + resolve stage took. Safe to
+// call concurrently with Status (atomic loads on the read side).
 func (c *realController) MarkReady(d time.Duration) {
 	c.warmupSeconds.Store(int64(d.Seconds()))
 	c.ready.Store(true)
 }
 
-// IsReady reports whether warmup has completed. Used by background
-// timers (snapshotter, janitor, savings flush, etc.) to skip work
-// that would fight the warmup pipeline for shard locks and GC budget.
+// IsReady reports whether the graph is resolved and queryable. The socket
+// accepts connections before this; callers waiting to issue queries should
+// wait for IsReady.
 func (c *realController) IsReady() bool {
 	return c.ready.Load()
+}
+
+// MarkEnriched flips the enrichment-complete flag once semantic enrichment
+// and the graph-wide derivation passes finish in the background, recording
+// the full warmup duration. It also sets ready, so the degenerate path where
+// MarkReady was skipped still reports a usable daemon.
+func (c *realController) MarkEnriched(d time.Duration) {
+	c.enrichSeconds.Store(int64(d.Seconds()))
+	c.enriched.Store(true)
+	c.ready.Store(true)
+}
+
+// IsEnriched reports whether the background enrichment + derivation passes
+// have finished. Background timers (the periodic snapshotter) gate on this
+// rather than IsReady so they don't fight the enrichment pipeline for shard
+// locks and GC budget.
+func (c *realController) IsEnriched() bool {
+	return c.enriched.Load()
 }
 
 // Shutdown gives the caller (the daemon main) a chance to flush any

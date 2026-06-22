@@ -94,9 +94,9 @@ type ControlResponse struct {
 
 // Control operation kinds. One constant per kind so callers can't typo.
 const (
-	ControlTrack         = "track"
-	ControlUntrack       = "untrack"
-	ControlReload        = "reload"
+	ControlTrack   = "track"
+	ControlUntrack = "untrack"
+	ControlReload  = "reload"
 	// ControlProxy reloads servers.toml and rebuilds + atomically swaps
 	// the daemon's multi-server Router, then invalidates the roster
 	// cache — so `gortex proxy on/off/add/remove` apply to a running
@@ -167,11 +167,18 @@ type StatusResponse struct {
 	// string means pprof is not enabled on this daemon.
 	PProfAddr string `json:"pprof_addr,omitempty"`
 	// Ready is false while the daemon is still loading the snapshot and
-	// re-indexing tracked repos in the background. The socket is reachable
-	// even when Ready=false; queries against not-yet-indexed repos may
-	// return partial results until warmup completes.
+	// resolving references in the background. It flips true once references
+	// are resolved and the graph is queryable — which can be well before
+	// EnrichmentComplete. The socket is reachable even when Ready=false.
 	Ready         bool  `json:"ready"`
 	WarmupSeconds int64 `json:"warmup_seconds"`
+
+	// EnrichmentComplete is false while semantic enrichment and the
+	// graph-wide derivation passes are still running in the background.
+	// Ready can be true (references resolved and queryable) while this is
+	// still false. EnrichSeconds records the full warmup duration.
+	EnrichmentComplete bool  `json:"enrichment_complete"`
+	EnrichSeconds      int64 `json:"enrich_seconds,omitempty"`
 
 	// Workspaces aggregates TrackedRepos by workspace slug. Empty
 	// when no repo declares one (every repo defaults to its own

@@ -16,9 +16,12 @@ import (
 // readinessBroadcaster fans `notifications/workspace_readiness` push
 // events to subscribed MCP sessions. Where `diagnostics` is event-
 // driven off LSP publishDiagnostics, readiness is phase-driven off the
-// daemon warmup pipeline: snapshot_loaded → parallel_parse →
-// deferred_passes_all → global_resolve → end_batch → watcher_started →
-// ready, plus steady-state ticks when re-indexing finishes.
+// daemon warmup pipeline: snapshot_loaded → parallel_parse → resolve →
+// ready (references resolved, graph queryable) → deferred_passes_all →
+// global_resolve → end_batch → watcher_started → enrichment_complete,
+// plus steady-state ticks when re-indexing finishes. `ready` flips true
+// at the `ready` phase — ahead of enrichment — and stays true; the later
+// phases carry ready:true and report enrichment progress.
 //
 // Sessions opt in via `subscribe_workspace_readiness`. The current
 // state is replayed immediately as `initial_replay: true` so a freshly
@@ -237,7 +240,7 @@ func (s *Server) ReadinessPhase() (phase string, ready bool) {
 func (s *Server) registerReadinessTools() {
 	s.addTool(
 		mcp.NewTool("subscribe_workspace_readiness",
-			mcp.WithDescription("Opt the current MCP session into `notifications/workspace_readiness` push events. Once subscribed, every daemon warmup-phase transition (snapshot_loaded → parallel_parse → deferred_passes_all → global_resolve → end_batch → watcher_started → ready) plus steady-state re-index completions are pushed to your session as `{phase, ready, ts, ...}`. The last-known state is replayed immediately as `initial_replay: true` so a freshly connected client knows where the daemon is on its warmup curve. Pair with `unsubscribe_workspace_readiness` to opt back out."),
+			mcp.WithDescription("Opt the current MCP session into `notifications/workspace_readiness` push events. Once subscribed, every daemon warmup-phase transition (snapshot_loaded → parallel_parse → resolve → ready → deferred_passes_all → global_resolve → end_batch → watcher_started → enrichment_complete) plus steady-state re-index completions are pushed to your session as `{phase, ready, ts, ...}`. `ready` flips true at the `ready` phase — once references are resolved and the graph is queryable — ahead of the slower semantic enrichment, which completes at `enrichment_complete`. The last-known state is replayed immediately as `initial_replay: true` so a freshly connected client knows where the daemon is on its warmup curve. Pair with `unsubscribe_workspace_readiness` to opt back out."),
 		),
 		s.handleSubscribeReadiness,
 	)
