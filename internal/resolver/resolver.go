@@ -1565,23 +1565,16 @@ func (r *Resolver) resolveTypeOrFunc(e *graph.Edge, name string, stats *ResolveS
 
 	callerDir := filepath.Dir(e.FilePath)
 
-	// Prefer same-package type match.
-	for _, c := range candidates {
-		if (c.Kind == graph.KindType || c.Kind == graph.KindInterface) &&
-			filepath.Dir(c.FilePath) == callerDir {
-			e.To = c.ID
-			stats.Resolved++
-			return
-		}
-	}
-
-	// Fall back to any same-repo type match.
-	for _, c := range candidates {
-		if c.Kind == graph.KindType || c.Kind == graph.KindInterface {
-			e.To = c.ID
-			stats.Resolved++
-			return
-		}
+	// Land the edge on the canonical type/interface definition (real,
+	// exported, top-level, non-test), preferring same-package only as a
+	// tiebreak. See bestTypeCandidate / resolveTypeRef for the rationale:
+	// without this an instantiate / reference edge for a widely-imported
+	// or builder-pattern type lands on whichever same-named rival sorts
+	// first, hiding all usage from the canonical definition node.
+	if best := bestTypeCandidate(candidates, callerDir); best != nil {
+		e.To = best.ID
+		stats.Resolved++
+		return
 	}
 
 	// If no type found, try as function (e.g., bare function name passed as value).
@@ -1625,22 +1618,17 @@ func (r *Resolver) resolveTypeRef(e *graph.Edge, name string, stats *ResolveStat
 	}
 	callerDir := filepath.Dir(e.FilePath)
 
-	// Prefer a same-directory type / interface (same package).
-	for _, c := range candidates {
-		if (c.Kind == graph.KindType || c.Kind == graph.KindInterface) &&
-			filepath.Dir(c.FilePath) == callerDir {
-			e.To = c.ID
-			stats.Resolved++
-			return
-		}
-	}
-	// Otherwise any same-repo type / interface.
-	for _, c := range candidates {
-		if c.Kind == graph.KindType || c.Kind == graph.KindInterface {
-			e.To = c.ID
-			stats.Resolved++
-			return
-		}
+	// Land the edge on the canonical type/interface definition. The
+	// ranker prefers a real, exported, top-level, non-test definition
+	// over same-named rivals (external stubs, test/mock defs, private or
+	// nested member types), with same-package proximity folded in only as
+	// a tiebreak — so a same-directory test/stub no longer steals the
+	// edge from a cross-directory canonical def (the bug that made
+	// widely-imported and builder-pattern types look unused).
+	if best := bestTypeCandidate(candidates, callerDir); best != nil {
+		e.To = best.ID
+		stats.Resolved++
+		return
 	}
 	stats.Unresolved++
 }
@@ -2145,6 +2133,173 @@ func nodeReceiverType(n *graph.Node) string {
 		return rt
 	}
 	return ""
+}
+
+// resolverTestPathRe-equivalent: a path-shaped test detector that the
+// candidate ranker uses to demote definitions that live in test sources.
+// It covers the file-suffix conventions (Go `_test.`, JS/TS `.test.` /
+// `.spec.`, Python `test_` prefix) and the directory conventions that the
+// JVM ecosystems use heavily and that a base-name check alone would miss
+// (`src/test/`, `src/jvmTest/`, `src/androidTest/`, `__tests__/`, …).
+// Kept resolver-local so the resolver does not import internal/analysis
+// (which depends on graph + resolver and would form an import cycle).
+func isTestSourcePath(path string) bool {
+	if path == "" {
+		return false
+	}
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case strings.Contains(base, "_test."),
+		strings.Contains(base, ".test."),
+		strings.Contains(base, ".spec."),
+		strings.HasPrefix(base, "test_"):
+		return true
+	}
+	// Directory conventions. The slashes are normalised to "/" already on
+	// the relative paths the indexer stores; guard the leading-segment
+	// case too so a top-level "test/" or "tests/" dir is caught.
+	for _, seg := range []string{
+		"/test/", "/tests/", "/__tests__/", "/testing/",
+		"/jvmtest/", "/androidtest/", "/commontest/", "/androidhosttest/",
+		"/src/test/", "/test-utils/",
+	} {
+		if strings.Contains(lower, seg) {
+			return true
+		}
+	}
+	if strings.HasPrefix(lower, "test/") || strings.HasPrefix(lower, "tests/") {
+		return true
+	}
+	return false
+}
+
+// nodeIsExportedType reports whether a type/interface candidate is part
+// of the module's public surface. Two signals, in order: an explicit
+// `Meta["visibility"]` stamped by the extractor (Kotlin/TS/Swift/Java/…
+// emit "public" | "private" | "internal" | "protected"), and the
+// Go/Rust capitalisation convention as a fallback for languages that do
+// not stamp visibility. Unknown → treated as exported, so a candidate
+// that simply lacks the metadata is never demoted below an explicitly
+// private one.
+func nodeIsExportedType(n *graph.Node) bool {
+	if n.Meta != nil {
+		if vis, ok := n.Meta["visibility"].(string); ok && vis != "" {
+			switch strings.ToLower(vis) {
+			case "private", "internal", "fileprivate":
+				return false
+			default:
+				return true
+			}
+		}
+	}
+	// Capitalisation fallback (Go exported, Rust `pub` types are PascalCase
+	// by convention but not enforced — capitalisation is a weak signal,
+	// only used to break ties when no visibility metadata exists).
+	if n.Name == "" {
+		return true
+	}
+	r := rune(n.Name[0])
+	return r < 'a' || r > 'z'
+}
+
+// nodeIsNestedType reports whether a type candidate is a member /
+// nested type rather than a top-level definition — e.g. the inner
+// `Foo.Builder` rather than the top-level `Foo`. Detected from the
+// dotted qualified name (`Foo.Builder`) the extractor emits for nested
+// types in languages that keep the enclosing-type prefix. Languages
+// that flatten nested names to the bare leaf (so `Foo.Builder` is just
+// `Builder`) carry no nesting signal here — those candidates tie and
+// fall through to the deterministic id-order tiebreak.
+func nodeIsNestedType(n *graph.Node) bool {
+	return strings.Contains(n.Name, ".")
+}
+
+// typeCandidateRank scores a type/interface candidate for an
+// `unresolved::Name` type-position / reference / instantiate edge so
+// the resolver lands the edge on the *canonical* definition — the same
+// node search_symbols returns — rather than whichever same-named rival
+// (an external/stub node, a test-file or mock definition, a private /
+// nested member type) happens to sort first. Higher rank wins. The
+// fields are weighted most-significant-first; same-package proximity is
+// folded in by the caller as a final tiebreak so a genuinely local type
+// still wins among otherwise-equal candidates without letting a
+// same-directory test/stub beat a cross-directory canonical def.
+func typeCandidateRank(n *graph.Node) int {
+	rank := 0
+	// (1) A real, in-repo definition beats a synthetic stub / external
+	// placeholder by the widest margin.
+	if !graph.IsStub(n.ID) && !nodeIsSyntheticOrExternal(n) {
+		rank += 1000
+	}
+	// (2) A non-test definition beats a test/mock definition.
+	if !isTestSourcePath(n.FilePath) {
+		rank += 100
+	}
+	// (3) A top-level type beats a nested / member type.
+	if !nodeIsNestedType(n) {
+		rank += 10
+	}
+	// (4) An exported / public type beats a private / internal one.
+	if nodeIsExportedType(n) {
+		rank += 1
+	}
+	return rank
+}
+
+// nodeIsSyntheticOrExternal reports whether a node is a synthetic
+// placeholder (external-call terminal, import alias, re-export shell)
+// rather than a real source definition. These carry explicit Meta flags
+// stamped by the synthesis passes.
+func nodeIsSyntheticOrExternal(n *graph.Node) bool {
+	if n.Meta == nil {
+		return false
+	}
+	for _, k := range []string{"external", "external_call", "synthetic", "is_stub", "reexport"} {
+		if b, ok := n.Meta[k].(bool); ok && b {
+			return true
+		}
+	}
+	return false
+}
+
+// bestTypeCandidate picks the canonical type/interface definition from a
+// candidate slice for a type-position / reference / instantiate edge.
+// Candidates are ranked by typeCandidateRank (real-def > non-test >
+// top-level > exported); ties are broken by same-package proximity to
+// the caller's directory, then by lexicographically-smallest id for a
+// stable, deterministic result across runs and backends. Returns nil
+// when no KindType / KindInterface candidate exists.
+func bestTypeCandidate(candidates []*graph.Node, callerDir string) *graph.Node {
+	var best *graph.Node
+	bestRank := -1
+	bestSameDir := false
+	for _, c := range candidates {
+		if c.Kind != graph.KindType && c.Kind != graph.KindInterface {
+			continue
+		}
+		rank := typeCandidateRank(c)
+		sameDir := filepath.Dir(c.FilePath) == callerDir
+		if best == nil || candidateBeats(rank, sameDir, c.ID, bestRank, bestSameDir, best.ID) {
+			best, bestRank, bestSameDir = c, rank, sameDir
+		}
+	}
+	return best
+}
+
+// candidateBeats reports whether a candidate (rank/sameDir/id) should
+// replace the current best, applying the tiebreak order: higher rank,
+// then same-package proximity, then lexicographically-smallest id (for a
+// stable, deterministic result independent of candidate-iteration order
+// across in-memory and disk backends).
+func candidateBeats(rank int, sameDir bool, id string, bestRank int, bestSameDir bool, bestID string) bool {
+	if rank != bestRank {
+		return rank > bestRank
+	}
+	if sameDir != bestSameDir {
+		return sameDir
+	}
+	return id < bestID
 }
 
 // memberMethodInfosByType returns the storage layer's per-type member
