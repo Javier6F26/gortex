@@ -57,6 +57,15 @@ func emitRustReferenceForms(root *sitter.Node, funcRanges []funcRange, fileID, f
 	}
 	seen := make(map[string]bool)
 
+	// File-wide set of declared type-parameter names (`<T>`, `<K, V>` on
+	// any fn / impl / struct / enum / trait). A name in this set is a
+	// type-variable, not a real type, so a `type_arguments` member that
+	// names one (`HashMap<K, Bar>` → K) must not become a type reference.
+	// This is the precise signal Rust's grammar otherwise hides: a
+	// type-param is spelled with the same `type_identifier` node as a real
+	// type, so only the declaration site distinguishes them.
+	typeParams := rustDeclaredTypeParams(root, src)
+
 	owner := func(line int) string {
 		if id := findEnclosingFunc(funcRanges, line); id != "" {
 			return id
@@ -211,9 +220,100 @@ func emitRustReferenceForms(root *sitter.Node, funcRanges []funcRange, fileID, f
 			// `#[derive(Foo, Bar)]` — each derive macro name is a static
 			// reference to a trait/derive. Other attributes are ignored.
 			emitRustDeriveRefs(n, owner(line), src, emitRef, line)
+
+		case "type_arguments":
+			// Generic argument list `<Foo>`, `<K, Bar>`, `<Foo, MyError>`,
+			// `<dyn Trait>` — the element types the head wrapper carries.
+			// The annotation / param / return passes only project the head
+			// type of a `generic_type` (and canonicalize drops every arg of
+			// a non-wrapper like HashMap, plus the error arm of Result), so
+			// each arg type a generic mentions is otherwise lost. Emit a
+			// `generic_arg` reference for every named type child here.
+			//
+			// Nesting is handled by the walker: `HashMap<K, Vec<Bar>>` has
+			// an inner `Vec<Bar>` whose own `type_arguments` node this walk
+			// visits separately, so for a `generic_type` arg we record only
+			// its head spelling (Vec) and let that nested visit record Bar.
+			// emitRef's canonicalize + primitive/capitalization gates drop
+			// type-params (K), primitives (i32/str/String), lifetimes, and
+			// lowercase names exactly as the other Rust reference forms do.
+			emitArg := func(spelling string) {
+				canon := canonicalizeRustTypeRef(spelling)
+				if canon == "" || typeParams[canon] {
+					return
+				}
+				emitRef(owner(line), canon, graph.RefContextGenericArg, line)
+			}
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if c == nil {
+					continue
+				}
+				switch c.Type() {
+				case "type_identifier", "scoped_type_identifier":
+					emitArg(c.Content(src))
+				case "generic_type":
+					// Record the head only; the nested type_arguments visit
+					// records the inner args. Strip the `<...>` tail so
+					// canonicalize doesn't unwrap a wrapper head to its inner.
+					head := c.Content(src)
+					if idx := strings.IndexByte(head, '<'); idx > 0 {
+						head = head[:idx]
+					}
+					emitArg(head)
+				case "dynamic_type":
+					// `<dyn Trait>` — the dynamic_type case of the outer
+					// switch also fires for this node, but that is the
+					// `inherit` role; record the generic_arg role too.
+					emitArg(c.Content(src))
+				}
+			}
 		}
 		return true
 	})
+}
+
+// rustDeclaredTypeParams returns the set of type-parameter names declared
+// anywhere in the tree (`fn f<T>`, `impl<K, V>`, `struct S<E>`, …). A
+// `type_arguments` member whose name is in this set is a type-variable
+// reference, not a real type, and the generic_arg pass drops it so it
+// never produces a spurious `unresolved::<param>` edge. The set is
+// file-wide rather than per-scope: a `T` used as a generic arg in one fn
+// is overwhelmingly the same `T` the enclosing item declares, and a real
+// one-letter type that happens to collide with a param name elsewhere is
+// vanishingly rare next to the false positives a per-letter heuristic
+// would cause. Lifetimes carry their own node type and are ignored.
+func rustDeclaredTypeParams(root *sitter.Node, src []byte) map[string]bool {
+	params := map[string]bool{}
+	walkRustNodes(root, func(n *sitter.Node) bool {
+		if n.Type() != "type_parameters" {
+			return true
+		}
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			tp := n.NamedChild(i)
+			if tp == nil {
+				continue
+			}
+			switch tp.Type() {
+			case "lifetime", "const_parameter":
+				continue
+			case "type_identifier":
+				params[strings.TrimSpace(tp.Content(src))] = true
+			default:
+				// Constrained (`<T: Clone>`, `<T = u8>`) — the param name is
+				// the first type_identifier child.
+				for j := 0; j < int(tp.NamedChildCount()); j++ {
+					c := tp.NamedChild(j)
+					if c != nil && c.Type() == "type_identifier" {
+						params[strings.TrimSpace(c.Content(src))] = true
+						break
+					}
+				}
+			}
+		}
+		return true
+	})
+	return params
 }
 
 // emitRustDeriveRefs pulls the derive-macro names out of a

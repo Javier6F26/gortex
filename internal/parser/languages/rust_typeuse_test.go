@@ -76,6 +76,61 @@ func TestRustTypeUse_LetBindingWrappers(t *testing.T) {
 	}
 }
 
+// TestRustTypeUse_GenericArgs asserts that the element types inside a
+// generic argument list are captured as `generic_arg` reference edges in
+// every position — a let annotation, a parameter, a return type, and a
+// nested generic — while type-params and primitives are dropped. The
+// annotation / param / return passes only project the head of a
+// `generic_type` (and canonicalize loses every arg of a non-wrapper like
+// HashMap, plus the error arm of Result), so this is the surface those
+// passes leave uncovered.
+func TestRustTypeUse_GenericArgs(t *testing.T) {
+	src := `fn run<K>(m: HashMap<K, Bar>) -> Result<Baz, MyError> {
+    let x: Vec<Foo> = make();
+    let y: HashMap<K, Vec<Inner>> = make();
+    let n: Vec<u8> = bytes();
+    todo!()
+}
+`
+	_, edges := runRustExtract(t, "src/lib.rs", src)
+
+	// let annotation: Vec<Foo> — the element type Foo.
+	if !hasRef(t, edges, "Foo", graph.RefContextGenericArg) {
+		t.Errorf("let x: Vec<Foo> must emit generic_arg → Foo")
+	}
+	// parameter: HashMap<K, Bar> — HashMap is not a wrapper, so the head
+	// pass loses Bar; the generic_arg pass must recover it.
+	if !hasRef(t, edges, "Bar", graph.RefContextGenericArg) {
+		t.Errorf("param HashMap<K, Bar> must emit generic_arg → Bar")
+	}
+	// return type: Result<Baz, MyError> — both arms, including the error
+	// arm canonicalize drops.
+	if !hasRef(t, edges, "Baz", graph.RefContextGenericArg) {
+		t.Errorf("return Result<Baz, MyError> must emit generic_arg → Baz")
+	}
+	if !hasRef(t, edges, "MyError", graph.RefContextGenericArg) {
+		t.Errorf("return Result<Baz, MyError> must emit generic_arg → MyError")
+	}
+	// nested generic: HashMap<K, Vec<Inner>> — the inner element type.
+	if !hasRef(t, edges, "Inner", graph.RefContextGenericArg) {
+		t.Errorf("nested HashMap<K, Vec<Inner>> must emit generic_arg → Inner")
+	}
+
+	// Negatives: a type-parameter (K) and a primitive arg (u8) must never
+	// produce a generic_arg edge.
+	for _, e := range edges {
+		if e.Kind != graph.EdgeReferences || refEdgeUseKind(e) != graph.RefContextGenericArg {
+			continue
+		}
+		switch e.To {
+		case "unresolved::K":
+			t.Errorf("type-parameter K must not emit a generic_arg edge")
+		case "unresolved::u8":
+			t.Errorf("primitive u8 must not emit a generic_arg edge")
+		}
+	}
+}
+
 // TestRustTypeUse_TopLevelLetFallsBackToFile asserts a let binding at the
 // crate root (no enclosing function) attributes its type-use edge to the
 // file node rather than dropping it.
