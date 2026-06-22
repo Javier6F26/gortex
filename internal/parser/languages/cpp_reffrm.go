@@ -25,6 +25,13 @@ import (
 //   - scope / static access — `Foo::BAR`, `Foo::method()`
 //     (qualified_identifier whose scope is a Capitalized namespace / type)
 //     → EdgeReferences, ref_context=static_access.
+//   - generic / template arguments — every named type inside a
+//     `template_argument_list` (`std::vector<Foo>`, `std::map<K, Bar>`,
+//     `Foo<Bar>`, nested `std::map<std::string, std::vector<Widget>>`) →
+//     EdgeReferences, ref_context=generic_arg. The declaration-position
+//     canonicaliser keeps only the template head (or unwraps a single
+//     container arg), so the element types of multi-argument / user
+//     generics were otherwise dropped.
 //
 // emitCppReferenceForms runs one post-pass tree walk (mirroring
 // collectCppTypeUseEdges) and emits these edges, attributed to the
@@ -87,6 +94,8 @@ func emitCppReferenceForms(root *sitter.Node, src []byte, filePath, fileID strin
 			emitCppQualifiedCall(n, src, filePath, funcRanges, result, seen)
 		case "qualified_identifier":
 			emitCppStaticAccess(n, src, filePath, funcRanges, result, seen)
+		case "template_argument_list":
+			emitCppGenericArgs(n, src, filePath, funcRanges, result, seen)
 		}
 		for i := 0; i < int(n.NamedChildCount()); i++ {
 			walk(n.NamedChild(i))
@@ -316,6 +325,34 @@ func emitCppStaticAccess(n *sitter.Node, src []byte, filePath string, funcRanges
 	line := int(n.StartPoint().Row) + 1
 	owner := findEnclosingFunc(funcRanges, line)
 	emitCppReferenceEdge(owner, scope, graph.RefContextStaticAccess, filePath, line, result, seen)
+}
+
+// emitCppGenericArgs handles a `template_argument_list` (`<Foo>`,
+// `<std::string, Bar>`, `<int, 5>`): every `type_descriptor` child names a
+// type argument, which is a genuine reference to that type. Each is
+// attributed to the enclosing function/method via funcRanges (a top-level
+// generic outside any function — e.g. a global `std::vector<Foo> g;` — has
+// no owner and is skipped, matching the type-use pass). Non-type arguments
+// (integer constants, which the grammar nests as `number_literal` rather
+// than `type_descriptor`) are not iterated, and primitives / lowercase
+// leaves are dropped by emitCppReferenceEdge's canonicaliser +
+// Capitalization gate, so `<int, 5>` and `<std::string>` contribute
+// nothing. Nesting is handled by the enclosing tree walk, which reaches the
+// inner `template_argument_list` of `std::map<K, std::vector<Widget>>` as
+// its own node.
+func emitCppGenericArgs(n *sitter.Node, src []byte, filePath string, funcRanges []funcRange, result *parser.ExtractionResult, seen map[string]bool) {
+	line := int(n.StartPoint().Row) + 1
+	owner := findEnclosingFunc(funcRanges, line)
+	if owner == "" {
+		return
+	}
+	for i := 0; i < int(n.NamedChildCount()); i++ {
+		ch := n.NamedChild(i)
+		if ch == nil || ch.Type() != "type_descriptor" {
+			continue
+		}
+		emitCppReferenceEdge(owner, ch.Content(src), graph.RefContextGenericArg, filePath, line, result, seen)
+	}
 }
 
 // cppQualifiedScopeType returns the Capitalized type that names the scope

@@ -166,6 +166,56 @@ func TestCppRefForm_Negatives(t *testing.T) {
 	}
 }
 
+// TestCppRefForm_GenericArgs: a type named inside a template_argument_list
+// is a generic_arg reference, in every position — a variable declaration
+// (`std::vector<Foo>`), a function parameter (`std::map<std::string, Bar>`),
+// and a nested template (`std::map<int, std::vector<Widget>>`). A primitive
+// / non-type argument (`int`, the integer constant `5`) emits nothing.
+func TestCppRefForm_GenericArgs(t *testing.T) {
+	edges := cppRefEdges(t, `void use(std::map<std::string, Bar> m) {
+  std::vector<Foo> x;
+  std::map<int, std::vector<Widget>> nested;
+  std::array<int, 5> a;
+}`)
+	// Variable-decl template arg.
+	if !hasCppRefEdge(edges, "unresolved::Foo", graph.EdgeReferences, graph.RefContextGenericArg) {
+		t.Fatalf("want generic_arg -> unresolved::Foo (variable decl); got %+v", edges)
+	}
+	// Parameter template arg (the non-wrapper map's second argument).
+	if !hasCppRefEdge(edges, "unresolved::Bar", graph.EdgeReferences, graph.RefContextGenericArg) {
+		t.Fatalf("want generic_arg -> unresolved::Bar (parameter); got %+v", edges)
+	}
+	// Nested template arg.
+	if !hasCppRefEdge(edges, "unresolved::Widget", graph.EdgeReferences, graph.RefContextGenericArg) {
+		t.Fatalf("want generic_arg -> unresolved::Widget (nested template); got %+v", edges)
+	}
+	// Primitives / std aliases / integer constants must not appear as
+	// generic_arg references.
+	for _, e := range edges {
+		if e.refContext != graph.RefContextGenericArg {
+			continue
+		}
+		switch e.to {
+		case "unresolved::int", "unresolved::string", "unresolved::5",
+			"unresolved::vector", "unresolved::map", "unresolved::array":
+			t.Fatalf("false positive: generic_arg edge %+v for a non-user-type argument", e)
+		}
+	}
+	// generic_arg edges must be OriginASTResolved so the cross-pkg guard
+	// doesn't revert them.
+	res, err := NewCppExtractor().Extract("x.cpp", []byte(`void use() { std::vector<Foo> x; }`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeReferences && e.To == "unresolved::Foo" {
+			if rc, _ := e.Meta["ref_context"].(string); rc == graph.RefContextGenericArg && e.Origin != graph.OriginASTResolved {
+				t.Fatalf("generic_arg edge origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+			}
+		}
+	}
+}
+
 func TestCppRefForm_StdQualifiedTypeReducesToTrailing(t *testing.T) {
 	// A std::-qualified path whose trailing segment is a Capitalized type
 	// reduces to that type; a lowercase trailing one emits nothing.
