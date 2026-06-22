@@ -181,3 +181,32 @@ fun run(svc: Service) {
 		t.Fatalf("lowercase receiver svc must not produce a static_access reference")
 	}
 }
+
+// TestKotlinReferenceForm_GenericArgs: type arguments inside a generic — in any
+// type position (property annotation, parameter, nested return) — are captured
+// as generic_arg references. The type-annotation pass strips the `<…>` and keeps
+// only the head type, so without this the element types are invisible to
+// find_usages. Primitive args (String) are dropped.
+func TestKotlinReferenceForm_GenericArgs(t *testing.T) {
+	edges := extractKotlinRefEdges(t, `package p
+class Holder {
+  val client: Lazy<OkHttpClient> = lazy { something() }
+  fun chain(list: List<Interceptor>): Map<String, List<Response>> {
+    return emptyMap()
+  }
+}
+`)
+	for _, want := range []string{
+		"unresolved::OkHttpClient", // Lazy<OkHttpClient> property annotation
+		"unresolved::Interceptor",  // List<Interceptor> parameter
+		"unresolved::Response",     // nested Map<String, List<Response>> return
+	} {
+		if !hasRefEdge(edges, graph.EdgeReferences, want, "generic_arg") {
+			t.Fatalf("expected EdgeReferences -> %s (generic_arg); got %+v", want, edges)
+		}
+	}
+	// Primitive generic args (String) must not produce a reference edge.
+	if countTo(edges, "unresolved::String") != 0 {
+		t.Fatalf("primitive String generic arg must not produce a reference edge; got %+v", edges)
+	}
+}

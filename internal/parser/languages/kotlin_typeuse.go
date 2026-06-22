@@ -11,7 +11,7 @@ import (
 // find_usages of a type surfaces every place the type is mentioned — not
 // just the declarations that name it in a type position.
 //
-// Four forms, each emitted as an edge to `unresolved::<TypeName>` carrying
+// Five forms, each emitted as an edge to `unresolved::<TypeName>` carrying
 // Meta["ref_context"], attributed to the enclosing function (or the file node
 // for top-level expressions):
 //
@@ -27,6 +27,10 @@ import (
 //   - inherit        `class X : Bar(), Iface` (delegation_specifier) — the
 //     supertype / interface. EdgeExtends for a constructor_invocation superclass,
 //     EdgeReferences for a bare user_type supertype.
+//   - generic_arg    `List<OkHttpClient>` / `Map<String, Interceptor>` — each
+//     type named inside a type_arguments block, in any type position. The
+//     type-annotation / function-shape passes strip the `<…>` arguments, so the
+//     element types are captured here. EdgeReferences to each argument type.
 //
 // Scope/shadow safety: only Capitalized names are treated as types (so a
 // lowercase function call `foo()` or a local variable read never produces a
@@ -154,6 +158,39 @@ func emitKotlinReferenceForms(root *sitter.Node, src []byte, filePath, fileID st
 					emit(ownerID, c.Content(src), "inherit", graph.EdgeReferences, line)
 				}
 			}
+
+		case "type_arguments":
+			// Generic / collection element types: `List<OkHttpClient>`,
+			// `Map<String, Interceptor>`, `Lazy<Response>` in any type position
+			// (annotation, parameter, return, supertype, cast, explicit call
+			// type-arg). The type-annotation / function-shape passes keep only
+			// the head type and strip the `<…>` arguments, so the element types
+			// would otherwise be lost. Every type_identifier inside a
+			// type_arguments block names a type; emit each as a generic_arg
+			// reference (normalizeKotlinTypeName drops primitives + lowercase, so
+			// `List<String>` adds nothing extra). Nested generics like
+			// `Map<K, List<Foo>>` are reached when walkNodes visits the inner
+			// type_arguments node on its own pass.
+			gaLine := int(n.StartPoint().Row) + 1
+			gaOwner := owner(gaLine)
+			var collectGenericArgs func(*sitter.Node)
+			collectGenericArgs = func(m *sitter.Node) {
+				for i := 0; i < int(m.NamedChildCount()); i++ {
+					c := m.NamedChild(i)
+					if c == nil {
+						continue
+					}
+					switch c.Type() {
+					case "type_identifier":
+						emit(gaOwner, c.Content(src), "generic_arg", graph.EdgeReferences, gaLine)
+					case "type_arguments":
+						// Nested generic — walkNodes visits it separately.
+					default:
+						collectGenericArgs(c)
+					}
+				}
+			}
+			collectGenericArgs(n)
 		}
 	})
 }
