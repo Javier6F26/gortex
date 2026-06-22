@@ -41,7 +41,9 @@ func hasUseKindTo(edges []*graph.Edge, to, useKind string) bool {
 
 // TestJavaRefForm_Instantiation pins `new Foo()` / `new Foo[]` /
 // `new Outer.Inner()` → EdgeInstantiates (ref_context=instantiate), and
-// generic args of `new ArrayList<Request>()` → Request.
+// the generic arg of `new ArrayList<Request>()` → Request as a
+// generic_arg reference (handled by the type_arguments walker, not the
+// instantiation case).
 func TestJavaRefForm_Instantiation(t *testing.T) {
 	src := `package app;
 public class Factory {
@@ -66,8 +68,8 @@ public class Factory {
 	if refEdge(edges, graph.EdgeInstantiates, "unresolved::ArrayList", "instantiate") == nil {
 		t.Errorf("expected EdgeInstantiates -> ArrayList for `new java.util.ArrayList<>()`")
 	}
-	if refEdge(edges, graph.EdgeInstantiates, "unresolved::Request", "instantiate") == nil {
-		t.Errorf("expected EdgeInstantiates -> Request (generic arg of new ArrayList<Request>())")
+	if refEdge(edges, graph.EdgeReferences, "unresolved::Request", "generic_arg") == nil {
+		t.Errorf("expected EdgeReferences -> Request (generic_arg of new ArrayList<Request>())")
 	}
 }
 
@@ -175,7 +177,7 @@ public class C {
 		}
 		uk, _ := e.Meta["ref_context"].(string)
 		switch uk {
-		case "instantiate", "cast", "inherit", "static_access":
+		case "instantiate", "cast", "inherit", "static_access", "generic_arg":
 			to := e.To
 			// Strip the unresolved:: prefix for the check.
 			const p = "unresolved::"
@@ -203,10 +205,87 @@ public class C {
 		t.Errorf("instance receiver obj emitted a static_access reference")
 	}
 	for _, prim := range []string{"int", "field", "name", "value", "lower"} {
-		for _, uk := range []string{"instantiate", "cast", "inherit", "static_access"} {
+		for _, uk := range []string{"instantiate", "cast", "inherit", "static_access", "generic_arg"} {
 			if hasUseKindTo(edges, "unresolved::"+prim, uk) {
 				t.Errorf("primitive/lowercase %q emitted a %s reference-form edge", prim, uk)
 			}
 		}
+	}
+}
+
+// TestJavaRefForm_GenericArgs pins that the element types of a
+// `type_arguments` node are emitted as generic_arg references
+// (EdgeReferences, OriginASTResolved) in *every* position, not just the
+// expression positions. The declaration-position passes canonicalize the
+// annotation to its outer/wrapped type and drop the remaining element
+// types, so without the type_arguments walker `Foo` in `Map<String, Foo>`
+// is edge-less. This covers field, parameter, return, local, nested, and
+// instantiation/cast/inherit positions, and confirms String / wildcards /
+// primitives in the arg list contribute nothing.
+func TestJavaRefForm_GenericArgs(t *testing.T) {
+	src := `package app;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+public class Svc<T extends Bound> extends Base<Sup> implements Sink<Iface> {
+	private Map<String, FieldT> fieldMap;
+	private Cache<FieldU> fieldCache;
+	public Optional<RetT> getOpt(List<ParamT> items, Map<String, List<NestT>> nested) {
+		Map<String, LocalT> local = build();
+		Repository<WidgetT> repo = make();
+		List<NewT> made = new java.util.ArrayList<NewT>();
+		Object o = (Holder<CastT>) made;
+		boolean b = o instanceof Box<TestT>;
+		List<? extends WildLow> wild = wild();
+		List<Integer> nums = null;
+		return null;
+	}
+}
+`
+	_, edges := runJavaExtract(t, "app/Svc.java", src)
+
+	// Every element type, regardless of position, must surface as a
+	// generic_arg EdgeReferences (OriginASTResolved).
+	wantArgs := []string{
+		"FieldT",  // field Map<String, FieldT>
+		"FieldU",  // field Cache<FieldU>
+		"RetT",    // return Optional<RetT>
+		"ParamT",  // param List<ParamT>
+		"NestT",   // nested param Map<String, List<NestT>>
+		"LocalT",  // local Map<String, LocalT>
+		"WidgetT", // local Repository<WidgetT>
+		"NewT",    // new ArrayList<NewT>()
+		"CastT",   // (Holder<CastT>) cast
+		"TestT",   // instanceof Box<TestT>
+		"Sup",     // extends Base<Sup>
+		"Iface",   // implements Sink<Iface>
+	}
+	for _, want := range wantArgs {
+		e := refEdge(edges, graph.EdgeReferences, "unresolved::"+want, "generic_arg")
+		if e == nil {
+			t.Errorf("expected EdgeReferences -> %s (ref_context=generic_arg)", want)
+			continue
+		}
+		if e.Origin != graph.OriginASTResolved {
+			t.Errorf("generic_arg -> %s Origin = %q, want OriginASTResolved", want, e.Origin)
+		}
+	}
+
+	// Wildcard bound type (`? extends WildLow`) is also an element mention.
+	if refEdge(edges, graph.EdgeReferences, "unresolved::WildLow", "generic_arg") == nil {
+		t.Errorf("expected EdgeReferences -> WildLow (generic_arg of `? extends WildLow`)")
+	}
+
+	// `String` is treated as a primitive by isJavaPrimitive (same gate the
+	// declaration-position passes use), so a `Map<String, …>` key must NOT
+	// produce a generic_arg reference.
+	if hasUseKindTo(edges, "unresolved::String", "generic_arg") {
+		t.Errorf("String must not be emitted as a generic_arg reference (primitive gate)")
+	}
+	// A boxed type that is *not* on the primitive list (Integer) is a real
+	// type reference and must surface, confirming the gate is the same one
+	// the type-position edges use rather than an over-broad drop.
+	if refEdge(edges, graph.EdgeReferences, "unresolved::Integer", "generic_arg") == nil {
+		t.Errorf("expected EdgeReferences -> Integer (generic_arg of List<Integer>)")
 	}
 }

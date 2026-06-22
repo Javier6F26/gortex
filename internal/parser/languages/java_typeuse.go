@@ -16,9 +16,16 @@ import (
 // genuine `find_usages(Type)` hit that, without an LSP, was previously
 // edge-less:
 //
-//   - INSTANTIATION  `new Foo()`, `new Foo[3]`, `new Outer.Inner()`,
-//     plus the generic arguments of `new ArrayList<Request>()` —
+//   - INSTANTIATION  `new Foo()`, `new Foo[3]`, `new Outer.Inner()` —
 //     graph.EdgeInstantiates, ref_context=instantiate.
+//   - GENERIC ARGS   the element types of every `type_arguments` node, in
+//     any position (`Map<String, Foo>` field/param/return/local, plus
+//     `new List<Foo>()`, `(List<Foo>) x`, `extends Base<Foo>`). The
+//     declaration-position passes canonicalize an annotation to its
+//     outer/wrapped type and drop the rest, so these element types were
+//     otherwise edge-less. EdgeReferences, ref_context=generic_arg.
+//     Nested generics (`Map<K, List<V>>`) are covered because the walker
+//     descends into the inner type_arguments.
 //   - INHERITANCE    `class X extends Foo implements Bar, Baz` — the base
 //     extractor only stamps `scope_parent` meta (for the method-scope
 //     resolver), so the type reference for find_usages was missing.
@@ -83,15 +90,51 @@ func emitJavaReferenceForms(root *sitter.Node, src []byte, filePath, fileID stri
 		}
 		line := int(n.StartPoint().Row) + 1
 		switch n.Type() {
+		case "type_arguments":
+			// `<Foo>` / `<String, Foo>` / `<String, List<Foo>>` — every named
+			// element type is a genuine find_usages(Foo) hit. This single case
+			// covers generic arguments in *all* positions the AST can place a
+			// `type_arguments` node: field / parameter / return / local
+			// declarations (`Map<String, Foo> m`, `Optional<Foo> getX()`),
+			// as well as the expression positions (`new List<Foo>()`,
+			// `(List<Foo>) x`, `extends Base<Foo>`). The declaration-position
+			// passes (emitJavaFunctionShape / emitJavaTypeUseEdges) canonicalize
+			// the annotation to its outer/wrapped type and drop the remaining
+			// element types, so without this case `Foo` in `Map<String, Foo>`
+			// was edge-less. Nested generics are handled because the walker
+			// also descends into the inner `type_arguments` node and re-enters
+			// this case for it. A `wildcard` element (`? extends Foo` /
+			// `? super Foo`) carries its bound as a type-node child, so its
+			// bound is emitted too. Each element is canonicalized +
+			// primitive-gated by emit, so `<String, int>` contributes nothing.
+			emitArg := func(c *sitter.Node) {
+				if c == nil {
+					return
+				}
+				if isJavaTypeNode(c.Type()) {
+					emit(strings.TrimSpace(c.Content(src)), line, "generic_arg", graph.EdgeReferences, graph.OriginASTResolved)
+					return
+				}
+				if c.Type() == "wildcard" {
+					for j := 0; j < int(c.NamedChildCount()); j++ {
+						if w := c.NamedChild(j); w != nil && isJavaTypeNode(w.Type()) {
+							emit(strings.TrimSpace(w.Content(src)), line, "generic_arg", graph.EdgeReferences, graph.OriginASTResolved)
+						}
+					}
+				}
+			}
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				emitArg(n.NamedChild(i))
+			}
+
 		case "object_creation_expression":
-			// `new Foo(...)` / `new Outer.Inner(...)` / `new List<Req>()`.
+			// `new Foo(...)` / `new Outer.Inner(...)` / `new List<Req>()`. The
+			// generic arguments of the created type (`new ArrayList<Request>()`
+			// → Request) are emitted by the `type_arguments` case above, which
+			// the walker reaches when it descends into this node.
 			if ty := javaCreatedTypeText(n, src); ty != "" {
 				emit(ty, line, "instantiate", graph.EdgeInstantiates, graph.OriginASTInferred)
 			}
-			// Generic arguments of the created type are themselves
-			// instantiation-position references (`new ArrayList<Request>()`
-			// uses Request).
-			emitJavaTypeArgRefs(n, src, line, "instantiate", graph.EdgeInstantiates, graph.OriginASTInferred, emit)
 
 		case "array_creation_expression":
 			// `new Foo[3]` — the element type child.
@@ -174,9 +217,12 @@ func isJavaTypeNode(t string) bool {
 }
 
 // emitJavaTypeChildRefs emits a reference for every direct named type
-// child of node (and their generic arguments). Used for cast /
-// instanceof / extends / implements clauses, where the type(s) sit as
-// direct children.
+// child of node. Used for cast / instanceof / extends / implements
+// clauses, where the type(s) sit as direct children. The generic
+// arguments those types carry (`extends Base<Foo>`) are emitted
+// separately by the `type_arguments` case of the main walker, which the
+// walk reaches when it descends into the child `generic_type` node — so
+// this helper deliberately does not recurse into them.
 func emitJavaTypeChildRefs(node *sitter.Node, src []byte, line int, useKind string, kind graph.EdgeKind, origin string, emit func(string, int, string, graph.EdgeKind, string)) {
 	for i := 0; i < int(node.NamedChildCount()); i++ {
 		c := node.NamedChild(i)
@@ -184,26 +230,7 @@ func emitJavaTypeChildRefs(node *sitter.Node, src []byte, line int, useKind stri
 			continue
 		}
 		emit(strings.TrimSpace(c.Content(src)), line, useKind, kind, origin)
-		emitJavaTypeArgRefs(c, src, line, useKind, kind, origin, emit)
 	}
-}
-
-// emitJavaTypeArgRefs walks the `type_arguments` subtree of node and
-// emits a reference for each named type argument (`<Request>` →
-// Request). Recurses through nested generics (`Map<K, List<V>>`).
-func emitJavaTypeArgRefs(node *sitter.Node, src []byte, line int, useKind string, kind graph.EdgeKind, origin string, emit func(string, int, string, graph.EdgeKind, string)) {
-	walkNodes(node, func(n *sitter.Node) {
-		if n == nil || n.Type() != "type_arguments" {
-			return
-		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			c := n.NamedChild(i)
-			if c == nil || !isJavaTypeNode(c.Type()) {
-				continue
-			}
-			emit(strings.TrimSpace(c.Content(src)), line, useKind, kind, origin)
-		}
-	})
 }
 
 // javaCreatedTypeText returns the raw type text of an
