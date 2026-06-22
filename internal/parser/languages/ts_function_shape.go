@@ -463,10 +463,10 @@ func emitTSParamNodes(ownerID string, params *sitter.Node, src []byte, filePath 
 			Line:     startLine,
 			Origin:   graph.OriginASTResolved,
 		})
-		if canon := canonicalizeTSTypeRef(typeName); canon != "" && !isTSPrimitive(canon) {
+		for _, ref := range tsTypeRefs(typeName) {
 			result.Edges = append(result.Edges, &graph.Edge{
 				From:     paramID,
-				To:       "unresolved::" + canon,
+				To:       "unresolved::" + ref,
 				Kind:     graph.EdgeTypedAs,
 				FilePath: filePath,
 				Line:     startLine,
@@ -482,14 +482,7 @@ func emitTSParamNodes(ownerID string, params *sitter.Node, src []byte, filePath 
 // (`A | B`) emit one edge per branch so traversals can find every
 // possible runtime return type.
 func emitTSReturnEdges(ownerID, returnText, filePath string, line int, result *parser.ExtractionResult) {
-	if returnText == "" {
-		return
-	}
-	for i, raw := range splitTSUnionType(returnText) {
-		t := canonicalizeTSTypeRef(raw)
-		if t == "" || isTSPrimitive(t) {
-			continue
-		}
+	for i, t := range tsTypeRefs(returnText) {
 		result.Edges = append(result.Edges, &graph.Edge{
 			From:     ownerID,
 			To:       "unresolved::" + t,
@@ -511,14 +504,7 @@ func emitTSReturnEdges(ownerID, returnText, filePath string, line int, result *p
 // without an LSP. Union / intersection branches each emit an edge,
 // mirroring emitTSReturnEdges; primitives are skipped.
 func emitTSTypeUseEdges(ownerID, typeText, filePath string, line int, result *parser.ExtractionResult) {
-	if typeText == "" {
-		return
-	}
-	for _, raw := range splitTSUnionType(typeText) {
-		t := canonicalizeTSTypeRef(raw)
-		if t == "" || isTSPrimitive(t) {
-			continue
-		}
+	for _, t := range tsTypeRefs(typeText) {
 		result.Edges = append(result.Edges, &graph.Edge{
 			From:     ownerID,
 			To:       "unresolved::" + t,
@@ -528,6 +514,135 @@ func emitTSTypeUseEdges(ownerID, typeText, filePath string, line int, result *pa
 			Origin:   graph.OriginASTInferred,
 		})
 	}
+}
+
+// tsBuiltinGenerics are container / utility generics whose own name is not
+// a useful cross-file reference (they have no repo definition) but whose
+// type arguments are — so tsTypeRefs recurses into them without emitting
+// the wrapper itself. A user-defined wrapper (NonDeleted<Foo>) is NOT in
+// this set, so both NonDeleted and Foo surface as references.
+var tsBuiltinGenerics = map[string]bool{
+	"Promise": true, "PromiseLike": true, "Awaited": true,
+	"Array": true, "ReadonlyArray": true,
+	"Map": true, "ReadonlyMap": true, "WeakMap": true,
+	"Set": true, "ReadonlySet": true, "WeakSet": true,
+	"Record": true, "Readonly": true, "Partial": true, "Required": true,
+	"Pick": true, "Omit": true, "Exclude": true, "Extract": true,
+	"NonNullable": true, "Parameters": true, "ReturnType": true,
+	"InstanceType": true, "Iterable": true, "IterableIterator": true,
+	"Iterator": true, "Generator": true,
+}
+
+// tsTypeRefs returns the distinct named type references in a TypeScript type
+// annotation, decomposing unions / intersections, `readonly`, arrays,
+// parentheses and generic type arguments. A type used only as a type
+// argument — `Map<string, Foo>`, `NonDeleted<Foo>`, `readonly Foo[]` —
+// surfaces as a reference; primitives and container/utility generics are
+// dropped (but recursed into). This is what lets find_usages land a type
+// that never appears bare, only wrapped.
+func tsTypeRefs(typeText string) []string {
+	var out []string
+	seen := map[string]bool{}
+	var walk func(t string)
+	walk = func(t string) {
+		t = strings.TrimSpace(t)
+		t = strings.TrimPrefix(t, "readonly ")
+		t = strings.TrimSpace(t)
+		for strings.HasSuffix(t, "[]") {
+			t = strings.TrimSpace(strings.TrimSuffix(t, "[]"))
+		}
+		for strings.HasPrefix(t, "(") && strings.HasSuffix(t, ")") {
+			t = strings.TrimSpace(t[1 : len(t)-1])
+		}
+		if t == "" {
+			return
+		}
+		if parts := splitTSUnionType(t); len(parts) > 1 {
+			for _, p := range parts {
+				walk(p)
+			}
+			return
+		}
+		if i := strings.IndexByte(t, '<'); i >= 0 && strings.HasSuffix(t, ">") {
+			addTSRef(strings.TrimSpace(t[:i]), &out, seen)
+			for _, arg := range splitTSTypeArgs(t[i+1 : len(t)-1]) {
+				walk(arg)
+			}
+			return
+		}
+		addTSRef(t, &out, seen)
+	}
+	walk(typeText)
+	return out
+}
+
+// addTSRef appends a bare named type to out (deduped) after stripping
+// keyof/typeof prefixes and module qualifiers, skipping primitives,
+// container/utility generics, and anything that is not a plain identifier
+// (string-literal types, object-type literals, mapped types).
+func addTSRef(name string, out *[]string, seen map[string]bool) {
+	name = strings.TrimSpace(name)
+	name = strings.TrimPrefix(name, "keyof ")
+	name = strings.TrimPrefix(name, "typeof ")
+	name = strings.TrimSpace(name)
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		name = name[i+1:]
+	}
+	if name == "" || isTSPrimitive(name) || tsBuiltinGenerics[name] || !isTSTypeName(name) || seen[name] {
+		return
+	}
+	seen[name] = true
+	*out = append(*out, name)
+}
+
+// isTSTypeName reports whether s is a plain (ASCII) type identifier, so a
+// string-literal type ("foo"), numeric literal, or object-type residue
+// never becomes a bogus unresolved target.
+func isTSTypeName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := c == '_' || c == '$' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		if i > 0 {
+			ok = ok || (c >= '0' && c <= '9')
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// splitTSTypeArgs splits a generic argument list at top-level commas,
+// respecting nested <>, (), {}, [].
+func splitTSTypeArgs(s string) []string {
+	var parts []string
+	depth := 0
+	cur := strings.Builder{}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '<', '(', '{', '[':
+			depth++
+		case '>', ')', '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, cur.String())
+				cur.Reset()
+				continue
+			}
+		}
+		cur.WriteByte(c)
+	}
+	if last := strings.TrimSpace(cur.String()); last != "" {
+		parts = append(parts, last)
+	}
+	return parts
 }
 
 // emitTSGenericParamNodes turns a TS function/class declaration's
@@ -691,4 +806,114 @@ func isTSPrimitive(t string) bool {
 		return true
 	}
 	return false
+}
+
+// emitTSTypeRefEdges emits one EdgeTypedAs per named type in typeText
+// from ownerID to unresolved::<name>, tagged with use_kind so a
+// traversal can tell a cast (`x as Foo`) from an alias body
+// (`type Bar = Foo`) from an annotation. Decomposition is delegated to
+// tsTypeRefs (unions / intersections / arrays / generics handled,
+// primitives + container generics dropped). De-duplicated per name so a
+// position firing twice can't double-emit.
+func emitTSTypeRefEdges(ownerID, typeText, filePath string, line int, useKind string, result *parser.ExtractionResult) {
+	if ownerID == "" || typeText == "" {
+		return
+	}
+	for _, name := range tsTypeRefs(typeText) {
+		result.Edges = append(result.Edges, &graph.Edge{
+			From:     ownerID,
+			To:       "unresolved::" + name,
+			Kind:     graph.EdgeTypedAs,
+			FilePath: filePath,
+			Line:     line,
+			Origin:   graph.OriginASTInferred,
+			Meta:     map[string]any{"use_kind": useKind},
+		})
+	}
+}
+
+// emitTSCastTypeRefs walks a parsed TS/TSX file and emits a cast
+// type-reference edge for every type assertion:
+//
+//   - as_expression       — `x as Foo`, `x as Foo[]`, `x as NonDeleted<Foo>`
+//   - satisfies_expression — `x satisfies Foo`
+//   - type_assertion      — `<Foo>x` (plain .ts only; the TSX grammar
+//     never produces this node because `<Foo>` is a JSX opening element)
+//
+// Each names the asserted type(s); the edge is EdgeTypedAs to
+// unresolved::<name> with use_kind:"cast", attributed to the enclosing
+// function (fallback: the file node). Decomposition (unions, generics,
+// arrays, primitive/container dropping) is delegated to tsTypeRefs via
+// emitTSTypeRefEdges. De-duplicated per (owner, name, line) so an
+// expression that a future query might also match elsewhere can't
+// double-emit.
+func emitTSCastTypeRefs(root *sitter.Node, src []byte, filePath, fileID string, funcRanges []funcRange, result *parser.ExtractionResult) {
+	if root == nil {
+		return
+	}
+	seen := map[string]bool{}
+	emit := func(typeText string, line int) {
+		typeText = strings.TrimSpace(typeText)
+		if typeText == "" {
+			return
+		}
+		ownerID := findEnclosingFunc(funcRanges, line)
+		if ownerID == "" {
+			ownerID = fileID
+		}
+		for _, name := range tsTypeRefs(typeText) {
+			key := ownerID + "\x00" + name + "\x00" + strconv.Itoa(line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result.Edges = append(result.Edges, &graph.Edge{
+				From:     ownerID,
+				To:       "unresolved::" + name,
+				Kind:     graph.EdgeTypedAs,
+				FilePath: filePath,
+				Line:     line,
+				Origin:   graph.OriginASTInferred,
+				Meta:     map[string]any{"use_kind": "cast"},
+			})
+		}
+	}
+	walkTSNodes(root, func(n *sitter.Node) bool {
+		switch n.Type() {
+		case "as_expression", "satisfies_expression":
+			// Shape: (as_expression <value> <type>) — the asserted type
+			// is the last named child (the first is the value expression).
+			if tn := tsCastTypeNode(n); tn != nil {
+				emit(tn.Content(src), int(n.StartPoint().Row)+1)
+			}
+		case "type_assertion":
+			// Shape: (type_assertion (type_arguments <type>) <value>) —
+			// the angle-bracket `<Foo>x` form, plain .ts only. The
+			// type_arguments text carries the surrounding `<…>`; the
+			// inner type_identifier(s) are the real reference, so trim
+			// the brackets before decomposing.
+			for i := 0; i < int(n.NamedChildCount()); i++ {
+				c := n.NamedChild(i)
+				if c != nil && c.Type() == "type_arguments" {
+					inner := strings.TrimSpace(c.Content(src))
+					inner = strings.TrimPrefix(inner, "<")
+					inner = strings.TrimSuffix(inner, ">")
+					emit(inner, int(n.StartPoint().Row)+1)
+					break
+				}
+			}
+		}
+		return true
+	})
+}
+
+// tsCastTypeNode returns the asserted-type node of an as_expression or
+// satisfies_expression — the last named child, since the value
+// expression precedes it. Returns nil for a malformed node.
+func tsCastTypeNode(n *sitter.Node) *sitter.Node {
+	count := int(n.NamedChildCount())
+	if count == 0 {
+		return nil
+	}
+	return n.NamedChild(count - 1)
 }
