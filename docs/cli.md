@@ -3,6 +3,7 @@
 ```
 gortex install               One-time machine-wide setup (user-level MCP, skills, hooks, daemon wiring)
 gortex init [path]           Per-repo setup (.mcp.json, hooks, community routing, per-community SKILL.md)
+gortex init --dry-run-intake Emit a privacy-safe intake manifest and exit before parsing/writes
 gortex init doctor           Zero-op drift report across all detected agents (human or --json)
 gortex mcp [flags]           Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
 gortex daemon start [flags]  Start the daemon; --http-addr <addr> serves the HTTP/JSON API under /v1/* plus the MCP /mcp transport (--http-auth-token, --cors-origin)
@@ -75,6 +76,8 @@ gortex init --no-skills                 # skip community-routing generation
 gortex init --skills-min-size 5 --skills-max 10   # tune the generator
 gortex init --hooks-only                # (re)install repo-local hooks only, skip everything else
 gortex init --no-hooks                  # full init but skip hook installation
+gortex init --dry-run-intake --json     # inspect admitted/skipped corpus buckets; no parsing/storage/writes,
+                                        # no raw paths or file contents in the report
 
 # Run the MCP server standalone (auto-detects daemon via stdio; --no-daemon forces embedded):
 gortex mcp --index /path/to/repo --watch
