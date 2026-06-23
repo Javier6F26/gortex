@@ -195,6 +195,8 @@ func (e *CppExtractor) Extract(filePath string, src []byte) (*parser.ExtractionR
 		result.Edges = append(result.Edges, edge)
 	}
 
+	captureCFnPointerDispatch(result, root, filePath, src)
+
 	return result, nil
 }
 

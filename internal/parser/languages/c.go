@@ -210,6 +210,7 @@ func (e *CExtractor) Extract(filePath string, src []byte) (*parser.ExtractionRes
 
 	captureValueRefCandidates(result, root, filePath, src)
 	captureFnValueCandidates(result, root, filePath, src)
+	captureCFnPointerDispatch(result, root, filePath, src)
 	return result, nil
 }
 

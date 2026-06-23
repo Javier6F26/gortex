@@ -102,6 +102,7 @@ const (
 	SynthMediatR           = "mediatr-dispatch"
 	SynthSidekiq           = "sidekiq-dispatch"
 	SynthLaravelEvent      = "laravel-event"
+	SynthFnPointerDispatch = "fn-pointer-dispatch"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -221,6 +222,10 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// Laravel events: event(new X()) / X::dispatch() → every listener
 		// handle(X), from the Listeners convention and the $listen map.
 		synthFunc{name: SynthLaravelEvent, fn: ResolveLaravelEventCalls},
+		// C/C++ function-pointer dispatch: a fn registered into a struct's
+		// fn-pointer field → the indirect recv->field() call, keyed by
+		// (struct type, field) with a field-copy fixpoint.
+		synthFunc{name: SynthFnPointerDispatch, fn: ResolveFnPointerDispatch},
 		// Gin middleware-chain dispatcher → registered handlers. Bridges the
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.
