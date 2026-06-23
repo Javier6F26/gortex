@@ -97,6 +97,7 @@ const (
 	SynthObjectRegistry    = "object-registry"
 	SynthRTKQuery          = "rtk-query"
 	SynthVuexDispatch      = "vuex-dispatch"
+	SynthCelery            = "celery-dispatch"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -201,6 +202,9 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// Vuex string-keyed dispatch/commit → action/mutation, with
 		// module-namespace disambiguation.
 		synthFunc{name: SynthVuexDispatch, fn: ResolveVuexDispatchCalls},
+		// Celery task dispatch: `task.delay()` / `send_task("name")` →
+		// the decorator-gated task function. Typed tier.
+		synthFunc{name: SynthCelery, fn: ResolveCeleryCalls},
 		// Gin middleware-chain dispatcher → registered handlers. Bridges the
 		// `c.handlers[idx](c)` indirection so ServeHTTP→handler reachability
 		// flows; repo-scoped, gated on a dispatcher existing.
