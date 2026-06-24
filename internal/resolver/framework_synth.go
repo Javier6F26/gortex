@@ -106,6 +106,7 @@ const (
 	SynthGoFrameRoute      = "goframe-route"
 	SynthDjangoDescriptor  = "django-descriptor"
 	SynthExpressResolve    = "express-resolve"
+	SynthReactResolve      = "react-resolve"
 	SynthGinMiddleware     = "gin-middleware"
 	SynthSvelteKitLoad     = "sveltekit-load"
 	SynthSpeculative       = "speculative-dispatch"
@@ -236,6 +237,10 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 		// Express named-handler resolution: middleware idents and
 		// XController.method args bound by directory convention.
 		synthFunc{name: SynthExpressResolve, fn: ResolveExpressHandlers},
+		// React custom-hook / context resolution: a `useAuth()` call binds to
+		// its /hooks/ definition; a `*Context`/`*Provider` reference binds to
+		// /context/ or /providers/, with the suffix-strip fallback.
+		synthFunc{name: SynthReactResolve, fn: ResolveReactHooksContext},
 		// GoFrame reflective route → controller method, joined by the
 		// method's request-struct type rather than its name.
 		synthFunc{name: SynthGoFrameRoute, fn: ResolveGoFrameRoutes},
