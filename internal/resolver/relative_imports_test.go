@@ -386,3 +386,97 @@ func TestResolveRelativeImports_CIncludeAngleSuffixFallback(t *testing.T) {
 	assert.Equal(t, "weird/place/widget.h", e.To, "single-match header resolves via suffix-unique net")
 	assert.Nil(t, e.Meta["resolved_via"], "suffix fallback is not stamped")
 }
+
+// phpImport builds a PHP require/include or use import edge for the tests.
+func phpImport(g graph.Store, from, target string) *graph.Edge {
+	e := &graph.Edge{From: from, To: "unresolved::import::" + target, Kind: graph.EdgeImports}
+	g.AddEdge(e)
+	return e
+}
+
+// TestResolveRelativeImports_PhpLiteralInclude pins a literal require path
+// binding to the repo-relative file.
+func TestResolveRelativeImports_PhpLiteralInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "lib/helpers.php", "php")
+	e := phpImport(g, "app.php", "lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "lib/helpers.php", e.To)
+	assert.Equal(t, graph.OriginASTResolved, e.Origin)
+}
+
+// TestResolveRelativeImports_PhpDirInclude pins the `__DIR__ . '/lib/x.php'`
+// form (lowered to a leading-slash target) resolving relative to the file dir.
+func TestResolveRelativeImports_PhpDirInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "lib/helpers.php", "php")
+	e := phpImport(g, "app.php", "/lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "lib/helpers.php", e.To, "__DIR__-relative include resolves relative to the file dir")
+}
+
+// TestResolveRelativeImports_PhpSubdirRelativeInclude pins a `./`-relative
+// include from a file in a subdirectory.
+func TestResolveRelativeImports_PhpSubdirRelativeInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/app.php", "php")
+	seedFile(g, "src/helpers.php", "php")
+	e := phpImport(g, "src/app.php", "./helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "src/helpers.php", e.To)
+}
+
+// TestResolveRelativeImports_PhpExtensionlessInclude pins that `.php` is
+// appended when the include omits the extension.
+func TestResolveRelativeImports_PhpExtensionlessInclude(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "src/app.php", "php")
+	seedFile(g, "src/config.php", "php")
+	e := phpImport(g, "src/app.php", "./config")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "src/config.php", e.To, ".php is appended when the include omits it")
+}
+
+// TestResolveRelativeImports_PhpSuffixNet pins a project-root-relative include
+// reaching a uniquely-matching deeper file.
+func TestResolveRelativeImports_PhpSuffixNet(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "public/index.php", "php")
+	seedFile(g, "app/lib/helpers.php", "php")
+	e := phpImport(g, "public/index.php", "lib/helpers.php")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "app/lib/helpers.php", e.To, "project-root include resolves via the unique suffix net")
+}
+
+// TestResolveRelativeImports_PhpNamespaceUseUntouched pins that a `use`
+// namespace import (lowered to `App/Foo` with no `.php`) is not treated as a
+// path include — even when a same-named file exists — and stays for the main
+// import sweep to resolve.
+func TestResolveRelativeImports_PhpNamespaceUseUntouched(t *testing.T) {
+	g := graph.New()
+	seedFile(g, "app.php", "php")
+	seedFile(g, "src/Foo.php", "php")
+	e := phpImport(g, "app.php", "App/Foo")
+
+	r := New(g)
+	r.resolveRelativeImports()
+
+	assert.Equal(t, "unresolved::import::App/Foo", e.To, "namespace use is not treated as a path include")
+}

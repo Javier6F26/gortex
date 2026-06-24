@@ -22,11 +22,12 @@ import (
 // target file is not in the graph stay as `external::*` so the
 // module-attribution pass can decide what to do with them.
 func (r *Resolver) resolveRelativeImports() {
-	// Relative-import resolution for Python / Dart relative imports and
-	// C-family quoted includes; skip the File-node + edge walk when the graph
-	// has none of those languages.
+	// Relative-import resolution for Python / Dart relative imports, C-family
+	// quoted includes, and PHP literal require/include paths; skip the
+	// File-node + edge walk when the graph has none of those languages.
 	if !r.graphHasLanguage("python") && !r.graphHasLanguage("dart") &&
-		!r.graphHasLanguage("c") && !r.graphHasLanguage("cpp") && !r.graphHasLanguage("objc") {
+		!r.graphHasLanguage("c") && !r.graphHasLanguage("cpp") && !r.graphHasLanguage("objc") &&
+		!r.graphHasLanguage("php") {
 		return
 	}
 	fileLang := r.collectFileLanguages()
@@ -226,6 +227,17 @@ func (r *Resolver) resolveRelativeImports() {
 					}
 				}
 			}
+			// PHP literal `require`/`include` of a file path. The `use`-namespace
+			// imports the extractor also lowers to `unresolved::import::` are NOT
+			// path-shaped (no `.php` / leading `./`,`../`,`/`) and resolve through
+			// the main import sweep, so isPhpPathInclude keeps them untouched.
+			if lang == "php" && strings.HasPrefix(e.To, "unresolved::import::") {
+				raw := strings.TrimPrefix(e.To, "unresolved::import::")
+				if isPhpPathInclude(raw) {
+					path = raw
+					resolved = resolvePhpInclude(e.From, raw, fileIDs, filesByBase)
+				}
+			}
 			if resolved == "" {
 				continue
 			}
@@ -274,6 +286,61 @@ func cppProbeIncludeDir(fileIDs map[string]struct{}, dir, rel string) string {
 		}
 	}
 	return ""
+}
+
+// isPhpPathInclude reports whether a PHP `unresolved::import::` target is a
+// file-path include (`require 'lib/x.php'`, `require __DIR__ . '/lib/x.php'`)
+// rather than a `use`-namespace import. Namespaces are lowered with `\`→`/` but
+// never carry a `.php` extension or a leading `./`,`../`,`/`, so the extension
+// and path-prefix shape distinguishes the two unambiguously.
+func isPhpPathInclude(target string) bool {
+	if target == "" {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(target), ".php") ||
+		strings.HasPrefix(target, "/") ||
+		strings.HasPrefix(target, "./") ||
+		strings.HasPrefix(target, "../")
+}
+
+// resolvePhpInclude resolves a PHP literal include path to an indexed file:
+// relative to the including file's directory first (the `__DIR__` convention,
+// leading `/` being relative to that dir), then repo-root-relative, then a
+// unique path-suffix match. A `.php` extension is appended when the include
+// omits one. Returns "" when no unique indexed file matches.
+func resolvePhpInclude(importingFile, rel string, fileIDs map[string]struct{}, filesByBase map[string][]string) string {
+	withExt := rel
+	if !strings.HasSuffix(strings.ToLower(rel), ".php") {
+		withExt += ".php"
+	}
+	dir := ""
+	if i := strings.LastIndex(importingFile, "/"); i >= 0 {
+		dir = importingFile[:i]
+	}
+	for _, cand := range []string{joinRelativePath(dir, withExt), joinRelativePath("", withExt)} {
+		if cand != "" {
+			if _, ok := fileIDs[cand]; ok {
+				return cand
+			}
+		}
+	}
+	// Project-root-relative suffix net: a unique indexed file ending with the
+	// include path. Refuses on ambiguity so no false edge lands.
+	base := withExt
+	if i := strings.LastIndex(withExt, "/"); i >= 0 {
+		base = withExt[i+1:]
+	}
+	suffix := "/" + withExt
+	match := ""
+	for _, cand := range filesByBase[base] {
+		if cand == withExt || strings.HasSuffix(cand, suffix) {
+			if match != "" && match != cand {
+				return "" // ambiguous across roots
+			}
+			match = cand
+		}
+	}
+	return match
 }
 
 // joinRelativePath joins a relative URI onto a directory and collapses
