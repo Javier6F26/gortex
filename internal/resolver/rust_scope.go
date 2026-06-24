@@ -65,9 +65,14 @@ func ResolveRustScopeCalls(g graph.Store) int {
 		return 0
 	}
 
+	// Module-path `use crate::…`/`self::…`/`super::…` → module-file binding.
+	// Independent of the call-edge resolution below, so it runs even when the
+	// graph has no unresolved Rust call edges.
+	bound := resolveRustModuleImports(g)
+
 	idx := buildRustScopeIndex(g)
 	if idx == nil {
-		return 0
+		return bound
 	}
 
 	resolved := 0
@@ -97,7 +102,7 @@ func ResolveRustScopeCalls(g graph.Store) int {
 		}
 	}
 	if len(cands) == 0 {
-		return 0
+		return bound
 	}
 
 	fromList := make([]string, 0, len(fromIDs))
@@ -132,7 +137,7 @@ func ResolveRustScopeCalls(g graph.Store) int {
 	if len(reindexBatch) > 0 {
 		g.ReindexEdges(reindexBatch)
 	}
-	return resolved
+	return bound + resolved
 }
 
 // rustScopeEdgeCandidate reports whether an unresolved call edge is one
