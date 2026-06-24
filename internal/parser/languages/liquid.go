@@ -27,6 +27,15 @@ var (
 // liquidSnippetPath / liquidSectionPath normalize a bare render/include/section
 // name to the theme-relative file it resolves to (Shopify layout convention),
 // so the import edge lands on a real cross-file target instead of a bare name.
+// liquidBareName returns the searchable bare name of a render / include /
+// section target — the last path segment ("components/card" → "card").
+func liquidBareName(raw string) string {
+	if i := strings.LastIndexByte(raw, '/'); i >= 0 {
+		return raw[i+1:]
+	}
+	return raw
+}
+
 func liquidSnippetPath(name string) string { return liquidThemePath("snippets", name) }
 func liquidSectionPath(name string) string { return liquidThemePath("sections", name) }
 
@@ -92,19 +101,37 @@ func (e *LiquidExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 	// render / include reference a snippet; section references a section file —
 	// normalize both to the theme-relative file so the import edge resolves
 	// cross-file to the real partial rather than dangling on a bare name.
-	emitImport := func(re *regexp.Regexp, normalize func(string) string) {
+	emitImport := func(re *regexp.Regexp, normalize func(string) string, tag string) {
 		for _, m := range re.FindAllSubmatchIndex(src, -1) {
-			mod := normalize(string(src[m[2]:m[3]]))
+			raw := string(src[m[2]:m[3]])
+			mod := normalize(raw)
 			line := lineAt(src, m[0])
 			result.Edges = append(result.Edges, &graph.Edge{
 				From: fileNode.ID, To: "unresolved::import::" + mod,
 				Kind: graph.EdgeImports, FilePath: filePath, Line: line,
 			})
+			// Mint a searchable import node for the usage site (one per target),
+			// carrying the tag type so a `render` (isolated scope) is
+			// distinguishable from an `include` (shared scope). The existing
+			// cross-file EdgeImports resolution above is preserved.
+			nodeID := filePath + "::import::" + mod
+			if !seen[nodeID] {
+				seen[nodeID] = true
+				result.Nodes = append(result.Nodes, &graph.Node{
+					ID: nodeID, Kind: graph.KindImport, Name: liquidBareName(raw),
+					FilePath: filePath, StartLine: line, EndLine: line, Language: "liquid",
+					Meta: map[string]any{"liquid_tag": tag, "target": mod},
+				})
+				result.Edges = append(result.Edges, &graph.Edge{
+					From: fileNode.ID, To: nodeID, Kind: graph.EdgeDefines,
+					FilePath: filePath, Line: line,
+				})
+			}
 		}
 	}
-	emitImport(liquidIncludeRe, liquidSnippetPath)
-	emitImport(liquidRenderRe, liquidSnippetPath)
-	emitImport(liquidSectionRe, liquidSectionPath)
+	emitImport(liquidIncludeRe, liquidSnippetPath, "include")
+	emitImport(liquidRenderRe, liquidSnippetPath, "render")
+	emitImport(liquidSectionRe, liquidSectionPath, "section")
 
 	// A `{% schema %} … {% endschema %}` block configures a section's settings.
 	// Record that it exists as a redacted constant — never the raw JSON, which
