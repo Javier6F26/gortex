@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zzet/gortex/internal/parser"
@@ -766,6 +767,18 @@ func (h *HTTPExtractor) extract(
 						symbolID = hID
 					}
 				}
+			}
+
+			// Inline arrow/function route handlers (Express/Fastify/Koa) have
+			// no named symbol to bind. The JS/TS extractor materialises a
+			// synthetic handler node anchored to the route call line and
+			// attributes the handler body's application calls to it; anchor the
+			// route Contract's SymbolID to that node so the route connects
+			// through the anonymous handler to the services it invokes.
+			if symbolID == "" && pat.role == RoleProvider &&
+				(lang == "typescript" || lang == "javascript") &&
+				strings.Contains(lines[lineNum-1], "=>") {
+				symbolID = filePath + "::express-handler@" + strconv.Itoa(lineNum)
 			}
 
 			// Backend frameworks (Laravel / Rails / Spring / JAX-RS / ASP.NET)
