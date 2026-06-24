@@ -210,6 +210,55 @@ const posts = []
 	}
 }
 
+func TestTemplateExpr_AstroFrontmatterCovered(t *testing.T) {
+	// The Astro frontmatter is delegated TS — the markup scan must not read it:
+	// a `Map<WidgetConfig>` generic must not become a `<WidgetConfig>` component
+	// tag, and a frontmatter call must not be double-counted against the markup.
+	src := []byte(`---
+type Props = Map<WidgetConfig>;
+const Title = make();
+function make() { return 1 }
+---
+<div>{make()}</div>
+<Card />
+`)
+	res, err := NewAstroExtractor().Extract("Page.astro", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Page.astro::Page"
+
+	tagRef := func(name string) bool {
+		for _, e := range res.Edges {
+			if e.Kind == graph.EdgeReferences && e.From == comp && e.To == "unresolved::"+name {
+				return true
+			}
+		}
+		return false
+	}
+	if !tagRef("Card") {
+		t.Errorf("the markup <Card /> tag should be referenced")
+	}
+	for _, leaked := range []string{"WidgetConfig", "Map", "Props", "Title"} {
+		if tagRef(leaked) {
+			t.Errorf("frontmatter identifier %s must not become a component reference", leaked)
+		}
+	}
+	// The markup `{make()}` is the only template_expr call — the frontmatter
+	// `make()` is delegated TS, not re-scanned.
+	count := 0
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeCalls && e.From == comp && e.To == "unresolved::make" && e.Meta != nil {
+			if v, _ := e.Meta["via"].(string); v == "template_expr" {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 template_expr make call (no frontmatter double-count), got %d", count)
+	}
+}
+
 func TestTemplateMustacheSpans_MultiLine(t *testing.T) {
 	// A group that opens on one line and closes several lines later is one span.
 	b := []byte("a {posts.map((p) => (\n  fmt(p)\n))} b")

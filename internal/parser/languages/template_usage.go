@@ -100,7 +100,7 @@ func stripNuxtLazyPrefix(name string) string {
 // framework special elements (svelte:, astro:) are skipped.
 func mineTemplateComponentUsages(src []byte, filePath, componentID, lang string, result *parser.ExtractionResult) {
 	builtins := templateBuiltinsFor(lang)
-	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
+	tmpl := blankTemplateRegions(src, lang)
 	for _, idx := range templateTagRe.FindAllSubmatchIndex(tmpl, -1) {
 		// idx[0:2] spans the whole `<Tag` match; idx[2:4] is the captured name.
 		raw := string(tmpl[idx[2]:idx[3]])
@@ -234,10 +234,7 @@ func mineTemplateExpressionCalls(src []byte, filePath, componentID, lang string,
 	if componentID == "" {
 		return
 	}
-	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
-	if lang == "astro" {
-		tmpl = astroFrontmatterRe.ReplaceAllFunc(tmpl, blankPreservingNewlines)
-	}
+	tmpl := blankTemplateRegions(src, lang)
 	seen := map[string]bool{}
 	for _, span := range templateMustacheSpans(tmpl) {
 		body := tmpl[span.start:span.end]
@@ -265,6 +262,21 @@ func mineTemplateExpressionCalls(src []byte, filePath, componentID, lang string,
 			})
 		}
 	}
+}
+
+// blankTemplateRegions returns src with every non-markup region blanked
+// (newline-preserving, so line numbers are intact): `<script>` / `<style>`
+// blocks for all SFC languages, plus the leading `--- … ---` frontmatter fence
+// for Astro. Centralising the masking gives the component-tag, expression-call
+// and event-handler scans the same exclusion discipline — so an Astro
+// frontmatter generic (`Map<Widget>`) is never misread as a `<Widget>` tag and
+// a frontmatter call is never double-counted against the delegated TS.
+func blankTemplateRegions(src []byte, lang string) []byte {
+	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
+	if lang == "astro" {
+		tmpl = astroFrontmatterRe.ReplaceAllFunc(tmpl, blankPreservingNewlines)
+	}
+	return tmpl
 }
 
 // blankPreservingNewlines returns a same-length copy of b with every byte except
