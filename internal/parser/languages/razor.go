@@ -83,6 +83,18 @@ func (e *RazorExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	for _, m := range razorTypeofRe.FindAllSubmatch(src, -1) {
 		emitRazorTypeRef(result, fileNode.ID, filePath, string(m[1]))
 	}
+
+	// Markup component tags (`<Child />`) and Blazor generic type-arg
+	// references (`<Grid TItem="CatalogItem" />`), scanned with @code /
+	// @functions / @{} bodies blanked so the C# inside them is never parsed
+	// for tags.
+	if componentID != "" {
+		blanked := razorBlankCode(src)
+		mineTemplateComponentUsages(blanked, filePath, componentID, result)
+		for _, m := range razorGenericArgRE.FindAllSubmatch(blanked, -1) {
+			emitRazorTypeRef(result, fileNode.ID, filePath, string(m[1]))
+		}
+	}
 	return result, nil
 }
 
@@ -179,6 +191,26 @@ type razorSpan struct {
 // is string-, char-, and comment-aware (matchRazorBrace), so a `}` inside a C#
 // string literal or comment cannot end the block early — which would otherwise
 // truncate the delegated C# and silently drop every member after it.
+// razorGenericArgRE matches a Blazor generic type-parameter attribute on a
+// component tag — `TItem="CatalogItem"`, `TValue="int"` — whose value is a type
+// reference. The `T[A-Z]` shape is the Blazor type-param convention, so it does
+// not match ordinary attributes like `Title=` / `Text=`.
+var razorGenericArgRE = regexp.MustCompile(`\bT[A-Z]\w*\s*=\s*"([A-Za-z_][\w.]*)"`)
+
+// razorBlankCode returns a copy of src with every @code / @functions / @{}
+// body blanked (newlines preserved), so the markup tag/type scan never reads
+// the C# inside those blocks.
+func razorBlankCode(src []byte) []byte {
+	out := make([]byte, len(src))
+	copy(out, src)
+	for _, span := range razorCodeSpans(src) {
+		if span.start <= span.end && span.end <= len(out) {
+			copy(out[span.start:span.end], blankPreservingNewlines(out[span.start:span.end]))
+		}
+	}
+	return out
+}
+
 func razorCodeSpans(src []byte) []razorSpan {
 	var spans []razorSpan
 	for _, loc := range razorBlockRe.FindAllSubmatchIndex(src, -1) {

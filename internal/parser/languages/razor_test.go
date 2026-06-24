@@ -136,3 +136,55 @@ func TestRazorMatchBraceUnit(t *testing.T) {
 		t.Fatalf("matchRazorBrace = %d, want %d (final brace)", end, len(src)-1)
 	}
 }
+
+func razorTagRef(edges []*graph.Edge, from, name string) *graph.Edge {
+	for _, e := range edges {
+		if e.Kind == graph.EdgeReferences && e.From == from && e.To == "unresolved::"+name {
+			return e
+		}
+	}
+	return nil
+}
+
+func razorAnyRefTo(edges []*graph.Edge, name string) bool {
+	for _, e := range edges {
+		if e.Kind == graph.EdgeReferences && e.To == "unresolved::"+name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRazorComponentTagAndGenericArg(t *testing.T) {
+	src := []byte(`<h1>Parent</h1>
+<Child />
+<Grid TItem="CatalogItem" />
+@code {
+    private List<DecoyType> items = new();
+}
+`)
+	res, err := NewRazorExtractor().Extract("Pages/Parent.razor", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Pages/Parent.razor::Parent"
+
+	if razorTagRef(res.Edges, comp, "Child") == nil {
+		t.Errorf("expected a component-tag reference to Child")
+	}
+	if razorTagRef(res.Edges, comp, "Grid") == nil {
+		t.Errorf("expected a component-tag reference to Grid")
+	}
+	// The TItem generic type-arg references the DTO.
+	if !razorAnyRefTo(res.Edges, "CatalogItem") {
+		t.Errorf("expected a type reference to the TItem value CatalogItem")
+	}
+	// The C# generic `List<DecoyType>` inside @code must not be misread as a
+	// markup tag — its body is blanked before the tag scan.
+	if razorTagRef(res.Edges, comp, "DecoyType") != nil {
+		t.Errorf("a generic type-arg inside @code must not become a component-tag reference")
+	}
+	if razorTagRef(res.Edges, comp, "List") != nil {
+		t.Errorf("a generic container inside @code must not become a component-tag reference")
+	}
+}
