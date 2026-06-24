@@ -102,3 +102,78 @@ import Counter from './Counter.vue'
 		t.Errorf("expected 2 distinct render-site lines, got %v", lines)
 	}
 }
+
+func templateExprCall(edges []*graph.Edge, from, name string) *graph.Edge {
+	for _, e := range edges {
+		if e.Kind != graph.EdgeCalls || e.From != from || e.To != "unresolved::"+name || e.Meta == nil {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v == "template_expr" {
+			return e
+		}
+	}
+	return nil
+}
+
+func TestTemplateExpr_SvelteMarkupCalls(t *testing.T) {
+	src := []byte(`<script>
+  function cn(x) { return x }
+  function fmt(p) { return p }
+</script>
+
+<div class={cn(active)}>{fmt(price)}</div>
+<ul>{items.map((i) => i)}</ul>
+`)
+	res, err := NewSvelteExtractor().Extract("Button.svelte", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const comp = "Button.svelte::Button"
+	if templateExprCall(res.Edges, comp, "cn") == nil {
+		t.Errorf("expected a template_expr call to cn from class={cn(active)}")
+	}
+	if templateExprCall(res.Edges, comp, "fmt") == nil {
+		t.Errorf("expected a template_expr call to fmt from {fmt(price)}")
+	}
+	// A method call's name is not a receiver-less free-function call.
+	if templateExprCall(res.Edges, comp, "map") != nil {
+		t.Errorf("method call items.map must not emit a template_expr call to map")
+	}
+	var sawCn bool
+	for _, n := range res.Nodes {
+		if n.Kind == graph.KindFunction && n.Name == "cn" {
+			sawCn = true
+		}
+	}
+	if !sawCn {
+		t.Errorf("the script function cn should be present for resolution")
+	}
+}
+
+func TestTemplateExpr_SvelteRuneSuppressed(t *testing.T) {
+	src := []byte(`<script>
+  let count = $state(0)
+</script>
+<button>{$state(5)}</button>
+`)
+	res, err := NewSvelteExtractor().Extract("Counter.svelte", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if templateExprCall(res.Edges, "Counter.svelte::Counter", "$state") != nil {
+		t.Errorf("svelte rune $state must be suppressed, not emitted as a template call")
+	}
+}
+
+func TestTemplateMustacheSpans_MultiLine(t *testing.T) {
+	// A group that opens on one line and closes several lines later is one span.
+	b := []byte("a {posts.map((p) => (\n  fmt(p)\n))} b")
+	spans := templateMustacheSpans(b)
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 multi-line span, got %d", len(spans))
+	}
+	body := string(b[spans[0].start:spans[0].end])
+	if want := "posts.map((p) => (\n  fmt(p)\n))"; body != want {
+		t.Errorf("span body = %q (want %q)", body, want)
+	}
+}

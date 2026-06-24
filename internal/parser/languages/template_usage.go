@@ -2,6 +2,7 @@ package languages
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -109,6 +110,112 @@ func componentRefName(raw string) string {
 		b.WriteString(p[1:])
 	}
 	return b.String()
+}
+
+// templateCalleeRe captures an identifier in call position (`fn(`) — group 1 is
+// the callee name.
+var templateCalleeRe = regexp.MustCompile(`([A-Za-z_$][\w$]*)\s*\(`)
+
+// templateExprKeywords are JS/TS keywords that can appear in call position
+// inside a `{...}` group but are not user functions.
+var templateExprKeywords = map[string]bool{
+	"if": true, "for": true, "while": true, "switch": true, "return": true,
+	"typeof": true, "instanceof": true, "new": true, "in": true, "of": true,
+	"await": true, "yield": true, "void": true, "delete": true, "do": true,
+	"else": true, "case": true, "try": true, "catch": true, "throw": true,
+	"function": true, "let": true, "const": true, "var": true, "as": true,
+}
+
+// mustacheSpan is the content range [start, end) between a `{` and its matching
+// `}` in blanked SFC markup.
+type mustacheSpan struct{ start, end int }
+
+// templateMustacheSpans returns every top-level `{...}` group's content span,
+// tracking brace depth and skipping braces inside string / template literals
+// (so `` `${x}` `` and `"{"` do not confuse the depth count). A group that
+// opens on one line and closes many lines later is returned as a single span.
+func templateMustacheSpans(b []byte) []mustacheSpan {
+	var spans []mustacheSpan
+	depth, spanStart := 0, -1
+	var strCh byte
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		if strCh != 0 {
+			if c == '\\' {
+				i++
+				continue
+			}
+			if c == strCh {
+				strCh = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			strCh = c
+		case '{':
+			if depth == 0 {
+				spanStart = i + 1
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && spanStart >= 0 {
+					spans = append(spans, mustacheSpan{spanStart, i})
+					spanStart = -1
+				}
+			}
+		}
+	}
+	return spans
+}
+
+// mineTemplateExpressionCalls scans every `{...}` mustache group in SFC markup
+// (Svelte / Astro / Vue) for call-position identifiers and emits a speculative
+// call edge from the component to each — so a helper invoked only from markup
+// (`class={cn(active)}`, `{fmt(price)}`) is not flagged dead and is reachable
+// via find_usages / get_callers. The scan is brace-depth aware, so a group that
+// opens on one line and closes many lines later (`{posts.map((p) => (`) is
+// captured in one span. <script>/<style> blocks — and, for Astro, the leading
+// frontmatter — are blanked first so their code is not double-scanned. Method
+// calls (`x.map(...)`) and JS keywords are skipped; framework runes/macros are
+// dropped by the later suppressFrameworkIdents pass.
+func mineTemplateExpressionCalls(src []byte, filePath, componentID, lang string, result *parser.ExtractionResult) {
+	if componentID == "" {
+		return
+	}
+	tmpl := templateBlockRe.ReplaceAllFunc(src, blankPreservingNewlines)
+	if lang == "astro" {
+		tmpl = astroFrontmatterRe.ReplaceAllFunc(tmpl, blankPreservingNewlines)
+	}
+	seen := map[string]bool{}
+	for _, span := range templateMustacheSpans(tmpl) {
+		body := tmpl[span.start:span.end]
+		for _, m := range templateCalleeRe.FindAllSubmatchIndex(body, -1) {
+			// Skip a method call (`x.map(`) — only the receiver-less free
+			// function resolves to a script-defined helper.
+			if m[2] > 0 && body[m[2]-1] == '.' {
+				continue
+			}
+			name := string(body[m[2]:m[3]])
+			if templateExprKeywords[name] {
+				continue
+			}
+			line := 1 + strings.Count(string(tmpl[:span.start+m[2]]), "\n")
+			key := name + "\x00" + strconv.Itoa(line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			result.Edges = append(result.Edges, &graph.Edge{
+				From: componentID, To: "unresolved::" + name,
+				Kind: graph.EdgeCalls, FilePath: filePath, Line: line,
+				Origin: graph.OriginTextMatched,
+				Meta:   map[string]any{"template": true, "via": "template_expr"},
+			})
+		}
+	}
 }
 
 // blankPreservingNewlines returns a same-length copy of b with every byte except

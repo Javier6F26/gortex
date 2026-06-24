@@ -232,6 +232,9 @@ func mineTemplateHandlers(src []byte, filePath, componentID, lang string, result
 // applyFrameworkTemplatePasses runs the suppression + handler-mining passes
 // shared by the Vue/Svelte/Astro extractors after their scripts are delegated.
 func applyFrameworkTemplatePasses(src []byte, filePath, componentID, lang string, result *parser.ExtractionResult) {
+	// Mine markup `{expr}` calls first, so the suppression pass can drop any
+	// rune/macro calls (`$state(...)`) it surfaced before they linger as edges.
+	mineTemplateExpressionCalls(src, filePath, componentID, lang, result)
 	suppressFrameworkIdents(result, lang)
 	mineTemplateHandlers(src, filePath, componentID, lang, result)
 }
