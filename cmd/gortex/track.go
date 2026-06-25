@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,9 +18,19 @@ import (
 )
 
 var (
-	trackName       string
-	trackAsWorktree bool
+	trackName        string
+	trackAsWorktree  bool
+	trackWait        bool
+	trackWaitTimeout time.Duration
 )
+
+// trackStatusFn fetches the daemon status; indirected through a package var so
+// the --wait poll loop can be exercised in tests without a running daemon.
+var trackStatusFn = fetchDaemonStatusForCLI
+
+// trackPollInterval is how often --wait re-queries the daemon. A package var so
+// tests can drop it to a sub-millisecond tick instead of waiting whole seconds.
+var trackPollInterval = time.Second
 
 var trackCmd = &cobra.Command{
 	Use:   "track <path>",
@@ -42,6 +53,10 @@ func init() {
 		"Explicit repo prefix override (default: directory basename)")
 	trackCmd.Flags().BoolVar(&trackAsWorktree, "as-worktree", false,
 		"Track a linked git worktree as an independent instance even when its repo is already tracked elsewhere")
+	trackCmd.Flags().BoolVar(&trackWait, "wait", false,
+		"Block until the daemon has indexed the repo and the graph is queryable (useful for CI / one-shot scripts)")
+	trackCmd.Flags().DurationVar(&trackWaitTimeout, "wait-timeout", 10*time.Minute,
+		"With --wait, fail if indexing has not settled within this duration (0 = wait forever)")
 	rootCmd.AddCommand(trackCmd)
 	rootCmd.AddCommand(untrackCmd)
 }
@@ -131,9 +146,22 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	//    so we degrade to the offline summary instead of erroring.
 	if ensureDaemonReady(daemon.ParseAutostart()) != daemonUnavailable {
 		if err := notifyDaemonTrack(absPath); err == nil {
+			// --wait blocks until the daemon has actually indexed the repo so
+			// a following `gortex analyze` / query sees a complete graph.
+			if trackWait {
+				if werr := waitForRepoIndexed(w, absPath, trackWaitTimeout); werr != nil {
+					return werr
+				}
+			}
 			emitTrackSummary(w, absPath, trackResult{viaDaemon: true, prefix: prefix, alreadyTracked: already})
 			return nil
+		} else if trackWait {
+			// The repo is persisted, but --wait promised a queryable graph we
+			// can no longer deliver — surface that rather than a soft success.
+			return fmt.Errorf("--wait: daemon did not accept the repo: %w", err)
 		}
+	} else if trackWait {
+		return fmt.Errorf("--wait requires a running daemon, but none is available — start it with `gortex daemon start --detach`")
 	}
 
 	// 3. Daemon unavailable (autostart off, spawn failed/timed out, or
@@ -141,6 +169,56 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	//    user the daemon will pick it up later — success, not error.
 	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos), prefix: prefix, alreadyTracked: already})
 	return nil
+}
+
+// repoNodeCount returns the indexed node count for the repo at absPath in the
+// daemon status, or -1 if the daemon has not registered the repo yet.
+func repoNodeCount(st daemon.StatusResponse, absPath string) int {
+	for _, r := range st.TrackedRepos {
+		if ra, err := filepath.Abs(r.Path); err == nil && ra == absPath {
+			return r.Nodes
+		}
+	}
+	return -1
+}
+
+// indexSettled reports whether the repo at absPath looks fully indexed: the
+// daemon has it with a non-zero node count that has stopped moving (equal to
+// prevNodes, the previous poll's reading) and the graph is resolved (Ready).
+// prevNodes is -1 before the first reading. Requiring a stable count across two
+// polls is a per-repo heuristic that holds even on a warm multi-repo daemon
+// where the global Ready flag alone would be insufficient.
+func indexSettled(st daemon.StatusResponse, absPath string, prevNodes int) (settled bool, nodes int) {
+	nodes = repoNodeCount(st, absPath)
+	if nodes <= 0 || !st.Ready {
+		return false, nodes
+	}
+	return nodes == prevNodes, nodes
+}
+
+// waitForRepoIndexed polls the daemon until the repo at absPath has settled
+// (see indexSettled) or timeout elapses. timeout <= 0 waits forever.
+func waitForRepoIndexed(w io.Writer, absPath string, timeout time.Duration) error {
+	fmt.Fprintf(w, "  waiting for indexing to settle (--wait)…\n")
+	var deadline time.Time
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+	}
+	prevNodes := -1
+	for {
+		if st, err := trackStatusFn(); err == nil {
+			settled, nodes := indexSettled(st, absPath, prevNodes)
+			if settled {
+				fmt.Fprintf(w, "  indexed: %d nodes\n", nodes)
+				return nil
+			}
+			prevNodes = nodes
+		}
+		if timeout > 0 && time.Now().After(deadline) {
+			return fmt.Errorf("--wait: timed out after %s waiting for %s to index", timeout, absPath)
+		}
+		time.Sleep(trackPollInterval)
+	}
 }
 
 // trackResult bundles the outcome of runTrack so emitTrackSummary can pick the
