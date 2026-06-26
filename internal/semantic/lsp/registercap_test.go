@@ -134,10 +134,101 @@ func TestProvider_RegisterCapability_OneMethod(t *testing.T) {
 	resp := readAck(t, serverIn, registerCapWait)
 	assert.Equal(t, int64(42), resp.ID, "ack must echo the request id")
 	assert.Nil(t, resp.Error, "ack must not carry an error")
-	assert.True(t, len(resp.Result) == 0 || string(resp.Result) == "null",
-		"ack result must be null; got %q", string(resp.Result))
+	assert.Equal(t, "null", string(resp.Result),
+		"ack result must be the JSON literal null; got %q", string(resp.Result))
 
 	waitForSupports(t, p, "textDocument/foldingRange", true, registerCapWait)
+}
+
+// readRawAck waits up to timeout for the next framed message off the
+// client's stdin and returns its raw JSON body (undecoded). Unlike
+// readAck, it does NOT round-trip through jsonRPCResponse — that decode
+// collapses an absent "result" field and an explicit "result":null into
+// the same zero-length RawMessage, hiding the exact wire defect this
+// guards against.
+func readRawAck(t *testing.T, serverIn func() ([]byte, bool), timeout time.Duration) []byte {
+	t.Helper()
+	done := make(chan []byte, 1)
+	go func() {
+		if body, ok := serverIn(); ok {
+			done <- body
+		} else {
+			close(done)
+		}
+	}()
+	select {
+	case body, ok := <-done:
+		require.True(t, ok, "client did not reply before pipe closed")
+		return body
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for client to ack the request")
+		return nil
+	}
+}
+
+// TestProvider_RegisterCapability_AckCarriesResultMember is the
+// regression guard for the bug where a nil handler result serialized to
+// a bare {"jsonrpc":"2.0","id":N} — the "result" member omitted entirely
+// because the response struct used `Result any` with `omitempty`. A nil
+// interface is "empty", so the field vanished. Strict JSON-RPC servers
+// (StreamJsonRpc / Roslyn) reject such a message as "Unrecognized
+// JSON-RPC 2.0 message" and drop the connection, which manifested as the
+// C# language server exiting mid-initialize and enriching 0 nodes. The
+// fix forces a null literal on success; this test asserts on the RAW
+// bytes (readAck's struct decode cannot distinguish absent from null).
+func TestProvider_RegisterCapability_AckCarriesResultMember(t *testing.T) {
+	_, serverIn, serverOut, cleanup := providerWithRegisterCapHandlers(t)
+	defer cleanup()
+
+	serverOut(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "client/registerCapability",
+		"params": RegistrationParams{Registrations: []Registration{
+			{ID: "uuid-x", Method: "textDocument/foldingRange"},
+		}},
+	})
+
+	raw := readRawAck(t, serverIn, registerCapWait)
+
+	// Decode into a permissive map so we can assert key *presence*,
+	// which a struct decode cannot.
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &m), "ack must be valid JSON: %s", raw)
+	_, hasResult := m["result"]
+	require.True(t, hasResult,
+		"success ack MUST include a result member (JSON-RPC 2.0 requires it; "+
+			"strict servers reject a bare id-only message); got %s", raw)
+	assert.Equal(t, "null", string(m["result"]),
+		"a nil handler result must serialize to the JSON literal null; got %s", raw)
+	_, hasError := m["error"]
+	assert.False(t, hasError, "success ack must not carry an error member; got %s", raw)
+}
+
+// TestProvider_DispatchRequest_ErrorOmitsResult confirms the symmetric
+// half of the contract: on the error path the response carries "error"
+// and MUST NOT carry "result" (the spec forbids both together). An
+// unhandled method drives the -32601 method-not-found path.
+func TestProvider_DispatchRequest_ErrorOmitsResult(t *testing.T) {
+	_, serverIn, serverOut, cleanup := providerWithRegisterCapHandlers(t)
+	defer cleanup()
+
+	serverOut(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      7,
+		"method":  "workspace/somethingUnhandled",
+		"params":  map[string]any{},
+	})
+
+	raw := readRawAck(t, serverIn, registerCapWait)
+
+	var m map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &m), "ack must be valid JSON: %s", raw)
+	_, hasError := m["error"]
+	require.True(t, hasError, "method-not-found ack must carry an error member; got %s", raw)
+	_, hasResult := m["result"]
+	assert.False(t, hasResult,
+		"error response must NOT carry a result member (spec forbids both); got %s", raw)
 }
 
 // TestProvider_RegisterCapability_MultipleMethods confirms a single

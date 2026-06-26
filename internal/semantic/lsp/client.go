@@ -531,10 +531,22 @@ func (c *Client) dispatchRequest(rawID json.RawMessage, method string, params js
 	h, ok := c.reqHandlers[method]
 	c.reqMu.RUnlock()
 
+	// Result is a json.RawMessage, not `any`, so we control exactly what
+	// lands on the wire. A JSON-RPC 2.0 *success* response MUST carry a
+	// "result" member — even when it is null. A nil handler result is a
+	// null success (the correct ack for client/registerCapability and
+	// workspace/applyEdit's negative case), NOT an absent field. Marshal
+	// it explicitly to "null" so the field is always present on success;
+	// `omitempty` then only drops Result on the error path (where it must
+	// be absent — the spec forbids result+error together). Strict servers
+	// (StreamJsonRpc, used by Roslyn / the C# server) reject a bare
+	// {"jsonrpc":"2.0","id":N} as "Unrecognized JSON-RPC 2.0 message" and
+	// tear down the whole connection, which is how a single nil ack to
+	// registerCapability used to kill every in-flight request.
 	type respWithRawID struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
-		Result  any             `json:"result,omitempty"`
+		Result  json.RawMessage `json:"result,omitempty"`
 		Error   *jsonRPCError   `json:"error,omitempty"`
 	}
 
@@ -542,19 +554,27 @@ func (c *Client) dispatchRequest(rawID json.RawMessage, method string, params js
 	if !ok {
 		resp.Error = &jsonRPCError{Code: -32601, Message: "method not found: " + method}
 	} else {
+		var res any
+		var rpcErr *jsonRPCError
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					resp.Error = &jsonRPCError{Code: -32603, Message: "handler panicked"}
+					rpcErr = &jsonRPCError{Code: -32603, Message: "handler panicked"}
 				}
 			}()
-			res, err := h(method, params)
-			if err != nil {
-				resp.Error = err
-			} else {
-				resp.Result = res
-			}
+			res, rpcErr = h(method, params)
 		}()
+		if rpcErr != nil {
+			resp.Error = rpcErr
+		} else {
+			// json.Marshal(nil) → "null"; any marshal failure also
+			// falls back to a null success so the field is never empty.
+			raw, err := json.Marshal(res)
+			if err != nil || len(raw) == 0 {
+				raw = json.RawMessage("null")
+			}
+			resp.Result = raw
+		}
 	}
 	_ = c.send(resp)
 }
