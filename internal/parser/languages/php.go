@@ -883,6 +883,21 @@ func (e *PHPExtractor) extractCallSites(
 					}
 				}
 			}
+			// Chained-factory receiver: `make()->with()->build()` -- carry the
+			// receiver object (`->` normalised to `.`) so the shared walker can
+			// type the chain or preserve it for the graph-aware resolver.
+			if node.Type() == "member_call_expression" {
+				obj := node.ChildByFieldName("object")
+				if obj == nil && node.NamedChildCount() > 0 {
+					obj = node.NamedChild(0)
+				}
+				if obj != nil {
+					recv := strings.ReplaceAll(strings.TrimSpace(obj.Content(src)), "->", ".")
+					if strings.Contains(recv, ".") || strings.Contains(recv, "(") {
+						stampFactoryChainReceiver(edge, recv, resolveChainType(recv, nil, result))
+					}
+				}
+			}
 			result.Edges = append(result.Edges, edge)
 		}
 	}
