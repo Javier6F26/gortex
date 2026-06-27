@@ -54,13 +54,22 @@ type FileBucket struct {
 // DryRunIntake walks root with the same high-level language, ignore, prune and
 // max-size gates used before IndexCtx starts extraction. It does not parse,
 // extract, embed, or store anything.
-func (idx *Indexer) DryRunIntake(_ context.Context, root string) (*IntakeManifest, error) {
+func (idx *Indexer) DryRunIntake(ctx context.Context, root string) (*IntakeManifest, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
 
 	maxSize := idx.config.MaxFileSize
+	// Apply the same corpus-admission gates the real index walk uses, so the
+	// manifest's admitted/skipped split matches what IndexCtx would actually
+	// do — oversized documents and (by default) data assets are reported as
+	// skipped (large_document / vector_data / large_data_asset), and, when
+	// index.skip_untracked_assets is on, untracked assets as untracked_asset.
+	// Without this the report would still count gigabytes of non-source files
+	// as admitted even though the indexer now drops them (#120).
+	contentGate := idx.newContentAdmissionGate()
+	untrackedGate := idx.newUntrackedAssetGate(ctx, absRoot)
 	manifest := &IntakeManifest{
 		SchemaVersion:           "gortex.index_intake.v1",
 		RawPathsIncluded:        false,
@@ -98,6 +107,10 @@ func (idx *Indexer) DryRunIntake(_ context.Context, root string) (*IntakeManifes
 			reason = "excluded"
 		} else if maxSize > 0 && size > maxSize {
 			reason = "max_file_size"
+		} else if r, skip := untrackedGate.skip(lang, path); skip {
+			reason = r
+		} else if r, skip := contentGate.skip(lang, size); skip {
+			reason = r
 		}
 
 		if reason != "" {
@@ -112,7 +125,6 @@ func (idx *Indexer) DryRunIntake(_ context.Context, root string) (*IntakeManifes
 			return nil
 		}
 
-		_ = lang // language detection is the admission gate; buckets stay extension-based for issue reports.
 		manifest.FilesAdmitted++
 		manifest.BytesAdmitted += size
 

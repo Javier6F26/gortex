@@ -226,6 +226,73 @@ func TestIndex_SkipUntrackedAssets(t *testing.T) {
 	require.Nil(t, un.Meta["skip_reason"], "with the flag off, an untracked document is admitted")
 }
 
+// bucketByKey finds an intake bucket by its extension key.
+func bucketByKey(buckets []IntakeBucket, key string) (IntakeBucket, bool) {
+	for _, b := range buckets {
+		if b.Key == key {
+			return b, true
+		}
+	}
+	return IntakeBucket{}, false
+}
+
+// TestDryRunIntake_ReflectsContentGate verifies the dry-run manifest reports
+// oversized documents and data assets as skipped with the same reasons the
+// real index walk uses — so the preflight matches the indexer (#120).
+func TestDryRunIntake_ReflectsContentGate(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "code.go"), "package main\n\nfunc A() {}\n")
+	writeFile(t, filepath.Join(dir, "small.txt"), "short")
+	writeFile(t, filepath.Join(dir, "big.txt"), strings.Repeat("filler text ", 400))
+	writeFile(t, filepath.Join(dir, "vectors.npy"), "NUMPY-placeholder-bytes")
+
+	idx := newAssetTestIndexer(graph.New())
+	idx.config.Content.MaxDocumentBytes = 1024
+
+	m, err := idx.DryRunIntake(testCtx(), dir)
+	require.NoError(t, err)
+
+	txt, ok := bucketByKey(m.TopSkippedExtensionsByBytes, "txt")
+	require.True(t, ok, "oversized document must be reported skipped")
+	require.Equal(t, skipReasonLargeDocument, txt.Reason)
+	npy, ok := bucketByKey(m.TopSkippedExtensionsByBytes, "npy")
+	require.True(t, ok, "data asset must be reported skipped")
+	require.Equal(t, skipReasonVectorData, npy.Reason)
+
+	// Code and the small document stay admitted.
+	_, ok = bucketByKey(m.TopAdmittedExtensionsByBytes, "go")
+	require.True(t, ok)
+	smallTxt, ok := bucketByKey(m.TopAdmittedExtensionsByBytes, "txt")
+	require.True(t, ok)
+	require.Equal(t, 1, smallTxt.Files, "only the small document is admitted")
+}
+
+// TestDryRunIntake_ReflectsUntrackedGate verifies the dry-run manifest applies
+// the opt-in untracked-asset gate too.
+func TestDryRunIntake_ReflectsUntrackedGate(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git binary not available in PATH")
+	}
+	dir := t.TempDir()
+	runGit(t, dir, "init", "-q", "-b", "main")
+	runGit(t, dir, "config", "user.email", "t@example.com")
+	runGit(t, dir, "config", "user.name", "T")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	writeFile(t, filepath.Join(dir, "code.go"), "package main\n\nfunc A() {}\n")
+	runGit(t, dir, "add", ".")
+	runGit(t, dir, "commit", "-q", "-m", "init")
+	writeFile(t, filepath.Join(dir, "untracked.txt"), "scratch asset")
+
+	idx := newAssetTestIndexer(graph.New())
+	idx.config.SkipUntrackedAssets = true
+
+	m, err := idx.DryRunIntake(testCtx(), dir)
+	require.NoError(t, err)
+	txt, ok := bucketByKey(m.TopSkippedExtensionsByBytes, "txt")
+	require.True(t, ok)
+	require.Equal(t, skipReasonUntrackedAsset, txt.Reason)
+}
+
 // TestGitTrackedSet_NonGitDirInert verifies gitTrackedSet reports failure
 // (gate inert) outside a git repo.
 func TestGitTrackedSet_NonGitDirInert(t *testing.T) {
