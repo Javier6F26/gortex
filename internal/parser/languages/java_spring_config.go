@@ -2,6 +2,7 @@ package languages
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
@@ -14,6 +15,7 @@ var (
 	// javaConfPropsRe captures an @ConfigurationProperties(prefix = "p") /
 	// @ConfigurationProperties("p") prefix. Group 1 is the prefix.
 	javaConfPropsRe = regexp.MustCompile(`@ConfigurationProperties\s*\(\s*(?:prefix\s*=\s*)?["']([^"']+)["']`)
+	javaStringLitRe = regexp.MustCompile(`["']([^"']+)["']`)
 )
 
 // mineSpringConfigReads stamps the Spring property keys a bean reads onto its
@@ -36,6 +38,11 @@ func mineSpringConfigReads(src []byte, result *parser.ExtractionResult) {
 	}
 	var types []typeRange
 	for _, n := range result.Nodes {
+		if n.Meta != nil {
+			if k, _ := n.Meta["kind"].(string); k == "annotation" {
+				continue
+			}
+		}
 		if n.Kind == graph.KindType || n.Kind == graph.KindInterface {
 			types = append(types, typeRange{n.ID, n.StartLine, n.EndLine})
 		}
@@ -77,16 +84,7 @@ func mineSpringConfigReads(src []byte, result *parser.ExtractionResult) {
 		if n == nil {
 			return
 		}
-		if n.Meta == nil {
-			n.Meta = map[string]any{}
-		}
-		existing, _ := n.Meta["spring_config_keys"].([]string)
-		for _, e := range existing {
-			if e == key {
-				return
-			}
-		}
-		n.Meta["spring_config_keys"] = append(existing, key)
+		appendJavaSpringConfigKey(n, key)
 	}
 
 	if hasValue {
@@ -111,4 +109,119 @@ func mineSpringConfigReads(src []byte, result *parser.ExtractionResult) {
 			stamp(id, prefix+".*")
 		}
 	}
+}
+
+func stampJavaSpringConfigAnnotations(n *graph.Node, anns []javaAnnotation) {
+	for _, ann := range anns {
+		name := ann.name
+		if i := strings.LastIndexByte(name, '.'); i >= 0 {
+			name = name[i+1:]
+		}
+		if name != "ConditionalOnProperty" {
+			if name != "ConfigurationProperties" {
+				continue
+			}
+			if prefix := javaConfigurationPropertiesPrefix(ann.args); prefix != "" {
+				appendJavaSpringConfigKey(n, prefix+".*")
+			}
+			continue
+		}
+		for _, key := range javaConditionalOnPropertyKeys(ann.args) {
+			appendJavaSpringConfigKey(n, key)
+		}
+	}
+}
+
+func appendJavaSpringConfigKey(n *graph.Node, key string) {
+	if n == nil || key == "" {
+		return
+	}
+	if n.Meta == nil {
+		n.Meta = map[string]any{}
+	}
+	existing, _ := n.Meta["spring_config_keys"].([]string)
+	for _, e := range existing {
+		if e == key {
+			return
+		}
+	}
+	n.Meta["spring_config_keys"] = append(existing, key)
+}
+
+func javaConditionalOnPropertyKeys(args string) []string {
+	prefix := firstJavaAnnotationStringArg(args, "prefix")
+	names := javaAnnotationStringArgs(args, "name")
+	if len(names) == 0 {
+		names = javaAnnotationStringArgs(args, "value")
+	}
+	if len(names) == 0 && !strings.Contains(args, "=") {
+		names = javaStringLiterals(args)
+	}
+
+	var out []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		key := name
+		if prefix != "" {
+			key = strings.TrimSuffix(prefix, ".") + "." + strings.TrimPrefix(name, ".")
+		}
+		if key != "" && !seen[key] {
+			seen[key] = true
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func javaConfigurationPropertiesPrefix(args string) string {
+	if prefix := firstJavaAnnotationStringArg(args, "prefix"); prefix != "" {
+		return prefix
+	}
+	if !strings.Contains(args, "=") {
+		return firstJavaStringLiteral(args)
+	}
+	return ""
+}
+
+func firstJavaAnnotationStringArg(args, name string) string {
+	vals := javaAnnotationStringArgs(args, name)
+	if len(vals) == 0 {
+		return ""
+	}
+	return vals[0]
+}
+
+func javaAnnotationStringArgs(args, name string) []string {
+	re := regexp.MustCompile(`(?:^|[,{ \t\r\n])` + regexp.QuoteMeta(name) + `\s*=\s*(\{[^}]*\}|["'][^"']*["'])`)
+	m := re.FindStringSubmatch(args)
+	if len(m) < 2 {
+		return nil
+	}
+	return javaStringLiterals(m[1])
+}
+
+func javaStringLiterals(s string) []string {
+	matches := javaStringLitRe.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) > 1 {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+func firstJavaStringLiteral(s string) string {
+	vals := javaStringLiterals(s)
+	if len(vals) == 0 {
+		return ""
+	}
+	return vals[0]
 }

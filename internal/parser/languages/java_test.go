@@ -333,6 +333,105 @@ public class X {
 	assert.Contains(t, params, "foo")
 }
 
+func TestJavaExtractor_BeanMethodParamsCaptured(t *testing.T) {
+	src := []byte(`
+package c;
+public class X {
+    public JdbcTemplate jdbcTemplate(DataSource dataSource) { return null; }
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("X.java", src)
+	require.NoError(t, err)
+
+	var method *graph.Node
+	for _, n := range nodesOfKind(result.Nodes, graph.KindMethod) {
+		if n.Name == "jdbcTemplate" {
+			method = n
+			break
+		}
+	}
+	require.NotNil(t, method)
+	params, _ := method.Meta["params_src"].(string)
+	assert.Contains(t, params, "DataSource")
+	assert.Contains(t, params, "dataSource")
+}
+
+func TestJavaExtractor_SpringConditionalOnPropertyReadsDatasource(t *testing.T) {
+	src := []byte(`
+package c;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+@ConditionalOnProperty(prefix = "spring.datasource", name = "url")
+public class JdbcConfig {
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("JdbcConfig.java", src)
+	require.NoError(t, err)
+
+	var cls *graph.Node
+	for _, n := range nodesOfKind(result.Nodes, graph.KindType) {
+		if n.Name == "JdbcConfig" {
+			cls = n
+			break
+		}
+	}
+	require.NotNil(t, cls)
+	keys, _ := cls.Meta["spring_config_keys"].([]string)
+	assert.Contains(t, keys, "spring.datasource.url")
+}
+
+func TestJavaExtractor_SpringConfigurationPropertiesStampsClass(t *testing.T) {
+	src := []byte(`
+package c;
+import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.validation.annotation.Validated;
+
+@Validated
+@ConfigurationProperties(prefix = "app.jdbc")
+public class JdbcFeatureProperties {
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("JdbcFeatureProperties.java", src)
+	require.NoError(t, err)
+
+	var cls *graph.Node
+	var ann *graph.Node
+	for _, n := range result.Nodes {
+		switch n.ID {
+		case "JdbcFeatureProperties.java::JdbcFeatureProperties":
+			cls = n
+		case "annotation::java::ConfigurationProperties":
+			ann = n
+		}
+	}
+	require.NotNil(t, cls)
+	keys, _ := cls.Meta["spring_config_keys"].([]string)
+	assert.Contains(t, keys, "app.jdbc.*")
+	if ann != nil {
+		_, stampedAnnotation := ann.Meta["spring_config_keys"]
+		assert.False(t, stampedAnnotation, "configuration property reads should be stamped on the annotated class")
+	}
+}
+
+func TestJavaConditionalOnPropertyKeys(t *testing.T) {
+	assert.Equal(t,
+		[]string{"spring.datasource.url", "spring.datasource.username"},
+		javaConditionalOnPropertyKeys(`prefix = "spring.datasource", name = {"url", "username"}`),
+	)
+	assert.Equal(t,
+		[]string{"spring.datasource.url"},
+		javaConditionalOnPropertyKeys(`"spring.datasource.url"`),
+	)
+}
+
+func TestJavaConfigurationPropertiesPrefix(t *testing.T) {
+	assert.Equal(t, "app.jdbc", javaConfigurationPropertiesPrefix(`prefix = "app.jdbc"`))
+	assert.Equal(t, "app.jdbc", javaConfigurationPropertiesPrefix(`"app.jdbc"`))
+}
+
 func TestJavaExtractor_DocAndVisibility(t *testing.T) {
 	src := []byte(`package x;
 

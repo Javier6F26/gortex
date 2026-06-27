@@ -38,6 +38,7 @@ func springConfigKeyID(key string) string {
 // springConfigFile reports whether path is a Spring application config file and
 // returns its profile (the `-prod` in application-prod.yml; "" for the base).
 func springConfigFile(path string) (profile string, ok bool) {
+	path = strings.ReplaceAll(path, "\\", "/")
 	base := path
 	if i := strings.LastIndexByte(path, '/'); i >= 0 {
 		base = path[i+1:]

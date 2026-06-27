@@ -97,6 +97,7 @@ func TestSpringConfigFileDetection(t *testing.T) {
 	}{
 		{"application.yml", true, ""},
 		{"src/main/resources/application.yaml", true, ""},
+		{`src\main\resources\application.yml`, true, ""},
 		{"application-prod.properties", true, "prod"},
 		{"config/application-staging.yml", true, "staging"},
 		{"other.yml", false, ""},

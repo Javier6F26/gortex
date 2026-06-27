@@ -514,16 +514,19 @@ func (e *JavaExtractor) emitClass(m parser.QueryResult, filePath, fileID string,
 	if parent := extractJavaParentClass(def.Node, src); parent != "" {
 		meta["scope_parent"] = parent
 	}
-	result.Nodes = append(result.Nodes, &graph.Node{
+	anns := javaCollectAnnotations(def.Node, src)
+	node := &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: def.StartLine + 1, EndLine: def.EndLine + 1,
 		Language: "java",
 		Meta:     meta,
-	})
+	}
+	stampJavaSpringConfigAnnotations(node, anns)
+	result.Nodes = append(result.Nodes, node)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: def.StartLine + 1,
 	})
-	emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+	emitJavaAnnotationEdges(anns, id, filePath, result, annotationSeen)
 	emitJavaGenericParamNodes(id, def.Node, src, filePath, def.StartLine+1, result)
 	// JPA model attribution: @Entity / @Table → EdgeModelsTable.
 	emitJavaORMEdges(def.Node, src, id, name, filePath, result)
@@ -712,10 +715,15 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 			if rt := extractJavaMethodReturnType(def.Node, src); rt != "" {
 				node.Meta["return_type"] = rt
 			}
+			if params := javaParamsSource(def.Node, src); params != "" {
+				node.Meta["params_src"] = params
+			}
 		}
 		if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
 			node.Meta["doc"] = doc
 		}
+		anns := javaCollectAnnotations(def.Node, src)
+		stampJavaSpringConfigAnnotations(node, anns)
 		if def.Node != nil {
 			if body := def.Node.ChildByFieldName("body"); body != nil {
 				StampFunctionMetrics(node, body, "java")
@@ -724,7 +732,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 		// React Native: an @ReactMethod method is callable from JS as
 		// NativeModules.<module>.<method>(...). Stamp the JS module +
 		// method so the bridge synthesizer can land the JS call here.
-		if def.Node != nil && javaHasReactMethod(javaCollectAnnotations(def.Node, src)) {
+		if def.Node != nil && javaHasReactMethod(anns) {
 			node.Meta["rn_method"] = name
 			if mod := rnModules[className]; mod != "" {
 				node.Meta["rn_module"] = mod
@@ -762,7 +770,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 				})
 			}
 		}
-		emitJavaAnnotationEdges(javaCollectAnnotations(def.Node, src), id, filePath, result, annotationSeen)
+		emitJavaAnnotationEdges(anns, id, filePath, result, annotationSeen)
 		emitJavaThrowsEdges(def.Node, src, id, filePath, startLine1, result)
 		emitJavaFunctionShape(id, def.Node, src, filePath, startLine1, result)
 		return
