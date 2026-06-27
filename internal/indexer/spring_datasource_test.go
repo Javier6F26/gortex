@@ -101,6 +101,45 @@ public class JdbcConfig {
 		"JdbcConfig should have a spring.Bean edge to the DataSource factory because jdbcTemplate consumes DataSource")
 }
 
+func TestIndex_SpringDataSourcePlainMethodDoesNotLinkBeanFactory(t *testing.T) {
+	dir := t.TempDir()
+	javaDir := filepath.Join(dir, "src", "main", "java", "com", "example")
+	require.NoError(t, os.MkdirAll(javaDir, 0o755))
+
+	writeFile(t, filepath.Join(javaDir, "JdbcConfig.java"), `
+package com.example;
+
+import javax.sql.DataSource;
+import org.springframework.context.annotation.Bean;
+
+public class JdbcConfig {
+    @Bean
+    DataSource dataSource() {
+        return null;
+    }
+
+    void inspect(DataSource dataSource) {
+    }
+}
+`)
+
+	g := graph.New()
+	reg := parser.NewRegistry()
+	languages.RegisterAll(reg)
+	idx := New(g, reg, config.Default().Index, zap.NewNop())
+	_, err := idx.Index(dir)
+	require.NoError(t, err)
+
+	javaGraphPath := filepath.Join("src", "main", "java", "com", "example", "JdbcConfig.java")
+	classID := javaGraphPath + "::JdbcConfig"
+	dataSourceID := classID + ".dataSource"
+	if hasEdge(g, classID, dataSourceID, graph.EdgeCalls) {
+		t.Logf("calls edges: %v", edgePairsOfKind(g, graph.EdgeCalls))
+	}
+	require.False(t, hasEdge(g, classID, dataSourceID, graph.EdgeCalls),
+		"a plain method parameter should not make the class look like a Spring bean consumer")
+}
+
 func hasEdge(g *graph.Graph, from, to string, kind graph.EdgeKind) bool {
 	for _, e := range g.AllEdges() {
 		if e.From == from && e.To == to && e.Kind == kind {

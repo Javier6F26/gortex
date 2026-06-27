@@ -711,12 +711,15 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 				"visibility":  javaVisibility(def.Node, src, VisibilityPackage),
 			},
 		}
+		isSpringBeanMethod := def.Node != nil && javaMethodHasAnnotation(def.Node, src, "Bean")
 		if def.Node != nil {
 			if rt := extractJavaMethodReturnType(def.Node, src); rt != "" {
 				node.Meta["return_type"] = rt
 			}
-			if params := javaParamsSource(def.Node, src); params != "" {
-				node.Meta["params_src"] = params
+			if isSpringBeanMethod {
+				if params := javaParamsSource(def.Node, src); params != "" {
+					node.Meta["params_src"] = params
+				}
 			}
 		}
 		if doc := ExtractDocAbove(src, def.StartLine, DocLangBlockStar); doc != "" {
@@ -755,7 +758,7 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 		// type. Emit an EdgeProvides from the config class to the
 		// method so the indexer's DI post-pass links consumers typed
 		// as the return type back to this factory.
-		if def.Node != nil && javaMethodHasAnnotation(def.Node, src, "Bean") {
+		if isSpringBeanMethod {
 			if rt, _ := node.Meta["return_type"].(string); rt != "" {
 				result.Edges = append(result.Edges, &graph.Edge{
 					From:     classID,

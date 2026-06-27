@@ -16,6 +16,10 @@ var (
 	// @ConfigurationProperties("p") prefix. Group 1 is the prefix.
 	javaConfPropsRe = regexp.MustCompile(`@ConfigurationProperties\s*\(\s*(?:prefix\s*=\s*)?["']([^"']+)["']`)
 	javaStringLitRe = regexp.MustCompile(`["']([^"']+)["']`)
+
+	javaAnnotationPrefixArgRe = regexp.MustCompile(`(?:^|[,{ \t\r\n])prefix\s*=\s*(\{[^}]*\}|["'][^"']*["'])`)
+	javaAnnotationNameArgRe   = regexp.MustCompile(`(?:^|[,{ \t\r\n])name\s*=\s*(\{[^}]*\}|["'][^"']*["'])`)
+	javaAnnotationValueArgRe  = regexp.MustCompile(`(?:^|[,{ \t\r\n])value\s*=\s*(\{[^}]*\}|["'][^"']*["'])`)
 )
 
 // mineSpringConfigReads stamps the Spring property keys a bean reads onto its
@@ -196,12 +200,28 @@ func firstJavaAnnotationStringArg(args, name string) string {
 }
 
 func javaAnnotationStringArgs(args, name string) []string {
-	re := regexp.MustCompile(`(?:^|[,{ \t\r\n])` + regexp.QuoteMeta(name) + `\s*=\s*(\{[^}]*\}|["'][^"']*["'])`)
+	re := javaAnnotationStringArgRe(name)
+	if re == nil {
+		return nil
+	}
 	m := re.FindStringSubmatch(args)
 	if len(m) < 2 {
 		return nil
 	}
 	return javaStringLiterals(m[1])
+}
+
+func javaAnnotationStringArgRe(name string) *regexp.Regexp {
+	switch name {
+	case "prefix":
+		return javaAnnotationPrefixArgRe
+	case "name":
+		return javaAnnotationNameArgRe
+	case "value":
+		return javaAnnotationValueArgRe
+	default:
+		return nil
+	}
 }
 
 func javaStringLiterals(s string) []string {

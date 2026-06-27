@@ -336,7 +336,10 @@ public class X {
 func TestJavaExtractor_BeanMethodParamsCaptured(t *testing.T) {
 	src := []byte(`
 package c;
+import org.springframework.context.annotation.Bean;
+
 public class X {
+    @Bean
     public JdbcTemplate jdbcTemplate(DataSource dataSource) { return null; }
 }
 `)
@@ -355,6 +358,29 @@ public class X {
 	params, _ := method.Meta["params_src"].(string)
 	assert.Contains(t, params, "DataSource")
 	assert.Contains(t, params, "dataSource")
+}
+
+func TestJavaExtractor_PlainMethodParamsNotCapturedForSpringBeanLinking(t *testing.T) {
+	src := []byte(`
+package c;
+public class X {
+    public void inspect(DataSource dataSource) {}
+}
+`)
+	e := NewJavaExtractor()
+	result, err := e.Extract("X.java", src)
+	require.NoError(t, err)
+
+	var method *graph.Node
+	for _, n := range nodesOfKind(result.Nodes, graph.KindMethod) {
+		if n.Name == "inspect" {
+			method = n
+			break
+		}
+	}
+	require.NotNil(t, method)
+	_, ok := method.Meta["params_src"]
+	assert.False(t, ok, "plain methods should not participate in Spring bean parameter matching")
 }
 
 func TestJavaExtractor_SpringConditionalOnPropertyReadsDatasource(t *testing.T) {

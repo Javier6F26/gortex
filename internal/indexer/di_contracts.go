@@ -132,10 +132,10 @@ func (idx *Indexer) linkSpringBeans() {
 		}
 	}
 
-	// For each bean, walk Java constructor nodes whose params_src
-	// (captured at extraction time) mentions the return type. Dedupe
-	// by (consumer_class, bean_method) so an overloaded constructor
-	// only links once.
+	// For each bean, walk Java constructors and @Bean factory methods
+	// whose params_src (captured at extraction time) mentions the return
+	// type. Dedupe by (consumer_class, bean_method) so an overloaded
+	// constructor or factory method only links once.
 	linked := make(map[string]struct{})
 	for _, b := range beans {
 		for _, n := range candidates {
