@@ -22,6 +22,35 @@ const maxFileBytes = 4 << 20
 // grounded but not type-checked.
 const astConfidence = 0.95
 
+// inferredConfidence is the graded confidence stamped on edges this
+// engine derives by a type heuristic rather than a direct structural
+// match (e.g. a receiver type narrowed by inference). Honestly weaker
+// than astConfidence, yet well above the name-only text-match floor.
+// The edge still carries OriginASTResolved provenance — only the
+// confidence and the resolution_strategy label distinguish it from the
+// direct path.
+const inferredConfidence = 0.7
+
+// resolutionStrategy labels how the engine derived an edge it emits. It
+// rides on Meta["resolution_strategy"] for graded (non-direct)
+// emissions so consumers can see the inference path; the direct path
+// carries no label. Extensible: later inference forms add their own
+// constants.
+type resolutionStrategy string
+
+const (
+	// strategyDirect is the default: a structurally grounded
+	// tree-sitter resolution. Emitted at astConfidence with no
+	// resolution_strategy label (its zero value is the empty string, so
+	// the direct path stamps nothing extra).
+	strategyDirect resolutionStrategy = ""
+	// strategyInferred marks an edge derived by a type heuristic rather
+	// than a direct scope match — emitted at inferredConfidence and
+	// labelled so it stays honestly distinguishable from a direct
+	// resolution.
+	strategyInferred resolutionStrategy = "inferred"
+)
+
 // extendsWalkDepth bounds the inherited-method lookup walk up the
 // resolved EdgeExtends chain.
 const extendsWalkDepth = 3
@@ -527,7 +556,7 @@ func (a *applier) upgradeOrCreateCall(caller, target *graph.Node, cf callFact, f
 		res.EdgesConfirmed++
 		return
 	}
-	a.addASTEdge(caller.ID, target.ID, graph.EdgeCalls, file, cf.line)
+	a.addASTEdge(caller.ID, target.ID, graph.EdgeCalls, file, cf.line, strategyDirect, astConfidence)
 	res.EdgesAdded++
 }
 
@@ -589,11 +618,11 @@ func (a *applier) applySuper(idx *fileIndex, sf superFact, res *semantic.EnrichR
 		// correct kind instead, mirroring how the compiler-grade providers
 		// only ever add new edges rather than flip an existing one's kind.
 		a.g.RemoveEdge(e.From, e.To, e.Kind)
-		a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line)
+		a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line, strategyDirect, astConfidence)
 		res.EdgesAdded++
 		return
 	}
-	a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line)
+	a.addASTEdge(typeNode.ID, superNode.ID, kind, idx.facts.file, sf.line, strategyDirect, astConfidence)
 	res.EdgesAdded++
 }
 
@@ -714,22 +743,66 @@ func (a *applier) persistEdgeRow(e *graph.Edge) {
 	}
 }
 
-func (a *applier) addASTEdge(from, to string, kind graph.EdgeKind, file string, line int) *graph.Edge {
+// addASTEdge mints an AST-grade resolution edge. The default direct
+// path (strategyDirect, astConfidence) keeps the structurally-grounded
+// confidence and carries no resolution_strategy label — its callers
+// have already arbitrated the edge state before reaching here, so it
+// adds unconditionally exactly as before. A graded path (e.g.
+// strategyInferred, inferredConfidence) emits the same OriginASTResolved
+// provenance at a lower, honest confidence and stamps
+// Meta["resolution_strategy"] with its label. A graded emission never
+// clobbers or downgrades a pre-existing equal-or-stronger edge on the
+// same (from,to,kind): on contention the stronger edge is returned
+// untouched.
+func (a *applier) addASTEdge(from, to string, kind graph.EdgeKind, file string, line int, strategy resolutionStrategy, confidence float64) *graph.Edge {
+	if strategy != strategyDirect {
+		if existing := a.strongerEdge(from, to, kind, confidence); existing != nil {
+			return existing
+		}
+	}
 	e := &graph.Edge{
 		From:            from,
 		To:              to,
 		Kind:            kind,
 		FilePath:        file,
 		Line:            line,
-		Confidence:      astConfidence,
-		ConfidenceLabel: graph.ConfidenceLabelFor(kind, astConfidence),
+		Confidence:      confidence,
+		ConfidenceLabel: graph.ConfidenceLabelFor(kind, confidence),
 		Origin:          graph.OriginASTResolved,
 		Meta: map[string]any{
 			"semantic_source": a.provider,
 		},
 	}
+	if strategy != strategyDirect {
+		e.Meta["resolution_strategy"] = string(strategy)
+	}
 	a.g.AddEdge(e)
 	return e
+}
+
+// strongerEdge returns an existing (from->to, kind) edge whose
+// provenance outranks the AST-grade origin a graded emission would
+// stamp — or whose confidence is equal-or-higher at the same rank — so
+// a lower-confidence inferred edge yields to it instead of downgrading
+// it. Returns nil when no such edge exists. Graded emissions stay at
+// OriginASTResolved, so the rank floor is that tier: a pre-existing LSP
+// edge (higher rank) or a direct AST edge (same rank, higher
+// confidence) both win.
+func (a *applier) strongerEdge(from, to string, kind graph.EdgeKind, confidence float64) *graph.Edge {
+	gradedRank := graph.OriginRank(graph.OriginASTResolved)
+	for _, e := range a.g.GetOutEdges(from) {
+		if e.Kind != kind || e.To != to {
+			continue
+		}
+		rank := graph.OriginRank(effectiveOrigin(e))
+		if rank > gradedRank {
+			return e
+		}
+		if rank == gradedRank && e.Confidence >= confidence {
+			return e
+		}
+	}
+	return nil
 }
 
 // claimable reports whether the engine may rewire this edge's target:
