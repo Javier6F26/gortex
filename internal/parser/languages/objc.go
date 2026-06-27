@@ -14,14 +14,14 @@ import (
 var (
 	objcInterfaceRe = regexp.MustCompile(`(?m)^\s*@interface\s+(\w+)`)
 	// objcSuperRe captures the superclass of `@interface X : Super` (group 1).
-	objcSuperRe = regexp.MustCompile(`@interface\s+\w+\s*:\s*(\w+)`)
-	objcProtocolRe  = regexp.MustCompile(`(?m)^\s*@protocol\s+(\w+)`)
-	objcImplRe      = regexp.MustCompile(`(?m)^\s*@implementation\s+(\w+)`)
-	objcMethodRe    = regexp.MustCompile(`(?m)^\s*([-+])\s*\(\s*[^)]*\)\s*([A-Za-z_]\w*(?:\s*:\s*\([^)]*\)\s*\w+(?:\s+[A-Za-z_]\w*\s*:\s*\([^)]*\)\s*\w+)*)?)`)
-	objcFuncRe      = regexp.MustCompile(`(?m)^\s*(?:static\s+|extern\s+|inline\s+)*[A-Za-z_][\w\s\*]*?\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{`)
-	objcImportQRe   = regexp.MustCompile(`(?m)^\s*#import\s+"([^"]+)"`)
-	objcImportARe   = regexp.MustCompile(`(?m)^\s*#import\s+<([^>]+)>`)
-	objcAtImportRe  = regexp.MustCompile(`(?m)^\s*@import\s+([\w.]+)`)
+	objcSuperRe    = regexp.MustCompile(`@interface\s+\w+\s*:\s*(\w+)`)
+	objcProtocolRe = regexp.MustCompile(`(?m)^\s*@protocol\s+(\w+)`)
+	objcImplRe     = regexp.MustCompile(`(?m)^\s*@implementation\s+(\w+)`)
+	objcMethodRe   = regexp.MustCompile(`(?m)^\s*([-+])\s*\(\s*[^)]*\)\s*([A-Za-z_]\w*(?:\s*:\s*\([^)]*\)\s*\w+(?:\s+[A-Za-z_]\w*\s*:\s*\([^)]*\)\s*\w+)*)?)`)
+	objcFuncRe     = regexp.MustCompile(`(?m)^\s*(?:static\s+|extern\s+|inline\s+)*[A-Za-z_][\w\s\*]*?\s+([A-Za-z_]\w*)\s*\([^)]*\)\s*\{`)
+	objcImportQRe  = regexp.MustCompile(`(?m)^\s*#import\s+"([^"]+)"`)
+	objcImportARe  = regexp.MustCompile(`(?m)^\s*#import\s+<([^>]+)>`)
+	objcAtImportRe = regexp.MustCompile(`(?m)^\s*@import\s+([\w.]+)`)
 )
 
 // ObjCExtractor extracts Objective-C / Objective-C++ source using regex.
@@ -253,6 +253,13 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 	// React Native native event emits pair with the JS addListener handler.
 	mineRNNativeEmits(src, rnObjCSendEventRe, func(line int) string {
+		return objcEnclosing(methodRanges, line)
+	}, filePath, "objc", result)
+
+	// A custom paren-form sendEvent(...) wrapper (distinct from the bracketed
+	// sendEventWithName:) is also an RN emit; the two forms are syntactically
+	// disjoint, so mining it separately does not double-count.
+	mineRNNativeEmits(src, rnSendEventWrapperRe, func(line int) string {
 		return objcEnclosing(methodRanges, line)
 	}, filePath, "objc", result)
 

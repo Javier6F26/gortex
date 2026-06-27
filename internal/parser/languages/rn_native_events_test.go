@@ -81,3 +81,50 @@ function subscribe() {
 	assert.Equal(t, "rn_native_event", events[0].Meta["transport"])
 	assert.Len(t, fix.edgesByKind[graph.EdgeListensOn], 1)
 }
+
+func TestSwiftExtractor_RNCustomSendEventWrapper(t *testing.T) {
+	const swift = `class Notifier {
+    func emit() {
+        sendEvent(reactContext, "MyEvent", body)
+    }
+}
+`
+	res, err := NewSwiftExtractor().Extract("Notifier.swift", []byte(swift))
+	require.NoError(t, err)
+
+	topicID := "event::pubsub::rn_native_event::MyEvent"
+	emit := emitEdgeTo(res.Edges, graph.EdgeEmits, topicID)
+	require.NotNil(t, emit, "custom sendEvent(...) wrapper should emit an EdgeEmits to the topic")
+	assert.Equal(t, "Notifier.swift::Notifier.emit", emit.From, "emit attributed to the enclosing method")
+
+	count := 0
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeEmits && e.To == topicID {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "wrapper form must not double-count the emit edge")
+}
+
+func TestObjCExtractor_RNCustomSendEventWrapper(t *testing.T) {
+	const objc = `@implementation Notifier
+- (void)emit {
+    sendEvent(self, @"MyEvent", @{});
+}
+@end
+`
+	res, err := NewObjCExtractor().Extract("Notifier.m", []byte(objc))
+	require.NoError(t, err)
+
+	topicID := "event::pubsub::rn_native_event::MyEvent"
+	emit := emitEdgeTo(res.Edges, graph.EdgeEmits, topicID)
+	require.NotNil(t, emit, "ObjC paren-form sendEvent(...) wrapper should emit an EdgeEmits to the topic")
+
+	count := 0
+	for _, e := range res.Edges {
+		if e.Kind == graph.EdgeEmits && e.To == topicID {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "wrapper form must not double-count the emit edge")
+}

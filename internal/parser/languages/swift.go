@@ -206,7 +206,7 @@ func (e *SwiftExtractor) Extract(filePath string, src []byte) (*parser.Extractio
 	}
 
 	// React Native native event emits pair with the JS addListener handler.
-	mineRNNativeEmits(src, rnSwiftSendEventRe, func(line int) string {
+	mineRNNativeEmits(src, rnSendEventWrapperRe, func(line int) string {
 		return findEnclosingFunc(funcRanges, line)
 	}, filePath, "swift", result)
 

@@ -17,9 +17,12 @@ const rnNativeEventTransport = "rn_native_event"
 // RCTEventEmitter emit, capturing the event name string.
 var rnObjCSendEventRe = regexp.MustCompile(`sendEventWithName:\s*@"([^"]+)"`)
 
-// rnSwiftSendEventRe matches a Swift `sendEvent(withName: "Name", …)`
-// RCTEventEmitter emit, capturing the event name string.
-var rnSwiftSendEventRe = regexp.MustCompile(`sendEvent\s*\(\s*withName:\s*"([^"]+)"`)
+// rnSendEventWrapperRe matches a paren-form `sendEvent(...)` emit -- both the
+// Swift labelled `sendEvent(withName: "Name", ...)` and a custom helper
+// wrapper `sendEvent(reactContext, "Name", body)` -- capturing the first
+// literal string argument as the event name. The `[^;{}]` guard keeps a
+// single match from spanning a statement boundary.
+var rnSendEventWrapperRe = regexp.MustCompile(`\bsendEvent\s*\([^;{}]*?"([^"]+)"`)
 
 // mineRNNativeEmits scans native source for React Native event-emit sites and
 // records one pub/sub publish per emit on the rn_native_event channel,
