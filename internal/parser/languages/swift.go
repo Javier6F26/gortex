@@ -362,6 +362,9 @@ func (e *SwiftExtractor) emitProtocol(m parser.QueryResult, filePath, fileID str
 	}
 	seen[id] = true
 	meta := map[string]any{"visibility": swiftVisibility(def.Node, src)}
+	if swiftHasAttr(def.Node, "objc", src) {
+		meta["objc"] = true
+	}
 	if doc := ExtractDocAbove(src, def.StartLine, DocLangSlashSlash); doc != "" {
 		meta["doc"] = doc
 	}

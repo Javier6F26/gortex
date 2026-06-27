@@ -119,3 +119,20 @@ func TestObjCExtractor_SelectorFnValue(t *testing.T) {
 	assert.Equal(t, "Widget.m::tap", found.From, "captured in the enclosing method")
 	assert.Equal(t, "selector", found.Meta["fn_ref_form"])
 }
+
+func TestObjCExtractor_ProtocolConformance(t *testing.T) {
+	const objc = `@interface Widget : NSObject <Drawable, Tappable>
+@end
+`
+	res, err := NewObjCExtractor().Extract("Widget.h", []byte(objc))
+	require.NoError(t, err)
+	var cls *graph.Node
+	for _, n := range res.Nodes {
+		if n.Name == "Widget" && n.Kind == graph.KindType {
+			cls = n
+		}
+	}
+	require.NotNil(t, cls, "interface Widget should be extracted")
+	require.NotNil(t, cls.Meta, "Widget should carry conformance meta")
+	assert.Equal(t, "Drawable,Tappable", cls.Meta["objc_protocols"])
+}

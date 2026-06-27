@@ -72,12 +72,12 @@ func TestResolveSwiftObjCBridge_CandidateBridge(t *testing.T) {
 
 func TestSwiftObjCBaseNameCandidates(t *testing.T) {
 	cases := map[string][]string{
-		"cellForRowAtIndexPath:":            {"cellForRowAtIndexPath", "cellForRow"},
-		"moveFrom:to:":                      {"moveFrom", "move"},
-		"initWithFrame:":                    {"initWithFrame"},
-		"tableView:numberOfRowsInSection:":  {"tableView"},
-		"viewDidLoad":                       {"viewDidLoad"},
-		"dataForKey:":                       {"dataForKey", "data"},
+		"cellForRowAtIndexPath:":           {"cellForRowAtIndexPath", "cellForRow"},
+		"moveFrom:to:":                     {"moveFrom", "move"},
+		"initWithFrame:":                   {"initWithFrame"},
+		"tableView:numberOfRowsInSection:": {"tableView"},
+		"viewDidLoad":                      {"viewDidLoad"},
+		"dataForKey:":                      {"dataForKey", "data"},
 	}
 	for sel, want := range cases {
 		assert.ElementsMatch(t, want, swiftObjCBaseNameCandidates(sel), "selector %q", sel)
@@ -160,4 +160,52 @@ func TestResolveSwiftObjCBridge_Idempotent(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 2, count)
+}
+
+func TestResolveSwiftObjCBridge_ProtocolConformance(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "ios/P.swift::Drawable", Kind: graph.KindInterface, Name: "Drawable",
+		FilePath: "ios/P.swift", StartLine: 1, Language: "swift",
+		Meta: map[string]any{"objc": true},
+	})
+	g.AddNode(&graph.Node{
+		ID: "ios/C.m::Widget", Kind: graph.KindType, Name: "Widget",
+		FilePath: "ios/C.m", StartLine: 1, Language: "objc",
+		Meta: map[string]any{"objc_protocols": "Drawable"},
+	})
+
+	ResolveSwiftObjCBridge(g)
+
+	var impl *graph.Edge
+	for _, e := range g.GetOutEdges("ios/C.m::Widget") {
+		if e.To == "ios/P.swift::Drawable" && e.Kind == graph.EdgeImplements {
+			impl = e
+		}
+	}
+	require.NotNil(t, impl, "ObjC class adopting a Swift @objc protocol should get EdgeImplements")
+	assert.Equal(t, SynthSwiftObjC, impl.Meta[MetaSynthesizedBy])
+	assert.Equal(t, "objc", impl.Meta["bridge_from_lang"])
+	assert.Equal(t, "swift", impl.Meta["bridge_to_lang"])
+}
+
+func TestResolveSwiftObjCBridge_NonObjCProtocolNotBridged(t *testing.T) {
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "ios/P.swift::Plain", Kind: graph.KindInterface, Name: "Plain",
+		FilePath: "ios/P.swift", StartLine: 1, Language: "swift",
+	})
+	g.AddNode(&graph.Node{
+		ID: "ios/C.m::Widget", Kind: graph.KindType, Name: "Widget",
+		FilePath: "ios/C.m", StartLine: 1, Language: "objc",
+		Meta: map[string]any{"objc_protocols": "Plain"},
+	})
+
+	ResolveSwiftObjCBridge(g)
+
+	for _, e := range g.GetOutEdges("ios/C.m::Widget") {
+		if e.To == "ios/P.swift::Plain" && e.Kind == graph.EdgeImplements {
+			t.Errorf("a non-@objc Swift protocol must not be bridged")
+		}
+	}
 }

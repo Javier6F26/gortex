@@ -168,3 +168,30 @@ class C {
 		t.Errorf("@nonobjc var secret must not be exposed, got selector %v", sel["secret"])
 	}
 }
+
+func TestSwift_ObjCProtocolFlag(t *testing.T) {
+	src := `@objc protocol Drawable {
+    func draw()
+}
+protocol Plain {
+    func x()
+}
+`
+	nodes, _ := runSwiftExtract(t, "P.swift", src)
+	flag := map[string]any{}
+	for _, n := range nodes {
+		if n.Kind == graph.KindInterface {
+			if n.Meta != nil {
+				flag[n.Name] = n.Meta["objc"]
+			} else {
+				flag[n.Name] = nil
+			}
+		}
+	}
+	if flag["Drawable"] != true {
+		t.Errorf("@objc protocol Drawable should carry Meta[objc]=true, got %v", flag["Drawable"])
+	}
+	if flag["Plain"] == true {
+		t.Errorf("plain protocol Plain must not carry Meta[objc]=true")
+	}
+}

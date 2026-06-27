@@ -1,6 +1,10 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"strings"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // swiftObjCBridgeVia marks a synthesized Swift↔ObjC bridge edge.
 const swiftObjCBridgeVia = "swift.objc.bridge"
@@ -40,7 +44,11 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 	objcBySelector := map[string][]*graph.Node{}
 	swiftByName := map[string][]*graph.Node{}
 	var swiftExact []swiftSelRef
-	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction, graph.KindField) {
+	// Protocol-conformance bridge inputs: Swift @objc protocols by name and
+	// the ObjC @interface nodes that adopt protocols.
+	swiftObjCProto := map[string]*graph.Node{}
+	var objcConformers []*graph.Node
+	for _, n := range nodesByKindsOrAll(g, graph.KindMethod, graph.KindFunction, graph.KindField, graph.KindInterface, graph.KindType) {
 		if n == nil {
 			continue
 		}
@@ -48,6 +56,11 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 		case "objc":
 			if n.Kind == graph.KindMethod && n.Name != "" {
 				objcBySelector[n.Name] = append(objcBySelector[n.Name], n)
+			}
+			if n.Kind == graph.KindType && n.Meta != nil {
+				if protos, _ := n.Meta["objc_protocols"].(string); protos != "" {
+					objcConformers = append(objcConformers, n)
+				}
 			}
 		case "swift":
 			if n.Name != "" {
@@ -62,10 +75,17 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 				if sel, _ := n.Meta["objc_setter_selector"].(string); sel != "" {
 					swiftExact = append(swiftExact, swiftSelRef{n, sel})
 				}
+				if n.Kind == graph.KindInterface {
+					if isObjC, _ := n.Meta["objc"].(bool); isObjC {
+						swiftObjCProto[n.Name] = n
+					}
+				}
 			}
 		}
 	}
-	if len(objcBySelector) == 0 || len(swiftByName) == 0 {
+	noSelectorBridge := len(objcBySelector) == 0 || len(swiftByName) == 0
+	noProtocolBridge := len(swiftObjCProto) == 0 || len(objcConformers) == 0
+	if noSelectorBridge && noProtocolBridge {
 		return 0
 	}
 
@@ -104,10 +124,45 @@ func ResolveSwiftObjCBridge(g graph.Store) int {
 		}
 	}
 
+	// Protocol-conformance pass: an ObjC @interface adopting a Swift @objc
+	// protocol gets a cross-language EdgeImplements to that protocol node.
+	for _, oc := range objcConformers {
+		protos, _ := oc.Meta["objc_protocols"].(string)
+		for _, pname := range strings.Split(protos, ",") {
+			pname = strings.TrimSpace(pname)
+			if pn := swiftObjCProto[pname]; pn != nil && pn.ID != oc.ID {
+				batch = append(batch, swiftObjCImplementsEdge(oc, pn))
+				bridged[oc.ID] = true
+			}
+		}
+	}
+
 	for _, e := range batch {
 		g.AddEdge(e)
 	}
 	return len(bridged)
+}
+
+// swiftObjCImplementsEdge builds the cross-language conformance edge from an
+// ObjC class adopting a Swift @objc protocol to that protocol node.
+func swiftObjCImplementsEdge(from, to *graph.Node) *graph.Edge {
+	return &graph.Edge{
+		From:            from.ID,
+		To:              to.ID,
+		Kind:            graph.EdgeImplements,
+		FilePath:        from.FilePath,
+		Line:            from.StartLine,
+		Confidence:      0.6,
+		ConfidenceLabel: graph.ConfidenceLabelFor(graph.EdgeImplements, 0.6),
+		Origin:          graph.OriginASTInferred,
+		Meta: map[string]any{
+			"via":              swiftObjCBridgeVia,
+			MetaSynthesizedBy:  SynthSwiftObjC,
+			MetaProvenance:     ProvenanceHeuristic,
+			"bridge_from_lang": from.Language,
+			"bridge_to_lang":   to.Language,
+		},
+	}
 }
 
 // swiftObjCBridgeEdge builds one direction of the cross-language bridge.

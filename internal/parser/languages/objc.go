@@ -109,6 +109,11 @@ func (e *ObjCExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 				stampObjCNodeMeta(result, filePath+"::"+name, "uikit_role", role)
 			}
 		}
+		// Protocol conformance: `@interface X : Base <P1, P2>` adopts P1, P2;
+		// stamp them for the Swift<->ObjC bridge synthesizer.
+		if protos := objcConformedProtocols(src, m[0]); protos != "" {
+			stampObjCNodeMeta(result, filePath+"::"+name, "objc_protocols", protos)
+		}
 	}
 	for _, m := range objcProtocolRe.FindAllSubmatchIndex(src, -1) {
 		name := string(src[m[2]:m[3]])
@@ -637,3 +642,30 @@ func objcComponentName(class string) string {
 }
 
 var _ parser.Extractor = (*ObjCExtractor)(nil)
+
+// objcConformedProtocols returns the comma-joined protocol names adopted on
+// an @interface declaration line (`@interface X : Base <P1, P2>` -> "P1,P2"),
+// or "" when none are adopted. The `<...>` clause on the declaration line is
+// the adopted-protocol list.
+func objcConformedProtocols(src []byte, from int) string {
+	end := from
+	for end < len(src) && src[end] != '\n' {
+		end++
+	}
+	line := string(src[from:end])
+	open := strings.IndexByte(line, '<')
+	if open < 0 {
+		return ""
+	}
+	closeIdx := strings.IndexByte(line[open:], '>')
+	if closeIdx < 0 {
+		return ""
+	}
+	var protos []string
+	for _, pr := range strings.Split(line[open+1:open+closeIdx], ",") {
+		if pr = strings.TrimSpace(pr); pr != "" {
+			protos = append(protos, pr)
+		}
+	}
+	return strings.Join(protos, ",")
+}
