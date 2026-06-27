@@ -23,6 +23,10 @@ type bottleneckRow struct {
 	LoopDepth           int      `json:"loop_depth,omitempty"`
 	TransitiveLoopDepth int      `json:"transitive_loop_depth,omitempty"`
 	Recursive           bool     `json:"recursive,omitempty"`
+	MaxAccessDepth      int      `json:"max_access_depth,omitempty"`
+	LinearScanInLoop    bool     `json:"linear_scan_in_loop,omitempty"`
+	AllocInLoop         bool     `json:"alloc_in_loop,omitempty"`
+	RecursionInLoop     bool     `json:"recursion_in_loop,omitempty"`
 	Score               int      `json:"score"`
 	Reasons             []string `json:"reasons"`
 }
@@ -44,6 +48,22 @@ func metricInt(n *graph.Node, key string) int {
 	return 0
 }
 
+// metricBool reads a boolean signal stamped on a node's Meta, tolerating
+// the bool / string shapes the gob, JSON, and flat-binary round-trips
+// produce.
+func metricBool(n *graph.Node, key string) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	switch v := n.Meta[key].(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	}
+	return false
+}
+
 // handleAnalyzeBottlenecks (NEW-CBM-1) ranks functions by computation-
 // bottleneck risk. It combines the index-time per-function metrics
 // (cyclomatic + cognitive complexity, max loop depth) with two
@@ -55,6 +75,14 @@ func metricInt(n *graph.Node, key string) int {
 //   - recursive: the function participates in a call cycle (direct
 //     self-recursion or a short mutual cycle); recursion with no
 //     branching base case is flagged as unguarded.
+//
+// It also surfaces four index-time loop-region signals stamped on the
+// function node (decided by structural loop-ancestor membership, not line
+// range): linear_scan_in_loop (a linear-scan call inside a loop —
+// accidental O(n^2)), recursion_in_loop (self-call inside a loop),
+// alloc_in_loop (allocation inside a loop — churn / GC pressure), and
+// max_access_depth (deepest member-access chain — pointer-chasing). Each
+// contributes a reason and weight to the risk score.
 //
 // Args: limit (default 50), path_prefix, kinds (default function,method),
 // min_score.
@@ -71,9 +99,13 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 
 	// Gather candidate functions and their stamped metrics.
 	type fnMetrics struct {
-		node      *graph.Node
-		cyc, cog  int
-		loop      int
+		node         *graph.Node
+		cyc, cog     int
+		loop         int
+		accessDepth  int
+		linearInLoop bool
+		allocInLoop  bool
+		recurInLoop  bool
 	}
 	metrics := map[string]*fnMetrics{}
 	for _, n := range s.scopedNodes(ctx) {
@@ -87,10 +119,14 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 			continue
 		}
 		metrics[n.ID] = &fnMetrics{
-			node: n,
-			cyc:  metricInt(n, "complexity"),
-			cog:  metricInt(n, "cognitive"),
-			loop: metricInt(n, "loop_depth"),
+			node:         n,
+			cyc:          metricInt(n, "complexity"),
+			cog:          metricInt(n, "cognitive"),
+			loop:         metricInt(n, "loop_depth"),
+			accessDepth:  metricInt(n, "max_access_depth"),
+			linearInLoop: metricBool(n, "linear_scan_in_loop"),
+			allocInLoop:  metricBool(n, "alloc_in_loop"),
+			recurInLoop:  metricBool(n, "recursion_in_loop"),
 		}
 	}
 
@@ -188,6 +224,22 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 				score += 3
 			}
 		}
+		if m.linearInLoop {
+			reasons = append(reasons, "linear-scan call inside a loop — accidental O(n^2)")
+			score += 6
+		}
+		if m.recurInLoop {
+			reasons = append(reasons, "self-recursion inside a loop — compounding blow-up")
+			score += 7
+		}
+		if m.allocInLoop {
+			reasons = append(reasons, "allocation inside a loop — per-iteration churn / GC pressure")
+			score += 3
+		}
+		if m.accessDepth >= 4 {
+			reasons = append(reasons, "deep member-access chain (depth "+itoa(m.accessDepth)+") — pointer-chasing / Law of Demeter")
+			score += m.accessDepth
+		}
 		if score < minScore || len(reasons) == 0 {
 			continue
 		}
@@ -195,7 +247,11 @@ func (s *Server) handleAnalyzeBottlenecks(ctx context.Context, req mcp.CallToolR
 			ID: id, Name: m.node.Name, File: m.node.FilePath, Line: m.node.StartLine,
 			Cyclomatic: m.cyc, Cognitive: m.cog, LoopDepth: m.loop,
 			TransitiveLoopDepth: transitive, Recursive: recursive,
-			Score: score, Reasons: reasons,
+			MaxAccessDepth:   m.accessDepth,
+			LinearScanInLoop: m.linearInLoop,
+			AllocInLoop:      m.allocInLoop,
+			RecursionInLoop:  m.recurInLoop,
+			Score:            score, Reasons: reasons,
 		})
 	}
 

@@ -372,3 +372,195 @@ func ApplyComplexityMeta(meta map[string]any, cyc, cognitive, loopDepth int) {
 		meta["loop_depth"] = loopDepth
 	}
 }
+
+// --- Loop-region bottleneck signals ---------------------------------
+//
+// Four additional per-function signals that only mean something with
+// loop-region membership. "Inside a loop" is decided structurally: a
+// node is in a loop iff some AST ancestor on its descent path is a loop
+// node (the loopTypes table) — never by line range. So a call that
+// merely shares a line span with a loop but sits outside its body is not
+// flagged, and a call nested under a loop through an intermediate block
+// is.
+//
+// This walks the *sitter.Node body the extractor already holds rather
+// than rebuilding a control-flow graph: a control-flow graph would have
+// to re-parse the function's source text (that package is query-time-
+// only by design), whereas the loop-ancestor walk over the node in hand
+// is both cheaper — no re-parse — and directly precise for the membership
+// question these signals ask.
+
+// linearScanCallNames are call names whose body performs a linear scan
+// over a collection. One of these inside a loop is the classic
+// accidental-quadratic membership test (e.g. a Contains / Index call run
+// once per outer iteration).
+var linearScanCallNames = map[string]bool{
+	"Contains": true, "ContainsAny": true, "ContainsRune": true, "ContainsFunc": true,
+	"Index": true, "IndexAny": true, "IndexByte": true, "IndexRune": true, "IndexFunc": true,
+	"LastIndex": true, "LastIndexByte": true,
+}
+
+// loopSignalSpec carries the per-language AST node names the loop-signal
+// walk needs. callType / memberType are node types; the *Field entries
+// are tree-sitter field names.
+type loopSignalSpec struct {
+	loop            map[string]bool // loop node types (also the nesting source)
+	skip            map[string]bool // do not descend (nested function bodies)
+	callType        string          // call-expression node type
+	calleeField     string          // field on a call holding the callee
+	memberType      string          // member-access (selector / attribute) node type
+	memberObjField  string          // field on a member-access holding the object operand
+	memberNameField string          // field on a member-access holding the trailing name
+	compositeTypes  map[string]bool // allocation literal node types
+	allocCallNames  map[string]bool // builtin allocation call names
+}
+
+// loopSignalTables is keyed by language. Only languages wired to call
+// StampLoopSignals need an entry; an unknown language is a no-op.
+var loopSignalTables = map[string]loopSignalSpec{
+	"go": {
+		loop:            goLoopTypes,
+		skip:            goComplexitySkip,
+		callType:        "call_expression",
+		calleeField:     "function",
+		memberType:      "selector_expression",
+		memberObjField:  "operand",
+		memberNameField: "field",
+		compositeTypes:  map[string]bool{"composite_literal": true},
+		allocCallNames:  map[string]bool{"make": true, "new": true, "append": true},
+	},
+}
+
+// StampLoopSignals computes four loop-region-aware bottleneck signals for
+// a function/method body and stamps them on the node's Meta:
+//
+//   - max_access_depth (int): the number of identifier segments in the
+//     deepest member-access chain — a.b.c.d.e is 5 (four selector hops
+//     plus the base operand). High depth flags pointer-chasing / a
+//     Law-of-Demeter coupling smell. Stamped only when >= 3 so the common
+//     shallow case stays out of Meta.
+//   - linear_scan_in_loop (bool): a linear-scan call occurs inside a loop
+//     region — an accidental-quadratic membership test.
+//   - alloc_in_loop (bool): an allocation (make / new / append / a
+//     composite literal) occurs inside a loop region — per-iteration churn
+//     / GC pressure.
+//   - recursion_in_loop (bool): the function calls itself inside a loop
+//     region — compounding blow-up.
+//
+// Loop membership is structural (a loop AST ancestor), never a line-range
+// guess. funcName is the enclosing function's bare name, used to spot
+// direct self-recursion. A no-op for a language without a loop-signal
+// table, a nil body, or nil source.
+func StampLoopSignals(node *graph.Node, body *sitter.Node, src []byte, lang string) {
+	if node == nil || body == nil || src == nil {
+		return
+	}
+	spec, ok := loopSignalTables[lang]
+	if !ok {
+		return
+	}
+	depth, linear, alloc, recur := computeLoopSignals(body, src, spec, node.Name)
+	if depth < 3 && !linear && !alloc && !recur {
+		return
+	}
+	if node.Meta == nil {
+		node.Meta = map[string]any{}
+	}
+	if depth >= 3 {
+		node.Meta["max_access_depth"] = depth
+	}
+	if linear {
+		node.Meta["linear_scan_in_loop"] = true
+	}
+	if alloc {
+		node.Meta["alloc_in_loop"] = true
+	}
+	if recur {
+		node.Meta["recursion_in_loop"] = true
+	}
+}
+
+// computeLoopSignals walks body once, tracking loop-ancestor membership,
+// and returns the four signals. Nested function bodies (closures) are not
+// descended into — their signals belong to their own nodes, matching the
+// cognitive-complexity / loop-depth convention.
+func computeLoopSignals(body *sitter.Node, src []byte, spec loopSignalSpec, funcName string) (maxAccessDepth int, linearScanInLoop, allocInLoop, recursionInLoop bool) {
+	var walk func(n *sitter.Node, inLoop bool)
+	walk = func(n *sitter.Node, inLoop bool) {
+		if n == nil {
+			return
+		}
+		t := n.Type()
+
+		if spec.memberType != "" && t == spec.memberType {
+			if d := memberChainSegments(n, spec); d > maxAccessDepth {
+				maxAccessDepth = d
+			}
+		}
+
+		if inLoop {
+			if spec.callType != "" && t == spec.callType {
+				if name := calleeFinalName(n, src, spec); name != "" {
+					if linearScanCallNames[name] {
+						linearScanInLoop = true
+					}
+					if spec.allocCallNames[name] {
+						allocInLoop = true
+					}
+					if name == funcName {
+						recursionInLoop = true
+					}
+				}
+			}
+			if spec.compositeTypes[t] {
+				allocInLoop = true
+			}
+		}
+
+		if spec.skip != nil && spec.skip[t] {
+			return
+		}
+		childInLoop := inLoop || spec.loop[t]
+		for c := range n.NamedChildren() {
+			walk(c, childInLoop)
+		}
+	}
+	walk(body, false)
+	return
+}
+
+// memberChainSegments returns the number of identifier segments in the
+// member-access chain whose outermost node is n: the run of contiguous
+// member-access nodes along the object spine, plus the base operand.
+// a.b.c.d.e -> 5. Measuring at every member-access node is safe — the
+// outermost yields the largest count, so the running max is correct.
+func memberChainSegments(n *sitter.Node, spec loopSignalSpec) int {
+	hops := 0
+	for cur := n; cur != nil && cur.Type() == spec.memberType; cur = cur.ChildByFieldName(spec.memberObjField) {
+		hops++
+	}
+	if hops == 0 {
+		return 0
+	}
+	return hops + 1
+}
+
+// calleeFinalName returns the bare final name of a call's callee: the
+// identifier for a direct call, or the trailing selector field for a
+// qualified / method call. Empty for a more complex callee expression.
+func calleeFinalName(call *sitter.Node, src []byte, spec loopSignalSpec) string {
+	fn := call.ChildByFieldName(spec.calleeField)
+	if fn == nil {
+		return ""
+	}
+	switch {
+	case spec.memberType != "" && fn.Type() == spec.memberType:
+		if field := fn.ChildByFieldName(spec.memberNameField); field != nil {
+			return field.Content(src)
+		}
+		return ""
+	case fn.Type() == "identifier":
+		return fn.Content(src)
+	}
+	return ""
+}
