@@ -43,6 +43,10 @@ __pycache__/
 dist/
 build/
 
+# Release: native-darwin archives the release job stages outside dist/ (which
+# --clean wipes). Must be ignored or goreleaser aborts on a dirty work tree.
+dist-darwin/
+
 # Testing
 .pytest_cache/
 .hypothesis/
