@@ -225,3 +225,37 @@ func TestScalaExtensionAndPackageScope(t *testing.T) {
 	assert.Equal(t, true, shout.Meta["extension"])
 	assert.Equal(t, "com.app.util", shout.Meta["scope_pkg"])
 }
+
+func TestScalaExtractor_FactoryChainReceiver(t *testing.T) {
+	src := []byte("object M {\n" +
+		"  def builder(): Widget = new Widget()\n" +
+		"  def run() = {\n" +
+		"    builder().withX().build()\n" +
+		"  }\n" +
+		"}\n")
+	res, err := NewScalaExtractor().Extract("w.scala", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var withX, build *graph.Edge
+	for _, e := range res.Edges {
+		if e.Kind != graph.EdgeCalls {
+			continue
+		}
+		switch e.To {
+		case "unresolved::*.withX":
+			withX = e
+		case "unresolved::*.build":
+			build = e
+		}
+	}
+	if withX == nil || build == nil {
+		t.Fatal("withX()/build() call edges not found")
+	}
+	if withX.Meta["receiver_type"] != "Widget" {
+		t.Errorf("withX receiver_type = %v, want Widget (builder() factory)", withX.Meta["receiver_type"])
+	}
+	if got, _ := build.Meta["receiver_expr"].(string); got != "builder().withX()" {
+		t.Errorf("build receiver_expr = %q, want builder().withX()", got)
+	}
+}

@@ -611,6 +611,7 @@ func (e *ScalaExtractor) extractCall(
 	}
 	callee := node.Child(0)
 	var callName string
+	var receiver string
 	switch callee.Type() {
 	case "identifier":
 		callName = callee.Content(src)
@@ -623,6 +624,10 @@ func (e *ScalaExtractor) extractCall(
 				callName = fc.Content(src)
 				break
 			}
+		}
+		// The object the method is selected on is the chained receiver.
+		if obj := callee.NamedChild(0); obj != nil {
+			receiver = strings.TrimSpace(obj.Content(src))
 		}
 	default:
 		return
@@ -637,10 +642,14 @@ func (e *ScalaExtractor) extractCall(
 	if callerID == "" {
 		return
 	}
-	result.Edges = append(result.Edges, &graph.Edge{
+	edge := &graph.Edge{
 		From: callerID, To: "unresolved::*." + callName,
 		Kind: graph.EdgeCalls, FilePath: filePath, Line: startLine,
-	})
+	}
+	if receiver != "" {
+		stampFactoryChainReceiver(edge, receiver, resolveChainType(receiver, nil, result))
+	}
+	result.Edges = append(result.Edges, edge)
 }
 
 // scalaFindChildIdentifier finds the first direct child of type "identifier"
