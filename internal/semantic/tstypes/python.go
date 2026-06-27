@@ -58,8 +58,7 @@ func pySupertypes(n *sitter.Node, src []byte) []SuperRef {
 		return nil
 	}
 	var out []SuperRef
-	for i := 0; i < int(supers.NamedChildCount()); i++ {
-		c := supers.NamedChild(i)
+	for c := range supers.NamedChildren() {
 		switch c.Type() {
 		case "identifier", "attribute":
 			name := c.Content(src)
@@ -118,13 +117,12 @@ func pyFields(n *sitter.Node, src []byte) []Binding {
 				}
 			}
 		}
-		for i := 0; i < int(node.NamedChildCount()); i++ {
-			visit(node.NamedChild(i), selfOnly)
+		for child := range node.NamedChildren() {
+			visit(child, selfOnly)
 		}
 	}
 	// Class-level: only direct statements; self.x: walk method bodies.
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		switch c.Type() {
 		case "expression_statement":
 			visit(c, false)
@@ -143,8 +141,7 @@ func pyParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		switch p.Type() {
 		case "identifier":
 			out = append(out, Binding{Name: p.Content(src), Line: nodeLine(p)})
@@ -249,8 +246,7 @@ func pyImports(root *sitter.Node, src []byte) []Import {
 				return
 			}
 			path := strings.ReplaceAll(module, ".", "/")
-			for i := 0; i < int(n.NamedChildCount()); i++ {
-				c := n.NamedChild(i)
+			for c := range n.NamedChildren() {
 				switch c.Type() {
 				case "dotted_name":
 					if c.Content(src) == module {
@@ -273,8 +269,8 @@ func pyImports(root *sitter.Node, src []byte) []Import {
 			// only `import x as y` introduces a flat local binding,
 			// and that's a module, not a type. Skip.
 		default:
-			for i := 0; i < int(n.NamedChildCount()); i++ {
-				visit(n.NamedChild(i))
+			for child := range n.NamedChildren() {
+				visit(child)
 			}
 		}
 	}

@@ -89,8 +89,7 @@ func csharpSupertypes(n *sitter.Node, src []byte) []SuperRef {
 		kind = graph.EdgeExtends
 	}
 	var out []SuperRef
-	for i := 0; i < int(baseList.NamedChildCount()); i++ {
-		entry := baseList.NamedChild(i)
+	for entry := range baseList.NamedChildren() {
 		name := entry.Content(src)
 		if entry.Type() == "primary_constructor_base_type" {
 			// `: Base(args)` — the base-class constructor invocation.
@@ -112,8 +111,7 @@ func csharpFields(n *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		switch c.Type() {
 		case "field_declaration":
 			decl := firstChildOfType(c, "variable_declaration")
@@ -121,8 +119,7 @@ func csharpFields(n *sitter.Node, src []byte) []Binding {
 				continue
 			}
 			typ := fieldText(decl, "type", src)
-			for j := 0; j < int(decl.NamedChildCount()); j++ {
-				d := decl.NamedChild(j)
+			for d := range decl.NamedChildren() {
 				if d.Type() != "variable_declarator" {
 					continue
 				}
@@ -149,8 +146,7 @@ func csharpParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		if p.Type() != "parameter" {
 			continue
 		}

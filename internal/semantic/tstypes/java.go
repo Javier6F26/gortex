@@ -65,8 +65,7 @@ func javaSupertypes(n *sitter.Node, src []byte) []SuperRef {
 	switch n.Type() {
 	case "class_declaration":
 		if sup := n.ChildByFieldName("superclass"); sup != nil {
-			for i := 0; i < int(sup.NamedChildCount()); i++ {
-				c := sup.NamedChild(i)
+			for c := range sup.NamedChildren() {
 				switch c.Type() {
 				case "type_identifier", "generic_type", "scoped_type_identifier":
 					out = append(out, SuperRef{Name: c.Content(src), Kind: graph.EdgeExtends, Line: nodeLine(c)})
@@ -103,15 +102,15 @@ func javaTypeList(n *sitter.Node, src []byte, kind graph.EdgeKind) []SuperRef {
 		}
 		switch c.Type() {
 		case "type_list":
-			for i := 0; i < int(c.NamedChildCount()); i++ {
-				visit(c.NamedChild(i))
+			for child := range c.NamedChildren() {
+				visit(child)
 			}
 		case "type_identifier", "generic_type", "scoped_type_identifier":
 			out = append(out, SuperRef{Name: c.Content(src), Kind: kind, Line: nodeLine(c)})
 		}
 	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		visit(n.NamedChild(i))
+	for child := range n.NamedChildren() {
+		visit(child)
 	}
 	return out
 }
@@ -122,14 +121,12 @@ func javaFields(n *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		if c.Type() != "field_declaration" {
 			continue
 		}
 		typ := fieldText(c, "type", src)
-		for j := 0; j < int(c.NamedChildCount()); j++ {
-			d := c.NamedChild(j)
+		for d := range c.NamedChildren() {
 			if d.Type() != "variable_declarator" {
 				continue
 			}
@@ -149,8 +146,7 @@ func javaParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		switch p.Type() {
 		case "formal_parameter", "spread_parameter":
 			name := fieldText(p, "name", src)
@@ -210,8 +206,7 @@ func javaCall(n *sitter.Node, src []byte) (*sitter.Node, string, bool) {
 
 func javaImports(root *sitter.Node, src []byte) []Import {
 	var out []Import
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		c := root.NamedChild(i)
+	for c := range root.NamedChildren() {
 		if c.Type() != "import_declaration" {
 			continue
 		}

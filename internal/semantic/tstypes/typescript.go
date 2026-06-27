@@ -83,8 +83,7 @@ func TypeScriptSpec() *LangSpec {
 func tsSupertypes(n *sitter.Node, src []byte) []SuperRef {
 	var out []SuperRef
 	collect := func(c *sitter.Node, kind graph.EdgeKind) {
-		for i := 0; i < int(c.NamedChildCount()); i++ {
-			t := c.NamedChild(i)
+		for t := range c.NamedChildren() {
 			switch t.Type() {
 			case "identifier", "type_identifier", "generic_type", "nested_type_identifier", "member_expression":
 				out = append(out, SuperRef{Name: t.Content(src), Kind: kind, Line: nodeLine(t)})
@@ -99,8 +98,7 @@ func tsSupertypes(n *sitter.Node, src []byte) []SuperRef {
 				continue
 			}
 			sawClause := false
-			for j := 0; j < int(h.NamedChildCount()); j++ {
-				c := h.NamedChild(j)
+			for c := range h.NamedChildren() {
 				switch c.Type() {
 				case "extends_clause":
 					sawClause = true
@@ -133,8 +131,7 @@ func tsFields(n *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		if c.Type() != "public_field_definition" && c.Type() != "field_definition" {
 			continue
 		}
@@ -162,8 +159,7 @@ func tsParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		switch p.Type() {
 		case "required_parameter", "optional_parameter":
 			pattern := p.ChildByFieldName("pattern")
@@ -232,8 +228,7 @@ func tsCall(n *sitter.Node, src []byte) (*sitter.Node, string, bool) {
 
 func tsImports(root *sitter.Node, src []byte) []Import {
 	var out []Import
-	for i := 0; i < int(root.NamedChildCount()); i++ {
-		stmt := root.NamedChild(i)
+	for stmt := range root.NamedChildren() {
 		if stmt.Type() != "import_statement" {
 			continue
 		}
@@ -246,14 +241,12 @@ func tsImports(root *sitter.Node, src []byte) []Import {
 		if clause == nil {
 			continue
 		}
-		for j := 0; j < int(clause.NamedChildCount()); j++ {
-			c := clause.NamedChild(j)
+		for c := range clause.NamedChildren() {
 			switch c.Type() {
 			case "identifier": // default import
 				out = append(out, Import{Local: c.Content(src), Path: source})
 			case "named_imports":
-				for k := 0; k < int(c.NamedChildCount()); k++ {
-					spec := c.NamedChild(k)
+				for spec := range c.NamedChildren() {
 					if spec.Type() != "import_specifier" {
 						continue
 					}

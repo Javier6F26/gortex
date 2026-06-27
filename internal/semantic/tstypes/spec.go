@@ -235,8 +235,8 @@ func nameField(n *sitter.Node, src []byte) string {
 
 // firstChildOfType returns the first named child with the given type.
 func firstChildOfType(n *sitter.Node, t string) *sitter.Node {
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		if c := n.NamedChild(i); c.Type() == t {
+	for c := range n.NamedChildren() {
+		if c.Type() == t {
 			return c
 		}
 	}

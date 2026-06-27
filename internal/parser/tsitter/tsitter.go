@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"sync"
 	"unsafe"
 
@@ -181,6 +182,44 @@ func (n *Node) NamedChild(i int) *Node {
 		return nil
 	}
 	return n.wrap(n.inner.NamedChild(uint(i)))
+}
+
+// NamedChildren yields n's named children, in order, walking the sibling
+// chain once with a tree-sitter cursor. Visiting every named child costs
+// O(total children). The index form
+//
+//	for i := 0; i < int(n.NamedChildCount()); i++ { c := n.NamedChild(i); … }
+//
+// is O(N^2): each NamedChild(i) re-walks the child list from the first
+// child to reach position i, so a loop over a very wide node (e.g. a
+// generated file's program root with thousands of top-level siblings)
+// degrades quadratically. This iterator stays linear.
+//
+// The visited set and order are identical to the NamedChild index form:
+// anonymous (unnamed) children are skipped and named children are
+// yielded in their natural child order.
+func (n *Node) NamedChildren() iter.Seq[*Node] {
+	return func(yield func(*Node) bool) {
+		if n == nil || !n.valid {
+			return
+		}
+		cursor := n.inner.Walk()
+		defer cursor.Close()
+		if !cursor.GotoFirstChild() {
+			return
+		}
+		for {
+			c := cursor.Node()
+			if c.IsNamed() {
+				if !yield(n.WrapVal(*c)) {
+					return
+				}
+			}
+			if !cursor.GotoNextSibling() {
+				return
+			}
+		}
+	}
 }
 
 // ChildByFieldName returns the first child with the given field name or nil.

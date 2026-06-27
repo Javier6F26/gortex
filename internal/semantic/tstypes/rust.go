@@ -79,13 +79,11 @@ func rustSupertypes(n *sitter.Node, src []byte) []SuperRef {
 		// Supertrait bounds: `trait Sub: Super + Display { ... }` makes Sub
 		// extend each named bound.
 		var refs []SuperRef
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			bounds := n.NamedChild(i)
+		for bounds := range n.NamedChildren() {
 			if bounds == nil || bounds.Type() != "trait_bounds" {
 				continue
 			}
-			for j := 0; j < int(bounds.NamedChildCount()); j++ {
-				b := bounds.NamedChild(j)
+			for b := range bounds.NamedChildren() {
 				if name := rustBoundName(b, src); name != "" {
 					refs = append(refs, SuperRef{Name: name, Kind: graph.EdgeExtends, Line: nodeLine(b)})
 				}
@@ -133,8 +131,7 @@ func rustFields(n *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(body.NamedChildCount()); i++ {
-		c := body.NamedChild(i)
+	for c := range body.NamedChildren() {
 		if c.Type() != "field_declaration" {
 			continue
 		}
@@ -153,8 +150,7 @@ func rustParams(fn *sitter.Node, src []byte) []Binding {
 		return nil
 	}
 	var out []Binding
-	for i := 0; i < int(params.NamedChildCount()); i++ {
-		p := params.NamedChild(i)
+	for p := range params.NamedChildren() {
 		if p.Type() != "parameter" {
 			continue
 		}
@@ -248,8 +244,8 @@ func rustImports(root *sitter.Node, src []byte) []Import {
 			}
 			return
 		}
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			visit(n.NamedChild(i))
+		for child := range n.NamedChildren() {
+			visit(child)
 		}
 	}
 	visit(root)
@@ -291,14 +287,14 @@ func rustUseImports(n *sitter.Node, src []byte, prefix string) []Import {
 			base = joinUsePath(prefix, strings.ReplaceAll(path.Content(src), "::", "/"))
 		}
 		var out []Import
-		for i := 0; i < int(list.NamedChildCount()); i++ {
-			out = append(out, rustUseImports(list.NamedChild(i), src, base)...)
+		for child := range list.NamedChildren() {
+			out = append(out, rustUseImports(child, src, base)...)
 		}
 		return out
 	case "use_list":
 		var out []Import
-		for i := 0; i < int(n.NamedChildCount()); i++ {
-			out = append(out, rustUseImports(n.NamedChild(i), src, prefix)...)
+		for child := range n.NamedChildren() {
+			out = append(out, rustUseImports(child, src, prefix)...)
 		}
 		return out
 	}

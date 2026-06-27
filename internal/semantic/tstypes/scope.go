@@ -196,8 +196,8 @@ func (b *binder) prepassFields(n *sitter.Node) {
 			}
 		}
 	}
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		b.prepassFields(n.NamedChild(i))
+	for c := range n.NamedChildren() {
+		b.prepassFields(c)
 	}
 }
 
@@ -282,8 +282,8 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 }
 
 func (b *binder) walkChildren(n *sitter.Node, env *scopeEnv) {
-	for i := 0; i < int(n.NamedChildCount()); i++ {
-		b.walk(n.NamedChild(i), env)
+	for c := range n.NamedChildren() {
+		b.walk(c, env)
 	}
 }
 
