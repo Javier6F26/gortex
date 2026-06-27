@@ -2,10 +2,16 @@ version: 2
 
 # Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
 # cross-compile toolchains so CGO (tree-sitter) links cleanly on a single
-# Linux runner. This config builds the UNIX targets only (linux + darwin).
-# Windows is built separately on a native windows runner (see the
-# `release-windows` job in release.yml) because the CGo tree-sitter
-# bindings need a real C/C++ toolchain there.
+# Linux runner. This config builds the LINUX targets + their deb/rpm/apk
+# packages, the checksums, and the GitHub release. darwin and windows are
+# built on NATIVE runners in release.yml (the build-darwin / release-windows
+# jobs) because their toolchains can't be cross-faked safely:
+#   - darwin: the osxcross ld64 in this image omits the __DATA_CONST
+#     SG_READ_ONLY flag that macOS 15+/Tahoe dyld enforces (issue #176), so
+#     darwin must link with Apple's ld on a macOS runner. The homebrew cask
+#     (which references all four os/arch tarballs) is assembled and pushed by
+#     release.yml once the darwin hashes exist — it is NOT generated here.
+#   - windows: the CGo tree-sitter bindings need a real mingw C/C++ toolchain.
 before:
   hooks:
     - go mod tidy
@@ -26,26 +32,14 @@ builds:
       - CGO_ENABLED=1
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
       - arm64
     # Per-target CC + CXX. goreleaser-cross exposes these cross-toolchains
     # on PATH; CGO needs both set per target triple because some deps
     # (tree-sitter yaml scanner, etc.) ship C++. Without CXX, the system
-    # default x86_64-linux-gnu-g++ leaks in and rejects macOS flags like
-    # -arch.
+    # default x86_64-linux-gnu-g++ leaks in.
     overrides:
-      - goos: darwin
-        goarch: amd64
-        env:
-          - CC=o64-clang
-          - CXX=o64-clang++
-      - goos: darwin
-        goarch: arm64
-        env:
-          - CC=oa64-clang
-          - CXX=oa64-clang++
       - goos: linux
         goarch: amd64
         env:
@@ -56,16 +50,6 @@ builds:
         env:
           - CC=aarch64-linux-gnu-gcc
           - CXX=aarch64-linux-gnu-g++
-    # Per-target build hook. Fires after each Mach-O / ELF is linked,
-    # before the archive step. The script is a no-op for non-darwin
-    # targets, so we don't need a per-override hook list.
-    #
-    # Codesigning a Mach-O is what makes the resulting tarball survive
-    # macOS Gatekeeper. Notarization (post-archive, in release.yml) only
-    # validates an already-signed binary; it cannot retroactively sign one.
-    hooks:
-      post:
-        - 'sh scripts/sign-macos-build-hook.sh "{{ .Os }}" "{{ .Path }}"'
 
 archives:
   - formats: [tar.gz]
@@ -108,33 +92,16 @@ nfpms:
     description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
     license: "Custom"
 
-homebrew_casks:
-  - name: gortex
-    # GITHUB_TOKEN can only push to the source repo. Pushing the updated
-    # cask to zzet/homebrew-tap needs a PAT with `repo` scope stored as
-    # HOMEBREW_TAP_TOKEN in repo secrets. Workflow wires it into the env.
-    repository:
-      owner: zzet
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    homepage: "https://github.com/zzet/gortex"
-    description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
-    binaries:
-      - gortex
-    # Generate shell completions at install time by invoking
-    # `gortex completion <shell>`. Cobra emits the right script for
-    # each shell; goreleaser drops them in the standard Homebrew
-    # completions directory so tab-complete works out of the box.
-    # `shell_parameter_format: cobra` makes goreleaser auto-append
-    # the `completion <shell>` subcommand — don't add it via args
-    # or it doubles up. Path is bare `gortex` because in a cask
-    # the binary lives at the staged-path root, not under bin/.
-    generate_completions_from_executable:
-      executable: gortex
-      shell_parameter_format: cobra
-
-# NOTE: goreleaser does NOT generate the Scoop manifest — windows is built by
-# the separate `release-windows` job (native runner) and isn't an artifact of
-# this goreleaser-cross run, so goreleaser has no windows zip to point at. That
-# job publishes the manifest to gortexhq/scoop-bucket itself (see its "Publish
-# Scoop manifest" step in release.yml).
+# NOTE: the homebrew cask is NOT generated here. goreleaser's `homebrew_casks`
+# can only reference archives goreleaser itself built, but darwin is now built
+# on a native macOS runner (issue #176) and the cask references all four
+# os/arch tarballs (incl. darwin). So the cask is assembled and pushed to
+# zzet/homebrew-tap by the "Publish homebrew cask" step in release.yml, once
+# every platform's tarball + sha256 exists. The cask is still install-time
+# completion-generated (`generate_completions_from_executable`, run on the
+# user's machine), so no binary needs to run at release time to build it.
+#
+# NOTE: goreleaser also does NOT generate the Scoop manifest — windows is built
+# by the separate `release-windows` job (native runner) and isn't an artifact
+# of this goreleaser-cross run. That job publishes the manifest to
+# gortexhq/scoop-bucket itself (see its "Publish Scoop manifest" step).

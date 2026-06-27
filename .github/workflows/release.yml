@@ -13,7 +13,135 @@ permissions:
   id-token: write
 
 jobs:
+  # darwin is built on a NATIVE macOS runner so Apple's ld sets the
+  # SG_READ_ONLY flag on the __DATA_CONST segment. The cross-compiled cask
+  # shipped without it and aborted under the macOS 15+/Tahoe dyld
+  # ("__DATA_CONST segment missing SG_READ_ONLY flag", issue #176). This job
+  # links arm64 natively + amd64 via `clang -arch x86_64`, codesigns each
+  # Mach-O, smoke-tests the flag (and actually runs the arm64 binary on this
+  # Sequoia runner — the exact `gortex --version` repro), packages the tar.gz
+  # archives in goreleaser's layout, and uploads them for the `release` job to
+  # merge, notarize, sign, and reference from the homebrew cask.
+  build-darwin:
+    runs-on: macos-15
+    # Only reads the repo and hands off an artifact — no release writes here.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build darwin binaries (native Apple toolchain)
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Mirror goreleaser's ldflags so the darwin binaries report the same
+          # version/commit as the linux ones. {{ .Version }} is the tag without
+          # its leading "v".
+          VERSION="${TAG#v}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          LDFLAGS="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}"
+          mkdir -p dist-darwin
+
+          # arm64: native link on this Apple-Silicon runner.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            go build -ldflags "$LDFLAGS" -o dist-darwin/gortex_darwin_arm64 ./cmd/gortex/
+
+          # amd64: cross within Apple's clang (the macOS SDK is universal), so
+          # Apple's ld still sets SG_READ_ONLY. CC + CXX both target x86_64
+          # because some tree-sitter scanners are C++.
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            CC="clang -arch x86_64" CXX="clang++ -arch x86_64" \
+            go build -ldflags "$LDFLAGS" -o dist-darwin/gortex_darwin_amd64 ./cmd/gortex/
+
+      - name: Stage macOS signing material
+        env:
+          P12_B64:  ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASS: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          SIGNING_DIR=/tmp/macos-signing
+          mkdir -p "$SIGNING_DIR"; chmod 700 "$SIGNING_DIR"
+          echo "$P12_B64" | base64 -d > "$SIGNING_DIR/cert.p12"
+          printf '%s' "$P12_PASS"     > "$SIGNING_DIR/cert.pass"
+          chmod 600 "$SIGNING_DIR"/cert.*
+
+          # Reuse the exact signing path (scripts/sign-macos-build-hook.sh)
+          # via rcodesign — just the native aarch64-apple-darwin build of the
+          # tool instead of the linux-musl one. Pin version + sha256 together;
+          # the apple-codesign release page publishes both.
+          RCODESIGN_VERSION=0.29.0
+          RCODESIGN_SHA256=d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a
+          RCODESIGN_TARBALL="apple-codesign-${RCODESIGN_VERSION}-aarch64-apple-darwin.tar.gz"
+          curl -fsSL \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/${RCODESIGN_TARBALL}" \
+            -o "$SIGNING_DIR/$RCODESIGN_TARBALL"
+          echo "$RCODESIGN_SHA256  $SIGNING_DIR/$RCODESIGN_TARBALL" | shasum -a 256 -c -
+          tar -xzf "$SIGNING_DIR/$RCODESIGN_TARBALL" -C "$SIGNING_DIR" --strip-components=1
+          chmod +x "$SIGNING_DIR/rcodesign"
+          rm "$SIGNING_DIR/$RCODESIGN_TARBALL"
+
+      - name: Codesign darwin binaries
+        run: |
+          set -euo pipefail
+          sh scripts/sign-macos-build-hook.sh darwin dist-darwin/gortex_darwin_arm64
+          sh scripts/sign-macos-build-hook.sh darwin dist-darwin/gortex_darwin_amd64
+
+      - name: Smoke-test __DATA_CONST SG_READ_ONLY flag (issue #176)
+        run: |
+          set -euo pipefail
+          sh scripts/verify-macho-readonly.sh dist-darwin/gortex_darwin_arm64
+          sh scripts/verify-macho-readonly.sh dist-darwin/gortex_darwin_amd64
+          # End-to-end repro of #176: actually load + run the binary on this
+          # Sequoia runner, whose dyld enforces the flag. A missing flag aborts
+          # here exactly like `gortex --version` did for users on Tahoe.
+          chmod +x dist-darwin/gortex_darwin_arm64
+          ./dist-darwin/gortex_darwin_arm64 version
+          # amd64 runs under Rosetta when present; otherwise the static otool
+          # check above already covers it.
+          if arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+            chmod +x dist-darwin/gortex_darwin_amd64
+            arch -x86_64 ./dist-darwin/gortex_darwin_amd64 version
+          else
+            echo "rosetta unavailable; amd64 covered by the otool flag check"
+          fi
+
+      - name: Package darwin archives
+        run: |
+          set -euo pipefail
+          # Match goreleaser's tar.gz layout: the binary as `gortex` at the
+          # archive root, alongside LICENSE/README (goreleaser's default
+          # archive files). install.sh + the cask expect this exact name:
+          # gortex_<os>_<arch>.tar.gz.
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            stage="$(mktemp -d)"
+            cp "dist-darwin/gortex_darwin_${arch}" "$stage/gortex"
+            chmod +x "$stage/gortex"
+            cp LICENSE.md README.md "$stage/"
+            tar -C "$stage" -czf "dist/gortex_darwin_${arch}.tar.gz" gortex LICENSE.md README.md
+            rm -rf "$stage"
+          done
+          ls -la dist/
+
+      - name: Wipe macOS signing material
+        if: always()
+        run: rm -rf /tmp/macos-signing
+
+      - name: Upload darwin archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: darwin-archives
+          path: dist/gortex_darwin_*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
   release:
+    needs: build-darwin
     runs-on: ubuntu-latest
     # Expose sha256 hashes of every release artifact so the provenance job
     # can feed them to the SLSA generator.
@@ -34,15 +162,14 @@ jobs:
         with:
           cosign-release: v2.4.1
 
-      # Stage every artifact rcodesign needs (binary + Apple credentials)
-      # under one 0700 directory so the goreleaser-cross container — and
-      # the post-archive notarize step on the host — can read it via a
-      # single bind-mount. The dir is wiped unconditionally at the end of
-      # the job (see "Wipe macOS signing material").
-      - name: Stage macOS signing material
+      # Stage the Apple notary credentials + rcodesign (linux-musl build)
+      # under one 0700 directory for the post-archive "Notarize macOS
+      # binaries" step. The darwin binaries were already codesigned in the
+      # build-darwin job, so the signing cert is NOT needed here — only the
+      # notary API key. The dir is wiped unconditionally at the end of the
+      # job (see "Wipe macOS signing material").
+      - name: Stage macOS notary material
         env:
-          P12_B64:    ${{ secrets.MACOS_CERTIFICATE_P12 }}
-          P12_PASS:   ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           NOTARY_B64: ${{ secrets.MACOS_NOTARY_API_KEY }}
           KEY_ID:     ${{ secrets.MACOS_NOTARY_KEY_ID }}
           ISSUER_ID:  ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
@@ -52,9 +179,7 @@ jobs:
           mkdir -p "$SIGNING_DIR"
           chmod 700 "$SIGNING_DIR"
 
-          echo "$P12_B64"     | base64 -d > "$SIGNING_DIR/cert.p12"
-          printf '%s' "$P12_PASS"        > "$SIGNING_DIR/cert.pass"
-          echo "$NOTARY_B64"  | base64 -d > "$SIGNING_DIR/notary.p8"
+          echo "$NOTARY_B64" | base64 -d > "$SIGNING_DIR/notary.p8"
 
           # Pin rcodesign to a known-good release. apple-codesign tags use
           # `apple-codesign/X.Y.Z`; the slash is URL-escaped as %2F. Bump
@@ -77,37 +202,38 @@ jobs:
             -o "$SIGNING_DIR/notary.json" \
             "$ISSUER_ID" "$KEY_ID" "$SIGNING_DIR/notary.p8"
 
-          chmod 600 "$SIGNING_DIR"/cert.* "$SIGNING_DIR"/notary.*
+          chmod 600 "$SIGNING_DIR"/notary.*
 
-      - name: Run GoReleaser (cross-compile via Docker)
-        # goreleaser-cross ships osxcross + aarch64/x86_64 gcc toolchains
-        # so all 4 targets (linux/amd64, linux/arm64, darwin/amd64,
-        # darwin/arm64) cross-compile from one ubuntu runner — no matrix,
-        # no macOS minutes burned.
+      # Pull the darwin tar.gz archives the build-darwin job produced (signed,
+      # flag-correct, native-linked) into dist-darwin/. They are merged into
+      # dist/ AFTER goreleaser runs — goreleaser's `--clean` wipes dist/, so
+      # staging them there first would lose them.
+      - name: Fetch darwin archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: darwin-archives
+          path: dist-darwin
+
+      - name: Run GoReleaser (linux build via Docker)
+        # goreleaser-cross ships the aarch64/x86_64 linux gcc toolchains so the
+        # two linux CGO targets cross-compile from one ubuntu runner. darwin is
+        # built separately (build-darwin job) and windows separately
+        # (release-windows job); goreleaser here owns the linux archives, the
+        # deb/rpm/apk packages, checksums.txt, and the GitHub release. The
+        # homebrew cask is assembled in the "Publish homebrew cask" step below,
+        # once every platform's tarball hash exists.
         #
         # Image tag is pinned to the Go major.minor; bump together with
         # go.mod and the setup-go step elsewhere in the workflows.
-        #
-        # The /tmp/macos-signing bind-mount exposes rcodesign + the P12
-        # to the build hook in .goreleaser.yml, which signs each darwin
-        # Mach-O before the archive step.
         run: |
           docker run --rm --privileged \
             -v "$PWD":/go/src/gortex \
-            -v /tmp/macos-signing:/tmp/macos-signing:ro \
             -w /go/src/gortex \
             -e GITHUB_TOKEN \
-            -e HOMEBREW_TAP_TOKEN \
             ghcr.io/goreleaser/goreleaser-cross:v1.26 \
             release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Personal access token with `repo` scope on zzet/homebrew-tap.
-          # GITHUB_TOKEN can only push to the source repo, not the tap.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          # (SCOOP_BUCKET_TOKEN is consumed by the release-windows job's
-          # "Publish Scoop manifest" step, not here — goreleaser builds no
-          # windows artifact, so it has no scoop manifest to push.)
 
       # goreleaser-cross runs as root inside the container, so everything
       # in dist/ is owned by root:root on the host. The subsequent cosign
@@ -117,11 +243,20 @@ jobs:
       - name: Reclaim ownership of dist/ from Docker
         run: sudo chown -R "$(id -u):$(id -g)" dist
 
-      # The build hook already codesigned each darwin Mach-O. Notarization
+      # Now that goreleaser's --clean has run, fold the darwin tarballs in
+      # alongside the linux ones so the notarize / cosign / checksum / upload
+      # steps below treat all platforms uniformly.
+      - name: Merge darwin archives into dist/
+        run: |
+          set -euo pipefail
+          cp dist-darwin/gortex_darwin_*.tar.gz dist/
+          ls -la dist/
+
+      # The build-darwin job already codesigned each darwin Mach-O. Notarization
       # is Apple's blessing on that signature — they don't see the binary
       # again, just hash + signature metadata, so the tarball on disk is
-      # left untouched. That means cosign signs and SLSA provenance covers
-      # the same bytes goreleaser already published, no checksum churn.
+      # left untouched. cosign + the checksums + SLSA provenance below all
+      # cover those same untouched bytes.
       #
       # Bare Mach-O can't be stapled (only .app/.pkg/.dmg can), so we
       # don't pass --staple. Online macs fetch the ticket from Apple on
@@ -141,6 +276,21 @@ jobs:
               "$workdir/notary.zip"
             rm -rf "$workdir"
           done
+
+      # goreleaser's checksums.txt only hashed its own (linux + nfpm)
+      # artifacts. Append the darwin tarballs so install.sh — which verifies
+      # every download against checksums.txt — and the cask both resolve. Done
+      # before cosign so the signature covers the final checksums.txt. (The
+      # release-windows job appends the windows zip the same way.)
+      - name: Append darwin checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in gortex_darwin_*.tar.gz; do
+            grep -q " ${f}$" checksums.txt || sha256sum "$f" >> checksums.txt
+          done
+          sort -o checksums.txt checksums.txt
+          cat checksums.txt
 
       # Keyless cosign signing: each artifact gets a `.sig` (signature) and
       # `.pem` (certificate chain binding the signature to this workflow's
@@ -166,6 +316,21 @@ jobs:
               "$f"
           done
           ls -la *.sig *.pem
+
+      # goreleaser created the release with the linux artifacts + a linux-only
+      # checksums.txt. Add the darwin tarballs and overwrite checksums.txt with
+      # the darwin-inclusive version (--clobber). The darwin .sig/.pem ride
+      # along in the "Upload signatures" step below.
+      - name: Upload darwin archives + refreshed checksums to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" \
+            dist/gortex_darwin_*.tar.gz \
+            dist/checksums.txt \
+            --clobber
 
       # Goreleaser already created the release and uploaded the primary
       # artifacts. Append .sig + .pem files to the same release so
@@ -194,6 +359,93 @@ jobs:
           # they don't need their own provenance.
           HASHES=$(sha256sum *.tar.gz *.zip *.deb *.rpm *.apk | base64 -w0)
           echo "hashes=$HASHES" >> "$GITHUB_OUTPUT"
+
+      # Assemble the homebrew cask and push it to zzet/homebrew-tap. goreleaser
+      # used to generate this, but the cask references all four os/arch tarballs
+      # and darwin is no longer a goreleaser artifact, so we build it here from
+      # the now-complete checksums.txt. Completions are still generated on the
+      # user's machine at install time (generate_completions_from_executable),
+      # so nothing needs to run at release time. HOMEBREW_TAP_TOKEN is a PAT
+      # with `repo` scope on the tap; GITHUB_TOKEN can only push to this repo.
+      - name: Publish homebrew cask
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+
+          # Pull each tarball's sha256 out of the darwin-inclusive checksums.txt.
+          sha() { awk -v f="$1" '$2==f || $2=="*"f {print $1; exit}' dist/checksums.txt; }
+          DA_AMD64="$(sha gortex_darwin_amd64.tar.gz)"
+          DA_ARM64="$(sha gortex_darwin_arm64.tar.gz)"
+          LX_AMD64="$(sha gortex_linux_amd64.tar.gz)"
+          LX_ARM64="$(sha gortex_linux_arm64.tar.gz)"
+          for pair in "darwin_amd64:$DA_AMD64" "darwin_arm64:$DA_ARM64" \
+                      "linux_amd64:$LX_AMD64" "linux_arm64:$LX_ARM64"; do
+            [ -n "${pair#*:}" ] || { echo "FATAL: no sha256 for gortex_${pair%%:*}.tar.gz in checksums.txt"; exit 1; }
+          done
+
+          # Generated cask. #{version} is Ruby interpolation evaluated by brew —
+          # it must stay literal, so it is NOT shell-expanded here (no leading $).
+          cat > gortex.rb <<EOF
+          # This file is generated by release.yml. DO NOT EDIT.
+          cask "gortex" do
+            version "${VERSION}"
+
+            on_macos do
+              on_intel do
+                sha256 "${DA_AMD64}"
+                url "https://github.com/zzet/gortex/releases/download/v#{version}/gortex_darwin_amd64.tar.gz"
+              end
+              on_arm do
+                sha256 "${DA_ARM64}"
+                url "https://github.com/zzet/gortex/releases/download/v#{version}/gortex_darwin_arm64.tar.gz"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                sha256 "${LX_AMD64}"
+                url "https://github.com/zzet/gortex/releases/download/v#{version}/gortex_linux_amd64.tar.gz"
+              end
+              on_arm do
+                sha256 "${LX_ARM64}"
+                url "https://github.com/zzet/gortex/releases/download/v#{version}/gortex_linux_arm64.tar.gz"
+              end
+            end
+
+            name "gortex"
+            desc "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
+            homepage "https://github.com/zzet/gortex"
+
+            livecheck do
+              skip "Auto-generated on release."
+            end
+
+            binary "gortex"
+
+            generate_completions_from_executable "gortex",
+              shell_parameter_format: :cobra
+
+            # No zap stanza required
+          end
+          EOF
+
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/zzet/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp gortex.rb tap/Casks/gortex.rb
+          cd tap
+          git add Casks/gortex.rb
+          if git diff --cached --quiet; then
+            echo "cask already current for ${VERSION}"
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "gortex: ${VERSION}"
+            git push
+            echo "published cask ${VERSION}"
+          fi
 
       # Always wipe signing material — even on failure — so a P12 / .p8
       # never lingers on a runner image cache or in actions/upload-artifact
