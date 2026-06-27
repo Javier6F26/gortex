@@ -48,6 +48,11 @@ const (
 	// anything above this ceiling is treated as "unset" rather than a real
 	// limit.
 	maxPlausibleMemoryBytes = 1 << 50 // 1 PiB
+
+	// maxPlausibleCPUCores bounds a sane cgroup CPU-quota core count: a quota
+	// far larger than any real machine signals a malformed file and is treated
+	// as "unset" (no clamp) rather than a real allotment.
+	maxPlausibleCPUCores = 1 << 16 // 65536
 )
 
 // gcTuneEnabled reports whether cold-index GC tuning is active. On by default;
@@ -142,6 +147,137 @@ func parseCgroupMemoryLimit(readFile func(string) ([]byte, error), path string) 
 		return 0, false
 	}
 	return n, true
+}
+
+// Cold-index worker clamp.
+//
+// idx.config.Workers defaults to the host's runtime.NumCPU() and sizes the
+// parse worker pool. In a CPU-limited container the host core count exceeds the
+// allotted cgroup CPU quota, so the pool over-subscribes and the CFS scheduler
+// throttles it — fewer, larger time slices and worse throughput than sizing the
+// pool to the real quota. When a finite quota is present the effective worker
+// count is clamped down to it. The clamp only ever LOWERS the count (never
+// raises it) and never drops below 1; it changes scheduling pressure only, not
+// what the indexer produces — node and edge counts are identical whether the
+// clamp is active or not. Set GORTEX_INDEX_CPU_CLAMP=0 to skip it.
+
+// cpuClampEnabled reports whether the cold-index worker pool is clamped to the
+// cgroup CPU quota. On by default; GORTEX_INDEX_CPU_CLAMP=0 (or "false")
+// disables it so a run can be A/B-compared against the unclamped baseline.
+func cpuClampEnabled() bool {
+	v := os.Getenv("GORTEX_INDEX_CPU_CLAMP")
+	if v == "" {
+		return true
+	}
+	return v != "0" && !strings.EqualFold(v, "false")
+}
+
+// cgroupCPUQuota returns the active cgroup CPU quota as an integer
+// core-equivalent (at least 1), or 0 when the process is not under a finite CPU
+// quota (or detection fails). cgroup v2 (`cpu.max`) is consulted first, then v1
+// (`cpu/cpu.cfs_quota_us` + `cpu/cpu.cfs_period_us`). An unlimited quota ("max"
+// / -1), missing files, and unparsable bodies all degrade to 0 — no clamp.
+// Linux-only in practice; on other platforms the files are absent and this
+// returns 0.
+func cgroupCPUQuota() int {
+	return cgroupCPUQuotaFrom(os.ReadFile)
+}
+
+// cgroupCPUQuotaFrom is cgroupCPUQuota with an injectable file reader, so the
+// cgroup-detection logic is testable without a real cgroup hierarchy.
+func cgroupCPUQuotaFrom(readFile func(string) ([]byte, error)) int {
+	if cores, ok := parseCgroupCPUMaxV2(readFile, "/sys/fs/cgroup/cpu.max"); ok {
+		return cores
+	}
+	if cores, ok := parseCgroupCPUQuotaV1(readFile,
+		"/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+		"/sys/fs/cgroup/cpu/cpu.cfs_period_us"); ok {
+		return cores
+	}
+	return 0
+}
+
+// parseCgroupCPUMaxV2 reads a cgroup v2 `cpu.max` file, whose body is
+// "<quota> <period>" (microseconds) or "max <period>" when unlimited. Reports
+// ok=false for a missing/empty/malformed file, the literal "max" quota
+// (unlimited), or a non-positive quota/period.
+func parseCgroupCPUMaxV2(readFile func(string) ([]byte, error), path string) (int, bool) {
+	b, err := readFile(path)
+	if err != nil {
+		return 0, false
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) != 2 || fields[0] == "max" {
+		return 0, false // missing/malformed, or unlimited
+	}
+	quota, qerr := strconv.ParseInt(fields[0], 10, 64)
+	period, perr := strconv.ParseInt(fields[1], 10, 64)
+	if qerr != nil || perr != nil {
+		return 0, false
+	}
+	return cpuQuotaCores(quota, period)
+}
+
+// parseCgroupCPUQuotaV1 reads the cgroup v1 `cpu.cfs_quota_us` and
+// `cpu.cfs_period_us` files (microseconds). A quota of -1 means unlimited.
+// Reports ok=false for missing/malformed files, an unlimited (non-positive)
+// quota, or a non-positive period.
+func parseCgroupCPUQuotaV1(readFile func(string) ([]byte, error), quotaPath, periodPath string) (int, bool) {
+	qb, err := readFile(quotaPath)
+	if err != nil {
+		return 0, false
+	}
+	quota, err := strconv.ParseInt(strings.TrimSpace(string(qb)), 10, 64)
+	if err != nil || quota <= 0 {
+		return 0, false // -1 (or 0) means unlimited / unset
+	}
+	pb, err := readFile(periodPath)
+	if err != nil {
+		return 0, false
+	}
+	period, err := strconv.ParseInt(strings.TrimSpace(string(pb)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return cpuQuotaCores(quota, period)
+}
+
+// cpuQuotaCores converts a (quota, period) microsecond pair into an integer
+// core count. It rounds UP — ceil(quota/period) — so a fractional allotment
+// like 1.5 cores sizes the pool to 2 rather than starving it at 1; the result
+// is floored at 1. Reports ok=false when quota or period is non-positive (the
+// period guard also rules out divide-by-zero) or the rounded count exceeds a
+// sane ceiling (a malformed file masquerading as an enormous quota).
+func cpuQuotaCores(quota, period int64) (int, bool) {
+	if quota <= 0 || period <= 0 {
+		return 0, false
+	}
+	cores := (quota + period - 1) / period // ceil(quota/period)
+	if cores < 1 {
+		cores = 1
+	}
+	if cores > maxPlausibleCPUCores {
+		return 0, false
+	}
+	return int(cores), true
+}
+
+// clampWorkersToCPUQuota returns the effective parse-worker count after
+// clamping `configured` down to the cgroup CPU quota `quotaCores` (an integer
+// core count, 0 when no finite quota was detected). The clamp applies to the
+// effective value regardless of whether Workers came from the runtime.NumCPU()
+// default or an explicit config override — both over-subscribe a quota and
+// invite CFS throttling — but it only ever LOWERS the count, never raises it,
+// and never drops below 1. quotaCores<=0 leaves `configured` unchanged, so a
+// non-limited host behaves exactly as before.
+func clampWorkersToCPUQuota(configured, quotaCores int) int {
+	if configured < 1 {
+		configured = 1
+	}
+	if quotaCores > 0 && quotaCores < configured {
+		return quotaCores
+	}
+	return configured
 }
 
 // gcTune state guards the process-global GC knobs across concurrent index

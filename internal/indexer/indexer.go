@@ -2365,6 +2365,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	if workers <= 0 {
 		workers = 1
 	}
+	// idx.config.Workers defaults to the host's runtime.NumCPU(); inside a
+	// CPU-limited container that exceeds the cgroup CPU quota and the pool
+	// over-subscribes, so CFS throttling drags throughput down. Clamp the
+	// effective pool size to the quota when one is present (lowers only, floor
+	// of 1, host-identical when unquotaed). GORTEX_INDEX_CPU_CLAMP=0 opts out.
+	if cpuClampEnabled() {
+		workers = clampWorkersToCPUQuota(workers, cgroupCPUQuota())
+	}
 
 	// Optional crash isolation: run tree-sitter extraction in worker
 	// subprocesses so a grammar SIGSEGV / OOM / hang on one
