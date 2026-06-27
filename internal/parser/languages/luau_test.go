@@ -145,3 +145,30 @@ end
 	}
 	assert.GreaterOrEqual(t, typedAs, 1, "expected at least one EdgeTypedAs to named type Account")
 }
+
+func TestLuauExtractor_FnValueCapture(t *testing.T) {
+	src := []byte("function onClick() end\n" +
+		"local handlers = {}\n" +
+		"function handlers.onTick() end\n" +
+		"function run()\n" +
+		"  setCallback(onClick)\n" +
+		"  register(handlers.onTick)\n" +
+		"end\n")
+	res, err := NewLuauExtractor().Extract("s.luau", []byte(src))
+	require.NoError(t, err)
+
+	cands := map[string]bool{}
+	for _, e := range res.Edges {
+		if e.Meta == nil {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "callback_candidate" {
+			continue
+		}
+		if name, _ := e.Meta["fn_value_name"].(string); name != "" {
+			cands[name] = true
+		}
+	}
+	assert.True(t, cands["onClick"], "setCallback(onClick) should capture onClick")
+	assert.True(t, cands["onTick"], "register(handlers.onTick) should capture onTick")
+}

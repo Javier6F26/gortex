@@ -89,6 +89,10 @@ func (e *LuauExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	funcRanges := buildFuncRanges(result)
 	e.extractCalls(root, src, filePath, result, funcRanges)
 
+	// Lua functions are first-class values; capture bare-name and
+	// table-member callbacks passed as args / assigned but not called.
+	captureFnValueCandidates(result, root, filePath, src)
+
 	return result, nil
 }
 

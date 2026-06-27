@@ -129,6 +129,11 @@ func fnRefSpecFor(lang string) fnRefSpec {
 		// callables, Ruby `method(:sym)` / `&:sym`); the bare path stays on the
 		// byte heuristic.
 		return fnRefSpec{idNodeTypes: []string{"identifier"}, dispatch: dispatchByteParen}
+	case "lua", "luau":
+		// Lua functions are first-class values: a bare `setCallback(onClick)`
+		// and a table-member `register(handlers.onTick)` both pass a function
+		// by value. A dot_index_expression resolves to its trailing field name.
+		return fnRefSpec{idNodeTypes: []string{"identifier", "dot_index_expression"}, dispatch: dispatchByteParen}
 	}
 	return defaultFnRefSpec
 }
@@ -158,6 +163,14 @@ func fnRefNodeName(n *sitter.Node, src []byte) string {
 	case "member_access_expression":
 		if name := n.ChildByFieldName("name"); name != nil {
 			return name.Content(src)
+		}
+	case "dot_index_expression":
+		// Lua `tbl.method` -- the trailing identifier names the function.
+		if f := n.ChildByFieldName("field"); f != nil {
+			return f.Content(src)
+		}
+		if k := int(n.NamedChildCount()); k > 0 {
+			return n.NamedChild(k - 1).Content(src)
 		}
 	}
 	return n.Content(src)

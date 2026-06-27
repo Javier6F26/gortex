@@ -143,3 +143,39 @@ func TestLuaRobloxInstanceRequires(t *testing.T) {
 	require.NoError(t, err)
 	t.Run("luau", func(t *testing.T) { check(t, luau.Edges) })
 }
+
+func TestLuaExtractor_FnValueCapture(t *testing.T) {
+	src := []byte("function onClick() end\n" +
+		"local handlers = {}\n" +
+		"function handlers.onTick() end\n" +
+		"function run()\n" +
+		"  setCallback(onClick)\n" +
+		"  register(handlers.onTick)\n" +
+		"end\n")
+	res, err := NewLuaExtractor().Extract("s.lua", []byte(src))
+	require.NoError(t, err)
+
+	cands := map[string]bool{}
+	for _, e := range res.Edges {
+		if e.Meta == nil {
+			continue
+		}
+		if v, _ := e.Meta["via"].(string); v != "callback_candidate" {
+			continue
+		}
+		if name, _ := e.Meta["fn_value_name"].(string); name != "" {
+			cands[name] = true
+			assert.Equal(t, "s.lua::run", e.From, "captured in the enclosing function")
+		}
+	}
+	assert.True(t, cands["onClick"], "setCallback(onClick) should capture onClick (got %v)", keys2(cands))
+	assert.True(t, cands["onTick"], "register(handlers.onTick) should capture onTick (got %v)", keys2(cands))
+}
+
+func keys2(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
