@@ -834,10 +834,61 @@ func (r *Resolver) ResolveFileAndIncoming(filePath string) *ResolveStats {
 	clear := r.buildPassIndexes()
 	defer clear()
 
+	// Warm the per-edge lookup cache for this file's pending forward and
+	// incoming edges. Without it the single-file path fires a fresh
+	// FindNodesByNameInRepo — a scanNode + meta-decode of every same-name
+	// candidate — once PER edge, re-materialising the same candidates for
+	// every edge that shares a name. Seeding the cache once (one batched
+	// FindNodesByNames, like ResolveAll) materialises each candidate once
+	// and the passes read it from memory.
+	r.warmLookupCache(r.pendingEdgesForFileAndIncoming(filePath))
+	defer r.clearLookupCache()
+
 	stats := &ResolveStats{}
 	r.resolveFileLocked(filePath, stats)
 	r.resolveIncomingLocked(filePath, stats)
 	return stats
+}
+
+// pendingEdgesForFileAndIncoming gathers the unresolved edges the forward
+// and reverse passes will visit — the file's own outgoing unresolved
+// edges plus the unresolved in-edges parked on the stub ids of the
+// referenceable symbols this file defines. It mirrors the edge walks
+// resolveFileEdgesLocked / resolveIncomingLocked perform, but only to seed
+// warmLookupCache; the result feeds caching, never resolution directly.
+func (r *Resolver) pendingEdgesForFileAndIncoming(filePath string) []*graph.Edge {
+	defNodes := r.graph.GetFileNodes(filePath)
+	var pending []*graph.Edge
+	seenNames := make(map[string]struct{}, len(defNodes))
+	for _, n := range defNodes {
+		if n == nil {
+			continue
+		}
+		for _, e := range r.graph.GetOutEdges(n.ID) {
+			if graph.IsUnresolvedTarget(e.To) {
+				pending = append(pending, e)
+			}
+		}
+		if n.Name == "" || !graph.IsReferenceableSymbol(n.Kind) {
+			continue
+		}
+		if _, dup := seenNames[n.Name]; dup {
+			continue
+		}
+		seenNames[n.Name] = struct{}{}
+		keys := []string{graph.UnresolvedMarker + n.Name}
+		if n.RepoPrefix != "" {
+			keys = append(keys, n.RepoPrefix+"::"+graph.UnresolvedMarker+n.Name)
+		}
+		for _, key := range keys {
+			for _, e := range r.graph.GetInEdges(key) {
+				if graph.IsUnresolvedTarget(e.To) {
+					pending = append(pending, e)
+				}
+			}
+		}
+	}
+	return pending
 }
 
 // ResolveFilesAndIncoming runs the forward and reverse passes for a
@@ -869,7 +920,21 @@ func (r *Resolver) ResolveFilesAndIncoming(filePaths []string) *ResolveStats {
 // has built the per-pass indexes.
 func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 	r.resolveFileEdgesLocked(filePath, stats)
-	r.runFileAttributionPassesLocked()
+	r.runFileAttributionPassesForFileLocked(filePath)
+}
+
+// fileOutEdges returns every outgoing edge of every node defined in
+// filePath — the scope a single-file attribution pass needs in place of
+// a whole-graph EdgesByKind sweep. Builtin / external / bare-name
+// attributions all act on edges whose source is inside the edited file,
+// so this is the complete candidate set for those passes.
+func (r *Resolver) fileOutEdges(filePath string) []*graph.Edge {
+	nodes := r.graph.GetFileNodes(filePath)
+	var out []*graph.Edge
+	for _, n := range nodes {
+		out = append(out, r.graph.GetOutEdges(n.ID)...)
+	}
+	return out
 }
 
 // resolveFileEdgesLocked walks one file's outgoing unresolved edges and
@@ -941,6 +1006,24 @@ func (r *Resolver) runFileAttributionPassesLocked() {
 	r.bindGenericParamRefs()
 	r.attributeGoBuiltins()
 	r.attributeGoExternalCalls()
+}
+
+// runFileAttributionPassesForFileLocked is the single-file equivalent of
+// runFileAttributionPassesLocked. Builtin / external-call / bare-name
+// attribution only ever rewrite edges originating in the edited file, so
+// they run over that file's outgoing edges instead of sweeping the whole
+// graph once per save — the dominant per-edit resolver cost on a large
+// graph. The two passes that genuinely need cross-file context (method-
+// receiver rebind reads the package's type index; generic-param binding)
+// stay whole-graph; both are already batched and cheap. The pass ORDER
+// matches runFileAttributionPassesLocked: bare-name binding runs before
+// builtin attribution so a local named `len` shadows the builtin.
+func (r *Resolver) runFileAttributionPassesForFileLocked(filePath string) {
+	r.rebindGoMethodReceivers()
+	r.bindBareNameScopeRefsForFile(filePath)
+	r.bindGenericParamRefs()
+	r.attributeGoBuiltinsForFile(filePath)
+	r.attributeGoExternalCallsForFile(filePath)
 }
 
 // ResolveIncomingForFile is the reverse of ResolveFile: instead of
@@ -2083,7 +2166,32 @@ func (r *Resolver) buildReachabilityIndex() {
 		addDir(n.ID, filepath.Dir(n.FilePath))
 	}
 
+	// Materialise the import edges and batch-load the endpoints of the
+	// resolved ones (e.To naming a concrete node) in one GetNodesByIDs.
+	// A per-edge GetNode here is a query round-trip per import on a disk
+	// backend — the same batching buildImportClosure already applies.
+	// Unresolved / external targets never name an in-repo file node, so
+	// they're skipped from the batch (their directory comes from dirIndex
+	// or not at all).
+	var imports []*graph.Edge
+	ids := make(map[string]struct{})
 	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
+		imports = append(imports, e)
+		if e.To == "" || graph.IsUnresolvedTarget(e.To) || strings.HasPrefix(e.To, "external::") {
+			continue
+		}
+		ids[e.To] = struct{}{}
+	}
+	var nodes map[string]*graph.Node
+	if len(ids) > 0 {
+		idList := make([]string, 0, len(ids))
+		for id := range ids {
+			idList = append(idList, id)
+		}
+		nodes = r.graph.GetNodesByIDs(idList)
+	}
+
+	for _, e := range imports {
 		var importedDir string
 		switch {
 		case graph.IsUnresolvedTarget(e.To) && strings.HasPrefix(graph.UnresolvedName(e.To), "import::"):
@@ -2098,7 +2206,7 @@ func (r *Resolver) buildReachabilityIndex() {
 		case strings.HasPrefix(e.To, "external::"):
 			// External / unindexed package — nothing to add.
 		default:
-			if n := r.graph.GetNode(e.To); n != nil && n.Kind == graph.KindFile {
+			if n := nodes[e.To]; n != nil && n.Kind == graph.KindFile {
 				importedDir = filepath.Dir(n.FilePath)
 			}
 		}
