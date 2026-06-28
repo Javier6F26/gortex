@@ -291,20 +291,31 @@ func (n *Node) ChildCount() uint32 { return uint32(n.inner.ChildCount()) }
 // NamedChildCount returns the number of named children.
 func (n *Node) NamedChildCount() uint32 { return uint32(n.inner.NamedChildCount()) }
 
-// Child returns the i-th child (named or anonymous) or nil.
+// Child returns the i-th child (named or anonymous) or nil. It reaches the
+// child through a direct C call that returns the node by value, so the result
+// is bump-allocated in the arena with no go-tree-sitter heap node (newNode).
 func (n *Node) Child(i int) *Node {
 	if i < 0 {
 		return nil
 	}
-	return n.wrap(n.inner.Child(uint(i)))
+	c, ok := childDirect(n.inner, i)
+	if !ok {
+		return nil
+	}
+	return n.WrapVal(c)
 }
 
-// NamedChild returns the i-th named child or nil.
+// NamedChild returns the i-th named child or nil. Like Child, it avoids
+// go-tree-sitter's per-node heap allocation.
 func (n *Node) NamedChild(i int) *Node {
 	if i < 0 {
 		return nil
 	}
-	return n.wrap(n.inner.NamedChild(uint(i)))
+	c, ok := namedChildDirect(n.inner, i)
+	if !ok {
+		return nil
+	}
+	return n.WrapVal(c)
 }
 
 // NamedChildren yields n's named children, in order, walking the sibling
@@ -358,8 +369,15 @@ func (n *Node) FieldNameForChild(i int) string {
 	return n.inner.FieldNameForChild(uint32(i))
 }
 
-// Parent returns the parent node or nil for the root.
-func (n *Node) Parent() *Node { return n.wrap(n.inner.Parent()) }
+// Parent returns the parent node or nil for the root. Avoids
+// go-tree-sitter's per-node heap allocation via a direct C call.
+func (n *Node) Parent() *Node {
+	c, ok := parentDirect(n.inner)
+	if !ok {
+		return nil
+	}
+	return n.WrapVal(c)
+}
 
 // NextSibling returns the next sibling (named or anonymous) or nil.
 func (n *Node) NextSibling() *Node { return n.wrap(n.inner.NextSibling()) }
