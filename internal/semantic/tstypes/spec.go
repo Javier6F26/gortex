@@ -230,6 +230,19 @@ type LangSpec struct {
 	// javascript).
 	GrammarFor func(filePath string) *sitter.Language
 
+	// Suppressed, when non-nil and returning true, makes the provider a
+	// complete no-op on this host: EnrichRepo / EnrichFile return an empty
+	// result without parsing any file or touching the graph. It is the
+	// toolchain-fallback gate for a language whose AUTHORITATIVE provider —
+	// a compiler / type-system pass — is the source of truth WHEN AVAILABLE,
+	// and which this spec only ever supplements with a tree-sitter
+	// resolution FLOOR where that provider cannot run. The Go spec
+	// suppresses itself whenever the Go toolchain is installed (go-types then
+	// owns Go resolution at compiler grade), so it contributes only on a host
+	// without a Go toolchain. nil (the default) never suppresses, so every
+	// other spec always contributes exactly as before.
+	Suppressed func() bool
+
 	// TypeDeclTypes / FuncDeclTypes are the node types that open a type
 	// or callable scope.
 	TypeDeclTypes map[string]bool

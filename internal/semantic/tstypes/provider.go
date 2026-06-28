@@ -44,6 +44,7 @@ func DefaultProviders(logger *zap.Logger) []*Provider {
 		NewProvider(CSharpSpec(), logger),
 		NewProvider(PHPSpec(), logger),
 		NewProvider(KotlinSpec(), logger),
+		NewProvider(GoSpec(), logger),
 	}
 }
 
@@ -74,6 +75,15 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 	res := &semantic.EnrichResult{
 		Provider: p.Name(),
 		Language: p.spec.Languages[0],
+	}
+
+	// Toolchain-fallback gate: a spec that suppresses itself on this host
+	// (its authoritative compiler-grade provider is available) contributes
+	// nothing — no parse, no graph mutation — so it can never alter, duplicate
+	// or downgrade that provider's resolutions.
+	if p.spec.Suppressed != nil && p.spec.Suppressed() {
+		res.DurationMs = time.Since(start).Milliseconds()
+		return res, nil
 	}
 
 	files := languageFiles(g, p.spec, repoPrefix, repoRoot)
@@ -151,6 +161,11 @@ func (p *Provider) EnrichFile(g graph.Store, repoRoot, filePath string) (*semant
 	res := &semantic.EnrichResult{
 		Provider: p.Name(),
 		Language: p.spec.Languages[0],
+	}
+	// Toolchain-fallback gate (see EnrichRepo): a suppressed spec is a no-op.
+	if p.spec.Suppressed != nil && p.spec.Suppressed() {
+		res.DurationMs = time.Since(start).Milliseconds()
+		return res, nil
 	}
 	// Find the file's own node by its exact graph key. It carries the
 	// RepoPrefix that maps the prefixed path back to the on-disk file.
