@@ -115,6 +115,12 @@ type Resolver struct {
 	nodesByName     map[string][]*graph.Node
 	nodesByQualName map[string]*graph.Node
 
+	// incrementalSkip holds the source-shapes of a single re-resolved file's
+	// out-edges that were already unresolved before the edit; the forward
+	// pass skips them. Set/cleared around ResolveFileAndIncoming by the
+	// single-file index path. nil on every batch/whole-graph pass.
+	incrementalSkip map[string]struct{}
+
 	// lspHelper, when non-nil, is consulted before falling back to
 	// AST heuristics for cross-file dispatch in languages whose
 	// helper-reported extensions match (today: TS/JS/JSX/TSX via
@@ -886,12 +892,19 @@ func (r *Resolver) pendingEdgesForFileAndIncoming(filePath string) []*graph.Edge
 	defNodes := r.graph.GetFileNodes(filePath)
 	var pending []*graph.Edge
 	seenNames := make(map[string]struct{}, len(defNodes))
+	defIDs := make([]string, 0, len(defNodes))
+	for _, n := range defNodes {
+		if n != nil {
+			defIDs = append(defIDs, n.ID)
+		}
+	}
+	outByNode := graph.OutEdgesForNodes(r.graph, defIDs)
 	for _, n := range defNodes {
 		if n == nil {
 			continue
 		}
-		for _, e := range r.graph.GetOutEdges(n.ID) {
-			if graph.IsUnresolvedTarget(e.To) {
+		for _, e := range outByNode[n.ID] {
+			if graph.IsUnresolvedTarget(e.To) && !r.incrementalSkipped(e) {
 				pending = append(pending, e)
 			}
 		}
@@ -956,9 +969,14 @@ func (r *Resolver) resolveFileLocked(filePath string, stats *ResolveStats) {
 // so this is the complete candidate set for those passes.
 func (r *Resolver) fileOutEdges(filePath string) []*graph.Edge {
 	nodes := r.graph.GetFileNodes(filePath)
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	byNode := graph.OutEdgesForNodes(r.graph, ids)
 	var out []*graph.Edge
 	for _, n := range nodes {
-		out = append(out, r.graph.GetOutEdges(n.ID)...)
+		out = append(out, byNode[n.ID]...)
 	}
 	return out
 }
@@ -978,10 +996,22 @@ func (r *Resolver) resolveFileEdgesLocked(filePath string, stats *ResolveStats) 
 	var jobs []reindexJob
 	var reindexBatch []graph.EdgeReindex
 	nodes := r.graph.GetFileNodes(filePath)
+	ids := make([]string, 0, len(nodes))
 	for _, n := range nodes {
-		edges := r.graph.GetOutEdges(n.ID)
+		ids = append(ids, n.ID)
+	}
+	byNode := graph.OutEdgesForNodes(r.graph, ids)
+	for _, n := range nodes {
+		edges := byNode[n.ID]
 		for _, e := range edges {
 			if !graph.IsUnresolvedTarget(e.To) {
+				continue
+			}
+			// Carry-over reference unchanged since the last resolve and
+			// already unresolved then — leave it for the incoming pass
+			// instead of re-running the cascade (the bulk of edit latency
+			// on reference-heavy files).
+			if r.incrementalSkipped(e) {
 				continue
 			}
 			oldTo, changed := r.resolveEdge(e, stats)
@@ -1047,7 +1077,7 @@ func (r *Resolver) runFileAttributionPassesLocked() {
 func (r *Resolver) runFileAttributionPassesForFileLocked(filePath string) {
 	r.rebindGoMethodReceiversForFile(filePath)
 	r.bindBareNameScopeRefsForFile(filePath)
-	r.bindGenericParamRefs()
+	r.bindGenericParamRefsForFile(filePath)
 	r.attributeGoBuiltinsForFile(filePath)
 	r.attributeGoExternalCallsForFile(filePath)
 }

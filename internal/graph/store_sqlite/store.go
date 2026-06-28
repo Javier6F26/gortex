@@ -1234,6 +1234,45 @@ func (s *Store) GetInEdges(nodeID string) []*graph.Edge {
 	return s.queryEdges(s.stmtInEdges, nodeID)
 }
 
+// GetOutEdgesForNodes fetches the out-edges of many nodes in one batched query
+// (chunked) instead of a round-trip per node. The single-file resolve path
+// walks every node of the edited file, which is an N+1 query storm on a disk
+// backend; this collapses it to one query per chunk. Edges are grouped by
+// their from_id; nodes with no out-edges are absent from the map.
+func (s *Store) GetOutEdgesForNodes(ids []string) map[string][]*graph.Edge {
+	out := make(map[string][]*graph.Edge, len(ids))
+	if len(ids) == 0 {
+		return out
+	}
+	seen := make(map[string]struct{}, len(ids))
+	uniq := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		uniq = append(uniq, id)
+	}
+	for i := 0; i < len(uniq); i += lookupChunkSize {
+		end := minInt(i+lookupChunkSize, len(uniq))
+		chunk := uniq[i:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for j, id := range chunk {
+			ph[j] = "?"
+			args[j] = id
+		}
+		q := `SELECT ` + lookupEdgeCols + ` FROM edges WHERE from_id IN (` + strings.Join(ph, ",") + `)`
+		for _, e := range s.queryEdgesSQL(q, args...) {
+			out[e.From] = append(out[e.From], e)
+		}
+	}
+	return out
+}
+
 func (s *Store) AllEdges() []*graph.Edge {
 	return s.queryEdges(s.stmtAllEdges)
 }

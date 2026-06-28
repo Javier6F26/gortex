@@ -71,6 +71,49 @@ func (r *Resolver) bindGenericParamRefs() {
 	}
 }
 
+// bindGenericParamRefsForFile is the single-file-resolve form of
+// bindGenericParamRefs. A type parameter is visible only inside its own
+// function's body, which lives in this file, so both the owner index and the
+// edges to rewrite are scoped to the file — no whole-graph EdgesByKind sweep
+// (the dominant cost of an incremental edit on a large graph).
+func (r *Resolver) bindGenericParamRefsForFile(filePath string) {
+	owned := map[string]map[string]string{}
+	for _, n := range r.graph.GetFileNodes(filePath) {
+		if n == nil || n.Kind != graph.KindGenericParam || n.Language != "go" || n.Name == "" {
+			continue
+		}
+		owner := enclosingFunctionForBinding(n.ID)
+		if owner == "" || owner == n.ID {
+			continue
+		}
+		set, ok := owned[owner]
+		if !ok {
+			set = map[string]string{}
+			owned[owner] = set
+		}
+		if _, dup := set[n.Name]; dup {
+			set[n.Name] = ""
+			continue
+		}
+		set[n.Name] = n.ID
+	}
+	if len(owned) == 0 {
+		return
+	}
+	var batch []graph.EdgeReindex
+	for _, e := range r.fileOutEdges(filePath) {
+		switch e.Kind {
+		case graph.EdgeReferences, graph.EdgeTypedAs, graph.EdgeReturns, graph.EdgeInstantiates:
+			if old := r.tryBindGenericParam(e, owned); old != "" {
+				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
+			}
+		}
+	}
+	if len(batch) > 0 {
+		r.graph.ReindexEdges(batch)
+	}
+}
+
 // tryBindGenericParam returns the old To value (for batched reindex)
 // when the edge was rewritten, or "" when left alone.
 func (r *Resolver) tryBindGenericParam(e *graph.Edge, owned map[string]map[string]string) string {
