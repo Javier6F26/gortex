@@ -72,9 +72,19 @@ type Node struct {
 // nodeArena is a per-tree bump allocator for Node wrappers. It is not
 // safe for concurrent use; each parse tree is walked by a single
 // goroutine, and distinct files use distinct trees (and arenas).
+//
+// Arenas are pooled and reused across files (see arenaPool): a Tree takes
+// one on its first RootNode() and returns it on Close(). reset() rewinds
+// the allocation cursor but RETAINS the backing chunks, so a warm pool
+// serves each file's node count with no fresh allocation. This is the
+// dominant GC-pressure lever on a large index: profiling vscode and
+// kubernetes put tree-sitter Node wrappers at 70–82% of every byte
+// allocated, almost all of it per-file chunk garbage. Retaining the chunks
+// turns that churn into a bounded, reused working set.
 type nodeArena struct {
-	cur  []Node
-	used int
+	chunks [][]Node // backing arrays, retained across resets for reuse
+	ci     int      // index of the current chunk within chunks
+	used   int      // slots used in chunks[ci]
 }
 
 const (
@@ -88,24 +98,66 @@ const (
 
 func newNodeArena() *nodeArena { return &nodeArena{} }
 
-// alloc returns a pointer to a fresh zeroed Node. The pointer is stable:
-// when the current chunk fills, a new (geometrically larger) backing array
-// is allocated and the old chunk stays alive through the Nodes that point
-// into it.
+// alloc returns a pointer to a fresh Node. The pointer is stable for the
+// life of the arena: a chunk is never resized in place — when the current
+// chunk fills, allocation advances to the next retained chunk, or appends a
+// geometrically larger one past the high-water mark, so earlier &chunk[i]
+// pointers never move. Callers overwrite all fields of the returned Node
+// immediately, so a reused slot needs no zeroing here; reset() clears stale
+// slots when the arena is recycled.
 func (a *nodeArena) alloc() *Node {
-	if a.used >= len(a.cur) {
-		size := len(a.cur) * 2
-		if size == 0 {
-			size = arenaFirstChunk
-		} else if size > arenaMaxChunk {
-			size = arenaMaxChunk
+	switch {
+	case len(a.chunks) == 0:
+		a.chunks = append(a.chunks, make([]Node, arenaFirstChunk))
+		a.ci, a.used = 0, 0
+	case a.used >= len(a.chunks[a.ci]):
+		a.ci++
+		if a.ci >= len(a.chunks) {
+			size := len(a.chunks[a.ci-1]) * 2
+			if size > arenaMaxChunk {
+				size = arenaMaxChunk
+			}
+			a.chunks = append(a.chunks, make([]Node, size))
 		}
-		a.cur = make([]Node, size)
 		a.used = 0
 	}
-	n := &a.cur[a.used]
+	n := &a.chunks[a.ci][a.used]
 	a.used++
 	return n
+}
+
+// reset rewinds the allocation cursor to the start while retaining the
+// backing chunks for reuse. It clears the slots touched since the last
+// reset so a stale Node value — whose embedded ts.Node pins its now-closed
+// *ts.Tree — cannot survive into the next file and leak. Clearing only the
+// used prefix keeps the cost proportional to the file just processed, not
+// the high-water capacity.
+func (a *nodeArena) reset() {
+	for i := 0; i <= a.ci && i < len(a.chunks); i++ {
+		end := len(a.chunks[i])
+		if i == a.ci {
+			end = a.used
+		}
+		clear(a.chunks[i][:end])
+	}
+	a.ci, a.used = 0, 0
+}
+
+// arenaPool recycles per-tree arenas — with their retained chunks — across
+// files. A Tree gets one lazily on its first RootNode() and returns it on
+// Close(). sync.Pool may drop entries under GC pressure; a cold Get then
+// just starts with no chunks and warms up again, so correctness never
+// depends on retention.
+var arenaPool = sync.Pool{New: func() any { return &nodeArena{} }}
+
+func getArena() *nodeArena { return arenaPool.Get().(*nodeArena) }
+
+func putArena(a *nodeArena) {
+	if a == nil {
+		return
+	}
+	a.reset()
+	arenaPool.Put(a)
 }
 
 // WrapNode wraps a value Node from the new API into our shim. It derives
@@ -360,6 +412,7 @@ func (n *Node) Equal(other *Node) bool {
 // Tree wraps *ts.Tree.
 type Tree struct {
 	inner *ts.Tree
+	arena *nodeArena // pooled; taken lazily on first RootNode, returned on Close
 }
 
 // WrapTree wraps a *ts.Tree for internal use by the parser package.
@@ -375,7 +428,13 @@ func (t *Tree) RootNode() *Node {
 	if root == nil {
 		return nil
 	}
-	a := newNodeArena()
+	// Take a pooled arena on first use and reuse it for any later RootNode
+	// call on the same tree, so every node walked from this tree allocates
+	// into one recycled arena. Close() returns it to the pool.
+	if t.arena == nil {
+		t.arena = getArena()
+	}
+	a := t.arena
 	nn := a.alloc()
 	nn.inner = *root
 	nn.valid = true
@@ -384,11 +443,23 @@ func (t *Tree) RootNode() *Node {
 	return nn
 }
 
-// Close releases the tree's C resources.
+// Close releases the tree's C resources and recycles its node arena.
+//
+// The arena is returned to the pool AFTER the C tree is freed: by the
+// Tree's contract every Node wrapper is dead once Close returns, so the
+// chunks the arena retains hold nothing live. putArena's reset() clears any
+// stale slot, so a recycled arena never pins a closed tree.
 func (t *Tree) Close() {
-	if t != nil && t.inner != nil {
+	if t == nil {
+		return
+	}
+	if t.inner != nil {
 		t.inner.Close()
 		t.inner = nil
+	}
+	if t.arena != nil {
+		putArena(t.arena)
+		t.arena = nil
 	}
 }
 
