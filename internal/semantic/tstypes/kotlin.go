@@ -58,6 +58,12 @@ func KotlinSpec() *LangSpec {
 		// into resolving such calls against the receiver type, with real
 		// members winning over extensions.
 		ExtensionFunctions: true,
+		// A method call standing in receiver position (`p.copy().component1()`,
+		// `a.step().done()`) types its receiver from the inner call's
+		// (rewritten) return type, so a fluent chain resolves link by link.
+		// The chain path grounds only when every link lands on a real member
+		// with a known return type — a missing link beats a wrong edge.
+		ChainedReceivers: true,
 		// Kotlin operators are sugar for named member functions (`a + b` is
 		// `a.plus(b)`, `a[i]` is `a.get(i)`, `a in b` is `b.contains(a)`).
 		// This desugars an operator expression into the member call it

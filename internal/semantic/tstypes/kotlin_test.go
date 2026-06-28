@@ -746,3 +746,170 @@ func TestKotlin_WhenIsArmNarrows(t *testing.T) {
 		t.Errorf("when-arm edge confidence = %v, want %v", e.Confidence, inferredConfidence)
 	}
 }
+
+// A Kotlin `data class` auto-generates one `componentN()` accessor per
+// primary-constructor property (in order) and a `copy()` returning the
+// class. The extractor synthesizes these as members, so `p.componentN()` /
+// `p.copy()` resolve through the engine's member lookup with no engine
+// change. componentI's declared return type is the I-th property's type;
+// copy's is the class itself.
+func TestKotlin_DataClassComponentAndCopyResolve(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"types.kt": `class A { fun ma() {} }
+class B { fun mb() {} }
+`,
+		"P.kt": `data class P(val a: A, val b: B)
+`,
+		"App.kt": `class App {
+    fun run() {
+        val p = P(A(), B())
+        p.component1()
+        p.component2()
+        p.copy()
+    }
+}
+`,
+	})
+	prov := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := prov.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "run", graph.KindMethod)
+	for _, tc := range []struct{ method, wantReturn string }{
+		{"component1", "A"},
+		{"component2", "B"},
+		{"copy", "P"},
+	} {
+		targetID := "P.kt::P." + tc.method
+		target := g.GetNode(targetID)
+		if target == nil {
+			t.Fatalf("synthetic member %q not emitted", targetID)
+		}
+		if target.Meta["synthetic"] != "data_class" {
+			t.Errorf("%s Meta[synthetic] = %v, want data_class", tc.method, target.Meta["synthetic"])
+		}
+		if target.Meta["generated"] != true {
+			t.Errorf("%s Meta[generated] = %v, want true", tc.method, target.Meta["generated"])
+		}
+		if target.Meta["return_type"] != tc.wantReturn {
+			t.Errorf("%s Meta[return_type] = %v, want %q", tc.method, target.Meta["return_type"], tc.wantReturn)
+		}
+		e := callEdgeTo(g, caller.ID, targetID)
+		if e == nil {
+			t.Fatalf("p.%s() not resolved to %q; edges: %v", tc.method, targetID, g.GetOutEdges(caller.ID))
+		}
+		assertASTProvenance(t, e, "kotlin-types")
+	}
+}
+
+// `copy()` returns the data class, so a `p.copy().componentN()` chain types
+// its receiver from copy's return type and resolves the trailing call — at
+// the graded inferred band (the receiver came through a return-type rewrite).
+func TestKotlin_DataClassCopyChainResolves(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"types.kt": `class A { fun ma() {} }
+`,
+		"P.kt": `data class P(val a: A)
+`,
+		"App.kt": `class App {
+    fun run() {
+        val p = P(A())
+        p.copy().component1()
+    }
+}
+`,
+	})
+	prov := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := prov.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "run", graph.KindMethod)
+	target := g.GetNode("P.kt::P.component1")
+	if target == nil {
+		t.Fatal("synthetic component1 not emitted")
+	}
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("p.copy().component1() not resolved; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Origin != graph.OriginASTResolved {
+		t.Errorf("chain edge origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+	}
+	if e.Meta["semantic_source"] != "kotlin-types" {
+		t.Errorf("chain edge semantic_source = %v, want kotlin-types", e.Meta["semantic_source"])
+	}
+}
+
+// A plain (non-`data`) class gets NO componentN / copy synthesis, so a
+// `q.component1()` call stays unresolved and untouched.
+func TestKotlin_NonDataClassNoComponentSynthesis(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"types.kt": `class A { fun ma() {} }
+`,
+		"Q.kt": `class Q(val a: A)
+`,
+		"App.kt": `class App {
+    fun run() {
+        val q = Q(A())
+        q.component1()
+    }
+}
+`,
+	})
+	prov := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := prov.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.GetNode("Q.kt::Q.component1"); n != nil {
+		t.Fatalf("non-data class Q must not synthesize component1, got %v", n)
+	}
+	caller := nodeByNameKind(t, g, "run", graph.KindMethod)
+	assertUntouched(t, g, caller.ID, "component1", "kotlin-types")
+}
+
+// A user-declared `copy` wins over the synthetic one: synthesis is skipped
+// for that name (emitting both would make the member lookup ambiguous), so
+// `r.copy()` resolves to the user's method, and componentN is still
+// synthesized for the properties the user did not redeclare.
+func TestKotlin_DataClassUserCopyWins(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"types.kt": `class A { fun ma() {} }
+`,
+		"R.kt": `data class R(val a: A) {
+    fun copy(): R = this
+}
+`,
+		"App.kt": `class App {
+    fun run() {
+        val r = R(A())
+        r.copy()
+    }
+}
+`,
+	})
+	prov := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := prov.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	copies := 0
+	for _, n := range g.FindNodesByName("copy") {
+		if n.Kind != graph.KindMethod {
+			continue
+		}
+		copies++
+		if n.Meta["synthetic"] == "data_class" {
+			t.Errorf("synthetic copy emitted despite user-declared copy: %s", n.ID)
+		}
+	}
+	if copies != 1 {
+		t.Fatalf("want exactly 1 copy method, got %d", copies)
+	}
+	caller := nodeByNameKind(t, g, "run", graph.KindMethod)
+	target := nodeByNameKind(t, g, "copy", graph.KindMethod)
+	if e := callEdgeTo(g, caller.ID, target.ID); e == nil {
+		t.Fatalf("r.copy() did not resolve to user copy; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if g.GetNode("R.kt::R.component1") == nil {
+		t.Error("component1 should still be synthesized when only copy is user-declared")
+	}
+}

@@ -656,3 +656,73 @@ func TestKotlinConstClassificationAndPackageScope(t *testing.T) {
 	require.NotNil(t, byName["other"])
 	assert.Equal(t, "com.app", byName["other"].Meta["scope_pkg"])
 }
+
+func TestKotlinExtractor_DataClassSynthesizesComponentAndCopy(t *testing.T) {
+	src := []byte(`data class P(val a: A, val b: B)
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("P.kt", src)
+	require.NoError(t, err)
+
+	byName := map[string]*graph.Node{}
+	for _, n := range nodesOfKind(result.Nodes, graph.KindMethod) {
+		byName[n.Name] = n
+	}
+	for _, tc := range []struct{ name, ret string }{
+		{"component1", "A"},
+		{"component2", "B"},
+		{"copy", "P"},
+	} {
+		n := byName[tc.name]
+		require.NotNilf(t, n, "%s not synthesized", tc.name)
+		assert.Equal(t, "data_class", n.Meta["synthetic"])
+		assert.Equal(t, true, n.Meta["generated"])
+		assert.Equal(t, tc.ret, n.Meta["return_type"])
+		found := false
+		for _, ed := range edgesOfKind(result.Edges, graph.EdgeMemberOf) {
+			if ed.From == n.ID && ed.To == "P.kt::P" {
+				found = true
+			}
+		}
+		assert.Truef(t, found, "%s missing member_of edge to P", tc.name)
+	}
+}
+
+func TestKotlinExtractor_NonDataClassNoSynthesis(t *testing.T) {
+	src := []byte(`class Q(val a: A)
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("Q.kt", src)
+	require.NoError(t, err)
+	for _, n := range result.Nodes {
+		if n.Kind == graph.KindMethod {
+			assert.NotEqual(t, "data_class", n.Meta["synthetic"], "non-data class must not synthesize members")
+		}
+		assert.NotEqual(t, "Q.kt::Q.component1", n.ID, "non-data class must not synthesize component1")
+	}
+}
+
+func TestKotlinExtractor_DataClassUserCopyNotDuplicated(t *testing.T) {
+	src := []byte(`data class R(val a: A) {
+    fun copy(): R = this
+}
+`)
+	e := NewKotlinExtractor()
+	result, err := e.Extract("R.kt", src)
+	require.NoError(t, err)
+	copies := 0
+	hasComp1 := false
+	for _, n := range nodesOfKind(result.Nodes, graph.KindMethod) {
+		switch n.Name {
+		case "copy":
+			copies++
+			assert.NotEqual(t, "data_class", n.Meta["synthetic"], "user copy must not be marked synthetic")
+		case "component1":
+			if n.Meta["synthetic"] == "data_class" {
+				hasComp1 = true
+			}
+		}
+	}
+	assert.Equal(t, 1, copies, "user-declared copy must not be duplicated by synthesis")
+	assert.True(t, hasComp1, "component1 should still be synthesized when only copy is user-declared")
+}
