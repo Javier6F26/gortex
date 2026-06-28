@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -112,10 +113,30 @@ func (p *Provider) Close() error {
 	return nil
 }
 
+// goToolchainOnce caches the one-time probe for the `go` command. The
+// provider shells out through go/packages (`go list`), so without the
+// toolchain on PATH it can only fail — and a shipped gortex binary often
+// runs on a machine with no Go installed. Probing once lets the manager's
+// Available() gate skip the provider instead of attempting a package load
+// that fails on every index.
+var (
+	goToolchainOnce sync.Once
+	goToolchainOK   bool
+)
+
+func goToolchainAvailable() bool {
+	goToolchainOnce.Do(func() {
+		_, err := exec.LookPath("go")
+		goToolchainOK = err == nil
+	})
+	return goToolchainOK
+}
+
 func (p *Provider) Available() bool {
-	// go/packages requires the Go toolchain. Check if 'go' is on PATH.
-	// Since this is a Go binary, the toolchain is almost always present.
-	return true
+	// go/packages requires the Go toolchain; gate on a cached PATH probe
+	// so a binary running without `go` skips this provider cleanly and
+	// the go-ast-types supplemental provider serves Go instead.
+	return goToolchainAvailable()
 }
 
 func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResult, error) {
