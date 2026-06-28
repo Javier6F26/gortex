@@ -16,6 +16,16 @@ import (
 )
 
 // fileExists reports whether path names an existing regular file.
+// spawnRubyLSPWithoutGemfile reports whether ruby-lsp should still be
+// launched for a workspace that has no Gemfile (and would therefore trigger
+// a network `bundle install` for its composed bundle on spawn). Default
+// false — skip it and rely on the in-process ruby resolver. Set
+// GORTEX_RUBY_LSP_NO_GEMFILE=1 to restore the spawn.
+func spawnRubyLSPWithoutGemfile() bool {
+	v := os.Getenv("GORTEX_RUBY_LSP_NO_GEMFILE")
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
@@ -430,6 +440,15 @@ func (r *Router) forSpecWorkspace(spec *ServerSpec, workspace string, pin bool) 
 	if spec.UseWorkspaceBundleGemfile {
 		if gemfile := filepath.Join(workspace, "Gemfile"); fileExists(gemfile) {
 			p.env = append(append([]string(nil), p.env...), "BUNDLE_GEMFILE="+gemfile)
+		} else if !spawnRubyLSPWithoutGemfile() {
+			// No Gemfile: ruby-lsp runs a `bundle install` for its composed
+			// bundle on spawn — a multi-second network round-trip to
+			// rubygems.org — for a workspace where Ruby is typically only test
+			// fixtures. Skip the LSP; the in-process ruby-types resolver still
+			// covers Ruby. This is a per-workspace skip (NOT markSpawnFailed),
+			// so a sibling repo that does carry a Gemfile still spawns ruby-lsp.
+			// GORTEX_RUBY_LSP_NO_GEMFILE=1 forces the spawn.
+			return nil, fmt.Errorf("ruby-lsp: no Gemfile in %s; skipping composed-bundle install", workspace)
 		}
 	}
 	if err := p.EnsureClient(workspace); err != nil {
