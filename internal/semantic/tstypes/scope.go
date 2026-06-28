@@ -90,10 +90,12 @@ type bindingState struct {
 	typ           string
 	pendingCallee string
 	poisoned      bool
-	// narrowed marks a binding produced by a guard narrowing rather than a
-	// direct annotation / inference. It rides onto the call fact so the
-	// apply phase grades a call through it at the inferred band.
-	narrowed bool
+	// inferred marks a binding whose type came from an inferential source
+	// rather than a direct native annotation — a guard narrowing
+	// (`if ($x instanceof Foo)`) or a documentation-comment type hint
+	// (`@var Foo $x`). It rides onto the call fact so the apply phase grades
+	// a call through it at the inferred confidence band.
+	inferred bool
 }
 
 type scopeKind int
@@ -152,8 +154,10 @@ func (s *scopeEnv) nearestTypeScope() *scopeEnv {
 
 // bind applies the single-assignment-lite rule: first binding wins; a
 // rebind that does not provably preserve the type degrades the binding
-// to unknown (poisoned), permanently for this scope chain.
-func (s *scopeEnv) bind(name string, typ, pendingCallee string) {
+// to unknown (poisoned), permanently for this scope chain. inferred marks
+// the fresh binding as derived from an inferential source (a doc-comment
+// type hint) so a call through it is graded at the inferred band.
+func (s *scopeEnv) bind(name string, typ, pendingCallee string, inferred bool) {
 	if name == "" {
 		return
 	}
@@ -168,7 +172,15 @@ func (s *scopeEnv) bind(name string, typ, pendingCallee string) {
 		}
 		return
 	}
-	s.vars[name] = &bindingState{typ: typ, pendingCallee: pendingCallee}
+	s.vars[name] = &bindingState{typ: typ, pendingCallee: pendingCallee, inferred: inferred}
+}
+
+// fieldType is one prepass field binding: its resolved type plus whether
+// that type came from an inferential source (a `@var` docblock) rather
+// than a native annotation, so the seeded binding grades calls honestly.
+type fieldType struct {
+	typ      string
+	inferred bool
 }
 
 // binder runs the scope-graph walk over one parsed file.
@@ -181,11 +193,11 @@ type binder struct {
 	// every type scope from it lets a method body resolve fields
 	// declared after it — and, for Rust, fields declared on the struct
 	// while the method lives in a separate impl block.
-	fieldsByType map[string]map[string]string
+	fieldsByType map[string]map[string]fieldType
 }
 
 func newBinder(spec *LangSpec, src []byte, facts *fileFacts) *binder {
-	return &binder{spec: spec, src: src, facts: facts, fieldsByType: make(map[string]map[string]string)}
+	return &binder{spec: spec, src: src, facts: facts, fieldsByType: make(map[string]map[string]fieldType)}
 }
 
 func (b *binder) run(root *sitter.Node) {
@@ -210,18 +222,18 @@ func (b *binder) prepassFields(n *sitter.Node) {
 		if name := b.spec.TypeDeclName(n, b.src); name != "" && b.spec.Fields != nil {
 			fields := b.fieldsByType[name]
 			if fields == nil {
-				fields = make(map[string]string)
+				fields = make(map[string]fieldType)
 				b.fieldsByType[name] = fields
 			}
 			for _, f := range b.spec.Fields(n, b.src) {
 				typ := b.spec.normalize(f.Type)
-				if prev, ok := fields[f.Name]; ok && prev != typ {
+				if prev, ok := fields[f.Name]; ok && prev.typ != typ {
 					// Conflicting declarations degrade to unknown —
 					// same rule as local rebinds.
-					fields[f.Name] = ""
+					fields[f.Name] = fieldType{}
 					continue
 				}
-				fields[f.Name] = typ
+				fields[f.Name] = fieldType{typ: typ, inferred: f.Inferred}
 				if typ != "" {
 					b.facts.metas = append(b.facts.metas, metaFact{
 						key: "semantic_type", value: typ, owner: name, name: f.Name,
@@ -268,8 +280,8 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 			}
 			tEnv := newScope(env, scopeType)
 			tEnv.typeName = name
-			for fname, ftyp := range b.fieldsByType[name] {
-				tEnv.vars[fname] = &bindingState{typ: ftyp}
+			for fname, ft := range b.fieldsByType[name] {
+				tEnv.vars[fname] = &bindingState{typ: ft.typ, inferred: ft.inferred}
 			}
 			b.walkChildren(n, tEnv)
 			return
@@ -278,17 +290,40 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 
 	if b.spec.FuncDeclTypes[t] {
 		fEnv := newScope(env, scopeFunc)
+		// The callable's own docblock (`@param` / `@return`) is the fallback
+		// type source for any parameter / return that carries no native
+		// annotation. Resolved once for the whole callable.
+		var docFacts []DocTypeFact
+		if b.spec.DocType != nil {
+			docFacts = b.spec.DocType(n, b.src)
+		}
 		if b.spec.Params != nil {
 			for _, p := range b.spec.Params(n, b.src) {
-				fEnv.vars[p.Name] = &bindingState{typ: b.spec.normalize(p.Type)}
+				typ := b.spec.normalize(p.Type)
+				inferred := false
+				if typ == "" {
+					// Native annotation absent: fall back to `@param T $x`.
+					if dt := b.spec.normalize(docParamType(docFacts, p.Name)); dt != "" {
+						typ, inferred = dt, true
+					}
+				}
+				fEnv.vars[p.Name] = &bindingState{typ: typ, inferred: inferred}
 			}
 		}
+		rt := ""
 		if b.spec.ReturnType != nil {
-			if rt := b.spec.normalize(b.spec.ReturnType(n, b.src)); rt != "" {
-				b.facts.metas = append(b.facts.metas, metaFact{
-					key: "return_type", value: rt, line: nodeLine(n),
-				})
-			}
+			rt = b.spec.normalize(b.spec.ReturnType(n, b.src))
+		}
+		if rt == "" {
+			// Native return absent: fall back to `@return T` (`$this` / self /
+			// static are preserved verbatim so the apply phase's fluent
+			// self-return rewrite types the result as the enclosing class).
+			rt = b.spec.normalize(docReturnType(docFacts))
+		}
+		if rt != "" {
+			b.facts.metas = append(b.facts.metas, metaFact{
+				key: "return_type", value: rt, line: nodeLine(n),
+			})
 		}
 		b.walkChildren(n, fEnv)
 		return
@@ -298,15 +333,30 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 		if lb, ok := b.spec.LocalBinding(n, b.src); ok {
 			typ := b.spec.normalize(lb.DeclType)
 			pending := ""
+			inferred := false
 			if typ == "" || isInferenceKeyword(typ) {
-				typ, pending = b.exprType(lb.Init, env)
+				// A `@var T $x` docblock on the statement is an explicit author
+				// assertion: it wins over initializer inference, but only when
+				// the binding has no native annotation (which locals in these
+				// grammars never do). It grades the binding inferred. When no
+				// docblock types the local, fall back to initializer inference
+				// exactly as before (including the inference-keyword case).
+				docTyped := false
+				if b.spec.DocType != nil {
+					if dt := b.spec.normalize(docVarType(b.spec.DocType(n, b.src), lb.Name)); dt != "" {
+						typ, inferred, docTyped = dt, true, true
+					}
+				}
+				if !docTyped {
+					typ, pending = b.exprType(lb.Init, env)
+				}
 			}
 			if lb.Field {
 				if ts := env.nearestTypeScope(); ts != nil {
-					ts.bind(lb.Name, typ, pending)
+					ts.bind(lb.Name, typ, pending, inferred)
 				}
 			} else {
-				env.bind(lb.Name, typ, pending)
+				env.bind(lb.Name, typ, pending, inferred)
 			}
 			// Fall through: the initializer may contain calls worth
 			// recording.
@@ -412,7 +462,7 @@ func (b *binder) bindNarrow(env *scopeEnv, name, typ string) {
 	if typ == "" {
 		return
 	}
-	env.vars[name] = &bindingState{typ: typ, narrowed: true}
+	env.vars[name] = &bindingState{typ: typ, inferred: true}
 }
 
 func (b *binder) walkChildren(n *sitter.Node, env *scopeEnv) {
@@ -472,7 +522,7 @@ func (b *binder) receiverFact(recv *sitter.Node, env *scopeEnv) (callFact, bool)
 		if fname, ok := b.spec.FieldRef(recv, b.src); ok {
 			if ts := env.nearestTypeScope(); ts != nil {
 				if st, found := ts.vars[fname]; found && !st.poisoned && st.typ != "" {
-					return callFact{recvType: st.typ}, true
+					return callFact{recvType: st.typ, inferred: st.inferred}, true
 				}
 			}
 			return callFact{}, false
@@ -484,7 +534,7 @@ func (b *binder) receiverFact(recv *sitter.Node, env *scopeEnv) (callFact, bool)
 				return callFact{}, false
 			}
 			if st.typ != "" {
-				return callFact{recvType: st.typ, inferred: st.narrowed}, true
+				return callFact{recvType: st.typ, inferred: st.inferred}, true
 			}
 			if st.pendingCallee != "" {
 				return callFact{recvPendingCallee: st.pendingCallee}, true

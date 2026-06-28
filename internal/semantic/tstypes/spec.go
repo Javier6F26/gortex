@@ -29,6 +29,79 @@ type Binding struct {
 	Name string
 	Type string // declared type name as written; "" when unannotated
 	Line int    // 1-based declaration line
+	// Inferred marks a binding whose Type came from an inferential source
+	// (a documentation comment, not a checked native annotation). It rides
+	// through the type-scope seeding onto the call fact so the apply phase
+	// grades a call through such a receiver at the inferred confidence band.
+	// Native-annotated bindings leave it false and stay at the direct band.
+	Inferred bool
+}
+
+// DocTypeKind selects how the binder applies a documentation-comment type
+// hint: to a local/field variable, a parameter, or a return type.
+type DocTypeKind int
+
+const (
+	// DocVar is a `@var T $x` (or bare `@var T` on a property) hint.
+	DocVar DocTypeKind = iota
+	// DocParam is a `@param T $x` hint.
+	DocParam
+	// DocReturn is a `@return T` hint (Name is empty).
+	DocReturn
+)
+
+// DocTypeFact is one type hint recovered from a documentation comment
+// (a PHPDoc-style docblock). Kind selects how it applies; Name is the
+// variable / parameter name as written in the comment (sigil-included
+// where the grammar carries one, e.g. "$x"; empty for a return fact);
+// Type is the chosen type name — already reduced to the leftmost
+// non-null member of a union and alias-resolved, but NOT yet
+// language-normalized (the binder runs spec.normalize on it, which strips
+// leading "\", the nullable "?", and generic / array suffixes).
+type DocTypeFact struct {
+	Kind DocTypeKind
+	Name string
+	Type string
+}
+
+// docParamType returns the `@param` doc-hint type for the parameter named
+// name, "" when the docblock carries none.
+func docParamType(facts []DocTypeFact, name string) string {
+	for _, f := range facts {
+		if f.Kind == DocParam && f.Name == name {
+			return f.Type
+		}
+	}
+	return ""
+}
+
+// docReturnType returns the first `@return` doc-hint type, "" when absent.
+func docReturnType(facts []DocTypeFact) string {
+	for _, f := range facts {
+		if f.Kind == DocReturn {
+			return f.Type
+		}
+	}
+	return ""
+}
+
+// docVarType returns the `@var` doc-hint type for the variable named name:
+// a name-matched `@var T $name` first, else a bare unnamed `@var T`
+// fallback (the single-variable form). "" when the docblock carries none.
+func docVarType(facts []DocTypeFact, name string) string {
+	var unnamed string
+	for _, f := range facts {
+		if f.Kind != DocVar {
+			continue
+		}
+		if f.Name == name {
+			return f.Type
+		}
+		if f.Name == "" && unnamed == "" {
+			unnamed = f.Type
+		}
+	}
+	return unnamed
 }
 
 // LocalBind is one local-variable declaration or assignment the engine
@@ -214,6 +287,22 @@ type LangSpec struct {
 	// still allowing then-branch narrowing. Consulted only when Narrowings
 	// and IfStmt are set.
 	EarlyExit func(body *sitter.Node, src []byte) bool
+
+	// DocType extracts type hints from the documentation comment (docblock)
+	// immediately preceding declNode — a parameter-bearing callable, a
+	// property, or a local-assignment / statement node. It returns zero or
+	// more facts: `@var T $x` / `@var T` (DocVar), `@param T $x` (DocParam),
+	// `@return T` (DocReturn). The binder uses each fact as a FALLBACK type
+	// source: a native type annotation on the same binding ALWAYS WINS, and
+	// DocType supplies a type only where the native annotation is absent. A
+	// docblock that cannot be parsed, or whose tag carries no resolvable
+	// type, contributes nothing — the binder never guesses from a comment.
+	// Because a documentation comment is an author assertion rather than a
+	// checked annotation, every edge resolved THROUGH a DocType-supplied
+	// type is graded at the inferred confidence band. nil (the default)
+	// disables docblock typing entirely, so a language that leaves it unset
+	// behaves byte-for-byte as before.
+	DocType func(declNode *sitter.Node, src []byte) []DocTypeFact
 }
 
 // inheritEdgeKinds returns the edge kinds methodOn climbs when looking

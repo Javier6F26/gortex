@@ -675,6 +675,265 @@ function f($x): void {
 	assertUntouched(t, g, caller.ID, "bar", "php-types")
 }
 
+// A `/** @var Foo $x */` docblock on a local assignment types the local
+// even when the initializer is an unresolvable call: `$x->bar()` resolves
+// to Foo::bar. The edge is graded inferred — a comment, not a checked
+// annotation.
+func TestPHP_DocVarLocalResolvesCall(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+function f(): void {
+    /** @var Foo $x */
+    $x = makeIt();
+    $x->bar();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("@var local did not resolve $x->bar() to Foo::bar; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Origin != graph.OriginASTResolved {
+		t.Errorf("@var edge origin = %q, want %q", e.Origin, graph.OriginASTResolved)
+	}
+	if e.Meta["semantic_source"] != "php-types" {
+		t.Errorf("@var edge semantic_source = %v, want php-types", e.Meta["semantic_source"])
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("@var edge resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("@var edge confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// A `/** @return $this */` docblock on a method makes the method return the
+// enclosing class, so a fluent chain `$c->chain()->other()` resolves
+// other() on that class. The chained edge is graded inferred.
+func TestPHP_DocReturnThisChainResolves(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class C {
+    /** @return $this */
+    public function chain() { return $this; }
+
+    public function other(): void {}
+}
+
+class App {
+    public function run(C $c): void {
+        $c->chain()->other();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	other := nodeByNameKind(t, g, "other", graph.KindMethod)
+	outer := callEdgeTo(g, run.ID, other.ID)
+	if outer == nil {
+		t.Fatalf("@return $this chain did not resolve $c->chain()->other() to C::other; edges: %v", g.GetOutEdges(run.ID))
+	}
+	if outer.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("chained edge resolution_strategy = %v, want %q", outer.Meta["resolution_strategy"], strategyInferred)
+	}
+	if outer.Confidence != inferredConfidence {
+		t.Errorf("chained edge confidence = %v, want %v", outer.Confidence, inferredConfidence)
+	}
+}
+
+// A `/** @param Foo $x */` docblock types a parameter that has NO native
+// annotation, so `$x->bar()` inside resolves to Foo::bar at the inferred
+// band.
+func TestPHP_DocParamWithoutNativeResolvesCall(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+/** @param Foo $x */
+function withParam($x): void {
+    $x->bar();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "withParam", graph.KindFunction)
+	target := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("@param without native type did not resolve $x->bar() to Foo::bar; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("@param edge resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("@param edge confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
+// A union return `/** @return Foo|null */` resolves to the LEFTMOST
+// NON-NULL member (Foo): the fluent chain `$c->make()->bar()` resolves
+// bar() on Foo.
+func TestPHP_DocReturnUnionLeftmostNonNull(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function bar(): void {}
+}
+
+class C {
+    /** @return Foo|null */
+    public function make() { return null; }
+}
+
+class App {
+    public function run(C $c): void {
+        $c->make()->bar();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	run := nodeByNameKind(t, g, "run", graph.KindMethod)
+	bar := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	if callEdgeTo(g, run.ID, bar.ID) == nil {
+		t.Fatalf("@return Foo|null did not resolve the chain to Foo::bar; edges: %v", g.GetOutEdges(run.ID))
+	}
+}
+
+// A union `/** @var A|B $x */` types the local as the LEFTMOST NON-NULL
+// member (A): `$x->m()` resolves to A::m, never B::m.
+func TestPHP_DocVarUnionLeftmostNonNull(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class A {
+    public function m(): void {}
+}
+class B {
+    public function m(): void {}
+}
+
+function f(): void {
+    /** @var A|B $x */
+    $x = makeIt();
+    $x->m();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindFunction)
+	wantA := "app.php::A.m"
+	if callEdgeTo(g, caller.ID, wantA) == nil {
+		t.Fatalf("@var A|B did not resolve to A::m (leftmost non-null); edges: %v", g.GetOutEdges(caller.ID))
+	}
+	wrongB := "app.php::B.m"
+	if callEdgeTo(g, caller.ID, wrongB) != nil {
+		t.Fatalf("@var A|B wrongly resolved to B::m")
+	}
+}
+
+// A native parameter annotation ALWAYS wins over a conflicting `@param`
+// docblock: `Bar $x` with `/** @param Foo $x */` resolves `$x->m()` to
+// Bar::m, not Foo::m, and at the direct (not inferred) band.
+func TestPHP_DocParamNativeAnnotationWins(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Foo {
+    public function m(): void {}
+}
+class Bar {
+    public function m(): void {}
+}
+
+/** @param Foo $x */
+function withBoth(Bar $x): void {
+    $x->m();
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "withBoth", graph.KindFunction)
+	wantBar := "app.php::Bar.m"
+	e := callEdgeTo(g, caller.ID, wantBar)
+	if e == nil {
+		t.Fatalf("native Bar $x did not win over @param Foo; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	wrongFoo := "app.php::Foo.m"
+	if callEdgeTo(g, caller.ID, wrongFoo) != nil {
+		t.Fatalf("docblock @param Foo wrongly overrode native Bar")
+	}
+	if e.Meta["resolution_strategy"] == string(strategyInferred) {
+		t.Errorf("native-annotation edge should be direct, got inferred")
+	}
+	if e.Confidence < astConfidence {
+		t.Errorf("native-annotation edge confidence = %v, want >= %v", e.Confidence, astConfidence)
+	}
+}
+
+// An untyped property with a `/** @var Dep */` docblock types the field, so
+// `$this->cached->work()` resolves to Dep::work at the inferred band.
+func TestPHP_DocVarPropertyResolvesCall(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"app.php": `<?php
+class Dep {
+    public function work(): void {}
+}
+
+class App {
+    /** @var Dep */
+    private $cached;
+
+    public function f(): void {
+        $this->cached->work();
+    }
+}
+`,
+	})
+	p := NewProvider(PHPSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "f", graph.KindMethod)
+	target := nodeByNameKind(t, g, "work", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, target.ID)
+	if e == nil {
+		t.Fatalf("@var property did not resolve $this->cached->work() to Dep::work; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	if e.Meta["resolution_strategy"] != string(strategyInferred) {
+		t.Errorf("@var property edge resolution_strategy = %v, want %q", e.Meta["resolution_strategy"], strategyInferred)
+	}
+	if e.Confidence != inferredConfidence {
+		t.Errorf("@var property edge confidence = %v, want %v", e.Confidence, inferredConfidence)
+	}
+}
+
 // EnrichFile resolves only the named file's calls, leaving others alone.
 func TestPHP_EnrichFileScopesToOneFile(t *testing.T) {
 	g, dir := buildFixture(t, map[string]string{

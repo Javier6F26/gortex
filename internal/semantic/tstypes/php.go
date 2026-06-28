@@ -49,6 +49,7 @@ func PHPSpec() *LangSpec {
 		Narrowings:       phpNarrowings,
 		IfStmt:           phpIfStmt,
 		EarlyExit:        phpEarlyExit,
+		DocType:          phpDocType,
 	}
 }
 
@@ -341,12 +342,16 @@ func phpTypeBody(n *sitter.Node) *sitter.Node {
 }
 
 // phpPropertyFields decodes a typed `private Foo $x, $y;` property
-// declaration into one binding per declared element. Untyped properties
-// yield nothing.
+// declaration into one binding per declared element. An untyped property
+// falls back to a `@var T` / `@var T $name` docblock immediately preceding
+// the declaration; a doc-derived binding is flagged Inferred so a call
+// through it grades at the inferred band. A property with neither a native
+// type nor a usable docblock yields nothing.
 func phpPropertyFields(prop *sitter.Node, src []byte) []Binding {
 	typ := phpTypeText(prop.ChildByFieldName("type"), src)
+	var docFacts []DocTypeFact
 	if typ == "" {
-		return nil
+		docFacts = phpDocType(prop, src)
 	}
 	var out []Binding
 	for c := range prop.NamedChildren() {
@@ -357,7 +362,16 @@ func phpPropertyFields(prop *sitter.Node, src []byte) []Binding {
 		if name == "" {
 			continue
 		}
-		out = append(out, Binding{Name: name, Type: typ, Line: nodeLine(c)})
+		t, inferred := typ, false
+		if t == "" {
+			if dt := docVarType(docFacts, "$"+name); dt != "" {
+				t, inferred = dt, true
+			}
+		}
+		if t == "" {
+			continue
+		}
+		out = append(out, Binding{Name: name, Type: t, Line: nodeLine(c), Inferred: inferred})
 	}
 	return out
 }
@@ -723,4 +737,175 @@ func normalizePHPType(t string) string {
 		t = t[i+1:]
 	}
 	return NormalizeTypeName(t)
+}
+
+// phpDocType implements the DocType hook for PHP. It finds the PHPDoc
+// docblock (`/** ... */`) immediately preceding decl and extracts its
+// `@var` / `@param` / `@return` type hints, applying the leftmost-non-null
+// union rule and resolving same-docblock `@phpstan-type` / `@psalm-type`
+// aliases. Returns nil when no docblock is attached or it carries no usable
+// hint — the binder then never types from a comment.
+func phpDocType(decl *sitter.Node, src []byte) []DocTypeFact {
+	comment := phpPrecedingDocComment(decl)
+	if comment == nil {
+		return nil
+	}
+	text := comment.Content(src)
+	if !strings.HasPrefix(strings.TrimSpace(text), "/**") {
+		return nil
+	}
+	return parsePHPDocFacts(text)
+}
+
+// phpPrecedingDocComment returns the comment node immediately preceding
+// decl, or nil. tree-sitter-php models a docblock as a preceding NAMED
+// SIBLING of the declaration, not a child: for a property / method /
+// function it is decl's own previous named sibling; for a local assignment
+// the docblock sits before the ENCLOSING statement, so the search climbs
+// one level (the assignment's parent expression_statement) before giving
+// up. A preceding named sibling that is not a comment means no docblock is
+// attached. The docblock-vs-plain-comment distinction is left to the
+// caller (a `/**`-prefix check).
+func phpPrecedingDocComment(decl *sitter.Node) *sitter.Node {
+	n := decl
+	for depth := 0; n != nil && depth < 2; depth++ {
+		if prev := n.PrevNamedSibling(); prev != nil {
+			if prev.Type() == "comment" {
+				return prev
+			}
+			return nil
+		}
+		n = n.Parent()
+	}
+	return nil
+}
+
+// parsePHPDocFacts extracts the type hints from a `/** ... */` docblock's
+// text. It runs two passes: the first collects `@phpstan-type` /
+// `@psalm-type` aliases, the second decodes `@var` / `@param` / `@return`
+// tags — substituting a same-docblock alias for its definition, and
+// reducing each union to its leftmost non-null member.
+func parsePHPDocFacts(text string) []DocTypeFact {
+	lines := phpDocLines(text)
+	aliases := map[string]string{}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "@phpstan-type", "@psalm-type":
+			if name, def := phpDocAlias(fields[1:]); name != "" && def != "" {
+				aliases[name] = def
+			}
+		}
+	}
+	resolve := func(raw string) string {
+		t := phpDocLeftmostType(raw)
+		if t == "" {
+			return ""
+		}
+		if def, ok := aliases[strings.TrimLeft(t, `\`)]; ok {
+			t = phpDocLeftmostType(def)
+		}
+		return t
+	}
+	var facts []DocTypeFact
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "@var":
+			if typ := resolve(fields[1]); typ != "" {
+				facts = append(facts, DocTypeFact{Kind: DocVar, Name: phpDocFirstSigil(fields[2:]), Type: typ})
+			}
+		case "@param":
+			name := phpDocFirstSigil(fields[2:])
+			if typ := resolve(fields[1]); typ != "" && name != "" {
+				facts = append(facts, DocTypeFact{Kind: DocParam, Name: name, Type: typ})
+			}
+		case "@return":
+			if typ := resolve(fields[1]); typ != "" {
+				facts = append(facts, DocTypeFact{Kind: DocReturn, Type: typ})
+			}
+		}
+	}
+	return facts
+}
+
+// phpDocLines splits a docblock into trimmed logical lines, stripping the
+// `/**` / `*/` fences and each line's leading `*`. Blank lines are dropped.
+func phpDocLines(text string) []string {
+	var out []string
+	for _, raw := range strings.Split(text, "\n") {
+		s := strings.TrimSpace(raw)
+		s = strings.TrimPrefix(s, "/**")
+		s = strings.TrimPrefix(s, "/*")
+		s = strings.TrimSuffix(s, "*/")
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "*")
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// phpDocLeftmostType reduces a docblock type expression to a single class
+// name: the LEFTMOST NON-NULL member of a union (`Foo|null` -> `Foo`,
+// `A|B` -> `A`), with the nullable shorthand `?T` treated as `T`. The
+// remaining reduction (leading "\", generics, `T[]` array suffixes) is left
+// to normalizePHPType. Returns "" when every member is null / empty.
+func phpDocLeftmostType(raw string) string {
+	raw = strings.TrimPrefix(strings.TrimSpace(raw), "?")
+	for _, part := range strings.Split(raw, "|") {
+		p := strings.TrimPrefix(strings.TrimSpace(part), "?")
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimLeft(p, `\`), "null") {
+			continue
+		}
+		return p
+	}
+	return ""
+}
+
+// phpDocAlias decodes a `@phpstan-type` / `@psalm-type` alias body
+// (`Name = Definition` or `Name Definition`) into (name, definition). Only
+// a single-token definition is accepted: a complex array-shape definition
+// (`array{...}`) yields an empty definition, so the alias is skipped
+// gracefully rather than misparsed.
+func phpDocAlias(fields []string) (string, string) {
+	if len(fields) < 2 {
+		return "", ""
+	}
+	name := fields[0]
+	rest := fields[1:]
+	if rest[0] == "=" {
+		rest = rest[1:]
+	}
+	if len(rest) == 0 {
+		return "", ""
+	}
+	def := rest[0]
+	if strings.ContainsAny(def, "{}<>()") {
+		return "", ""
+	}
+	return name, def
+}
+
+// phpDocFirstSigil returns the first `$`-sigil token among fields, "" when
+// none — the variable / parameter name a `@var` / `@param` tag carries.
+func phpDocFirstSigil(fields []string) string {
+	for _, f := range fields {
+		if strings.HasPrefix(f, "$") {
+			return f
+		}
+	}
+	return ""
 }
