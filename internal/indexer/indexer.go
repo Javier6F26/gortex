@@ -4778,17 +4778,19 @@ func (idx *Indexer) IncrementalReindex(root string) (*IndexResult, error) {
 			idx.resolver.InferOverrides()
 		}
 		// Capability edges (reads_env / executes_process / accesses_field)
-		// re-derived from the freshly re-indexed files' base edges so the
-		// daemon's capability surface — what a supply-chain / least-privilege
-		// audit traverses — stays fresh between full indexes. Whole-graph but
-		// idempotent (AddEdge dedupes), matching the other synthesis passes
-		// re-run here.
-		synthesizeCapabilityEdges(idx.graph)
-		// Framework dynamic-dispatch synthesis — re-run because eviction
-		// may have dropped a handler, a registration edge, or an emit /
-		// listen edge, and each synthesizer's index must be rebuilt
-		// against the fresh graph. Every pass is a full recompute.
-		resolver.RunFrameworkSynthesizers(idx.graph)
+		// and framework dynamic-dispatch synthesis are whole-graph recomputes
+		// that derive edges only from structural nodes in the changed files.
+		// When nothing structural changed — no stale code file (a doc/config
+		// edit or a true zero-change reconcile) and no deletion — they can
+		// produce no new edge, so re-running them is pure cost: the dominant
+		// waste in a no-op IncrementalReindex, which the periodic janitor runs
+		// per repo per tick. Gate them on the same predicate the path-scoped
+		// IncrementalReindexPaths already uses. Deletions still trigger a
+		// re-run because an evicted file may have been a dispatch endpoint.
+		if len(deletedFiles) > 0 || idx.staleFilesAffectDerivedEdges(staleFiles) {
+			synthesizeCapabilityEdges(idx.graph)
+			resolver.RunFrameworkSynthesizers(idx.graph)
+		}
 		// External-call synthesis (opt-in) — file-scoped to the reindexed
 		// files (O(edited files)), not a full-graph recompute. Eviction
 		// already dropped a removed file's synthetic edges; a re-indexed
