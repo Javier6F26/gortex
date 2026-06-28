@@ -52,6 +52,12 @@ func KotlinSpec() *LangSpec {
 		// ancestors stays unresolved, never half-guessed.
 		InheritEdgeKinds: []graph.EdgeKind{graph.EdgeExtends, graph.EdgeImplements},
 		NormalizeType:    normalizeKotlinType,
+		// Kotlin top-level `fun Foo.ext()` is an extension function: callable
+		// as `foo.ext()` on any Foo receiver. The extractor stamps the
+		// receiver on Meta["extension_receiver"]; this opts the call phase
+		// into resolving such calls against the receiver type, with real
+		// members winning over extensions.
+		ExtensionFunctions: true,
 	}
 }
 

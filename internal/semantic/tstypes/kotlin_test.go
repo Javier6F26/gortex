@@ -207,6 +207,134 @@ func TestKotlin_AmbiguousOverloadSkipped(t *testing.T) {
 	assertUntouched(t, g, caller.ID, "bar", "kotlin-types")
 }
 
+// A top-level extension function `fun Foo.ext()` declared in a different
+// file from `class Foo` is callable as `foo.ext()` on any Foo receiver. The
+// extractor's synthetic member_of edge points at a same-file phantom of the
+// receiver type, so the call resolves through the extension fallback against
+// the real cross-file Foo, at the direct AST band.
+func TestKotlin_ExtensionFunctionResolvesAsMemberCall(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+}
+`,
+		"Ext.kt": `fun Foo.ext() {}
+`,
+		"App.kt": `class App {
+    fun main(foo: Foo) {
+        foo.ext()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	ext := nodeByNameKind(t, g, "ext", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, ext.ID)
+	if e == nil {
+		t.Fatalf("extension call foo.ext() not resolved to %s; edges: %v", ext.ID, g.GetOutEdges(caller.ID))
+	}
+	assertASTProvenance(t, e, "kotlin-types")
+}
+
+// A nullable receiver `fun Foo?.ext2()` normalizes to receiver `Foo`, so
+// `foo.ext2()` on a Foo receiver still resolves.
+func TestKotlin_NullableReceiverExtensionResolves(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+}
+`,
+		"Ext.kt": `fun Foo?.ext2() {}
+`,
+		"App.kt": `class App {
+    fun main(foo: Foo) {
+        foo.ext2()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	ext := nodeByNameKind(t, g, "ext2", graph.KindMethod)
+	if callEdgeTo(g, caller.ID, ext.ID) == nil {
+		t.Fatalf("nullable-receiver extension foo.ext2() not resolved; edges: %v", g.GetOutEdges(caller.ID))
+	}
+}
+
+// A real member shadows an extension of the same name (Kotlin semantics):
+// `class Foo { fun m() }` plus `fun Foo.m()` resolves `foo.m()` to the REAL
+// member, never the extension.
+func TestKotlin_RealMemberShadowsExtension(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+    fun m() {}
+}
+`,
+		"Ext.kt": `fun Foo.m() {}
+`,
+		"App.kt": `class App {
+    fun main(foo: Foo) {
+        foo.m()
+    }
+}
+`,
+	})
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	// The real member is the `m` whose owner is Foo; the extension `m` lives
+	// in Ext.kt. Resolve the real member by its node ID convention.
+	realMember := g.GetNode("Foo.kt::Foo.m")
+	extMember := g.GetNode("Ext.kt::Foo.m")
+	if realMember == nil || extMember == nil {
+		t.Fatalf("expected both members in graph: real=%v ext=%v", realMember, extMember)
+	}
+	if callEdgeTo(g, caller.ID, realMember.ID) == nil {
+		t.Fatalf("foo.m() did not resolve to the real member %s; edges: %v", realMember.ID, g.GetOutEdges(caller.ID))
+	}
+	if callEdgeTo(g, caller.ID, extMember.ID) != nil {
+		t.Fatalf("foo.m() wrongly resolved to the extension %s over the real member", extMember.ID)
+	}
+}
+
+// A plain top-level `fun free()` is not an extension: it carries no
+// extension_receiver marker, so it never becomes a member of any type and a
+// receiver-qualified `x.free()` does not resolve to it.
+func TestKotlin_PlainTopLevelFunctionUnaffected(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"Foo.kt": `class Foo {
+}
+`,
+		"Free.kt": `fun free() {}
+`,
+		"App.kt": `class App {
+    fun main(foo: Foo) {
+        foo.free()
+    }
+}
+`,
+	})
+	free := nodeByNameKind(t, g, "free", graph.KindFunction)
+	if nodeIsExtension(free) {
+		t.Fatalf("plain top-level fun free() was marked as an extension: meta=%v", free.Meta)
+	}
+	p := NewProvider(KotlinSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "main", graph.KindMethod)
+	if callEdgeTo(g, caller.ID, free.ID) != nil {
+		t.Fatalf("foo.free() wrongly resolved to the free function %s", free.ID)
+	}
+}
+
 // EnrichFile resolves only the named file's calls, leaving others alone.
 func TestKotlin_EnrichFileScopesToOneFile(t *testing.T) {
 	g, dir := buildFixture(t, map[string]string{

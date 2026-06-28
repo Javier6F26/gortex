@@ -543,6 +543,15 @@ func (e *KotlinExtractor) emitFunction(m parser.QueryResult, filePath, fileID st
 			"visibility": visibility,
 		}
 		kotlinStampModMeta(meta, isAsync, kmpRole)
+		// An extension function (`fun Foo.ext()`) is declared at file scope,
+		// not inside Foo's body, so it is not a structural member of Foo and
+		// its synthetic member_of edge points at a same-file node that, when
+		// Foo lives in another file, does not exist. Mark it so the type
+		// engine can resolve `recv.ext()` against the real receiver type by
+		// name, as a fallback after a real member lookup misses.
+		if ownerKind == "extension" {
+			meta["extension_receiver"] = owner
+		}
 		// Companion-object members dispatch on the TYPE (`Foo.create()`),
 		// so the method is attributed to the enclosing class and flagged
 		// static. Without this an agent can't see that the companion's
@@ -790,41 +799,40 @@ func kotlinStampModMeta(meta map[string]any, isAsync bool, kmpRole string) {
 	}
 }
 
-// kotlinExtensionReceiver returns the receiver type of an extension function
-// (`fun Foo.bar()` -> "Foo"), or "" when fn is not an extension. A leading
-// type-parameter list and the receiver's own generic arguments are stripped, and
-// a dotted receiver is reduced to its last segment.
+// kotlinExtensionReceiver returns the receiver type name of an extension
+// function (`fun Foo.bar()` -> "Foo"), or "" when fn is not an extension.
+// The receiver is the `receiver_type` child that precedes the function name
+// in the function_declaration; a plain `fun free()` has no such child and is
+// not an extension. The bare type name is the last `type_identifier` under
+// the (possibly nullable) `user_type`, which drops a nullable marker
+// (`Foo?` -> "Foo"), generic arguments (`List<T>` -> "List", whose `T` hangs
+// off a nested type_arguments node, not a direct child), and a package
+// qualifier (`com.x.Foo` -> "Foo", whose earlier segments are the leading
+// type_identifier children).
 func kotlinExtensionReceiver(fn *sitter.Node, src []byte) string {
-	if fn == nil {
+	if fn == nil || fn.Type() != "function_declaration" {
 		return ""
 	}
-	header := fn.Content(src)
-	fi := strings.Index(header, "fun ")
-	if fi < 0 {
+	rt := firstChildOfType(fn, "receiver_type")
+	if rt == nil {
 		return ""
 	}
-	header = strings.TrimSpace(header[fi+4:])
-	if strings.HasPrefix(header, "<") {
-		if i := strings.IndexByte(header, '>'); i >= 0 {
-			header = strings.TrimSpace(header[i+1:])
+	ut := firstChildOfType(rt, "user_type")
+	if ut == nil {
+		if nt := firstChildOfType(rt, "nullable_type"); nt != nil {
+			ut = firstChildOfType(nt, "user_type")
 		}
 	}
-	if p := strings.IndexByte(header, '('); p >= 0 {
-		header = header[:p]
-	}
-	header = strings.TrimSpace(header)
-	dot := strings.LastIndexByte(header, '.')
-	if dot < 0 {
+	if ut == nil {
 		return ""
 	}
-	recv := strings.TrimSpace(header[:dot])
-	if i := strings.IndexByte(recv, '<'); i >= 0 {
-		recv = recv[:i]
+	name := ""
+	for i := 0; i < int(ut.ChildCount()); i++ {
+		if c := ut.Child(i); c != nil && c.Type() == "type_identifier" {
+			name = c.Content(src)
+		}
 	}
-	if i := strings.LastIndexByte(recv, '.'); i >= 0 {
-		recv = recv[i+1:]
-	}
-	return strings.TrimSpace(recv)
+	return strings.TrimSpace(name)
 }
 
 func (e *KotlinExtractor) emitImport(m parser.QueryResult, filePath, fileID string, result *parser.ExtractionResult) {

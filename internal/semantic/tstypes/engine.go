@@ -153,6 +153,24 @@ type applier struct {
 	// adaptations, built in the alias phase and consulted when a call's
 	// method name is not a direct or inherited member.
 	aliases map[string][]resolvedAlias
+	// extensions indexes the language's extension functions by
+	// (receiver-type-name, method-name). An extension `fun Foo.ext()` is
+	// callable as `recv.ext()` on any Foo receiver but is declared at file
+	// scope, so it is not a structural member of Foo (and cross-file its
+	// synthetic member_of edge points at a same-file phantom of the
+	// receiver type). The call phase consults this index as a FALLBACK,
+	// only after a real member lookup misses, so a real member of the same
+	// name always wins. nil until the first lookup lazily builds it; built
+	// only for specs that set ExtensionFunctions.
+	extensions   map[extKey][]*graph.Node
+	extensionsOK bool
+}
+
+// extKey indexes an extension function by its receiver type name and its
+// own method name — the pair a `recv.method()` call resolves against.
+type extKey struct {
+	receiver string
+	method   string
 }
 
 func newApplier(g graph.Store, spec *LangSpec, provider string) *applier {
@@ -408,7 +426,12 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 	var matches []*graph.Node
 	if len(fromIDs) > 0 {
 		for _, n := range a.g.GetNodesByIDs(fromIDs) {
-			if n.Kind == graph.KindMethod && n.Name == method {
+			// An extension function carries a synthetic member_of edge to
+			// its receiver type but is NOT a real member — a real member of
+			// the same name must shadow it. Exclude extensions here so the
+			// direct/inherited lookup sees only real members; the call phase
+			// resolves extensions separately, as a fallback.
+			if n.Kind == graph.KindMethod && n.Name == method && !nodeIsExtension(n) {
 				matches = append(matches, n)
 			}
 		}
@@ -530,6 +553,12 @@ func (a *applier) applyCall(idx *fileIndex, cf callFact, res *semantic.EnrichRes
 		// alias name is not a member of the type or its ancestry, so the
 		// direct climb misses it. The alias map routes it through.
 		target = a.resolveAlias(typeNode, cf.method)
+	}
+	if target == nil {
+		// No real (own or inherited) member and no alias — try an extension
+		// function declared on the receiver type. A real member would have
+		// resolved above, so this honours members-shadow-extensions.
+		target = a.extensionMethod(typeNode, cf.method)
 	}
 	if target == nil {
 		return
@@ -670,6 +699,89 @@ func (a *applier) resolveAlias(typeNode *graph.Node, method string) *graph.Node 
 		}
 	}
 	return nil
+}
+
+// nodeIsExtension reports whether a method node is an extension function —
+// a top-level callable declared with a receiver type, stamped by the
+// extractor with Meta["extension_receiver"]. Such a node is callable as a
+// member of its receiver but is not a structural member, so it is excluded
+// from the real-member lookup and resolved only as a fallback.
+func nodeIsExtension(n *graph.Node) bool {
+	if n == nil || n.Meta == nil {
+		return false
+	}
+	r, _ := n.Meta["extension_receiver"].(string)
+	return r != ""
+}
+
+// extensionMethod resolves a method name against the extension functions
+// declared on the receiver type. It is consulted ONLY after a real member
+// lookup (direct, inherited, and alias) misses, so a real member of the
+// same name always wins — even an ambiguous real overload set keeps the
+// extension from resolving, because the type genuinely declares the method.
+// Resolution is on the exact receiver type name within the receiver's repo;
+// a name claimed by more than one extension on that receiver stays
+// unresolved rather than guessed. Returns nil unless the spec opts in.
+func (a *applier) extensionMethod(typeNode *graph.Node, method string) *graph.Node {
+	if typeNode == nil || !a.spec.ExtensionFunctions {
+		return nil
+	}
+	if a.typeHasRealMember(typeNode, method) {
+		return nil
+	}
+	a.buildExtensionIndex()
+	var hit *graph.Node
+	for _, m := range a.extensions[extKey{receiver: typeNode.Name, method: method}] {
+		if m.RepoPrefix != typeNode.RepoPrefix {
+			continue
+		}
+		if hit != nil {
+			return nil // two extensions claim this receiver+name — ambiguous.
+		}
+		hit = m
+	}
+	return hit
+}
+
+// typeHasRealMember reports whether the type declares a real (non-extension)
+// method of this name directly. It guards the extension fallback so an
+// ambiguous real overload set — which makes methodOn return nil without
+// meaning "no member" — never resolves to an extension instead.
+func (a *applier) typeHasRealMember(typeNode *graph.Node, method string) bool {
+	for _, e := range a.g.GetInEdges(typeNode.ID) {
+		if e.Kind != graph.EdgeMemberOf {
+			continue
+		}
+		n := a.g.GetNode(e.From)
+		if n != nil && n.Kind == graph.KindMethod && n.Name == method && !nodeIsExtension(n) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildExtensionIndex lazily indexes every extension function in the graph
+// (KindMethod nodes carrying Meta["extension_receiver"], in the spec's
+// languages) by (normalized receiver type name, method name). Built once
+// per applier, on first use; a no-op for specs that never call it.
+func (a *applier) buildExtensionIndex() {
+	if a.extensionsOK {
+		return
+	}
+	a.extensionsOK = true
+	a.extensions = make(map[extKey][]*graph.Node)
+	lang := a.languageSet()
+	for n := range a.g.NodesByKind(graph.KindMethod) {
+		if n.Meta == nil || !lang[n.Language] || n.Name == "" {
+			continue
+		}
+		recv, _ := n.Meta["extension_receiver"].(string)
+		if recv == "" {
+			continue
+		}
+		k := extKey{receiver: a.spec.normalize(recv), method: n.Name}
+		a.extensions[k] = append(a.extensions[k], n)
+	}
 }
 
 // upgradeOrCreateCall lands a grounded call resolution on the graph:

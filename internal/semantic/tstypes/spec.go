@@ -288,6 +288,20 @@ type LangSpec struct {
 	// and IfStmt are set.
 	EarlyExit func(body *sitter.Node, src []byte) bool
 
+	// ExtensionFunctions enables resolving a receiver-qualified call that
+	// misses every real member against the language's extension functions —
+	// top-level functions declared with a receiver type (`fun Foo.ext()`),
+	// which the extractor emits as KindMethod nodes stamped
+	// Meta["extension_receiver"]=<receiver type name>. The call phase
+	// consults a (receiver, method) index as a FALLBACK, only after a real
+	// member lookup (direct + inherited) and any trait-alias miss, so a real
+	// member of the same name always wins (members shadow extensions). An
+	// extension claimed by more than one declaration on the same receiver
+	// stays unresolved rather than guessed. Off by default — a language
+	// without extension functions builds no index and behaves exactly as
+	// before.
+	ExtensionFunctions bool
+
 	// DocType extracts type hints from the documentation comment (docblock)
 	// immediately preceding declNode — a parameter-bearing callable, a
 	// property, or a local-assignment / statement node. It returns zero or
