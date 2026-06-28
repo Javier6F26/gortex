@@ -731,7 +731,26 @@ func (r *Resolver) cachedFindNodesByNameInRepo(name, repo string) []*graph.Node 
 	}
 	if r.nodesByName != nil {
 		if hits, ok := r.nodesByName[name]; ok {
-			var out []*graph.Node
+			// Count repo matches before allocating. When every hit is in
+			// repo -- always so in single-repo mode, and common otherwise --
+			// hand back the cached slice (capped so a caller's append cannot
+			// scribble into the cache) instead of copying it. The per-call
+			// copy + growslice here was the largest allocation source during
+			// resolution on a large index; callers treat the result as
+			// read-only.
+			match := 0
+			for _, n := range hits {
+				if n != nil && n.RepoPrefix == repo {
+					match++
+				}
+			}
+			switch {
+			case match == 0:
+				return nil
+			case match == len(hits):
+				return hits[:len(hits):len(hits)]
+			}
+			out := make([]*graph.Node, 0, match)
 			for _, n := range hits {
 				if n != nil && n.RepoPrefix == repo {
 					out = append(out, n)
