@@ -248,6 +248,16 @@ type LangSpec struct {
 	// receiverless calls — those are the resolver's job already).
 	Call func(n *sitter.Node, src []byte) (recv *sitter.Node, method string, ok bool)
 
+	// CallArgCount returns the number of argument expressions at a
+	// receiver-qualified call site — the same node Call decodes. It lets
+	// the apply phase disambiguate an overload set by arity: when a
+	// receiver type declares several same-named members, the candidate
+	// whose declared parameter count uniquely equals this count is the
+	// resolved target. ok=false (or a nil hook) leaves the call's arity
+	// unknown, so an overload set is never narrowed by arity for that
+	// language and the apply phase keeps skipping ambiguous sets.
+	CallArgCount func(n *sitter.Node, src []byte) (int, bool)
+
 	// NewExprType returns the constructed type name when n is a
 	// constructor expression ("" otherwise). Conventional constructors
 	// (Python `Foo()`, Ruby `Foo.new`, Rust `Foo::new`) may be

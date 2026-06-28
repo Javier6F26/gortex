@@ -40,6 +40,7 @@ func JavaSpec() *LangSpec {
 		},
 		LocalBinding: javaLocalBinding,
 		Call:         javaCall,
+		CallArgCount: javaCallArgCount,
 		NewExprType: func(n *sitter.Node, src []byte) string {
 			if n.Type() != "object_creation_expression" {
 				return ""
@@ -202,6 +203,43 @@ func javaCall(n *sitter.Node, src []byte) (*sitter.Node, string, bool) {
 		return nil, "", false
 	}
 	return obj, fieldText(n, "name", src), true
+}
+
+// javaCallArgCount counts the argument expressions of a method
+// invocation (`recv.m(a, b, c)` -> 3, `recv.m()` -> 0). Commas and
+// parentheses are anonymous, so the argument_list's named children are
+// the arguments; comment nodes that the grammar admits as extras are
+// skipped so they never inflate the count.
+func javaCallArgCount(n *sitter.Node, _ []byte) (int, bool) {
+	if n.Type() != "method_invocation" {
+		return 0, false
+	}
+	args := n.ChildByFieldName("arguments")
+	if args == nil {
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c != nil && c.Type() == "argument_list" {
+				args = c
+				break
+			}
+		}
+	}
+	if args == nil {
+		return 0, false
+	}
+	count := 0
+	for i := 0; i < int(args.NamedChildCount()); i++ {
+		c := args.NamedChild(i)
+		if c == nil {
+			continue
+		}
+		switch c.Type() {
+		case "line_comment", "block_comment":
+			continue
+		}
+		count++
+	}
+	return count, true
 }
 
 func javaImports(root *sitter.Node, src []byte) []Import {

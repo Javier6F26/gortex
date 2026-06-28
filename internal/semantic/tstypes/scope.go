@@ -58,6 +58,23 @@ type callFact struct {
 	// edge at the inferred confidence band, honestly weaker than a direct
 	// resolution.
 	inferred bool
+	// argCount is the number of argument expressions at the call site, and
+	// argKnown reports whether it was determined. It is filled only for the
+	// direct receiver-qualified call path, on languages that provide the
+	// CallArgCount hook. When argKnown is false the apply phase treats the
+	// call's arity as unknown and never narrows an overload set by it.
+	argCount int
+	argKnown bool
+}
+
+// arity returns the call site's argument count, or -1 when it was not
+// determined — the sentinel the apply phase reads to leave an overload
+// set un-narrowed.
+func (cf callFact) arity() int {
+	if cf.argKnown {
+		return cf.argCount
+	}
+	return -1
 }
 
 // superFact is one declared supertype relation, pending graph
@@ -376,6 +393,12 @@ func (b *binder) walk(n *sitter.Node, env *scopeEnv) {
 			if cf, grounded := b.receiverFact(recv, env); grounded {
 				cf.line = nodeLine(n)
 				cf.method = method
+				if b.spec.CallArgCount != nil {
+					if c, ok := b.spec.CallArgCount(n, b.src); ok {
+						cf.argCount = c
+						cf.argKnown = true
+					}
+				}
 				b.facts.calls = append(b.facts.calls, cf)
 			}
 		}

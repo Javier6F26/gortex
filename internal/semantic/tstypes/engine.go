@@ -410,10 +410,12 @@ func pathSegSuffix(cand, want string) bool {
 
 // methodOn resolves a method name against a type's member set,
 // following resolved EdgeExtends links for inherited methods. Returns
-// nil when the type (and its ancestry) declares zero or several
-// same-named members — overload sets stay untouched rather than
-// half-guessed.
-func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *graph.Node {
+// nil when the type (and its ancestry) declares zero same-named
+// members. When it declares several (an overload set), the call site's
+// argument count (argCount) may still pick a unique target by arity;
+// argCount < 0 means the arity is unknown, in which case an overload
+// set stays untouched rather than half-guessed.
+func (a *applier) methodOn(typeNode *graph.Node, method string, argCount, depth int) *graph.Node {
 	if typeNode == nil || depth > extendsWalkDepth {
 		return nil
 	}
@@ -459,7 +461,7 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 			if parent == nil || !parentKinds[parent.Kind] {
 				continue
 			}
-			m := a.methodOn(parent, method, depth+1)
+			m := a.methodOn(parent, method, argCount, depth+1)
 			if m == nil {
 				continue
 			}
@@ -470,7 +472,71 @@ func (a *applier) methodOn(typeNode *graph.Node, method string, depth int) *grap
 		}
 		return found
 	}
+	// Several same-named members: an overload set. Today this is always
+	// skipped. Narrow that skip with an arity filter — when the call
+	// site's argument count uniquely selects ONE fixed-arity candidate,
+	// resolve to it; in every other shape keep skipping (see
+	// disambiguateByArity).
+	return a.disambiguateByArity(matches, argCount)
+}
+
+// disambiguateByArity selects the unique member of an overload set whose
+// declared parameter count equals the call site's argument count. It
+// resolves ONLY among FIXED-arity candidates and only when exactly one
+// of them matches: a variadic candidate that could also accept the call
+// (its minimum arity is satisfied) makes the set ambiguous, because it
+// would shadow the fixed match — in that case, and whenever the arity is
+// unknown (argCount < 0), zero candidates match, or more than one fixed
+// candidate matches, it returns nil so the caller keeps skipping.
+func (a *applier) disambiguateByArity(matches []*graph.Node, argCount int) *graph.Node {
+	if argCount < 0 {
+		return nil
+	}
+	var fixedHit *graph.Node
+	fixedHits := 0
+	for _, m := range matches {
+		count, variadic := a.paramArity(m)
+		if variadic {
+			// A variadic candidate accepts any arg count at or above its
+			// minimum (non-variadic) arity. If the call could land here, the
+			// set cannot be disambiguated safely.
+			if argCount >= count-1 {
+				return nil
+			}
+			continue
+		}
+		if count == argCount {
+			fixedHit = m
+			fixedHits++
+		}
+	}
+	if fixedHits == 1 {
+		return fixedHit
+	}
 	return nil
+}
+
+// paramArity returns a method's declared parameter count and whether its
+// last parameter is variadic, derived from the KindParam nodes the
+// extractor links to it via EdgeParamOf. A variadic parameter counts as
+// one toward the total; its presence widens the method's acceptable
+// arity to [count-1, +inf). A method whose extractor emits no parameter
+// nodes reports count 0 — languages that opt into arity disambiguation
+// via the CallArgCount hook must emit parameter nodes for the count to
+// be meaningful.
+func (a *applier) paramArity(m *graph.Node) (count int, variadic bool) {
+	for _, e := range a.g.GetInEdges(m.ID) {
+		if e.Kind != graph.EdgeParamOf {
+			continue
+		}
+		count++
+		if p := a.g.GetNode(e.From); p != nil && p.Meta != nil {
+			if v, _ := p.Meta["variadic"].(bool); v {
+				variadic = true
+			}
+		}
+	}
+	return count, variadic
 }
 
 // edgeKindIn reports whether k is one of kinds.
@@ -563,7 +629,7 @@ func (a *applier) applyCall(idx *fileIndex, cf callFact, res *semantic.EnrichRes
 	if typeNode == nil {
 		return
 	}
-	target := a.methodOn(typeNode, cf.method, 0)
+	target := a.methodOn(typeNode, cf.method, cf.arity(), 0)
 	if target == nil {
 		// A trait-use alias renames the member onto the using type; the
 		// alias name is not a member of the type or its ancestry, so the
@@ -642,7 +708,7 @@ func (a *applier) chainReturnType(idx *fileIndex, inner *callFact) *graph.Node {
 	if recv == nil {
 		return nil
 	}
-	m := a.methodOn(recv, inner.method, 0)
+	m := a.methodOn(recv, inner.method, inner.arity(), 0)
 	if m == nil {
 		m = a.resolveAlias(recv, inner.method)
 	}
@@ -751,7 +817,9 @@ func (a *applier) resolveAlias(typeNode *graph.Node, method string) *graph.Node 
 		if owner == nil {
 			owner = typeNode
 		}
-		if m := a.methodOn(owner, al.method, 0); m != nil {
+		// The alias path carries no call site, so its arity is unknown
+		// (-1): an aliased overload set stays un-narrowed, as before.
+		if m := a.methodOn(owner, al.method, -1, 0); m != nil {
 			return m
 		}
 	}

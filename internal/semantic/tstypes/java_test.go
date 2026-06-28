@@ -301,3 +301,227 @@ public class Other {
 	other := nodeByNameKind(t, g, "go", graph.KindMethod)
 	assertUntouched(t, g, other.ID, "stop", "java-types")
 }
+
+// javaMethodByArity returns the unique method node of the given name
+// whose declared parameter count (counted from EdgeParamOf param nodes)
+// equals want. It picks one overload out of an overload set the way the
+// engine's arity filter does.
+func javaMethodByArity(t *testing.T, g *graph.Graph, name string, want int) *graph.Node {
+	t.Helper()
+	var found *graph.Node
+	for _, n := range g.FindNodesByName(name) {
+		if n.Kind != graph.KindMethod {
+			continue
+		}
+		cnt := 0
+		for _, e := range g.GetInEdges(n.ID) {
+			if e.Kind == graph.EdgeParamOf {
+				cnt++
+			}
+		}
+		if cnt != want {
+			continue
+		}
+		if found != nil {
+			t.Fatalf("multiple %q methods with arity %d", name, want)
+		}
+		found = n
+	}
+	if found == nil {
+		t.Fatalf("no %q method with arity %d", name, want)
+	}
+	return found
+}
+
+// An overloaded method set is disambiguated by the call site's argument
+// count: foo(int) and foo(int, int) resolve independently by arity, at
+// the normal AST band — a real disambiguation, not an inference.
+func TestJava_OverloadArityDisambiguates(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"a/Svc.java": `package a;
+
+public class Svc {
+    public void foo(int a) {
+    }
+
+    public void foo(int a, int b) {
+    }
+}
+`,
+		"b/App.java": `package b;
+
+import a.Svc;
+
+public class App {
+    public void one(Svc s) {
+        s.foo(1);
+    }
+
+    public void two(Svc s) {
+        s.foo(1, 2);
+    }
+}
+`,
+	})
+	p := NewProvider(JavaSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	foo1 := javaMethodByArity(t, g, "foo", 1)
+	foo2 := javaMethodByArity(t, g, "foo", 2)
+
+	one := nodeByNameKind(t, g, "one", graph.KindMethod)
+	e1 := callEdgeTo(g, one.ID, foo1.ID)
+	if e1 == nil {
+		t.Fatalf("s.foo(1) did not resolve to the 1-arg overload; edges: %v", g.GetOutEdges(one.ID))
+	}
+	assertASTProvenance(t, e1, "java-types")
+	if callEdgeTo(g, one.ID, foo2.ID) != nil {
+		t.Errorf("s.foo(1) wrongly resolved to the 2-arg overload")
+	}
+
+	two := nodeByNameKind(t, g, "two", graph.KindMethod)
+	e2 := callEdgeTo(g, two.ID, foo2.ID)
+	if e2 == nil {
+		t.Fatalf("s.foo(1, 2) did not resolve to the 2-arg overload; edges: %v", g.GetOutEdges(two.ID))
+	}
+	assertASTProvenance(t, e2, "java-types")
+	if callEdgeTo(g, two.ID, foo1.ID) != nil {
+		t.Errorf("s.foo(1, 2) wrongly resolved to the 1-arg overload")
+	}
+}
+
+// Two same-name members of equal arity cannot be told apart by the call
+// site's argument count, so the overload set keeps skipping.
+func TestJava_OverloadSameAritySkips(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"a/Svc.java": `package a;
+
+public class Svc {
+    public void foo(int a) {
+    }
+
+    public void foo(String a) {
+    }
+}
+`,
+		"b/App.java": `package b;
+
+import a.Svc;
+
+public class App {
+    public void one(Svc s) {
+        s.foo(1);
+    }
+}
+`,
+	})
+	p := NewProvider(JavaSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "one", graph.KindMethod)
+	assertUntouched(t, g, caller.ID, "foo", "java-types")
+}
+
+// An argument count that matches no overload's arity resolves nothing.
+func TestJava_OverloadArityNoMatchSkips(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"a/Svc.java": `package a;
+
+public class Svc {
+    public void foo(int a) {
+    }
+
+    public void foo(int a, int b) {
+    }
+}
+`,
+		"b/App.java": `package b;
+
+import a.Svc;
+
+public class App {
+    public void one(Svc s) {
+        s.foo(1, 2, 3);
+    }
+}
+`,
+	})
+	p := NewProvider(JavaSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "one", graph.KindMethod)
+	assertUntouched(t, g, caller.ID, "foo", "java-types")
+}
+
+// A variadic overload that could also accept the call's argument count
+// makes the set ambiguous — it would shadow the fixed match — so the
+// arity filter conservatively skips.
+func TestJava_OverloadVariadicSkips(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"a/Svc.java": `package a;
+
+public class Svc {
+    public void foo(int a) {
+    }
+
+    public void foo(int... xs) {
+    }
+}
+`,
+		"b/App.java": `package b;
+
+import a.Svc;
+
+public class App {
+    public void one(Svc s) {
+        s.foo(1);
+    }
+}
+`,
+	})
+	p := NewProvider(JavaSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "one", graph.KindMethod)
+	assertUntouched(t, g, caller.ID, "foo", "java-types")
+}
+
+// A non-overloaded method is unaffected by the arity filter: a single
+// same-named member resolves through the count-1 path regardless of the
+// call's argument count.
+func TestJava_NonOverloadedResolvesWithArgs(t *testing.T) {
+	g, dir := buildFixture(t, map[string]string{
+		"a/Svc.java": `package a;
+
+public class Svc {
+    public void bar(int a) {
+    }
+}
+`,
+		"b/App.java": `package b;
+
+import a.Svc;
+
+public class App {
+    public void one(Svc s) {
+        s.bar(1);
+    }
+}
+`,
+	})
+	p := NewProvider(JavaSpec(), zap.NewNop())
+	if _, err := p.Enrich(g, dir); err != nil {
+		t.Fatal(err)
+	}
+	caller := nodeByNameKind(t, g, "one", graph.KindMethod)
+	bar := nodeByNameKind(t, g, "bar", graph.KindMethod)
+	e := callEdgeTo(g, caller.ID, bar.ID)
+	if e == nil {
+		t.Fatalf("non-overloaded s.bar(1) did not resolve; edges: %v", g.GetOutEdges(caller.ID))
+	}
+	assertASTProvenance(t, e, "java-types")
+}
