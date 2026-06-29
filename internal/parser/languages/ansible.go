@@ -184,7 +184,7 @@ func extractAnsiblePlay(filePath, fileID string, play *yaml.Node, index int, res
 	}
 
 	playID := filePath + "::play:" + playName
-	meta := map[string]any{"ansible_kind": "play"}
+	meta := map[string]any{"ansible_kind": "play", "type_flavor": "play"}
 	if hosts != "" {
 		meta["hosts"] = hosts
 	}

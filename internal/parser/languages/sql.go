@@ -92,7 +92,7 @@ func (e *SQLExtractor) extractCreateTable(node *sitter.Node, src []byte, filePat
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "sql", Meta: map[string]any{"sql_type": "table"},
+		Language: "sql", Meta: map[string]any{"sql_type": "table", "type_flavor": "table"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -138,7 +138,7 @@ func (e *SQLExtractor) extractCreateView(node *sitter.Node, src []byte, filePath
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "sql", Meta: map[string]any{"sql_type": "view"},
+		Language: "sql", Meta: map[string]any{"sql_type": "view", "type_flavor": "view"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,

@@ -60,7 +60,7 @@ func (e *ErlangExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 			res.Nodes = append(res.Nodes, &graph.Node{
 				ID: id, Kind: graph.KindPackage, Name: name,
 				FilePath: filePath, StartLine: line, EndLine: line,
-				Language: "erlang",
+				Language: "erlang", Meta: map[string]any{"type_flavor": "module"},
 			})
 			res.Edges = append(res.Edges, &graph.Edge{
 				From: filePath, To: id, Kind: graph.EdgeDefines,

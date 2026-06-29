@@ -150,7 +150,7 @@ func (e *RExtractor) extractRClassSystems(src []byte, filePath string, res *pars
 		res.Nodes = append(res.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: line, EndLine: line, Language: "r",
-			Meta: map[string]any{"class_system": system},
+			Meta: map[string]any{"class_system": system, "type_flavor": "class"},
 		})
 		res.Edges = append(res.Edges, &graph.Edge{
 			From: filePath, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: line,

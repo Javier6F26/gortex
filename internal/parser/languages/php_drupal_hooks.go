@@ -171,7 +171,7 @@ func captureDrupalHooks(result *parser.ExtractionResult, filePath string) {
 			add = append(add, &graph.Node{
 				ID: hookID, Kind: graph.KindInterface, Name: hook,
 				FilePath: filePath, StartLine: n.StartLine,
-				Meta: map[string]any{"drupal_hook_def": true},
+				Meta: map[string]any{"drupal_hook_def": true, "type_flavor": "hook"},
 			})
 		}
 		result.Edges = append(result.Edges, &graph.Edge{

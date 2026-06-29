@@ -412,7 +412,7 @@ func (e *LuauExtractor) extractType(
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
 		Language: "luau",
-		Meta:     map[string]any{"exported": exported},
+		Meta:     map[string]any{"exported": exported, "type_flavor": "type_alias"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,

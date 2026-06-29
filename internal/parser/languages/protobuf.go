@@ -63,7 +63,7 @@ func (e *ProtobufExtractor) extractMessage(node *sitter.Node, src []byte, filePa
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "protobuf", Meta: map[string]any{"proto_type": "message"},
+		Language: "protobuf", Meta: map[string]any{"proto_type": "message", "type_flavor": "message"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -120,7 +120,7 @@ func (e *ProtobufExtractor) extractService(node *sitter.Node, src []byte, filePa
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,
 		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "protobuf", Meta: map[string]any{"methods": methods},
+		Language: "protobuf", Meta: map[string]any{"methods": methods, "type_flavor": "service"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
@@ -164,7 +164,7 @@ func (e *ProtobufExtractor) extractEnum(node *sitter.Node, src []byte, filePath,
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: name,
 		FilePath: filePath, StartLine: int(node.StartPoint().Row) + 1, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "protobuf", Meta: map[string]any{"proto_type": "enum"},
+		Language: "protobuf", Meta: map[string]any{"proto_type": "enum", "type_flavor": "enum"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,

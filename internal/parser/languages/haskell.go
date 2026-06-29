@@ -81,7 +81,7 @@ func (e *HaskellExtractor) Extract(filePath string, src []byte) (*parser.Extract
 			res.Nodes = append(res.Nodes, &graph.Node{
 				ID: instanceID, Kind: graph.KindType, Name: name + " instance",
 				FilePath: filePath, StartLine: line, EndLine: line,
-				Language: "haskell", Meta: map[string]any{"type_kind": "instance"},
+				Language: "haskell", Meta: map[string]any{"type_kind": "instance", "type_flavor": "instance"},
 			})
 			res.Edges = append(res.Edges, &graph.Edge{
 				From: filePath, To: instanceID, Kind: graph.EdgeDefines,

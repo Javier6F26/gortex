@@ -141,9 +141,10 @@ func (e *HCLExtractor) extractBlock(node *sitter.Node, src []byte, filePath, dir
 			FilePath: filePath, StartLine: startLine, EndLine: int(node.EndPoint().Row) + 1,
 			Language: "hcl",
 			Meta: map[string]any{
-				"block_type": blockType,
-				"labels":     labels,
-				"tf_address": address,
+				"block_type":  blockType,
+				"type_flavor": blockType,
+				"labels":      labels,
+				"tf_address":  address,
 			},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
@@ -202,7 +203,7 @@ func (e *HCLExtractor) extractLocals(body *sitter.Node, src []byte, filePath, di
 			ID: id, Kind: graph.KindConstant, Name: address,
 			FilePath: filePath, StartLine: line, EndLine: int(attr.EndPoint().Row) + 1,
 			Language: "hcl",
-			Meta:     map[string]any{"block_type": "local", "tf_address": address},
+			Meta:     map[string]any{"block_type": "local", "type_flavor": "local", "tf_address": address},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileID, To: id, Kind: graph.EdgeDefines,

@@ -209,7 +209,7 @@ func (e *OCamlExtractor) extractTypeDef(
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: endLine,
-			Language: "ocaml",
+			Language: "ocaml", Meta: map[string]any{"type_flavor": "type_def"},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
@@ -260,7 +260,7 @@ func (e *OCamlExtractor) extractModuleDef(
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: endLine,
-			Language: "ocaml",
+			Language: "ocaml", Meta: map[string]any{"type_flavor": "module"},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
@@ -310,7 +310,7 @@ func (e *OCamlExtractor) extractModuleTypeDef(
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: name,
 		FilePath: filePath, StartLine: startLine, EndLine: int(node.EndPoint().Row) + 1,
-		Language: "ocaml",
+		Language: "ocaml", Meta: map[string]any{"type_flavor": "signature"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileNode.ID, To: id, Kind: graph.EdgeDefines,
@@ -376,7 +376,7 @@ func (e *OCamlExtractor) extractClassDef(
 		result.Nodes = append(result.Nodes, &graph.Node{
 			ID: id, Kind: graph.KindType, Name: name,
 			FilePath: filePath, StartLine: startLine, EndLine: int(child.EndPoint().Row) + 1,
-			Language: "ocaml",
+			Language: "ocaml", Meta: map[string]any{"type_flavor": "class"},
 		})
 		result.Edges = append(result.Edges, &graph.Edge{
 			From: fileNode.ID, To: id, Kind: graph.EdgeDefines,

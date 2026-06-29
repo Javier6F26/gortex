@@ -122,6 +122,7 @@ func (e *ElixirExtractor) handleDefmodule(callNode *sitter.Node, src []byte, fil
 		ID: id, Kind: graph.KindType, Name: modName,
 		FilePath: filePath, StartLine: int(callNode.StartPoint().Row) + 1,
 		EndLine: int(callNode.EndPoint().Row) + 1, Language: "elixir",
+		Meta: map[string]any{"type_flavor": "module"},
 	})
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines,
