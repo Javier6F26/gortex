@@ -53,6 +53,12 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 	var reindexBatch []graph.EdgeReindex
 	for i := range jobs {
 		j := &jobs[i]
+		// A concurrent edit during a chunked ResolveAll yield may have evicted
+		// this edge since it resolved; reverting + reindexing it would
+		// half-resurrect it. Skip — it is no longer in the graph.
+		if r.validateLiveness && !edgeStillLive(r.graph, j.edge) {
+			continue
+		}
 		if !isCallLikeEdge(j.kind) {
 			continue
 		}

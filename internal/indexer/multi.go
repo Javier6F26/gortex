@@ -1680,6 +1680,7 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 
 	results := make(map[string]*IndexResult, len(prefixes))
 	reindexed := 0
+	changedPrefixes := make(map[string]struct{})
 	for _, prefix := range prefixes {
 		mi.mu.RLock()
 		idx, ok := mi.indexers[prefix]
@@ -1694,11 +1695,12 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 				zap.String("prefix", prefix), zap.Error(err))
 			continue
 		}
-		if result != nil && result.StaleFileCount > 0 {
+		if result != nil && (result.StaleFileCount > 0 || result.DeletedFileCount > 0) {
 			mi.logger.Info("janitor: reconciled repo",
 				zap.String("prefix", prefix),
 				zap.Int("stale_files_reindexed", result.StaleFileCount))
 			reindexed++
+			changedPrefixes[prefix] = struct{}{}
 		}
 		results[prefix] = result
 
@@ -1716,7 +1718,14 @@ func (mi *MultiIndexer) ReconcileAll() map[string]*IndexResult {
 		mi.ReconcileContractEdges()
 		// Only now — when at least one repo actually reindexed — is it
 		// worth the full-graph derivation pass. Nothing changed → skip it
-		// (the deferred ResetBatch still clears the batch flags).
+		// (the deferred ResetBatch still clears the batch flags). Scope the
+		// per-repo clone detection + Rebuild to just the repos that changed
+		// this cycle: an unchanged repo's clone edges are already on disk, so
+		// re-detecting all of them holds the resolve mutex for tens of seconds
+		// and stalls every concurrent interactive edit. Warmup arms the same
+		// scope; without this the janitor re-ran clone detection over every
+		// tracked repo on every cycle that touched even one file.
+		mi.ArmBatchScope(changedPrefixes)
 		mi.RunGlobalGraphPasses(context.Background())
 	}
 	return results

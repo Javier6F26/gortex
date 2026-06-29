@@ -100,6 +100,14 @@ type Resolver struct {
 	// edge mutations (resolveImport writes e.To while another
 	// goroutine iterates via graph.AllEdges()).
 	mu *sync.Mutex
+	// validateLiveness turns on the concurrent-edit guard on the chunked
+	// ResolveAll path: it releases mu between chunks so an interactive edit
+	// can interleave and evict an edge the pass already resolved. With it on,
+	// the per-chunk apply and guardCrossPackageCallEdges skip an evicted edge
+	// (reindexing one half-resurrects it and can panic). Off (the default and
+	// every non-chunked path) it is a no-op — nothing mutates the graph
+	// mid-pass. Set only inside ResolveAll.
+	validateLiveness bool
 
 	// lookupCache holds per-pass batched results from GetNodesByIDs /
 	// FindNodesByNames. Populated by ResolveAll/ResolveFile before
@@ -321,105 +329,128 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	r.warmLookupCache(pending)
 	defer r.clearLookupCache()
 
-	workers := runtime.NumCPU()
-	if workers < 1 {
-		workers = 1
+	// Chunked compute + apply: process pending in super-chunks and release the
+	// resolve mutex between chunks so an interactive single-file edit can
+	// interleave instead of waiting out the whole pass. Each chunk's
+	// compute+apply runs under the lock (atomic, fresh reads); only the
+	// inter-chunk gap is unlocked, where the pass holds no partial graph state.
+	// resolveEdge mutates a clone, so the live edge is only written at the
+	// per-chunk apply, which skips an edge a yielded edit evicted (reindexing
+	// it half-resurrects it and can panic). Accumulated jobs/stats feed the
+	// post-resolve passes once, after the loop. GORTEX_RESOLVE_CHUNK=0 restores
+	// the whole-pass-locked path.
+	r.validateLiveness = resolveChunkEnabled()
+	superChunk := len(pending)
+	if r.validateLiveness {
+		if sz := resolveChunkSize(); sz < superChunk {
+			superChunk = sz
+		}
 	}
-	if workers > len(pending) {
-		workers = len(pending)
+	if superChunk < 1 {
+		superChunk = 1
 	}
+	var allJobs [][]reindexJob
+	var allStats []ResolveStats
+	reindexTotal := 0
+	for base := 0; base < len(pending); base += superChunk {
+		hi := base + superChunk
+		if hi > len(pending) {
+			hi = len(pending)
+		}
+		scPending := pending[base:hi]
 
-	perWorkerStats := make([]ResolveStats, workers)
-	perWorkerJobs := make([][]reindexJob, workers)
-	var wg sync.WaitGroup
-	chunk := (len(pending) + workers - 1) / workers
-	for w := 0; w < workers; w++ {
-		start := w * chunk
-		end := start + chunk
-		if end > len(pending) {
-			end = len(pending)
+		workers := runtime.NumCPU()
+		if workers < 1 {
+			workers = 1
 		}
-		if start >= end {
-			continue
+		if workers > len(scPending) {
+			workers = len(scPending)
 		}
-		wg.Add(1)
-		go func(idx int, slice []*graph.Edge) {
-			defer wg.Done()
-			ws := &perWorkerStats[idx]
-			// Pre-size the jobs slice to the worker's chunk; over-
-			// allocates by ~5% (only resolved/external edges produce
-			// a job), but a few KB of headroom beats the growth
-			// amortisation cost across millions of edges.
-			jobs := make([]reindexJob, 0, len(slice))
-			for _, e := range slice {
-				clone := cloneEdgeForResolve(e)
-				oldTo, changed := r.resolveEdge(clone, ws)
-				processed.Add(1)
-				if changed {
-					jobs = append(jobs, reindexJob{
-						edge:       e,
-						oldTo:      oldTo,
-						newTo:      clone.To,
-						kind:       clone.Kind,
-						crossRepo:  clone.CrossRepo,
-						confidence: clone.Confidence,
-						origin:     clone.Origin,
-						meta:       clone.Meta,
-					})
-				}
-				// Return the clone shell to the pool. The Meta map (if
-				// any) is owned by the reindexJob now and lives on; the
-				// Edge struct itself is per-iteration garbage and is
-				// the part worth recycling.
-				releaseResolverClone(clone)
+		perWorkerStats := make([]ResolveStats, workers)
+		perWorkerJobs := make([][]reindexJob, workers)
+		var wg sync.WaitGroup
+		chunk := (len(scPending) + workers - 1) / workers
+		for w := 0; w < workers; w++ {
+			start := w * chunk
+			end := start + chunk
+			if end > len(scPending) {
+				end = len(scPending)
 			}
-			perWorkerJobs[idx] = jobs
-		}(w, pending[start:end])
+			if start >= end {
+				continue
+			}
+			wg.Add(1)
+			go func(idx int, slice []*graph.Edge) {
+				defer wg.Done()
+				ws := &perWorkerStats[idx]
+				jobs := make([]reindexJob, 0, len(slice))
+				for _, e := range slice {
+					clone := cloneEdgeForResolve(e)
+					oldTo, changed := r.resolveEdge(clone, ws)
+					processed.Add(1)
+					if changed {
+						jobs = append(jobs, reindexJob{
+							edge:       e,
+							oldTo:      oldTo,
+							newTo:      clone.To,
+							kind:       clone.Kind,
+							crossRepo:  clone.CrossRepo,
+							confidence: clone.Confidence,
+							origin:     clone.Origin,
+							meta:       clone.Meta,
+						})
+					}
+					releaseResolverClone(clone)
+				}
+				perWorkerJobs[idx] = jobs
+			}(w, scPending[start:end])
+		}
+		wg.Wait()
+
+		// Apply this chunk's mutations under the lock. An edit during a PRIOR
+		// inter-chunk yield may have evicted an edge this chunk resolved;
+		// reindexing it would half-resurrect it, so drop it (filter in place
+		// so allJobs carries only applied jobs for the post-passes).
+		reindexBatch := make([]graph.EdgeReindex, 0)
+		for i := range perWorkerJobs {
+			kept := perWorkerJobs[i][:0]
+			for _, j := range perWorkerJobs[i] {
+				if r.validateLiveness && !edgeStillLive(r.graph, j.edge) {
+					continue
+				}
+				j.edge.To = j.newTo
+				j.edge.Kind = j.kind
+				j.edge.CrossRepo = j.crossRepo
+				j.edge.Confidence = j.confidence
+				j.edge.Origin = j.origin
+				j.edge.Meta = j.meta
+				reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: j.edge, OldTo: j.oldTo})
+				kept = append(kept, j)
+			}
+			perWorkerJobs[i] = kept
+		}
+		if len(reindexBatch) > 0 {
+			r.graph.ReindexEdges(reindexBatch)
+			reindexTotal += len(reindexBatch)
+		}
+		allJobs = append(allJobs, perWorkerJobs...)
+		allStats = append(allStats, perWorkerStats...)
+
+		// Hand the resolve mutex to any waiting interactive edit before the
+		// next chunk.
+		if r.validateLiveness && hi < len(pending) {
+			r.mu.Unlock()
+			runtime.Gosched()
+			r.mu.Lock()
+		}
 	}
-	wg.Wait()
 	close(progressDone)
 	computeElapsed := time.Since(passStart)
-
-	// Apply mutations + ReindexEdge serially. Mutating e.To inside
-	// a worker would race with the bucket-maintenance reads inside
-	// every other worker's ReindexEdge — keyOf(swappedEdge) reads
-	// swappedEdge.To, which a neighbouring worker might be writing.
-	// Running both phases serially after the worker barrier removes
-	// the race entirely; it costs ~5% of resolver wall time on a
-	// 12k-edge vscode pass and buys a clean -race run plus simpler
-	// reasoning.
-	// Collect every mutation across all workers into one slice and hand
-	// the whole batch to ReindexEdges. Disk-backed stores commit per
-	// chunk inside the implementation; the in-memory store loops
-	// through the existing per-edge code. Per-edge ReindexEdge was the
-	// resolver's bottleneck against bbolt (10k+ ACID round-trips); the
-	// batch form folds it to ≤(N/5000) commits without changing any
-	// observable semantics.
-	totalJobs := 0
-	for i := range perWorkerJobs {
-		totalJobs += len(perWorkerJobs[i])
-	}
-	reindexBatch := make([]graph.EdgeReindex, 0, totalJobs)
-	for i := range perWorkerJobs {
-		for _, j := range perWorkerJobs[i] {
-			j.edge.To = j.newTo
-			j.edge.Kind = j.kind
-			j.edge.CrossRepo = j.crossRepo
-			j.edge.Confidence = j.confidence
-			j.edge.Origin = j.origin
-			j.edge.Meta = j.meta
-			reindexBatch = append(reindexBatch, graph.EdgeReindex{Edge: j.edge, OldTo: j.oldTo})
-		}
-	}
 	r.logger.Info("resolver: compute done",
 		zap.Int("pending", len(pending)),
-		zap.Int("reindex_batch", len(reindexBatch)),
+		zap.Int("reindex_batch", reindexTotal),
+		zap.Int("super_chunk", superChunk),
 		zap.Duration("elapsed", computeElapsed))
-	applyStart := time.Now()
-	r.graph.ReindexEdges(reindexBatch)
-	r.logger.Info("resolver: apply done",
-		zap.Int("edges", len(reindexBatch)),
-		zap.Duration("elapsed", time.Since(applyStart)))
 
 	// Cross-package name-match guard. The heuristic fallbacks above can
 	// resolve a call by name alone to a candidate in a package the
@@ -430,8 +461,8 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// pre-resolution target so a reverted edge is restored exactly.
 	guarded := 0
 	if closure := r.buildImportClosure(); len(closure) > 0 {
-		for i := range perWorkerJobs {
-			guarded += r.guardCrossPackageCallEdges(perWorkerJobs[i], closure)
+		for i := range allJobs {
+			guarded += r.guardCrossPackageCallEdges(allJobs[i], closure)
 		}
 	}
 
@@ -504,10 +535,10 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	r.attributeNonGoModuleImports()
 
 	total := &ResolveStats{}
-	for i := range perWorkerStats {
-		total.Resolved += perWorkerStats[i].Resolved
-		total.Unresolved += perWorkerStats[i].Unresolved
-		total.External += perWorkerStats[i].External
+	for i := range allStats {
+		total.Resolved += allStats[i].Resolved
+		total.Unresolved += allStats[i].Unresolved
+		total.External += allStats[i].External
 	}
 	// A guarded edge was counted as resolved by the fallback that
 	// produced it; reverting it moves the tally back to unresolved.
