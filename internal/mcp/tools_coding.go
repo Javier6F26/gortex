@@ -316,6 +316,10 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
 	}
+	// Normalise to the graph's stored path form so a repo-relative path
+	// (internal/x.go) doesn't miss the repo-prefixed nodes in multi-repo
+	// mode — the cause of spurious "no symbols found for file" misses.
+	fp = s.graphRelPath(fp)
 
 	// Auto re-index stale file before querying.
 	s.ensureFresh([]string{fp})

@@ -18,6 +18,7 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/search/trigram"
 )
 
 type searchTextMatch struct {
@@ -215,6 +216,93 @@ func TestSearchText_MultiRepoFanout(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(beta.Content[0].(mcplib.TextContent).Text), &betaOut))
 	require.Equal(t, 1, betaOut.Count)
 	require.True(t, strings.HasPrefix(betaOut.Matches[0].Path, "beta/"))
+}
+
+// TestGetFileSummary_MultiRepoRelativePath pins the multi-repo path
+// normalisation: get_file_summary (and get_editing_context, which shares
+// graphRelPath) must accept a repo-relative path and resolve it to the
+// owning repo's prefixed nodes. Before the fix the raw repo-relative path
+// missed the prefixed graph nodes and the tool returned file_not_indexed.
+func TestGetFileSummary_MultiRepoRelativePath(t *testing.T) {
+	mkRepo := func(name, rel, body string) string {
+		dir := filepath.Join(t.TempDir(), name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(dir, rel)), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, rel), []byte(body), 0o644))
+		return dir
+	}
+	repoA := mkRepo("alpha", "svc/a.go", "package svc\n\nfunc AlphaHandler() {}\n")
+	repoB := mkRepo("beta", "other/b.go", "package other\n\nfunc BetaHandler() {}\n")
+
+	tmpCfg := filepath.Join(t.TempDir(), "config.yaml")
+	gc := &config.GlobalConfig{Repos: []config.RepoEntry{
+		{Path: repoA, Name: "alpha"},
+		{Path: repoB, Name: "beta"},
+	}}
+	gc.SetConfigPath(tmpCfg)
+	require.NoError(t, gc.Save())
+	cm, err := config.NewConfigManager(tmpCfg)
+	require.NoError(t, err)
+
+	reg := parser.NewRegistry()
+	reg.Register(languages.NewGoExtractor())
+	g := graph.New()
+	mi := indexer.NewMultiIndexer(g, reg, search.NewBM25(), cm, zap.NewNop())
+	_, err = mi.IndexAll()
+	require.NoError(t, err)
+	require.True(t, mi.IsMultiRepo())
+
+	eng := query.NewEngine(g)
+	singleton := indexer.New(g, reg, config.IndexConfig{}, zap.NewNop())
+	srv := NewServer(eng, g, singleton, nil, zap.NewNop(), nil, MultiRepoOptions{
+		ConfigManager: cm,
+		MultiIndexer:  mi,
+	})
+
+	// A repo-relative path unique to one repo anchors to that repo's prefix.
+	require.Equal(t, "alpha/svc/a.go", srv.graphRelPath("svc/a.go"))
+
+	// get_file_summary with the repo-relative path now finds the symbols
+	// rather than returning a file_not_indexed miss.
+	res := callTool(t, srv, "get_file_summary", map[string]any{"path": "svc/a.go"})
+	require.False(t, res.IsError, "repo-relative path must resolve in multi-repo mode")
+	require.Contains(t, res.Content[0].(mcplib.TextContent).Text, "AlphaHandler")
+
+	// An already-prefixed path keeps working (idempotent normalisation).
+	require.Equal(t, "beta/other/b.go", srv.graphRelPath("beta/other/b.go"))
+}
+
+// TestFilterTextMatchesByPath_RepoPrefixed pins the multi-repo path
+// filter: a repo-relative sub-path (internal/mcp) must match the
+// repo-prefixed paths (gortex/internal/mcp/...) that
+// MultiIndexer.GrepText stamps onto matches. Before the fix the prefixed
+// paths never matched the repo-relative filter, so a path-scoped
+// search_text silently returned 0 even when the literal existed.
+func TestFilterTextMatchesByPath_RepoPrefixed(t *testing.T) {
+	matches := []trigram.Match{
+		{Path: "gortex/internal/mcp/tools_fileops.go"},
+		{Path: "gortex/internal/search/trigram/trigram.go"},
+		{Path: "other/internal/mcp/x.go"},
+	}
+	repoPrefixes := []string{"gortex", "other"}
+
+	// A repo-relative filter matches the prefixed paths across every repo.
+	got := filterTextMatchesByPath(matches, []string{"internal/mcp"}, repoPrefixes)
+	require.Len(t, got, 2)
+
+	// A prefix-qualified filter narrows to the one repo.
+	got = filterTextMatchesByPath(matches, []string{"gortex/internal/mcp"}, repoPrefixes)
+	require.Len(t, got, 1)
+	require.Equal(t, "gortex/internal/mcp/tools_fileops.go", got[0].Path)
+
+	// Anchored, segment-boundary matching is preserved — a partial
+	// segment must not match (no internal/mc → internal/mcp leak).
+	got = filterTextMatchesByPath(matches, []string{"internal/mc"}, repoPrefixes)
+	require.Empty(t, got)
+
+	// Single-repo mode (no repo prefixes): unprefixed paths match directly.
+	single := []trigram.Match{{Path: "internal/mcp/x.go"}}
+	got = filterTextMatchesByPath(single, []string{"internal/mcp"}, nil)
+	require.Len(t, got, 1)
 }
 
 // setupMiniRepoNamed mirrors setupMiniRepo but lets the caller supply
