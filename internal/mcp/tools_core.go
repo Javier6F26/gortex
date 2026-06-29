@@ -987,6 +987,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithString("group_by", mcp.Description("Set to \"file\" to bucket the usages by the file each reference originates in -- each group carries the per-file use count and the enclosing symbol of every reference. Omit for the default flat result.")),
 			mcp.WithString("context", mcp.Description("Filter usages by their reference context — the role the symbol plays at each site: parameter_type, return_type, field, value, type, attribute, generic_arg, or call. Every returned usage also carries its classified context. Omit for all usages.")),
 			mcp.WithString("return_usage", mcp.Description("Filter call-site usages by how they consume the callee's return value: discarded, assigned, partially_ignored, returned, goroutine, deferred, argument, or condition. Every returned call usage also carries its classification when the extractor recorded one. Use before changing a function's return signature to see who actually uses the return. Omit for all usages.")),
+			mcp.WithString("flavor", mcp.Description("Filter usages by the structural flavor of where they originate (comma-separated, union). A type flavor (class, struct, enum, interface, trait, …) keeps usages whose FROM site sits inside an enclosing type of that flavor — \"usages from inside a struct\". The special value `component` keeps usages from inside a UI component (React / Vue / SwiftUI / …). Each returned usage carries the resolved from_type_flavor / from_ui_component.")),
 		),
 		s.handleFindUsages,
 	)
@@ -2285,6 +2286,11 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// call usage and optionally filter to one consumption shape —
 	// `find_usages return_usage:"discarded"`.
 	annotateAndFilterReturnUsage(sg, strings.ToLower(strings.TrimSpace(req.GetString("return_usage", ""))))
+	// flavor: keeps only usages whose FROM site resolves to a matching
+	// structural flavor (the enclosing owner type for a type flavor; the
+	// FROM node's own ui_component for `component`). Orphan nodes left
+	// with no incident edge are pruned.
+	s.filterUsagesByFlavor(sg, id, strings.TrimSpace(req.GetString("flavor", "")))
 	if len(sg.Edges) == 0 {
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
@@ -2355,6 +2361,73 @@ func annotateAndFilterReturnUsage(sg *query.SubGraph, usageFilter string) {
 		}
 	}
 	sg.Edges = kept
+}
+
+// usageFromFlavor resolves the structural flavor and UI-component
+// framework attributable to a usage edge's FROM site, for the
+// find_usages flavor filter and the from_* surfacing. The component
+// marker is read off the FROM node itself (React function components /
+// Composables are KindFunction); the type flavor is read off the FROM
+// node's enclosing owner type, because callers are functions / methods
+// that never carry type_flavor themselves. Nil-safe: a FROM node absent
+// from both the supplied lookup and the graph yields empty strings.
+func usageFromFlavor(g graph.Store, fromID string, fromNode *graph.Node) (typeFlavor, uiComponent string) {
+	if fromNode == nil && g != nil {
+		fromNode = g.GetNode(fromID)
+	}
+	if fromNode == nil {
+		return "", ""
+	}
+	if fromNode.Meta != nil {
+		if uc, _ := fromNode.Meta["ui_component"].(string); uc != "" {
+			uiComponent = uc
+		}
+	}
+	if ownerID, _ := graph.EnclosingFromID(fromID, fromNode.Kind); ownerID != "" && g != nil {
+		if owner := g.GetNode(ownerID); owner != nil && owner.Meta != nil {
+			if tf, _ := owner.Meta["type_flavor"].(string); tf != "" {
+				typeFlavor = tf
+			}
+		}
+	}
+	return typeFlavor, uiComponent
+}
+
+// filterUsagesByFlavor drops usage edges whose FROM site does not
+// resolve to a matching structural flavor, then prunes nodes left with
+// no incident edge (the queried target is always kept). An empty flavor
+// argument is a no-op.
+func (s *Server) filterUsagesByFlavor(sg *query.SubGraph, targetID, flavorArg string) {
+	flavors := splitFlavors(flavorArg)
+	if sg == nil || len(flavors) == 0 {
+		return
+	}
+	nodeByID := make(map[string]*graph.Node, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		nodeByID[n.ID] = n
+	}
+	kept := sg.Edges[:0]
+	for _, e := range sg.Edges {
+		tf, uc := usageFromFlavor(s.graph, e.From, nodeByID[e.From])
+		if flavorMatchesResolved(tf, uc, flavors) {
+			kept = append(kept, e)
+		}
+	}
+	sg.Edges = kept
+	// Prune orphan nodes: keep the queried target plus every node still
+	// incident to a surviving edge.
+	referenced := map[string]struct{}{targetID: {}}
+	for _, e := range sg.Edges {
+		referenced[e.From] = struct{}{}
+		referenced[e.To] = struct{}{}
+	}
+	keptNodes := sg.Nodes[:0]
+	for _, n := range sg.Nodes {
+		if _, ok := referenced[n.ID]; ok {
+			keptNodes = append(keptNodes, n)
+		}
+	}
+	sg.Nodes = keptNodes
 }
 
 // usageFileGroup is one file's worth of references from a

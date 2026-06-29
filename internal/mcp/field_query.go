@@ -285,15 +285,24 @@ func nodeMatchesFlavor(n *graph.Node, flavors []string) bool {
 		return false
 	}
 	tf, _ := n.Meta["type_flavor"].(string)
-	tf = strings.ToLower(tf)
 	uc, _ := n.Meta["ui_component"].(string)
+	return flavorMatchesResolved(tf, uc, flavors)
+}
+
+// flavorMatchesResolved is the matcher core shared by nodeMatchesFlavor
+// (type_flavor + ui_component read off one node) and the find_usages
+// owner-resolution path (type flavor read off the FROM node's enclosing
+// owner type, ui_component off the FROM node itself). Both values are
+// matched case-insensitively; "component" is the cross-key bridge.
+func flavorMatchesResolved(typeFlavor, uiComponent string, flavors []string) bool {
+	tf := strings.ToLower(typeFlavor)
 	for _, f := range flavors {
 		f = strings.ToLower(strings.TrimSpace(f))
 		if f == "" {
 			continue
 		}
 		if f == "component" {
-			if uc != "" || tf == "component" {
+			if uiComponent != "" || tf == "component" {
 				return true
 			}
 			continue
