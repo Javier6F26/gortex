@@ -94,6 +94,20 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 				abs = worktreeRootedPath(abs, root, s.multiIndexer)
 				return abs, rawPath, nil
 			}
+			// No matched prefix and no lone repo: an unprefixed path is
+			// normally ambiguous across tracked repos. But when it names
+			// an existing file under exactly one repo there is no
+			// ambiguity — anchor it there, so an agent can edit
+			// gortex/internal/x.go as internal/x.go without first
+			// learning the prefix. A brand-new file (matches == 0) still
+			// requires an explicit prefix; a path present in several
+			// repos (matches > 1) is reported as such.
+			if abs, rel, matches := anchorUnprefixedExisting(s.multiIndexer, rawPath); matches == 1 {
+				return abs, rel, nil
+			} else if matches > 1 {
+				return "", "", fmt.Errorf("%w: path %q names a file in multiple tracked repos; prefix it with one of: %s/",
+					errPathUnresolved, rawPath, strings.Join(s.multiIndexer.RepoPrefixes(), "/, "))
+			}
 			prefixes := s.multiIndexer.RepoPrefixes()
 			return "", "", fmt.Errorf("%w: path %q does not start with a known repo prefix; expected one of: %s/, or an absolute path",
 				errPathUnresolved, rawPath, strings.Join(prefixes, "/, "))
@@ -229,6 +243,47 @@ func worktreeRootedPath(abs, root string, mi multiRepoLookup) string {
 		return match
 	}
 	return abs
+}
+
+// anchorUnprefixedExisting tries to anchor a bare repo-relative path —
+// one that carries no repo prefix — to the single tracked repo that
+// actually contains it. It joins rawPath against each repo root and
+// counts the repos where the resulting file exists on disk. A unique
+// match (matches == 1) is unambiguous and safe for the caller to honour:
+// absPath is the worktree-rooted absolute path and relPath the
+// repo-prefixed form used for session bookkeeping. matches == 0 means no
+// tracked repo has the file (e.g. a brand-new write target) and matches
+// > 1 means the path names a file in several repos; in both cases absPath
+// and relPath are unset and the caller decides how to report it. The
+// existence gate is what keeps this unambiguous — it never invents a
+// location for a path that does not already resolve to exactly one file.
+func anchorUnprefixedExisting(mi multiRepoLookup, rawPath string) (absPath, relPath string, matches int) {
+	if mi == nil || rawPath == "" || filepath.IsAbs(rawPath) {
+		return "", "", 0
+	}
+	for _, prefix := range mi.RepoPrefixes() {
+		if prefix == "" {
+			continue
+		}
+		root, ok := mi.RepoRoot(prefix)
+		if !ok || root == "" {
+			continue
+		}
+		cand := filepath.Clean(filepath.Join(root, rawPath))
+		if !pathContainedIn(cand, root) {
+			continue
+		}
+		if _, err := os.Stat(cand); err != nil {
+			continue
+		}
+		matches++
+		absPath = worktreeRootedPath(cand, root, mi)
+		relPath = prefix + "/" + rawPath
+	}
+	if matches != 1 {
+		return "", "", matches
+	}
+	return absPath, relPath, matches
 }
 
 // pathContainedIn reports whether abs sits at or beneath root, after
@@ -451,6 +506,24 @@ func (s *Server) resolveGraphPath(graphPath string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("%w: path=%q", errPathUnresolved, graphPath)
+}
+
+// graphRelPath normalises a caller-supplied file path to the
+// repo-relative form the graph stores its nodes under — repo-prefixed in
+// multi-repo mode (internal/x.go -> gortex/internal/x.go), unchanged in
+// single-repo mode, and converted from an absolute path when one is
+// given. It is the read-side companion to resolveFilePath's relPath:
+// both run the same anchoring, but graphRelPath never errors — a path
+// that cannot be anchored (e.g. a not-yet-created file) is returned
+// as-is so a graph lookup keyed on it degrades to exactly the raw-path
+// behaviour callers had before, never worse. Use it before GetFileSymbols
+// / FileEditingContext so a repo-relative path doesn't silently miss the
+// prefixed nodes in multi-repo mode.
+func (s *Server) graphRelPath(fp string) string {
+	if _, rel, err := s.resolveFilePath(fp); err == nil && rel != "" {
+		return rel
+	}
+	return fp
 }
 
 // fileAttributionNode synthesizes a node carrying just the repo prefix

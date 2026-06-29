@@ -209,6 +209,30 @@ func pathMatchesAnyPrefix(path string, prefixes []string) bool {
 	return false
 }
 
+// expandPathPrefixesWithRepos returns the normalised sub-path prefixes
+// plus, for every non-empty repo prefix, the prefix-qualified form
+// (<repoPrefix>/<subpath>). In multi-repo mode trigram match paths carry
+// a repo prefix (gortex/internal/...) while callers pass repo-relative
+// sub-paths (internal/...); expanding the filter lets the repo-relative
+// form still match without loosening the anchored, segment-boundary
+// matching of pathMatchesAnyPrefix. Returns norm unchanged when there
+// are no repo prefixes (single-repo mode, where paths are unprefixed).
+func expandPathPrefixesWithRepos(norm, repoPrefixes []string) []string {
+	if len(repoPrefixes) == 0 {
+		return norm
+	}
+	out := make([]string, 0, len(norm)*(1+len(repoPrefixes)))
+	for _, p := range norm {
+		out = append(out, p)
+		for _, rp := range repoPrefixes {
+			if rp = strings.Trim(rp, "/"); rp != "" {
+				out = append(out, rp+"/"+p)
+			}
+		}
+	}
+	return out
+}
+
 // resolvePathFilter collects the sub-path filters that apply to a
 // search request, from three additive sources:
 //

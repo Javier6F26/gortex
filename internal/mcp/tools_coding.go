@@ -316,6 +316,10 @@ func (s *Server) handleGetEditingContext(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return mcp.NewToolResultError("path is required"), nil
 	}
+	// Normalise to the graph's stored path form so a repo-relative path
+	// (internal/x.go) doesn't miss the repo-prefixed nodes in multi-repo
+	// mode — the cause of spurious "no symbols found for file" misses.
+	fp = s.graphRelPath(fp)
 
 	// Auto re-index stale file before querying.
 	s.ensureFresh([]string{fp})
@@ -768,6 +772,72 @@ func (s *Server) handleGetRecentChanges(ctx context.Context, req mcp.CallToolReq
 	})
 }
 
+// suggestSymbolIDs builds a short "did you mean" hint for a symbol id that
+// could not be resolved. It offers in-scope ids that share the requested
+// name anywhere in the graph (the "right name, wrong path" case) and, when
+// the id carries a file path, the symbols defined in that file ranked by
+// name similarity (the "right path, stale name" case). Returns "" when
+// nothing plausible is nearby, so callers can append it unconditionally.
+func (s *Server) suggestSymbolIDs(ctx context.Context, id string) string {
+	eng := s.engineFor(ctx)
+	if eng == nil || s.graph == nil {
+		return ""
+	}
+	pathPart, namePart := "", id
+	if parts := strings.SplitN(id, "::", 2); len(parts) == 2 {
+		pathPart, namePart = parts[0], parts[1]
+	}
+	// Drop a receiver qualifier so Foo.Bar can match a stored "Bar".
+	base := namePart
+	if i := strings.LastIndex(base, "."); i >= 0 && i < len(base)-1 {
+		base = base[i+1:]
+	}
+	seen := map[string]bool{id: true}
+	var out []string
+	add := func(n *graph.Node) bool {
+		if n == nil || seen[n.ID] || !s.nodeInSessionScope(ctx, n) {
+			return false
+		}
+		seen[n.ID] = true
+		out = append(out, n.ID)
+		return len(out) >= 5
+	}
+	// 1. Same-named symbols anywhere — the common wrong-path case.
+	if base != "" {
+		for _, n := range eng.FindSymbols(base) {
+			if add(n) {
+				break
+			}
+		}
+	}
+	// 2. Nearest-named symbols in the same file — the stale-name case.
+	if pathPart != "" && len(out) < 5 {
+		if sg := eng.GetFileSymbols(s.graphRelPath(pathPart)); sg != nil {
+			type scored struct {
+				n    *graph.Node
+				dist int
+			}
+			ranked := make([]scored, 0, len(sg.Nodes))
+			for _, n := range sg.Nodes {
+				if n == nil || n.Kind == graph.KindFile {
+					continue
+				}
+				ranked = append(ranked, scored{n, levenshtein(strings.ToLower(n.Name), strings.ToLower(base))})
+			}
+			sort.Slice(ranked, func(i, j int) bool { return ranked[i].dist < ranked[j].dist })
+			for _, r := range ranked {
+				if add(r.n) {
+					break
+				}
+			}
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return " — did you mean: " + strings.Join(out, ", ")
+}
+
 func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	id, err := s.symbolIDArg(ctx, req)
 	if err != nil {
@@ -781,7 +851,7 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 
 	node := s.engineFor(ctx).GetSymbol(id)
 	if node == nil {
-		return mcp.NewToolResultError("symbol not found: " + id), nil
+		return mcp.NewToolResultError("symbol not found: " + id + s.suggestSymbolIDs(ctx, id)), nil
 	}
 	// A by-id fetch must not cross the session's workspace boundary —
 	// reported the same as a genuine miss so the boundary isn't
@@ -2557,7 +2627,7 @@ func (s *Server) handleEditSymbol(ctx context.Context, req mcp.CallToolRequest) 
 
 	node := s.engineFor(ctx).GetSymbol(id)
 	if node == nil {
-		return mcp.NewToolResultError("symbol not found: " + id), nil
+		return mcp.NewToolResultError("symbol not found: " + id + s.suggestSymbolIDs(ctx, id)), nil
 	}
 
 	if node.StartLine == 0 || node.EndLine == 0 {

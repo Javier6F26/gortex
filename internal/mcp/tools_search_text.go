@@ -78,10 +78,15 @@ func (s *Server) handleSearchText(ctx context.Context, req mcp.CallToolRequest) 
 
 	// Sub-path scoping: a `path` argument or a `scope:`-named saved
 	// scope's paths narrow the literal hits to a monorepo service
-	// slice. trigram match paths are already repo-root-relative, so
-	// the anchored prefix test applies directly.
+	// slice. In multi-repo mode MultiIndexer.GrepText stamps a repo
+	// prefix onto every match path, so the repo-relative filter is
+	// expanded with the tracked repo prefixes before the anchored test.
 	if pathFilter := s.resolvePathFilter(req, fieldQuery{}); len(pathFilter) > 0 {
-		matches = filterTextMatchesByPath(matches, pathFilter)
+		var repoPrefixes []string
+		if s.multiIndexer != nil {
+			repoPrefixes = s.multiIndexer.RepoPrefixes()
+		}
+		matches = filterTextMatchesByPath(matches, pathFilter, repoPrefixes)
 	}
 
 	enriched := s.enrichTextMatches(matches)
@@ -93,15 +98,19 @@ func (s *Server) handleSearchText(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 // filterTextMatchesByPath keeps only the trigram matches whose file
-// path sits under one of the anchored sub-path prefixes.
-func filterTextMatchesByPath(matches []trigram.Match, paths []string) []trigram.Match {
+// path sits under one of the anchored sub-path prefixes. repoPrefixes
+// carries the tracked repo prefixes (empty in single-repo mode) so a
+// repo-relative filter still matches the repo-prefixed paths that
+// MultiIndexer.GrepText stamps onto matches in multi-repo mode.
+func filterTextMatchesByPath(matches []trigram.Match, paths, repoPrefixes []string) []trigram.Match {
 	norm := normalizePathPrefixes(paths)
 	if len(norm) == 0 {
 		return matches
 	}
+	prefixes := expandPathPrefixesWithRepos(norm, repoPrefixes)
 	out := make([]trigram.Match, 0, len(matches))
 	for _, m := range matches {
-		if pathMatchesAnyPrefix(m.Path, norm) {
+		if pathMatchesAnyPrefix(m.Path, prefixes) {
 			out = append(out, m)
 		}
 	}
