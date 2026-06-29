@@ -139,7 +139,7 @@ func postGlob(input postHookInput, port int) string {
 	indexed := make([]fileSummary, 0, maxFiles)
 	unindexed := 0
 	for _, p := range paths {
-		ok, n := queryFileIndexed(port, p)
+		ok, n := queryFileIndexed(input.CWD, p)
 		if !ok {
 			unindexed++
 			continue
@@ -177,7 +177,7 @@ func postRead(input postHookInput, port int) string {
 	if filePath == "" {
 		return ""
 	}
-	ok, symbolCount := queryFileIndexed(port, filePath)
+	ok, symbolCount := queryFileIndexed(input.CWD, filePath)
 	if !ok {
 		return ""
 	}

@@ -100,7 +100,7 @@ func TestIsGreedySourceGlob(t *testing.T) {
 func TestEnrichRead_NonIndexed_Guidance(t *testing.T) {
 	// Port 0 means bridge won't respond — file is not indexed.
 	// Should return advisory guidance (not deny).
-	result := enrichRead(map[string]any{"file_path": "/tmp/foo.go"}, 0)
+	result := enrichRead(map[string]any{"file_path": "/tmp/foo.go"}, "")
 	if result.context == "" {
 		t.Fatal("expected guidance for unindexed source file, got empty")
 	}
@@ -116,7 +116,7 @@ func TestEnrichRead_NonIndexed_Guidance(t *testing.T) {
 }
 
 func TestEnrichRead_NonSourceFile(t *testing.T) {
-	result := enrichRead(map[string]any{"file_path": "/tmp/config.json"}, 0)
+	result := enrichRead(map[string]any{"file_path": "/tmp/config.json"}, "")
 	if result.context != "" || result.deny {
 		t.Errorf("expected pass-through for non-source file, got: context=%q deny=%v", result.context, result.deny)
 	}
@@ -128,7 +128,7 @@ func TestEnrichRead_NarrowRead_Allowed(t *testing.T) {
 		"file_path": "/tmp/foo.go",
 		"offset":    float64(100),
 		"limit":     float64(20),
-	}, 0)
+	}, "")
 	if result.deny {
 		t.Error("narrow read (offset+limit) should not be denied")
 	}
@@ -141,7 +141,7 @@ func TestEnrichRead_OffsetOnly_Allowed(t *testing.T) {
 	result := enrichRead(map[string]any{
 		"file_path": "/tmp/foo.go",
 		"offset":    float64(50),
-	}, 0)
+	}, "")
 	if result.deny {
 		t.Error("read with offset only should not be denied")
 	}
@@ -151,7 +151,7 @@ func TestEnrichRead_SmallLimit_Allowed(t *testing.T) {
 	result := enrichRead(map[string]any{
 		"file_path": "/tmp/foo.go",
 		"limit":     float64(30),
-	}, 0)
+	}, "")
 	if result.deny {
 		t.Error("read with small limit should not be denied")
 	}
@@ -162,7 +162,7 @@ func TestEnrichRead_LargeLimit_NotNarrow(t *testing.T) {
 	result := enrichRead(map[string]any{
 		"file_path": "/tmp/foo.go",
 		"limit":     float64(500),
-	}, 0)
+	}, "")
 	// Not indexed (port 0), so advisory only.
 	if result.deny {
 		t.Error("should not deny unindexed file")

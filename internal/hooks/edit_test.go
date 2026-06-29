@@ -2,8 +2,6 @@ package hooks
 
 import (
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -16,33 +14,30 @@ func withEditBlocking(t *testing.T, on bool) {
 	t.Setenv(editBlockingEnvVar, map[bool]string{true: "1", false: ""}[on])
 }
 
-// fakeIndexedBridge stands up an HTTP server matching the bridge's
-// /api/graph/file shape so queryFileIndexed treats the named file as
-// indexed.
-func fakeIndexedBridge(t *testing.T, indexedPaths map[string]bool) (port int) {
+// fakeIndexedBridge stubs the daemon file-indexed probe so the named
+// files are treated as indexed (one symbol each) for the duration of the
+// test, restoring the real probe on cleanup.
+// Returns a dummy port (0) so the legacy `port := fakeIndexedBridge(...)`
+// call sites still compile; the value is unused now that the indexed check
+// routes through the stubbed fileIndexedFn seam rather than an HTTP port.
+func fakeIndexedBridge(t *testing.T, indexedPaths map[string]bool) int {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/graph/file" {
-			http.NotFound(w, r)
-			return
+	prev := fileIndexedFn
+	t.Cleanup(func() { fileIndexedFn = prev })
+	fileIndexedFn = func(_, filePath string) (bool, int) {
+		if indexedPaths[filePath] {
+			return true, 1
 		}
-		path := r.URL.Query().Get("path")
-		if !indexedPaths[path] {
-			_, _ = w.Write([]byte(`{"nodes":[]}`))
-			return
-		}
-		// Emit two nodes so queryFileIndexed sees ≥2 (file node + one).
-		_, _ = w.Write([]byte(`{"nodes":[{"id":"file"},{"id":"sym"}]}`))
-	}))
-	t.Cleanup(srv.Close)
-	return portFromURL(t, srv.URL)
+		return false, 0
+	}
+	return 0
 }
 
 func TestEnrichEdit_Disabled_NoOp(t *testing.T) {
 	withEditBlocking(t, false)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/foo.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/foo.go": true})
 
-	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, port)
+	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, "")
 	if result.deny || result.context != "" {
 		t.Errorf("disabled ⇒ silent; got deny=%v ctx=%q", result.deny, result.context)
 	}
@@ -50,9 +45,9 @@ func TestEnrichEdit_Disabled_NoOp(t *testing.T) {
 
 func TestEnrichEdit_NonSource_PassThrough(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/README.md": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/README.md": true})
 
-	result := enrichEdit(map[string]any{"file_path": "/repo/README.md"}, port)
+	result := enrichEdit(map[string]any{"file_path": "/repo/README.md"}, "")
 	if result.deny || result.context != "" {
 		t.Errorf("non-source ⇒ pass through; got deny=%v ctx=%q", result.deny, result.context)
 	}
@@ -60,9 +55,9 @@ func TestEnrichEdit_NonSource_PassThrough(t *testing.T) {
 
 func TestEnrichEdit_NotIndexed_PassThrough(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/other.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/other.go": true})
 
-	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, port)
+	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, "")
 	if result.deny || result.context != "" {
 		t.Errorf("unindexed source ⇒ pass through; got deny=%v ctx=%q", result.deny, result.context)
 	}
@@ -70,9 +65,9 @@ func TestEnrichEdit_NotIndexed_PassThrough(t *testing.T) {
 
 func TestEnrichEdit_IndexedSource_Denies(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/foo.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/foo.go": true})
 
-	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, port)
+	result := enrichEdit(map[string]any{"file_path": "/repo/foo.go"}, "")
 	if !result.deny {
 		t.Fatal("expected deny for Edit on indexed source")
 	}
@@ -85,9 +80,9 @@ func TestEnrichEdit_IndexedSource_Denies(t *testing.T) {
 
 func TestEnrichWrite_IndexedSource_Denies(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/server.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/server.go": true})
 
-	result := enrichWrite(map[string]any{"file_path": "/repo/server.go"}, port)
+	result := enrichWrite(map[string]any{"file_path": "/repo/server.go"}, "")
 	if !result.deny {
 		t.Fatal("expected deny for Write on indexed source")
 	}
@@ -98,9 +93,9 @@ func TestEnrichWrite_IndexedSource_Denies(t *testing.T) {
 
 func TestEnrichWrite_NewFile_PassThrough(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{}) // nothing indexed
+	fakeIndexedBridge(t, map[string]bool{}) // nothing indexed
 
-	result := enrichWrite(map[string]any{"file_path": "/repo/new.go"}, port)
+	result := enrichWrite(map[string]any{"file_path": "/repo/new.go"}, "")
 	if result.deny || result.context != "" {
 		t.Errorf("new file ⇒ pass through; got deny=%v ctx=%q", result.deny, result.context)
 	}
@@ -108,10 +103,10 @@ func TestEnrichWrite_NewFile_PassThrough(t *testing.T) {
 
 func TestEnrichEdit_DispatchedFromEnrich(t *testing.T) {
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/x.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/x.go": true})
 
 	input := HookInput{ToolName: "Edit", ToolInput: map[string]any{"file_path": "/repo/x.go"}}
-	result := enrich(input, port)
+	result := enrich(input, 0)
 	if !result.deny {
 		t.Errorf("dispatcher must route Edit to enrichEdit; got deny=%v", result.deny)
 	}
@@ -148,10 +143,10 @@ func TestEnrichEdit_ReturnsValidJSONWhenWrappedByDispatcher(t *testing.T) {
 	// the underlying enrichEdit denies. Catches future regressions
 	// where a struct tag drift breaks the wire format.
 	withEditBlocking(t, true)
-	port := fakeIndexedBridge(t, map[string]bool{"/repo/handler.go": true})
+	fakeIndexedBridge(t, map[string]bool{"/repo/handler.go": true})
 
 	payload := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/repo/handler.go"}}`)
-	out := captureStdout(t, func() { runPreToolUse(payload, port, ModeDeny) })
+	out := captureStdout(t, func() { runPreToolUse(payload, 0, ModeDeny) })
 	if out == "" {
 		t.Fatal("expected JSON output for deny path")
 	}

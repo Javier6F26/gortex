@@ -184,12 +184,12 @@ func runHermesPreToolCall(data []byte, port int, mode Mode) {
 // key, which Hermes names `path` rather than Claude's `file_path`);
 // terminal reuses enrichBash, whose `command` key Hermes already
 // matches. Any other tool is a no-op.
-func hermesEnrich(input hermesPreToolInput, port int) enrichResult {
+func hermesEnrich(input hermesPreToolInput, _ int) enrichResult {
 	switch input.ToolName {
 	case hermesReadFileTool:
-		return enrichRead(hermesNormalizeReadInput(input.ToolInput), port)
+		return enrichRead(hermesNormalizeReadInput(input.ToolInput), input.CWD)
 	case hermesTerminalTool:
-		return enrichBash(input.ToolInput, port)
+		return enrichBash(input.ToolInput, input.CWD)
 	default:
 		return enrichResult{}
 	}

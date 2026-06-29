@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
@@ -287,7 +288,7 @@ func nudgeReason(guidance string) string {
 func enrich(input HookInput, port int) enrichResult {
 	switch input.ToolName {
 	case "Read":
-		return enrichRead(input.ToolInput, port)
+		return enrichRead(input.ToolInput, input.CWD)
 	case "Grep":
 		return enrichGrep(input.ToolInput, port)
 	case "Glob":
@@ -295,11 +296,11 @@ func enrich(input HookInput, port int) enrichResult {
 	case "Task":
 		return enrichTask(input.ToolInput, port)
 	case "Bash":
-		return enrichBash(input.ToolInput, port)
+		return enrichBash(input.ToolInput, input.CWD)
 	case "Edit":
-		return enrichEdit(input.ToolInput, port)
+		return enrichEdit(input.ToolInput, input.CWD)
 	case "Write":
-		return enrichWrite(input.ToolInput, port)
+		return enrichWrite(input.ToolInput, input.CWD)
 	case gortexReadFileTool, gortexEditingContextTool:
 		return enrichGortexRead(input.ToolName, input.ToolInput)
 	default:
@@ -309,7 +310,7 @@ func enrich(input HookInput, port int) enrichResult {
 
 // enrichRead blocks whole-file reads of indexed source files and suggests graph tools.
 // Narrow reads (with offset+limit for editing) are allowed through with advisory context.
-func enrichRead(toolInput map[string]any, port int) enrichResult {
+func enrichRead(toolInput map[string]any, cwd string) enrichResult {
 	filePath, ok := toolInput["file_path"].(string)
 	if !ok || filePath == "" {
 		return enrichResult{}
@@ -326,7 +327,7 @@ func enrichRead(toolInput map[string]any, port int) enrichResult {
 		return enrichResult{}
 	}
 
-	fileIndexed, symbolCount := queryFileIndexed(port, filePath)
+	fileIndexed, symbolCount := queryFileIndexed(cwd, filePath)
 
 	// If the file is indexed, BLOCK the read and provide graph alternatives.
 	if fileIndexed {
@@ -510,26 +511,182 @@ func formatGrepDeny(pattern string, hits []grepSymbolHit) string {
 	return b.String()
 }
 
-// queryFileIndexed asks the local bridge whether the file at filePath is
-// indexed, returning the symbol count when it is. Shared by enrichRead and
-// enrichBash. A zero return (false, 0) is the "no signal" case — daemon
-// unreachable, malformed response, or file genuinely not indexed; callers
-// treat all three the same (fall through to soft guidance).
-func queryFileIndexed(port int, filePath string) (bool, int) {
-	resp, err := queryGortex(port, "/api/graph/file?path="+url.QueryEscape(filePath))
-	if err != nil || resp == "" {
+// queryFileIndexed reports whether the file at filePath is indexed by the
+// daemon, with the symbol count when it is. cwd scopes the probe to the
+// right workspace (and absolutises a relative filePath). A zero return
+// (false, 0) is the "no signal" case — daemon unreachable, malformed
+// response, or file genuinely not indexed; callers treat all three the
+// same (fall through to soft guidance).
+//
+// fileIndexedFn is the seam tests stub; production routes through the
+// daemon's MCP socket (the old HTTP :8765 /api/graph/file endpoint this
+// used to hit was removed when the web API migrated to the daemon, which
+// is why the hard deny silently stopped firing for every agent).
+func queryFileIndexed(cwd, filePath string) (bool, int) {
+	return fileIndexedFn(cwd, filePath)
+}
+
+// fileIndexedTimeout bounds the daemon probe so a wedged daemon never
+// stalls the PreToolUse critical path.
+const fileIndexedTimeout = 2 * time.Second
+
+var fileIndexedFn = fileIndexedViaDaemon
+
+// fileIndexedViaDaemon asks the daemon's get_file_summary tool how many
+// definition symbols the file carries, over the AF_UNIX MCP channel. The
+// graph keys files by their repo-relative path, so the absolute file path
+// is resolved against its tracked-repo root and the root-relative path is
+// what gets queried (with the handshake CWD set to that root for scoping).
+//
+// TODO(hook-local perf): each probe opens a fresh MCP connection, so a wide
+// postGlob still pays one dial per file even though repoRootForFile's status
+// fetch is now memoised. Reusing a single connection across the batch — or a
+// count-only probe that skips get_file_summary's ensureFresh re-index on the
+// hot path — is the next optimisation. Deferred so the test seam
+// (fileIndexedFn) stays a simple per-file func; left to the maintainer.
+func fileIndexedViaDaemon(cwd, filePath string) (bool, int) {
+	abs := filePath
+	if !filepath.IsAbs(abs) {
+		if cwd == "" {
+			return false, 0
+		}
+		abs = filepath.Join(cwd, abs)
+	}
+
+	root := repoRootForFile(abs)
+	if root == "" {
+		return false, 0 // outside every tracked repo → not indexed
+	}
+	rel, err := filepath.Rel(root, abs)
+	if err != nil {
 		return false, 0
 	}
-	var result struct {
-		Nodes []any `json:"nodes"`
-	}
-	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+
+	client, err := daemon.Dial(daemon.Handshake{
+		Mode:       daemon.ModeMCP,
+		ClientName: "gortex-hook",
+		CWD:        root,
+	})
+	if err != nil {
 		return false, 0
 	}
-	if len(result.Nodes) <= 1 {
+	defer client.Close()
+	_ = client.Conn.SetDeadline(time.Now().Add(fileIndexedTimeout))
+
+	frame, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "get_file_summary",
+			"arguments": map[string]any{"path": rel, "format": "json"},
+		},
+	})
+	if err != nil {
 		return false, 0
 	}
-	return true, len(result.Nodes) - 1 // subtract the file node itself
+	if err := client.WriteMCPFrame(frame); err != nil {
+		return false, 0
+	}
+	resp, err := client.ReadMCPFrame()
+	if err != nil {
+		return false, 0
+	}
+	return parseFileSummaryIndexed(resp)
+}
+
+// daemonStatusCacheTTL bounds how long a fetched tracked-repo list is reused
+// within one hook process. The set is effectively static for the lifetime of
+// a short-lived hook invocation, so a few seconds collapses a wide postGlob
+// (which probes every matched path) from one control-status round-trip per
+// file to ~one for the whole batch.
+const daemonStatusCacheTTL = 5 * time.Second
+
+var (
+	statusCacheMu  sync.Mutex
+	statusCacheVal *daemon.StatusResponse
+	statusCacheErr error
+	statusCacheAt  time.Time
+)
+
+// cachedDaemonStatus memoises fetchDaemonStatus for daemonStatusCacheTTL so
+// repoRootForFile — called once per probed file — does not re-dial the daemon
+// and re-marshal the entire tracked-repo list on every file in a postGlob
+// loop. The error is cached too: within one short hook process the daemon does
+// not realistically flip reachable↔unreachable, and a cached "down" short-
+// circuits N failed dials straight to soft-fallback.
+func cachedDaemonStatus() (*daemon.StatusResponse, error) {
+	statusCacheMu.Lock()
+	defer statusCacheMu.Unlock()
+	if !statusCacheAt.IsZero() && time.Since(statusCacheAt) < daemonStatusCacheTTL {
+		return statusCacheVal, statusCacheErr
+	}
+	statusCacheVal, statusCacheErr = fetchDaemonStatus()
+	statusCacheAt = time.Now()
+	return statusCacheVal, statusCacheErr
+}
+
+// repoRootForFile returns the tracked-repo root that contains abs (longest
+// match wins for nested repos), or "" when no tracked repo owns it.
+//
+// TODO(hook-local altitude): this hand-rolls a subset of the MCP server's
+// resolveFilePath (abs → repo-relative key) because get_file_summary does no
+// path resolution of its own — it looks the path up verbatim in the graph's
+// by-file index. It is also symlink-naive (no EvalSymlinks) where
+// resolveFilePath enforces the SECURITY.md repo-confinement guard, and yields
+// a bare repo-relative path that can diverge from the graph key in multi-repo
+// mode. The deeper fix is to route get_file_summary's path through
+// resolveFilePath server-side and have the hook forward {cwd, file_path}
+// verbatim — left to the maintainer as it touches a shared handler.
+func repoRootForFile(abs string) string {
+	status, err := cachedDaemonStatus()
+	if err != nil || status == nil {
+		return ""
+	}
+	var best string
+	for _, r := range status.TrackedRepos {
+		if r.Path == "" {
+			continue
+		}
+		if abs == r.Path || strings.HasPrefix(abs, r.Path+string(filepath.Separator)) {
+			if len(r.Path) > len(best) {
+				best = r.Path
+			}
+		}
+	}
+	return best
+}
+
+// parseFileSummaryIndexed unwraps a get_file_summary tools/call response —
+// JSON-RPC envelope → first content block (the JSON payload as text) →
+// total_nodes. get_file_summary strips the file/import nodes, so
+// total_nodes is the definition-symbol count; a not-indexed file comes back
+// as a tool error / guidance text, which fails the parse → (false, 0).
+func parseFileSummaryIndexed(resp []byte) (bool, int) {
+	var rpc struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &rpc); err != nil {
+		return false, 0
+	}
+	if rpc.Result.IsError || len(rpc.Result.Content) == 0 {
+		return false, 0
+	}
+	var summary struct {
+		TotalNodes int `json:"total_nodes"`
+	}
+	if err := json.Unmarshal([]byte(rpc.Result.Content[0].Text), &summary); err != nil {
+		return false, 0
+	}
+	if summary.TotalNodes <= 0 {
+		return false, 0
+	}
+	return true, summary.TotalNodes
 }
 
 // enrichBash classifies the Bash command and routes codebase-search shapes
@@ -537,7 +694,7 @@ func queryFileIndexed(port int, filePath string) (bool, int) {
 // not recognised as a codebase search passes through silently — false-deny
 // is more disruptive than a miss, so the classifier only flags primary
 // grep/rg/find-name/cat-source invocations.
-func enrichBash(toolInput map[string]any, port int) enrichResult {
+func enrichBash(toolInput map[string]any, cwd string) enrichResult {
 	cmd, _ := toolInput["command"].(string)
 	if cmd == "" {
 		return enrichResult{}
@@ -556,7 +713,7 @@ func enrichBash(toolInput map[string]any, port int) enrichResult {
 		return probeSymbolPattern("Bash", c.Pattern, defaultGrepGuidance())
 
 	case BashActionReadSource:
-		indexed, symbolCount := queryFileIndexed(port, c.Path)
+		indexed, symbolCount := queryFileIndexed(cwd, c.Path)
 		if indexed {
 			var reason strings.Builder
 			fmt.Fprintf(&reason,
@@ -706,7 +863,7 @@ func envGateEnabled(name string) bool {
 // Gortex MCP edit tools. Behind GORTEX_HOOK_BLOCK_EDIT until the
 // classifier is proven; without it the hook is a no-op so Edit
 // behaves exactly as it did pre-feature.
-func enrichEdit(toolInput map[string]any, port int) enrichResult {
+func enrichEdit(toolInput map[string]any, cwd string) enrichResult {
 	if !editBlockingEnabled() {
 		return enrichResult{}
 	}
@@ -717,7 +874,7 @@ func enrichEdit(toolInput map[string]any, port int) enrichResult {
 	if !looksLikeSourceFile(filePath) {
 		return enrichResult{}
 	}
-	indexed, _ := queryFileIndexed(port, filePath)
+	indexed, _ := queryFileIndexed(cwd, filePath)
 	if !indexed {
 		return enrichResult{}
 	}
@@ -735,7 +892,7 @@ func enrichEdit(toolInput map[string]any, port int) enrichResult {
 // enrichWrite mirrors enrichEdit for whole-file Write. New files
 // (not yet indexed) pass through; rewrites of existing indexed
 // files are redirected to `edit_file` / `write_file`.
-func enrichWrite(toolInput map[string]any, port int) enrichResult {
+func enrichWrite(toolInput map[string]any, cwd string) enrichResult {
 	if !editBlockingEnabled() {
 		return enrichResult{}
 	}
@@ -746,7 +903,7 @@ func enrichWrite(toolInput map[string]any, port int) enrichResult {
 	if !looksLikeSourceFile(filePath) {
 		return enrichResult{}
 	}
-	indexed, _ := queryFileIndexed(port, filePath)
+	indexed, _ := queryFileIndexed(cwd, filePath)
 	if !indexed {
 		return enrichResult{}
 	}

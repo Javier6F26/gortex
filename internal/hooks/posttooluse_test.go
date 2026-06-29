@@ -30,6 +30,17 @@ func stubBridge(
 	callers map[string]int, // path → external-caller count
 ) int {
 	t.Helper()
+
+	// The file-indexed check now routes through the daemon socket probe
+	// (fileIndexedFn), not the HTTP bridge; stub it from the same `indexed`
+	// map. callers / symbol-at still go over HTTP below (via the port).
+	prevIndexed := fileIndexedFn
+	t.Cleanup(func() { fileIndexedFn = prevIndexed })
+	fileIndexedFn = func(_, filePath string) (bool, int) {
+		n, ok := indexed[filePath]
+		return ok && n > 0, n
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/graph/file", func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Query().Get("path")
