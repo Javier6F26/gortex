@@ -1,9 +1,11 @@
 package resolver
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -336,73 +338,101 @@ func (cr *CrossRepoResolver) ResolveAll() *CrossRepoStats {
 	// written concurrently. Batches are concatenated and applied once after
 	// the barrier (cr never reindexes per-edge mid-loop, so unlike the
 	// master pool no edge clone is needed); stats are summed.
-	workers := runtime.NumCPU()
-	// Clamp to the work count BEFORE flooring at 1: an empty pending slice
-	// must leave workers >= 1 so the chunk division below can't divide by
-	// zero. With workers == 1 and len(pending) == 0 the chunk is 0 and every
-	// worker's [start,end) is empty, so the pass is a correct no-op.
-	if workers > len(pending) {
-		workers = len(pending)
-	}
-	if workers < 1 {
-		workers = 1
-	}
-	perWorkerBatch := make([][]graph.EdgeReindex, workers)
-	perWorkerStats := make([]*CrossRepoStats, workers)
-	var wg sync.WaitGroup
-	chunk := (len(pending) + workers - 1) / workers
-	for w := 0; w < workers; w++ {
-		start := w * chunk
-		end := start + chunk
-		if end > len(pending) {
-			end = len(pending)
+	// Chunked resolve: process pending in super-chunks, releasing the resolve
+	// mutex between chunks so an interactive single-file edit can interleave
+	// instead of waiting out the whole pass. Each super-chunk's compute+apply
+	// runs entirely under the lock (atomic, fresh reads); only the inter-chunk
+	// gap is unlocked, where the pass holds no partial graph state. resolveEdge's
+	// liveness guards (cr.validateLiveness) skip any edge/candidate a yielded
+	// edit evicted. GORTEX_RESOLVE_CHUNK=0 restores one chunk == the prior
+	// whole-pass-locked behaviour.
+	cr.validateLiveness = resolveChunkEnabled()
+	superChunk := len(pending)
+	if cr.validateLiveness {
+		if sz := resolveChunkSize(); sz < superChunk {
+			superChunk = sz
 		}
-		if start >= end {
-			continue
-		}
-		wg.Add(1)
-		go func(idx int, slice []*graph.Edge) {
-			defer wg.Done()
-			ws := &CrossRepoStats{ByRepo: make(map[string]int)}
-			var batch []graph.EdgeReindex
-			for _, e := range slice {
-				cr.resolveEdge(e, ws, &batch)
-				processed.Add(1)
-			}
-			perWorkerStats[idx] = ws
-			perWorkerBatch[idx] = batch
-		}(w, pending[start:end])
 	}
-	wg.Wait()
-	close(progressDone)
+	if superChunk < 1 {
+		superChunk = 1
+	}
+	reindexTotal := 0
+	for base := 0; base < len(pending); base += superChunk {
+		hi := base + superChunk
+		if hi > len(pending) {
+			hi = len(pending)
+		}
+		sc := pending[base:hi]
 
-	var reindexBatch []graph.EdgeReindex
-	for i := range perWorkerBatch {
-		reindexBatch = append(reindexBatch, perWorkerBatch[i]...)
-	}
-	for _, ws := range perWorkerStats {
-		if ws == nil {
-			continue
+		workers := runtime.NumCPU()
+		if workers > len(sc) {
+			workers = len(sc)
 		}
-		stats.Resolved += ws.Resolved
-		stats.Unresolved += ws.Unresolved
-		stats.CrossRepoEdges += ws.CrossRepoEdges
-		for repo, n := range ws.ByRepo {
-			stats.ByRepo[repo] += n
+		if workers < 1 {
+			workers = 1
+		}
+		perWorkerBatch := make([][]graph.EdgeReindex, workers)
+		perWorkerStats := make([]*CrossRepoStats, workers)
+		var wg sync.WaitGroup
+		chunk := (len(sc) + workers - 1) / workers
+		for w := 0; w < workers; w++ {
+			start := w * chunk
+			end := start + chunk
+			if end > len(sc) {
+				end = len(sc)
+			}
+			if start >= end {
+				continue
+			}
+			wg.Add(1)
+			go func(idx int, slice []*graph.Edge) {
+				defer wg.Done()
+				ws := &CrossRepoStats{ByRepo: make(map[string]int)}
+				var batch []graph.EdgeReindex
+				for _, e := range slice {
+					cr.resolveEdge(e, ws, &batch)
+					processed.Add(1)
+				}
+				perWorkerStats[idx] = ws
+				perWorkerBatch[idx] = batch
+			}(w, sc[start:end])
+		}
+		wg.Wait()
+
+		var scBatch []graph.EdgeReindex
+		for i := range perWorkerBatch {
+			scBatch = append(scBatch, perWorkerBatch[i]...)
+		}
+		for _, ws := range perWorkerStats {
+			if ws == nil {
+				continue
+			}
+			stats.Resolved += ws.Resolved
+			stats.Unresolved += ws.Unresolved
+			stats.CrossRepoEdges += ws.CrossRepoEdges
+			for repo, n := range ws.ByRepo {
+				stats.ByRepo[repo] += n
+			}
+		}
+		if len(scBatch) > 0 {
+			cr.graph.ReindexEdges(scBatch)
+			reindexTotal += len(scBatch)
+		}
+		// Hand the resolve mutex to any waiting interactive edit before the
+		// next chunk. Held continuously within a chunk; released only here,
+		// where the pass holds no partial graph state.
+		if cr.validateLiveness && hi < len(pending) {
+			cr.mu.Unlock()
+			runtime.Gosched()
+			cr.mu.Lock()
 		}
 	}
+	close(progressDone)
 	cr.logger.Info("cross-repo resolve: compute done",
 		zap.Int("pending", len(pending)),
-		zap.Int("reindex_batch", len(reindexBatch)),
-		zap.Int("workers", workers),
+		zap.Int("reindex_batch", reindexTotal),
+		zap.Int("super_chunk", superChunk),
 		zap.Duration("elapsed", time.Since(passStart)))
-	if len(reindexBatch) > 0 {
-		applyStart := time.Now()
-		cr.graph.ReindexEdges(reindexBatch)
-		cr.logger.Info("cross-repo resolve: apply done",
-			zap.Int("edges", len(reindexBatch)),
-			zap.Duration("elapsed", time.Since(applyStart)))
-	}
 	// Materialise the cross_repo_* edge layer over the freshly lifted
 	// calls / implements / extends edges.
 	DetectCrossRepoEdges(cr.graph)
@@ -969,6 +999,31 @@ func edgeStillLive(g graph.Store, e *graph.Edge) bool {
 // target-liveness guard must not treat its absence as an evicted candidate).
 func isSyntheticResolveTarget(to string) bool {
 	return strings.HasPrefix(to, "external::") || strings.HasPrefix(to, "extern::")
+}
+
+// resolveChunkEnabled reports whether the global resolve passes process their
+// pending set in super-chunks, releasing the resolve mutex between chunks so
+// interactive single-file edits can interleave instead of waiting out the
+// whole pass. Default ON; GORTEX_RESOLVE_CHUNK=0 restores the prior
+// whole-pass-locked behaviour.
+func resolveChunkEnabled() bool {
+	if v := os.Getenv("GORTEX_RESOLVE_CHUNK"); v != "" {
+		return v != "0" && !strings.EqualFold(v, "false")
+	}
+	return true
+}
+
+// resolveChunkSize is the number of pending edges resolved + applied per chunk
+// before the resolve mutex is yielded. GORTEX_RESOLVE_CHUNK_SIZE overrides;
+// default 2048 — large enough to amortise the per-chunk worker barrier, small
+// enough that a waiting edit is delayed by at most one chunk's compute.
+func resolveChunkSize() int {
+	if v := os.Getenv("GORTEX_RESOLVE_CHUNK_SIZE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 2048
 }
 
 // callerRepoPrefix returns the RepoPrefix of the node that owns the edge's From field.
