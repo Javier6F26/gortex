@@ -26,7 +26,7 @@ const Name = "codex"
 const DocsURL = "https://developers.openai.com/codex/mcp"
 
 const codexSessionStartMatcher = "startup|resume|clear|compact"
-const codexSessionStartMessage = "[Gortex] Prefer Gortex graph tools (search_symbols, get_callers, get_file_summary) before Read/Grep/Glob over large files."
+const codexSessionStartMessage = "IMPORTANT: Prefer Gortex MCP tools (search_symbols, get_callers, get_file_summary, edit_file) over Read/Grep/Glob/Edit."
 const codexSessionStartCommand = "printf '%s\\n' '" + codexSessionStartMessage + "'"
 const codexSessionStartWindowsCommand = "powershell -NoProfile -Command \"Write-Output '" + codexSessionStartMessage + "'\""
 

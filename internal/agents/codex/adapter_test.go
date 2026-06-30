@@ -84,8 +84,15 @@ func TestCodexInstallsSessionStartHook(t *testing.T) {
 	if handler["command_windows"] != codexSessionStartWindowsCommand {
 		t.Errorf("command_windows=%v want %q", handler["command_windows"], codexSessionStartWindowsCommand)
 	}
-	if !strings.Contains(handler["command"].(string), "Prefer Gortex graph tools") {
+	command := handler["command"].(string)
+	if !strings.Contains(command, "IMPORTANT: Prefer Gortex MCP tools") {
 		t.Errorf("command should emit the graph-tools orientation: %v", handler["command"])
+	}
+	if !strings.Contains(command, "edit_file") {
+		t.Errorf("command should mention edit_file: %v", handler["command"])
+	}
+	if strings.Contains(command, "[Gortex]") {
+		t.Errorf("command should not duplicate the Gortex label: %v", handler["command"])
 	}
 }
 
