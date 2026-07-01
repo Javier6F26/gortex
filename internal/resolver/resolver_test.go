@@ -689,5 +689,6 @@ func TestResolveMethodCall_InterfaceDispatchFanOut(t *testing.T) {
 	require.NotNil(t, callEdge.Meta)
 	assert.Equal(t, "interface", callEdge.Meta["dispatch"],
 		"edge should be marked as interface dispatch when receiver is an interface and multiple impls exist")
-	assert.Equal(t, graph.OriginLSPDispatch, callEdge.Origin)
+	assert.Equal(t, graph.OriginASTInferred, callEdge.Origin,
+		"a locality-heuristic pick is ast_inferred — stamping an LSP tier without server evidence poisons min_tier filtering")
 }

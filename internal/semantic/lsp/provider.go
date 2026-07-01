@@ -1952,38 +1952,52 @@ func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string
 		return
 	}
 
-	// One pass over the caller's out-edges: find every existing
-	// (from, to, calls) edge so per-line dedup and the promotion
-	// check share a single fetch.
+	// One pass over the caller's out-edges: bucket every existing
+	// (from, to, calls) edge by line so per-line dedup and per-site
+	// promotion share a single fetch.
 	var existing *graph.Edge
-	coveredLines := map[int]bool{}
+	byLine := map[int][]*graph.Edge{}
 	for _, e := range g.GetOutEdges(from.ID) {
 		if e.Kind != graph.EdgeCalls || e.To != to.ID {
 			continue
 		}
-		coveredLines[e.Line] = true
+		byLine[e.Line] = append(byLine[e.Line], e)
 		if existing == nil {
 			existing = e
 		}
 	}
-	if existing != nil && graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
-		semantic.ConfirmEdge(existing, p.Name())
-		existing.Origin = graph.OriginLSPResolved
-		result.EdgesConfirmed++
+	promote := func(e *graph.Edge) {
+		if graph.OriginRank(e.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
+			semantic.ConfirmEdge(e, p.Name())
+			e.Origin = graph.OriginLSPResolved
+			result.EdgesConfirmed++
+		}
 	}
 
 	lines := callSiteLines(fromRanges)
 	if len(lines) == 0 {
 		// No precise ranges from the server. Preserve the legacy
-		// behaviour: only land a declaration-anchored edge when the
-		// pair does not exist at all.
+		// behaviour: promote the first pair edge, or land one
+		// declaration-anchored edge when the pair does not exist.
 		if existing != nil {
+			promote(existing)
 			return
 		}
-		lines = []int{from.StartLine}
+		semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
+			from.FilePath, from.StartLine, p.Name())
+		result.EdgesAdded++
+		return
 	}
+	// Server-verified call sites: promote EVERY existing pair edge at a
+	// verified line, mint the rest. Promoting only the first edge left a
+	// caller's second call site as text_matched — which the read-path
+	// precision filter then suppressed, silently costing recall on
+	// repeated calls within one function.
 	for _, line := range lines {
-		if coveredLines[line] {
+		if es, ok := byLine[line]; ok {
+			for _, e := range es {
+				promote(e)
+			}
 			continue
 		}
 		semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
@@ -2299,11 +2313,51 @@ func identifierColumn(src []byte, oneBasedLine int, name string) int {
 		lineEnd++
 	}
 	line := string(src[lineStart:lineEnd])
-	idx := strings.Index(line, name)
+	idx := identifierIndex(line, name)
 	if idx < 0 {
 		return 0
 	}
 	return idx
+}
+
+// identifierIndex returns the column of the first occurrence of name in
+// line that is a WHOLE identifier — not a substring of a longer one. The
+// naive scan silently targeted the wrong symbol whenever a method's name
+// is contained in its receiver type: for `func (formBinding) Bind(...)`
+// the first "Bind" sits inside "formBinding", so hover /
+// prepareCallHierarchy / implementations were asked about the TYPE
+// identifier — prepare returned no items and the entire incoming-call
+// fan-out never ran for that method (every implementation of a
+// same-named interface method lost all its dispatch callers).
+func identifierIndex(line, name string) int {
+	if name == "" {
+		return -1
+	}
+	for from := 0; from+len(name) <= len(line); {
+		idx := strings.Index(line[from:], name)
+		if idx < 0 {
+			return -1
+		}
+		idx += from
+		beforeOK := idx == 0 || !isIdentByte(line[idx-1])
+		afterOK := idx+len(name) == len(line) || !isIdentByte(line[idx+len(name)])
+		if beforeOK && afterOK {
+			return idx
+		}
+		from = idx + 1
+	}
+	return -1
+}
+
+// isIdentByte reports whether c can appear inside an ASCII identifier.
+// Multi-byte runes are treated as boundaries — a heuristic that errs
+// toward accepting a match, which is still strictly tighter than the
+// unbounded substring scan this replaces.
+func isIdentByte(c byte) bool {
+	return c == '_' ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= '0' && c <= '9')
 }
 
 // extractTypeFromHover extracts type information from hover text.

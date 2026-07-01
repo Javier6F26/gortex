@@ -2060,7 +2060,13 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 			e.Meta = map[string]any{}
 		}
 		e.Meta["dispatch"] = "interface"
-		e.Origin = graph.OriginLSPDispatch
+		// The pick below is a locality heuristic over legal runtime
+		// targets — no language server verified it. Stamping the LSP
+		// dispatch tier here let a guessed winner masquerade as
+		// semantic-provider evidence and poisoned min_tier filtering;
+		// ast_inferred is what this actually is. The LSP hierarchy
+		// pass upgrades (or fans out) the truly verified sites.
+		e.Origin = graph.OriginASTInferred
 	}
 
 	if sameDirMethod != nil {
