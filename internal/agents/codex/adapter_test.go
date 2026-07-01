@@ -47,6 +47,9 @@ func TestCodexWritesMcpServersTOMLTable(t *testing.T) {
 	if count := gortexSessionStartHookCount(t, cfg); count != 1 {
 		t.Fatalf("expected one Gortex SessionStart hook, got %d: %#v", count, cfg["hooks"])
 	}
+	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("expected one Gortex PreToolUse hook, got %d: %#v", count, cfg["hooks"])
+	}
 
 	agentstest.AssertIdempotent(t, a, env)
 }
@@ -96,6 +99,52 @@ func TestCodexInstallsSessionStartHook(t *testing.T) {
 	}
 }
 
+func TestCodexInstallsPreToolUseHook(t *testing.T) {
+	env := codexGlobalEnv(t)
+	a := New()
+
+	res, err := a.Apply(env, agents.ApplyOpts{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+
+	cfg := readCodexConfig(t, env)
+	entries := preToolUseEntries(t, cfg)
+	if len(entries) != 1 {
+		t.Fatalf("PreToolUse entries=%d want 1: %#v", len(entries), entries)
+	}
+	entry := entries[0].(map[string]any)
+	if entry["matcher"] != codexPreToolUseMatcher {
+		t.Fatalf("matcher=%v want %q", entry["matcher"], codexPreToolUseMatcher)
+	}
+	handlers, ok := codexHookList(entry["hooks"])
+	if !ok || len(handlers) != 1 {
+		t.Fatalf("handlers=%#v", entry["hooks"])
+	}
+	handler := handlers[0].(map[string]any)
+	if handler["type"] != "command" {
+		t.Errorf("hook type=%v want command", handler["type"])
+	}
+	command := handler["command"].(string)
+	if command != "/tmp/test-gortex hook --agent=codex --mode=enrich" {
+		t.Errorf("command=%v want test hook command with --agent=codex --mode=enrich", command)
+	}
+	if handler["timeout"] != int64(codexHookTimeoutSeconds) {
+		t.Errorf("timeout=%v want %d", handler["timeout"], codexHookTimeoutSeconds)
+	}
+	if _, ok := cfg["hooks"].(map[string]any)["PostToolUse"]; ok {
+		t.Fatalf("Codex should not install PostToolUse: %#v", cfg["hooks"])
+	}
+}
+
+func TestCodexPreToolUseCommandFallsBackToGortexHook(t *testing.T) {
+	command := codexPreToolUseCommand(agents.Env{})
+	if command != "gortex hook --agent=codex --mode=enrich" {
+		t.Fatalf("fallback command=%q", command)
+	}
+}
+
 func TestCodexSessionStartHookIdempotent(t *testing.T) {
 	env := codexGlobalEnv(t)
 	a := New()
@@ -112,6 +161,9 @@ func TestCodexSessionStartHookIdempotent(t *testing.T) {
 	cfg := readCodexConfig(t, env)
 	if count := gortexSessionStartHookCount(t, cfg); count != 1 {
 		t.Fatalf("re-run duplicated Gortex SessionStart hook: got %d", count)
+	}
+	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("re-run duplicated Gortex PreToolUse hook: got %d", count)
 	}
 }
 
@@ -130,6 +182,14 @@ matcher = "startup"
 type = "command"
 command = "echo user-session-start"
 statusMessage = "User hook"
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo user-pretooluse"
+statusMessage = "User PreToolUse"
 `
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -162,6 +222,65 @@ statusMessage = "User hook"
 	}
 	if count := gortexSessionStartHookCount(t, cfg); count != 1 {
 		t.Fatalf("Gortex SessionStart hooks=%d want 1", count)
+	}
+	preEntries := preToolUseEntries(t, cfg)
+	if len(preEntries) != 2 {
+		t.Fatalf("PreToolUse entries=%d want user+gortex entries: %#v", len(preEntries), preEntries)
+	}
+	if !hasHookCommand(t, cfg, "PreToolUse", "echo user-pretooluse") {
+		t.Fatalf("user PreToolUse hook was not preserved: %#v", preEntries)
+	}
+	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("Gortex PreToolUse hooks=%d want 1", count)
+	}
+}
+
+func TestCodexForceReplacesOnlyGortexPreToolUseHook(t *testing.T) {
+	env := codexGlobalEnv(t)
+	path := codexConfigPath(env)
+	seed := `[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo user-pretooluse"
+statusMessage = "User PreToolUse"
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/tmp/old-gortex hook --agent=codex --mode=enrich"
+statusMessage = "Old Gortex PreToolUse"
+`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	a := New()
+	res, err := a.Apply(env, agents.ApplyOpts{Force: true})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionMerge: 1})
+
+	cfg := readCodexConfig(t, env)
+	preEntries := preToolUseEntries(t, cfg)
+	if len(preEntries) != 2 {
+		t.Fatalf("PreToolUse entries=%d want user+gortex entries: %#v", len(preEntries), preEntries)
+	}
+	if !hasHookCommand(t, cfg, "PreToolUse", "echo user-pretooluse") {
+		t.Fatalf("Force removed user PreToolUse hook: %#v", preEntries)
+	}
+	if hasHookCommand(t, cfg, "PreToolUse", "/tmp/old-gortex hook --agent=codex --mode=enrich") {
+		t.Fatalf("Force kept stale Gortex PreToolUse hook: %#v", preEntries)
+	}
+	if !hasHookCommand(t, cfg, "PreToolUse", "/tmp/test-gortex hook --agent=codex --mode=enrich") {
+		t.Fatalf("Force did not install current Gortex PreToolUse hook: %#v", preEntries)
+	}
+	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("Gortex PreToolUse hooks=%d want 1", count)
 	}
 }
 
@@ -224,13 +343,23 @@ func readCodexConfig(t *testing.T, env agents.Env) map[string]any {
 
 func sessionStartEntries(t *testing.T, cfg map[string]any) []any {
 	t.Helper()
+	return hookEntries(t, cfg, "SessionStart")
+}
+
+func preToolUseEntries(t *testing.T, cfg map[string]any) []any {
+	t.Helper()
+	return hookEntries(t, cfg, "PreToolUse")
+}
+
+func hookEntries(t *testing.T, cfg map[string]any, event string) []any {
+	t.Helper()
 	hooks, ok := cfg["hooks"].(map[string]any)
 	if !ok {
 		t.Fatalf("missing hooks map: %#v", cfg)
 	}
-	entries, ok := codexHookList(hooks["SessionStart"])
+	entries, ok := codexHookList(hooks[event])
 	if !ok {
-		t.Fatalf("hooks.SessionStart has unexpected shape: %#v", hooks["SessionStart"])
+		t.Fatalf("hooks.%s has unexpected shape: %#v", event, hooks[event])
 	}
 	return entries
 }
@@ -246,9 +375,25 @@ func gortexSessionStartHookCount(t *testing.T, cfg map[string]any) int {
 	return count
 }
 
+func gortexPreToolUseHookCount(t *testing.T, cfg map[string]any) int {
+	t.Helper()
+	count := 0
+	for _, entry := range preToolUseEntries(t, cfg) {
+		if codexHookEntryIsGortexPreToolUse(entry) {
+			count++
+		}
+	}
+	return count
+}
+
 func hasSessionStartCommand(t *testing.T, cfg map[string]any, command string) bool {
 	t.Helper()
-	for _, entry := range sessionStartEntries(t, cfg) {
+	return hasHookCommand(t, cfg, "SessionStart", command)
+}
+
+func hasHookCommand(t *testing.T, cfg map[string]any, event string, command string) bool {
+	t.Helper()
+	for _, entry := range hookEntries(t, cfg, event) {
 		group, ok := entry.(map[string]any)
 		if !ok {
 			continue

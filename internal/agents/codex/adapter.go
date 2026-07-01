@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/zzet/gortex/internal/agents"
 	"github.com/zzet/gortex/internal/agents/internalutil"
@@ -29,6 +30,8 @@ const codexSessionStartMatcher = "startup|resume|clear|compact"
 const codexSessionStartMessage = "IMPORTANT: Prefer Gortex MCP tools (search_symbols, get_callers, get_file_summary, edit_file) over Read/Grep/Glob/Edit."
 const codexSessionStartCommand = "printf '%s\\n' '" + codexSessionStartMessage + "'"
 const codexSessionStartWindowsCommand = "powershell -NoProfile -Command \"Write-Output '" + codexSessionStartMessage + "'\""
+const codexPreToolUseMatcher = "^Bash$"
+const codexHookTimeoutSeconds = 5
 
 type Adapter struct{}
 
@@ -104,8 +107,13 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 			changed = true
 		}
 
-		if env.InstallHooks && upsertSessionStartHook(root, opts) {
-			changed = true
+		if env.InstallHooks {
+			if upsertSessionStartHook(root, opts) {
+				changed = true
+			}
+			if upsertPreToolUseHook(root, env, opts) {
+				changed = true
+			}
 		}
 		return changed, nil
 	}, opts)
@@ -133,6 +141,14 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 }
 
 func upsertSessionStartHook(root map[string]any, opts agents.ApplyOpts) bool {
+	return upsertCodexHook(root, "SessionStart", codexHookEntryIsGortexSessionStart, codexSessionStartHookEntry(), opts)
+}
+
+func upsertPreToolUseHook(root map[string]any, env agents.Env, opts agents.ApplyOpts) bool {
+	return upsertCodexHook(root, "PreToolUse", codexHookEntryIsGortexPreToolUse, codexPreToolUseHookEntry(env), opts)
+}
+
+func upsertCodexHook(root map[string]any, event string, isGortex func(any) bool, desired map[string]any, opts agents.ApplyOpts) bool {
 	hooks, ok := root["hooks"].(map[string]any)
 	if !ok {
 		if _, exists := root["hooks"]; exists {
@@ -141,7 +157,7 @@ func upsertSessionStartHook(root map[string]any, opts agents.ApplyOpts) bool {
 		hooks = make(map[string]any)
 	}
 
-	entries, ok := codexHookList(hooks["SessionStart"])
+	entries, ok := codexHookList(hooks[event])
 	if !ok {
 		return false
 	}
@@ -149,7 +165,7 @@ func upsertSessionStartHook(root map[string]any, opts agents.ApplyOpts) bool {
 	found := false
 	kept := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
-		if codexHookEntryIsGortexSessionStart(entry) {
+		if isGortex(entry) {
 			found = true
 			if opts.Force {
 				continue
@@ -161,7 +177,7 @@ func upsertSessionStartHook(root map[string]any, opts agents.ApplyOpts) bool {
 		return false
 	}
 
-	hooks["SessionStart"] = append(kept, codexSessionStartHookEntry())
+	hooks[event] = append(kept, desired)
 	root["hooks"] = hooks
 	return true
 }
@@ -208,6 +224,39 @@ func codexHookEntryIsGortexSessionStart(entry any) bool {
 	return false
 }
 
+func codexHookEntryIsGortexPreToolUse(entry any) bool {
+	group, ok := entry.(map[string]any)
+	if !ok {
+		return false
+	}
+	handlers, ok := codexHookList(group["hooks"])
+	if !ok {
+		return false
+	}
+	for _, handler := range handlers {
+		hm, ok := handler.(map[string]any)
+		if !ok {
+			continue
+		}
+		if cmd, _ := hm["command"].(string); codexCommandInvokesCodexHook(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexCommandInvokesCodexHook(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return false
+	}
+	lower := strings.ToLower(cmd)
+	if !strings.Contains(lower, "gortex") || !strings.Contains(lower, "hook") {
+		return false
+	}
+	return strings.Contains(cmd, "--agent=codex") || strings.Contains(cmd, "--agent codex")
+}
+
 func codexSessionStartHookEntry() map[string]any {
 	return map[string]any{
 		"matcher": codexSessionStartMatcher,
@@ -216,9 +265,31 @@ func codexSessionStartHookEntry() map[string]any {
 				"type":            "command",
 				"command":         codexSessionStartCommand,
 				"command_windows": codexSessionStartWindowsCommand,
-				"timeout":         5,
+				"timeout":         codexHookTimeoutSeconds,
 				"statusMessage":   "Loading Gortex graph orientation...",
 			},
 		},
 	}
+}
+
+func codexPreToolUseHookEntry(env agents.Env) map[string]any {
+	return map[string]any{
+		"matcher": codexPreToolUseMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       codexPreToolUseCommand(env),
+				"timeout":       codexHookTimeoutSeconds,
+				"statusMessage": "Loading Gortex Bash guidance...",
+			},
+		},
+	}
+}
+
+func codexPreToolUseCommand(env agents.Env) string {
+	base := strings.TrimSpace(env.HookCommand)
+	if base == "" {
+		base = "gortex hook"
+	}
+	return base + " --agent=codex --mode=enrich"
 }
