@@ -167,17 +167,10 @@ func InstallHooksOnly(w io.Writer, configPath string, env agents.Env, opts agent
 }
 
 func upsertCodexHooks(root map[string]any, env agents.Env, opts agents.ApplyOpts) bool {
-	changed := false
-	if upsertSessionStartHook(root, opts) {
-		changed = true
-	}
-	if upsertPreToolUseHook(root, env, opts) {
-		changed = true
-	}
-	if upsertPostToolUseHook(root, env, opts) {
-		changed = true
-	}
-	return changed
+	sessionChanged := upsertSessionStartHook(root, opts)
+	preChanged := upsertPreToolUseHook(root, env, opts)
+	postChanged := upsertPostToolUseHook(root, env, opts)
+	return sessionChanged || preChanged || postChanged
 }
 
 func upsertCodexHook(root map[string]any, event string, isGortex func(any) bool, desired map[string]any, opts agents.ApplyOpts) bool {
