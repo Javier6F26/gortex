@@ -36,8 +36,8 @@ var hookCmd = &cobra.Command{
 			return
 		case "codex":
 			// Codex support is intentionally soft-only for now: the adapter
-			// installs a Bash PreToolUse hook that emits additionalContext
-			// without ever denying the tool call.
+			// installs Bash PreToolUse/PostToolUse hooks that emit
+			// additionalContext without ever denying the tool call.
 			hooks.RunCodex(hookPort)
 			return
 		case "", "claude":
@@ -55,6 +55,6 @@ func init() {
 	hookCmd.Flags().StringVar(&hookMode, "mode", "deny",
 		"hook posture: 'deny' (redirect Grep/Glob/Read of indexed source), 'enrich' (never deny; PostToolUse appends graph context), 'consult-unlock' (deny fallback reads until the graph is queried once this session), or 'nudge' (soft-deny once per burst of non-symbolic calls)")
 	hookCmd.Flags().StringVar(&hookAgent, "agent", "",
-		"hook wire protocol: empty/'claude' (Claude Code PreToolUse/UserPromptSubmit), 'codex' (Codex Bash PreToolUse soft nudge), 'hermes' (NousResearch hermes-agent pre_tool_call/pre_llm_call), 'pi' (earendil-works/pi extension bridge — normalized PiEvent envelope in, PiDecision out), or 'gemini'/'antigravity' (emits hookSpecificOutput.additionalContext). Default (empty) is the Claude Code format.")
+		"hook wire protocol: empty/'claude' (Claude Code PreToolUse/UserPromptSubmit), 'codex' (Codex Bash PreToolUse/PostToolUse soft context), 'hermes' (NousResearch hermes-agent pre_tool_call/pre_llm_call), 'pi' (earendil-works/pi extension bridge — normalized PiEvent envelope in, PiDecision out), or 'gemini'/'antigravity' (emits hookSpecificOutput.additionalContext). Default (empty) is the Claude Code format.")
 	rootCmd.AddCommand(hookCmd)
 }

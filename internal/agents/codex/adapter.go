@@ -31,6 +31,7 @@ const codexSessionStartMessage = "IMPORTANT: Prefer Gortex MCP tools (search_sym
 const codexSessionStartCommand = "printf '%s\\n' '" + codexSessionStartMessage + "'"
 const codexSessionStartWindowsCommand = "powershell -NoProfile -Command \"Write-Output '" + codexSessionStartMessage + "'\""
 const codexPreToolUseMatcher = "^Bash$"
+const codexPostToolUseMatcher = "^Bash$"
 const codexHookTimeoutSeconds = 5
 
 type Adapter struct{}
@@ -114,6 +115,9 @@ func (a *Adapter) Apply(env agents.Env, opts agents.ApplyOpts) (*agents.Result, 
 			if upsertPreToolUseHook(root, env, opts) {
 				changed = true
 			}
+			if upsertPostToolUseHook(root, env, opts) {
+				changed = true
+			}
 		}
 		return changed, nil
 	}, opts)
@@ -146,6 +150,10 @@ func upsertSessionStartHook(root map[string]any, opts agents.ApplyOpts) bool {
 
 func upsertPreToolUseHook(root map[string]any, env agents.Env, opts agents.ApplyOpts) bool {
 	return upsertCodexHook(root, "PreToolUse", codexHookEntryIsGortexPreToolUse, codexPreToolUseHookEntry(env), opts)
+}
+
+func upsertPostToolUseHook(root map[string]any, env agents.Env, opts agents.ApplyOpts) bool {
+	return upsertCodexHook(root, "PostToolUse", codexHookEntryIsGortexPostToolUse, codexPostToolUseHookEntry(env), opts)
 }
 
 func upsertCodexHook(root map[string]any, event string, isGortex func(any) bool, desired map[string]any, opts agents.ApplyOpts) bool {
@@ -225,6 +233,14 @@ func codexHookEntryIsGortexSessionStart(entry any) bool {
 }
 
 func codexHookEntryIsGortexPreToolUse(entry any) bool {
+	return codexHookEntryInvokesCodexHook(entry)
+}
+
+func codexHookEntryIsGortexPostToolUse(entry any) bool {
+	return codexHookEntryInvokesCodexHook(entry)
+}
+
+func codexHookEntryInvokesCodexHook(entry any) bool {
 	group, ok := entry.(map[string]any)
 	if !ok {
 		return false
@@ -286,7 +302,25 @@ func codexPreToolUseHookEntry(env agents.Env) map[string]any {
 	}
 }
 
+func codexPostToolUseHookEntry(env agents.Env) map[string]any {
+	return map[string]any{
+		"matcher": codexPostToolUseMatcher,
+		"hooks": []any{
+			map[string]any{
+				"type":          "command",
+				"command":       codexHookCommand(env),
+				"timeout":       codexHookTimeoutSeconds,
+				"statusMessage": "Loading Gortex Bash output context...",
+			},
+		},
+	}
+}
+
 func codexPreToolUseCommand(env agents.Env) string {
+	return codexHookCommand(env)
+}
+
+func codexHookCommand(env agents.Env) string {
 	base := strings.TrimSpace(env.HookCommand)
 	if base == "" {
 		base = "gortex hook"

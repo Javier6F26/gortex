@@ -50,6 +50,9 @@ func TestCodexWritesMcpServersTOMLTable(t *testing.T) {
 	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
 		t.Fatalf("expected one Gortex PreToolUse hook, got %d: %#v", count, cfg["hooks"])
 	}
+	if count := gortexPostToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("expected one Gortex PostToolUse hook, got %d: %#v", count, cfg["hooks"])
+	}
 
 	agentstest.AssertIdempotent(t, a, env)
 }
@@ -133,8 +136,41 @@ func TestCodexInstallsPreToolUseHook(t *testing.T) {
 	if handler["timeout"] != int64(codexHookTimeoutSeconds) {
 		t.Errorf("timeout=%v want %d", handler["timeout"], codexHookTimeoutSeconds)
 	}
-	if _, ok := cfg["hooks"].(map[string]any)["PostToolUse"]; ok {
-		t.Fatalf("Codex should not install PostToolUse: %#v", cfg["hooks"])
+}
+
+func TestCodexInstallsPostToolUseHook(t *testing.T) {
+	env := codexGlobalEnv(t)
+	a := New()
+
+	res, err := a.Apply(env, agents.ApplyOpts{})
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	agentstest.AssertCountsByAction(t, res, map[agents.ActionKind]int{agents.ActionCreate: 1})
+
+	cfg := readCodexConfig(t, env)
+	entries := postToolUseEntries(t, cfg)
+	if len(entries) != 1 {
+		t.Fatalf("PostToolUse entries=%d want 1: %#v", len(entries), entries)
+	}
+	entry := entries[0].(map[string]any)
+	if entry["matcher"] != codexPostToolUseMatcher {
+		t.Fatalf("matcher=%v want %q", entry["matcher"], codexPostToolUseMatcher)
+	}
+	handlers, ok := codexHookList(entry["hooks"])
+	if !ok || len(handlers) != 1 {
+		t.Fatalf("handlers=%#v", entry["hooks"])
+	}
+	handler := handlers[0].(map[string]any)
+	if handler["type"] != "command" {
+		t.Errorf("hook type=%v want command", handler["type"])
+	}
+	command := handler["command"].(string)
+	if command != "/tmp/test-gortex hook --agent=codex --mode=enrich" {
+		t.Errorf("command=%v want test hook command with --agent=codex --mode=enrich", command)
+	}
+	if handler["timeout"] != int64(codexHookTimeoutSeconds) {
+		t.Errorf("timeout=%v want %d", handler["timeout"], codexHookTimeoutSeconds)
 	}
 }
 
@@ -165,6 +201,9 @@ func TestCodexSessionStartHookIdempotent(t *testing.T) {
 	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
 		t.Fatalf("re-run duplicated Gortex PreToolUse hook: got %d", count)
 	}
+	if count := gortexPostToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("re-run duplicated Gortex PostToolUse hook: got %d", count)
+	}
 }
 
 func TestCodexSessionStartHookPreservesExistingConfig(t *testing.T) {
@@ -190,6 +229,14 @@ matcher = "^Bash$"
 type = "command"
 command = "echo user-pretooluse"
 statusMessage = "User PreToolUse"
+
+[[hooks.PostToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "echo user-posttooluse"
+statusMessage = "User PostToolUse"
 `
 	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -232,6 +279,16 @@ statusMessage = "User PreToolUse"
 	}
 	if count := gortexPreToolUseHookCount(t, cfg); count != 1 {
 		t.Fatalf("Gortex PreToolUse hooks=%d want 1", count)
+	}
+	postEntries := postToolUseEntries(t, cfg)
+	if len(postEntries) != 2 {
+		t.Fatalf("PostToolUse entries=%d want user+gortex entries: %#v", len(postEntries), postEntries)
+	}
+	if !hasHookCommand(t, cfg, "PostToolUse", "echo user-posttooluse") {
+		t.Fatalf("user PostToolUse hook was not preserved: %#v", postEntries)
+	}
+	if count := gortexPostToolUseHookCount(t, cfg); count != 1 {
+		t.Fatalf("Gortex PostToolUse hooks=%d want 1", count)
 	}
 }
 
@@ -351,6 +408,11 @@ func preToolUseEntries(t *testing.T, cfg map[string]any) []any {
 	return hookEntries(t, cfg, "PreToolUse")
 }
 
+func postToolUseEntries(t *testing.T, cfg map[string]any) []any {
+	t.Helper()
+	return hookEntries(t, cfg, "PostToolUse")
+}
+
 func hookEntries(t *testing.T, cfg map[string]any, event string) []any {
 	t.Helper()
 	hooks, ok := cfg["hooks"].(map[string]any)
@@ -380,6 +442,17 @@ func gortexPreToolUseHookCount(t *testing.T, cfg map[string]any) int {
 	count := 0
 	for _, entry := range preToolUseEntries(t, cfg) {
 		if codexHookEntryIsGortexPreToolUse(entry) {
+			count++
+		}
+	}
+	return count
+}
+
+func gortexPostToolUseHookCount(t *testing.T, cfg map[string]any) int {
+	t.Helper()
+	count := 0
+	for _, entry := range postToolUseEntries(t, cfg) {
+		if codexHookEntryIsGortexPostToolUse(entry) {
 			count++
 		}
 	}
