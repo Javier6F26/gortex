@@ -963,7 +963,8 @@ func (s *Server) handleAnalyze(ctx context.Context, req mcp.CallToolRequest) (*m
 	// truthful about the resolved scope; scope_note prevents it from
 	// misleading a caller whose kind ignored the narrowing ("no silent
 	// no-ops").
-	if err == nil && res != nil && resolved.RepoAllow != nil && !analyzeScopeAwareKinds[kind] {
+	if err == nil && res != nil && resolved.RepoAllow != nil &&
+		!analyzeScopeAwareKinds[kind] && !analyzeWorkspaceClampedKinds[kind] {
 		stampScopeNote(res, kind)
 	}
 	return withScopeResult(res, err, resolved)

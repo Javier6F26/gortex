@@ -306,17 +306,23 @@ func TestAnalyzeScope_ScopeNote_BypassKind(t *testing.T) {
 	// Membership gate is the source of truth.
 	require.True(t, analyzeScopeAwareKinds["health_score"], "health_score must be scope-aware")
 	require.False(t, analyzeScopeAwareKinds["clusters"], "clusters must NOT be scope-aware (community-detection bypass)")
+	require.True(t, analyzeWorkspaceClampedKinds["clusters"], "clusters is workspace-clamped and self-discloses in the body")
 
 	fx := newSharedWorkspaceServer(t, true)
 	ctx := sessionCtx("s-a", fx.repoA)
 
-	// Bypass kind + narrowing arg → scope_note discloses the no-op.
+	// clusters is workspace-clamped but not repo-narrowed: a narrowing
+	// arg is disclosed in the response BODY (visible to every client),
+	// not via the now-stale _meta scope_note. scope_applied stays uniform
+	// and truthful about the resolved scope.
 	r, err := fx.srv.handleAnalyze(ctx, makeReq("analyze", map[string]any{"kind": "clusters", "repo": "repo-a"}))
 	require.NoError(t, err)
-	require.False(t, r.IsError, "pubsub errored: %s", toolResultText(r))
+	require.False(t, r.IsError, "clusters errored: %s", toolResultText(r))
 	require.NotNil(t, r.Meta)
-	note, _ := r.Meta.AdditionalFields["scope_note"].(string)
-	assert.NotEmpty(t, note, "a bypass kind asked to narrow must carry a scope_note")
+	assert.Contains(t, toolResultText(r), "not repo/project-narrowed",
+		"a workspace-clamped bypass kind asked to narrow must disclose the no-op in the body")
+	_, hasMetaNote := r.Meta.AdditionalFields["scope_note"]
+	assert.False(t, hasMetaNote, "a self-disclosing clamped kind must not also carry the stale _meta scope_note")
 	assert.Equal(t, "repo:repo-a", r.Meta.AdditionalFields["scope_applied"],
 		"scope_applied stays uniform/truthful about the resolved scope")
 

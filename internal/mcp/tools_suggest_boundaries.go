@@ -27,6 +27,10 @@ type suggestedLayer struct {
 
 func (s *Server) handleSuggestBoundaries(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	comms := s.getCommunities()
+	// Clamp to the session workspace (community detection is global) so
+	// boundaries are seeded only from in-workspace communities and never
+	// leak a sibling workspace's layers.
+	comms = s.communitiesInSessionScope(ctx, comms)
 	if comms == nil || len(comms.Communities) == 0 {
 		return mcp.NewToolResultError("no communities detected — run `analyze kind=clusters` (or reindex) first so boundaries can be seeded"), nil
 	}
@@ -111,13 +115,17 @@ func (s *Server) handleSuggestBoundaries(ctx context.Context, req mcp.CallToolRe
 		})
 	}
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"suggested_layers": layers,
 		"yaml":             renderArchitectureYAML(layers),
 		"community_count":  len(comms.Communities),
 		"modularity":       comms.Modularity,
 		"note":             "Starter architecture block seeded from detected communities. Review the layer names and allow lists, then paste into .gortex.yaml; change_contract's architecture family enforces it (set architecture.severity: error to make breaks refuse).",
-	})
+	}
+	if blk := s.workspaceScopeBlock(ctx, req, "suggest_boundaries"); blk != nil {
+		resp["scope"] = blk
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // commonDirPrefix returns the longest shared leading directory segments across

@@ -31,6 +31,12 @@ func (s *Server) handleAnalyzeSynthesizers(ctx context.Context, req mcp.CallTool
 	if nameFilter != "" {
 		opts = append(opts, analyzer.WithSynthesizerNameFilter(nameFilter))
 	}
+	// Clamp to the session workspace (synthesizer edge enumeration is
+	// global) so a workspace-bound caller never sees edges from sibling
+	// workspaces.
+	if wsRepos, bound := s.sessionWorkspaceRepoSet(ctx); bound {
+		opts = append(opts, analyzer.WithSynthesizerRepoScope(wsRepos))
+	}
 	result := analyzer.AnalyzeSynthesizers(s.graph, opts...)
 
 	if isCompact(req) {
@@ -49,8 +55,12 @@ func (s *Server) handleAnalyzeSynthesizers(ctx context.Context, req mcp.CallTool
 		return mcp.NewToolResultText(b.String()), nil
 	}
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"synthesizers": result.Synthesizers,
 		"total_edges":  result.TotalEdges,
-	})
+	}
+	if blk := s.workspaceScopeBlock(ctx, req, "synthesizers"); blk != nil {
+		resp["scope"] = blk
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }

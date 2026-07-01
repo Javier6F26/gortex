@@ -7,6 +7,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/zzet/gortex/internal/analysis"
+	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -338,4 +340,93 @@ func intersectRepoSets(a, b map[string]bool) map[string]bool {
 		}
 	}
 	return out
+}
+
+// sessionWorkspaceRepoSet returns the set of repo prefixes inside the
+// current session's workspace and whether the session is workspace-
+// bound. An unbound session (no cwd / no multi-repo indexer) returns
+// (nil, false) — its callers must not clamp. This is the workspace
+// ceiling for the analyze kinds that run a global graph algorithm and
+// cannot honour the repo allow-set in v1.
+func (s *Server) sessionWorkspaceRepoSet(ctx context.Context) (map[string]bool, bool) {
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound || s.multiIndexer == nil {
+		return nil, false
+	}
+	return s.multiIndexer.ReposInWorkspace(sessWS), true
+}
+
+// communitiesInSessionScope returns a workspace-clamped copy of cr for a
+// workspace-bound session: each community keeps only the members / files
+// inside the session workspace, and communities left with no in-workspace
+// member are dropped. Community detection runs over the whole index (one
+// shared partition), so without this the community analyze kinds
+// (clusters / concepts / suggest_boundaries) would surface clusters from
+// sibling workspaces — a breach of the workspace isolation boundary. The
+// cached partition is never mutated: the copy gets fresh member / file
+// slices. An unbound session gets cr back unchanged.
+func (s *Server) communitiesInSessionScope(ctx context.Context, cr *analysis.CommunityResult) *analysis.CommunityResult {
+	wsRepos, bound := s.sessionWorkspaceRepoSet(ctx)
+	if !bound || len(wsRepos) == 0 || cr == nil {
+		return cr
+	}
+	out := *cr
+	out.Communities = make([]analysis.Community, 0, len(cr.Communities))
+	for _, c := range cr.Communities {
+		members := make([]string, 0, len(c.Members))
+		for _, m := range c.Members {
+			if wsRepos[graph.RepoPrefixOfID(m)] {
+				members = append(members, m)
+			}
+		}
+		if len(members) == 0 {
+			continue
+		}
+		files := make([]string, 0, len(c.Files))
+		for _, f := range c.Files {
+			if wsRepos[graph.RepoPrefixOfID(f)] {
+				files = append(files, f)
+			}
+		}
+		c.Members = members
+		c.Files = files
+		c.Size = len(members)
+		out.Communities = append(out.Communities, c)
+	}
+	return &out
+}
+
+// scopeNarrowingRequested reports whether the caller passed an explicit
+// repo / project / scope / ref narrowing arg (other than the "*"
+// all-repos escape hatch).
+func scopeNarrowingRequested(req mcp.CallToolRequest) bool {
+	if repo := strings.TrimSpace(req.GetString("repo", "")); repo != "" && repo != "*" {
+		return true
+	}
+	return strings.TrimSpace(req.GetString("project", "")) != "" ||
+		strings.TrimSpace(req.GetString("scope", "")) != "" ||
+		strings.TrimSpace(req.GetString("ref", "")) != ""
+}
+
+// workspaceScopeBlock returns a body-visible disclosure of the scope a
+// not-repo-narrowed analyze kind actually applied: it honours the session
+// workspace boundary but cannot apply a repo / project narrow in v1.
+// Unlike the _meta scope_note (which several clients, Claude Code among
+// them, do not surface), this rides in the response payload so an agent
+// always sees it. Returns nil for an unbound session — nothing to
+// disclose, and the result was never clamped.
+func (s *Server) workspaceScopeBlock(ctx context.Context, req mcp.CallToolRequest, kind string) map[string]any {
+	sessWS, _, bound := s.sessionScope(ctx)
+	if !bound {
+		return nil
+	}
+	applied := "workspace"
+	if sessWS != "" {
+		applied = "workspace:" + sessWS
+	}
+	blk := map[string]any{"applied": applied}
+	if scopeNarrowingRequested(req) {
+		blk["note"] = "kind '" + kind + "' is clamped to the session workspace but is not repo/project-narrowed in v1; the requested narrowing was widened to the whole workspace"
+	}
+	return blk
 }

@@ -188,6 +188,20 @@ var analyzeScopeAwareKinds = map[string]bool{
 	"unsafe_patterns": true,
 }
 
+// analyzeWorkspaceClampedKinds are the not-repo-narrowed analyze kinds
+// (community detection + synthesizer enumeration) that now clamp their
+// rows to the session workspace and self-disclose that via a body-
+// visible `scope` block (workspaceScopeBlock). They are excluded from
+// the _meta stampScopeNote path, whose text predates the clamp and would
+// otherwise wrongly claim the result "may span the entire index / all
+// workspaces".
+var analyzeWorkspaceClampedKinds = map[string]bool{
+	"clusters":           true,
+	"concepts":           true,
+	"suggest_boundaries": true,
+	"synthesizers":       true,
+}
+
 // AnalyzeKinds returns a defensive copy of the canonical analyze-kind
 // set, in sorted order. Callers must not mutate the returned slice's
 // backing array of the package-level source.

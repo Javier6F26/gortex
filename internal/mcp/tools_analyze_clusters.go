@@ -70,13 +70,22 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 			" (expected: leiden, louvain, spectral)"), nil
 	}
 
+	// Clamp the global partition to the session workspace so a
+	// workspace-bound caller never sees clusters whose members live in a
+	// sibling workspace (community detection runs over the whole index).
+	cr = s.communitiesInSessionScope(ctx, cr)
+
 	if cr == nil || len(cr.Communities) == 0 {
-		return s.respondJSONOrTOON(ctx, req, map[string]any{
+		empty := map[string]any{
 			"clusters":  []map[string]any{},
 			"total":     0,
 			"algorithm": algorithm,
-			"note":      "no communities detected on this graph",
-		})
+			"note":      "no communities detected in the session workspace",
+		}
+		if blk := s.workspaceScopeBlock(ctx, req, "clusters"); blk != nil {
+			empty["scope"] = blk
+		}
+		return s.respondJSONOrTOON(ctx, req, empty)
 	}
 
 	type clusterRow struct {
@@ -248,6 +257,9 @@ func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequ
 		detection["resolution"] = resolution
 		resp["detection"] = detection
 	}
+	if blk := s.workspaceScopeBlock(ctx, req, "clusters"); blk != nil {
+		resp["scope"] = blk
+	}
 	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
@@ -262,6 +274,8 @@ func (s *Server) handleAnalyzeConcepts(ctx context.Context, req mcp.CallToolRequ
 	useLLM := requestBoolDefault(req, "use_llm", s.llmService != nil && s.llmService.Enabled())
 
 	cr := s.getCommunities()
+	// Clamp to the session workspace (community detection is global).
+	cr = s.communitiesInSessionScope(ctx, cr)
 	if cr == nil || len(cr.Communities) == 0 {
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"concepts": []map[string]any{},
@@ -299,10 +313,14 @@ func (s *Server) handleAnalyzeConcepts(ctx context.Context, req mcp.CallToolRequ
 		})
 	}
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
+	resp := map[string]any{
 		"concepts": out,
 		"total":    len(out),
-	})
+	}
+	if blk := s.workspaceScopeBlock(ctx, req, "concepts"); blk != nil {
+		resp["scope"] = blk
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // labelConcept returns a theme label for the cluster + the source

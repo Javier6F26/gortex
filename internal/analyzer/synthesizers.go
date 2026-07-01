@@ -53,11 +53,22 @@ type SynthesizersOption func(*synthConfig)
 
 type synthConfig struct {
 	nameFilter string
+	repoScope  map[string]bool
 }
 
 // WithSynthesizerNameFilter restricts the result to a single synthesizer name.
 func WithSynthesizerNameFilter(name string) SynthesizersOption {
 	return func(c *synthConfig) { c.nameFilter = name }
+}
+
+// WithSynthesizerRepoScope restricts the result to synthesized edges
+// whose source node lives in one of the given repository prefixes — the
+// repos of the caller's workspace. A nil/empty set disables the clamp
+// (the whole-index default). Used to keep `analyze synthesizers` inside
+// the session workspace boundary even though it is not repo-narrowed in
+// v1.
+func WithSynthesizerRepoScope(repos map[string]bool) SynthesizersOption {
+	return func(c *synthConfig) { c.repoScope = repos }
 }
 
 // AnalyzeSynthesizers groups every synthesized edge in the graph by the
@@ -79,6 +90,12 @@ func AnalyzeSynthesizers(g graph.Store, opts ...SynthesizersOption) Synthesizers
 			continue
 		}
 		if cfg.nameFilter != "" && by != cfg.nameFilter {
+			continue
+		}
+		// Workspace clamp: drop edges whose source node is outside the
+		// caller's workspace repos so the count, by-kind tally, and
+		// samples never span sibling workspaces.
+		if len(cfg.repoScope) > 0 && !cfg.repoScope[graph.RepoPrefixOfID(e.From)] {
 			continue
 		}
 		row, ok := rows[by]
