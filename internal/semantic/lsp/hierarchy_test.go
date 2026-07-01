@@ -286,3 +286,221 @@ func TestLSP_Provider_AddsMissingCallEdgeViaCallHierarchy(t *testing.T) {
 	}
 	require.NotNil(t, added, "expected newly-added EdgeCalls Caller→Hello from LSP call hierarchy")
 }
+
+// Regression: a synthesized call-hierarchy edge must (a) attach to the
+// caller FUNCTION node — not a `#param:` node sharing the declaration
+// line — and (b) be stamped at the call-expression line the server
+// reported in fromRanges, not at the caller's declaration line.
+func TestLSP_Provider_IncomingCallStampsCallSiteNotDeclaration(t *testing.T) {
+	repoRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "q.go"),
+		[]byte("package b\n\nfunc (q queryBinding) Name() string { return \"query\" }\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "t.go"),
+		[]byte("package b\n\n\n\n\n\n\n\n\nfunc TestFoo(t *T, b Binding) {\n\tx := b\n\t_ = x.Name()\n\t_ = x\n\t_ = x.Name()\n}\n"),
+		0o644,
+	))
+
+	server := newFakeLSPServer()
+	server.handle("textDocument/hover", func(params json.RawMessage) (any, *jsonRPCError) {
+		return nil, nil
+	})
+	server.handle("textDocument/prepareCallHierarchy", func(params json.RawMessage) (any, *jsonRPCError) {
+		return []CallHierarchyItem{{
+			Name: "Name", Kind: 6,
+			URI:            pathToURI(filepath.Join(repoRoot, "q.go")),
+			Range:          Range{Start: Position{Line: 2, Character: 0}, End: Position{Line: 2, Character: 50}},
+			SelectionRange: Range{Start: Position{Line: 2, Character: 22}, End: Position{Line: 2, Character: 26}},
+		}}, nil
+	})
+	server.handle("callHierarchy/outgoingCalls", func(params json.RawMessage) (any, *jsonRPCError) {
+		return []CallHierarchyOutgoingCall{}, nil
+	})
+	server.handle("callHierarchy/incomingCalls", func(params json.RawMessage) (any, *jsonRPCError) {
+		// Caller item points at TestFoo's declaration line (0-based 9);
+		// the actual call expressions are on 0-based lines 11 and 13.
+		return []CallHierarchyIncomingCall{{
+			From: CallHierarchyItem{
+				Name: "TestFoo", Kind: 12,
+				URI:            pathToURI(filepath.Join(repoRoot, "t.go")),
+				Range:          Range{Start: Position{Line: 9, Character: 0}, End: Position{Line: 14, Character: 1}},
+				SelectionRange: Range{Start: Position{Line: 9, Character: 5}, End: Position{Line: 9, Character: 12}},
+			},
+			FromRanges: []Range{
+				{Start: Position{Line: 11, Character: 6}, End: Position{Line: 11, Character: 14}},
+				{Start: Position{Line: 13, Character: 6}, End: Position{Line: 13, Character: 14}},
+			},
+		}}, nil
+	})
+
+	p, cleanup := providerWithFakeServer(t, server, []string{"go"})
+	defer cleanup()
+
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "q.go::queryBinding.Name", Kind: graph.KindMethod, Name: "Name",
+		FilePath: "q.go", StartLine: 3, EndLine: 3, Language: "go",
+	})
+	g.AddNode(&graph.Node{
+		ID: "t.go::TestFoo", Kind: graph.KindFunction, Name: "TestFoo",
+		FilePath: "t.go", StartLine: 10, EndLine: 15, Language: "go",
+	})
+	// Param decoy: shares the declaration line with a zero-height span,
+	// so the generic innermost matcher would pick it over the function.
+	g.AddNode(&graph.Node{
+		ID: "t.go::TestFoo#param:t", Kind: graph.KindParam, Name: "t",
+		FilePath: "t.go", StartLine: 10, EndLine: 10, Language: "go",
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Enrich(g, repoRoot)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Enrich timed out")
+	}
+
+	assert.Empty(t, g.GetOutEdges("t.go::TestFoo#param:t"),
+		"no call edge may attach to the #param: decoy node")
+
+	var lines []int
+	for _, e := range g.GetOutEdges("t.go::TestFoo") {
+		if e.Kind == graph.EdgeCalls && e.To == "q.go::queryBinding.Name" {
+			lines = append(lines, e.Line)
+			assert.Equal(t, "t.go", e.FilePath, "edge must be anchored in the caller's file")
+			assert.Equal(t, graph.OriginLSPResolved, e.Origin)
+		}
+	}
+	assert.ElementsMatch(t, []int{12, 14}, lines,
+		"one edge per call-site line from fromRanges (1-based), not the declaration line 10")
+}
+
+// Regression (outgoing direction): the callee item must match the callee
+// method node — not `<callee>#param:<name>` — and the added edge must be
+// stamped at the call site inside the caller.
+func TestLSP_Provider_OutgoingCallMatchesCallableAndStampsCallSite(t *testing.T) {
+	repoRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "m.go"),
+		[]byte("package h\n\nfunc (c *Context) Header(key, value string) {\n\t_ = key\n}\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "c.go"),
+		[]byte("package h\n\n\n\nfunc Do(c *Context) {\n\t_ = c\n\tc.Header(\"a\", \"b\")\n}\n"),
+		0o644,
+	))
+
+	server := newFakeLSPServer()
+	server.handle("textDocument/hover", func(params json.RawMessage) (any, *jsonRPCError) {
+		return nil, nil
+	})
+	server.handle("textDocument/prepareCallHierarchy", func(params json.RawMessage) (any, *jsonRPCError) {
+		return []CallHierarchyItem{{
+			Name: "Do", Kind: 12,
+			URI:            pathToURI(filepath.Join(repoRoot, "c.go")),
+			Range:          Range{Start: Position{Line: 4, Character: 0}, End: Position{Line: 7, Character: 1}},
+			SelectionRange: Range{Start: Position{Line: 4, Character: 5}, End: Position{Line: 4, Character: 7}},
+		}}, nil
+	})
+	server.handle("callHierarchy/incomingCalls", func(params json.RawMessage) (any, *jsonRPCError) {
+		return []CallHierarchyIncomingCall{}, nil
+	})
+	server.handle("callHierarchy/outgoingCalls", func(params json.RawMessage) (any, *jsonRPCError) {
+		// Callee item points at Context.Header's declaration line
+		// (0-based 2); the call expression inside Do is 0-based line 6.
+		return []CallHierarchyOutgoingCall{{
+			To: CallHierarchyItem{
+				Name: "Header", Kind: 6,
+				URI:            pathToURI(filepath.Join(repoRoot, "m.go")),
+				Range:          Range{Start: Position{Line: 2, Character: 0}, End: Position{Line: 4, Character: 1}},
+				SelectionRange: Range{Start: Position{Line: 2, Character: 18}, End: Position{Line: 2, Character: 24}},
+			},
+			FromRanges: []Range{
+				{Start: Position{Line: 6, Character: 1}, End: Position{Line: 6, Character: 18}},
+			},
+		}}, nil
+	})
+
+	p, cleanup := providerWithFakeServer(t, server, []string{"go"})
+	defer cleanup()
+
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "m.go::Context.Header", Kind: graph.KindMethod, Name: "Header",
+		FilePath: "m.go", StartLine: 3, EndLine: 5, Language: "go",
+	})
+	// Param decoy on the callee's declaration line.
+	g.AddNode(&graph.Node{
+		ID: "m.go::Context.Header#param:key", Kind: graph.KindParam, Name: "key",
+		FilePath: "m.go", StartLine: 3, EndLine: 3, Language: "go",
+	})
+	g.AddNode(&graph.Node{
+		ID: "c.go::Do", Kind: graph.KindFunction, Name: "Do",
+		FilePath: "c.go", StartLine: 5, EndLine: 8, Language: "go",
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Enrich(g, repoRoot)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Enrich timed out")
+	}
+
+	var toParam, toMethod []*graph.Edge
+	for _, e := range g.GetOutEdges("c.go::Do") {
+		if e.Kind != graph.EdgeCalls {
+			continue
+		}
+		switch e.To {
+		case "m.go::Context.Header#param:key":
+			toParam = append(toParam, e)
+		case "m.go::Context.Header":
+			toMethod = append(toMethod, e)
+		}
+	}
+	assert.Empty(t, toParam, "no call edge may target the callee's #param: node")
+	require.Len(t, toMethod, 1)
+	assert.Equal(t, 7, toMethod[0].Line, "edge stamped at the call site (1-based), not the callee/caller declaration")
+	assert.Equal(t, "c.go", toMethod[0].FilePath)
+}
+
+// callSiteLines lowers fromRanges to distinct, sorted, 1-based lines.
+func TestCallSiteLines(t *testing.T) {
+	cases := []struct {
+		name   string
+		ranges []Range
+		want   []int
+	}{
+		{"nil", nil, nil},
+		{"empty", []Range{}, nil},
+		{"single", []Range{{Start: Position{Line: 11}}}, []int{12}},
+		{"dedup and sort", []Range{
+			{Start: Position{Line: 13}},
+			{Start: Position{Line: 11}},
+			{Start: Position{Line: 13}},
+		}, []int{12, 14}},
+		{"drops nonpositive", []Range{
+			{Start: Position{Line: -1}},
+			{Start: Position{Line: -5}},
+			{Start: Position{Line: 0}},
+		}, []int{1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, callSiteLines(tc.ranges))
+		})
+	}
+}

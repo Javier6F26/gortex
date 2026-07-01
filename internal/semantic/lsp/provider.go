@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -445,6 +446,12 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 		n          *graph.Node
 		other      CallHierarchyItem
 		asOutgoing bool
+		// fromRanges carries the call-expression ranges reported by
+		// the server — per the LSP spec these are always ranges
+		// inside the CALLER's file, for both incoming and outgoing
+		// hops. Kept so the landed edge can be stamped at the real
+		// call-site line instead of the caller's declaration line.
+		fromRanges []Range
 	}
 	type typeHop struct {
 		n           *graph.Node
@@ -646,12 +653,12 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 						for _, item := range items {
 							if outs, oerr := p.outgoingCalls(item); oerr == nil {
 								for _, oc := range outs {
-									cHops = append(cHops, callHop{n: n, other: oc.To, asOutgoing: true})
+									cHops = append(cHops, callHop{n: n, other: oc.To, asOutgoing: true, fromRanges: oc.FromRanges})
 								}
 							}
 							if ins, ierr := p.incomingCalls(item); ierr == nil {
 								for _, ic := range ins {
-									cHops = append(cHops, callHop{n: n, other: ic.From, asOutgoing: false})
+									cHops = append(cHops, callHop{n: n, other: ic.From, asOutgoing: false, fromRanges: ic.FromRanges})
 								}
 							}
 						}
@@ -772,7 +779,7 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 	// could not follow (the single biggest non-Go win).
 	rmu.Lock()
 	for _, h := range callHops {
-		p.recordHierarchyCall(g, repoPrefix, absRoot, h.n, h.other, h.asOutgoing, result)
+		p.recordHierarchyCall(g, repoPrefix, absRoot, h.n, h.other, h.asOutgoing, h.fromRanges, result)
 	}
 	for _, h := range typeHops {
 		p.linkTypeHierarchy(g, repoPrefix, absRoot, h.n, h.other, h.asSupertype, result)
@@ -1913,12 +1920,26 @@ func (p *Provider) Source(repoRoot, relPath string) []byte {
 // asOutgoing=true means "this node calls other"; false means "other
 // calls this node" (incoming-calls direction). Existing edges get
 // promoted to lsp_resolved; missing edges get added.
-func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string, n *graph.Node, other CallHierarchyItem, asOutgoing bool, result *semantic.EnrichResult) {
+//
+// fromRanges carries the call-expression ranges the server reported
+// for this hop — per the LSP spec they always live in the CALLER's
+// file, for both directions. New edges are stamped at those lines
+// (one edge per distinct call-site line), so a synthesized
+// interface-dispatch edge points at the `b.Name()` expression, not
+// at the calling function's declaration line. When the server
+// returned no ranges, the caller's declaration line remains the
+// fallback anchor.
+func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string, n *graph.Node, other CallHierarchyItem, asOutgoing bool, fromRanges []Range, result *semantic.EnrichResult) {
 	otherPath := uriToPath(other.URI, absRoot)
 	if otherPath == "" {
 		return
 	}
-	otherNode := semantic.MatchNodeByFileLine(g, scopedPath(repoPrefix, otherPath),
+	// A hierarchy item names a function or method — match callable
+	// kinds only. The generic innermost-node matcher used to land on
+	// a KindParam node here (params share the declaration line with
+	// a zero-height span, so they always won the innermost tie),
+	// wiring call edges to `<fn>#param:<name>` endpoints.
+	otherNode := semantic.MatchCallableByFileLine(g, scopedPath(repoPrefix, otherPath),
 		other.SelectionRange.Start.Line+1)
 	if otherNode == nil {
 		return
@@ -1930,18 +1951,66 @@ func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string
 	if from.ID == to.ID {
 		return
 	}
-	existing := semantic.FindMatchingEdge(g, from.ID, to.ID, graph.EdgeCalls)
-	if existing != nil {
-		if graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
-			semantic.ConfirmEdge(existing, p.Name())
-			existing.Origin = graph.OriginLSPResolved
-			result.EdgesConfirmed++
+
+	// One pass over the caller's out-edges: find every existing
+	// (from, to, calls) edge so per-line dedup and the promotion
+	// check share a single fetch.
+	var existing *graph.Edge
+	coveredLines := map[int]bool{}
+	for _, e := range g.GetOutEdges(from.ID) {
+		if e.Kind != graph.EdgeCalls || e.To != to.ID {
+			continue
 		}
-		return
+		coveredLines[e.Line] = true
+		if existing == nil {
+			existing = e
+		}
 	}
-	semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
-		from.FilePath, from.StartLine, p.Name())
-	result.EdgesAdded++
+	if existing != nil && graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
+		semantic.ConfirmEdge(existing, p.Name())
+		existing.Origin = graph.OriginLSPResolved
+		result.EdgesConfirmed++
+	}
+
+	lines := callSiteLines(fromRanges)
+	if len(lines) == 0 {
+		// No precise ranges from the server. Preserve the legacy
+		// behaviour: only land a declaration-anchored edge when the
+		// pair does not exist at all.
+		if existing != nil {
+			return
+		}
+		lines = []int{from.StartLine}
+	}
+	for _, line := range lines {
+		if coveredLines[line] {
+			continue
+		}
+		semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
+			from.FilePath, line, p.Name())
+		result.EdgesAdded++
+	}
+}
+
+// callSiteLines lowers a hop's fromRanges to the distinct, sorted
+// 1-based start lines of the call expressions. Zero-valued / negative
+// lines are dropped.
+func callSiteLines(ranges []Range) []int {
+	if len(ranges) == 0 {
+		return nil
+	}
+	seen := make(map[int]bool, len(ranges))
+	lines := make([]int, 0, len(ranges))
+	for _, r := range ranges {
+		line := r.Start.Line + 1
+		if line <= 0 || seen[line] {
+			continue
+		}
+		seen[line] = true
+		lines = append(lines, line)
+	}
+	sort.Ints(lines)
+	return lines
 }
 
 // linkTypeHierarchy emits the right edge kind for one super/subtype

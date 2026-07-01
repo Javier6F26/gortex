@@ -118,3 +118,59 @@ func TestNormalizeFilePath(t *testing.T) {
 	result := NormalizeFilePath("/home/user/repo/pkg/foo.go", "/home/user/repo")
 	assert.Equal(t, "pkg/foo.go", result)
 }
+
+func TestMatchCallableByFileLine(t *testing.T) {
+	g := graph.New()
+	// Function with a param decoy sharing its declaration line — the
+	// zero-height param span wins MatchNodeByFileLine's innermost tie,
+	// which is exactly what the callable matcher must NOT return.
+	g.AddNode(&graph.Node{
+		ID: "a.go::TestFoo", Kind: graph.KindFunction, Name: "TestFoo",
+		FilePath: "a.go", StartLine: 10, EndLine: 20,
+	})
+	g.AddNode(&graph.Node{
+		ID: "a.go::TestFoo#param:t", Kind: graph.KindParam, Name: "t",
+		FilePath: "a.go", StartLine: 10, EndLine: 10,
+	})
+	g.AddNode(&graph.Node{
+		ID: "a.go::TestFoo#closure:1", Kind: graph.KindClosure, Name: "closure",
+		FilePath: "a.go", StartLine: 14, EndLine: 16,
+	})
+	g.AddNode(&graph.Node{
+		ID: "a.go::Recv.M", Kind: graph.KindMethod, Name: "M",
+		FilePath: "a.go", StartLine: 25, EndLine: 27,
+	})
+	g.AddNode(&graph.Node{
+		ID: "a.go::topVar", Kind: graph.KindVariable, Name: "topVar",
+		FilePath: "a.go", StartLine: 40, EndLine: 40,
+	})
+	g.AddNode(&graph.Node{
+		ID: "a.go", Kind: graph.KindFile, Name: "a.go",
+		FilePath: "a.go", StartLine: 1, EndLine: 50,
+	})
+
+	cases := []struct {
+		name string
+		line int
+		want string // "" = nil expected
+	}{
+		{"declaration line beats param decoy", 10, "a.go::TestFoo"},
+		{"body line inside function", 12, "a.go::TestFoo"},
+		{"innermost closure wins inside its span", 15, "a.go::TestFoo#closure:1"},
+		{"method declaration line", 25, "a.go::Recv.M"},
+		{"near-miss within tolerance snaps to method", 23, "a.go::Recv.M"},
+		{"variable line far from any callable", 40, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := MatchCallableByFileLine(g, "a.go", tc.line)
+			if tc.want == "" {
+				assert.Nil(t, n)
+				return
+			}
+			if assert.NotNil(t, n) {
+				assert.Equal(t, tc.want, n.ID)
+			}
+		})
+	}
+}

@@ -88,6 +88,57 @@ func MatchNodeByFileLine(g graph.Store, filePath string, line int) *graph.Node {
 	return nil
 }
 
+// MatchCallableByFileLine finds the innermost function / method /
+// closure node containing the line. Used to match LSP call-hierarchy
+// items (whose selectionRange points at a function's NAME line) back
+// to graph nodes. The generic MatchNodeByFileLine is wrong for this:
+// parameter nodes sit on the declaration line with a zero-height
+// span, so they always win the innermost tie and the hop lands on a
+// `<fn>#param:<name>` endpoint instead of the function itself.
+func MatchCallableByFileLine(g graph.Store, filePath string, line int) *graph.Node {
+	nodes := g.GetFileNodes(filePath)
+
+	callable := func(k graph.NodeKind) bool {
+		return k == graph.KindFunction || k == graph.KindMethod || k == graph.KindClosure
+	}
+
+	// First: the innermost callable containing this line (smallest range).
+	var best *graph.Node
+	bestSize := int(^uint(0) >> 1)
+	for _, n := range nodes {
+		if !callable(n.Kind) {
+			continue
+		}
+		if n.StartLine <= line && line <= n.EndLine {
+			size := n.EndLine - n.StartLine
+			if size < bestSize {
+				best = n
+				bestSize = size
+			}
+		}
+	}
+	if best != nil {
+		return best
+	}
+
+	// Fallback: the closest callable by start line (within tolerance).
+	bestDist := int(^uint(0) >> 1)
+	for _, n := range nodes {
+		if !callable(n.Kind) {
+			continue
+		}
+		dist := abs(n.StartLine - line)
+		if dist < bestDist {
+			best = n
+			bestDist = dist
+		}
+	}
+	if bestDist <= 2 {
+		return best
+	}
+	return nil
+}
+
 // MatchNodeByQualName finds a Gortex node by qualified name.
 func MatchNodeByQualName(g graph.Store, qualName string) *graph.Node {
 	return g.GetNodeByQualName(qualName)
