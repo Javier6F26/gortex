@@ -124,7 +124,30 @@ func ClassifyZeroEdge(g Store, symbolID string) ZeroEdgeClass {
 	if importConsumerCount(g, symbolID) > 0 {
 		return ZeroEdgeCoverageIncomplete
 	}
+	// The graph still carries unresolved call candidates that name this
+	// symbol — `unresolved::*.<name>` call edges the resolver / enrichment
+	// pass never bound to it. Their existence is direct evidence that call
+	// sites reference this name; an empty usage set is a resolution/coverage
+	// gap, not proof the symbol is unused.
+	if hasUnresolvedSameNameCandidates(g, symbolID) {
+		return ZeroEdgeCoverageIncomplete
+	}
 	return ZeroEdgeLikelyUnused
+}
+
+// hasUnresolvedSameNameCandidates reports whether the graph holds any
+// unresolved member-call edge (`unresolved::*.<name>`) naming this callable
+// symbol. Unresolved call stubs are indexed by their target string, so this is
+// a single reverse-edge lookup — no scan. Non-callable symbols never match.
+func hasUnresolvedSameNameCandidates(g Store, symbolID string) bool {
+	n := g.GetNode(symbolID)
+	if n == nil || n.Name == "" {
+		return false
+	}
+	if n.Kind != KindFunction && n.Kind != KindMethod {
+		return false
+	}
+	return len(g.GetInEdges(UnresolvedMarker+"*."+n.Name)) > 0
 }
 
 // importConsumerCount counts the import-level consumer evidence for a
@@ -174,10 +197,12 @@ var zeroEdgeMessages = map[ZeroEdgeClass]string{
 		"normally indexed symbol always has at least a structural edge, so the " +
 		"extractor most likely did not process it — treat this empty result as " +
 		"unverified, not as proof the symbol is unused.",
-	ZeroEdgeCoverageIncomplete: "no resolved call or reference edges, but import/" +
-		"re-export edges point at this symbol or its file — consumers exist and " +
-		"reference-level resolution is incomplete for them. Treat this empty result " +
-		"as UNVERIFIED coverage, not as proof the symbol is unused or safe to remove.",
+	ZeroEdgeCoverageIncomplete: "no resolved call or reference edges, but the graph " +
+		"still carries consumer evidence — import/re-export edges pointing at this " +
+		"symbol or its file, or unresolved same-name call candidates the resolver / " +
+		"enrichment pass never bound to it. Reference-level resolution is incomplete, " +
+		"so treat this empty result as UNVERIFIED coverage, not as proof the symbol is " +
+		"unused or safe to remove.",
 }
 
 // zeroEdgeNotFoundMessage is the caveat text when the queried id is not in
