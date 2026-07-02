@@ -134,6 +134,30 @@ func emitJavaReferenceForms(root *sitter.Node, src []byte, filePath, fileID stri
 			// the walker reaches when it descends into this node.
 			if ty := javaCreatedTypeText(n, src); ty != "" {
 				emit(ty, line, "instantiate", graph.EdgeInstantiates, graph.OriginASTInferred)
+				// A `new Foo(...)` inside a function is a call of Foo's
+				// constructor. Emit a calls candidate targeting the flat
+				// `<Class>.<init>` node name so find_usages / get_callers on the
+				// constructor surface the instantiation site. The name is
+				// class-qualified and unique, so resolution binds it to that
+				// class's explicit constructor and to no other; a class with
+				// only an implicit default constructor has no `<Class>.<init>`
+				// node, so the edge stays unresolved and behaviour is unchanged.
+				if ownerID := findEnclosingFunc(funcRanges, line); ownerID != "" {
+					if cn := canonicalizeJavaTypeRef(ty); cn != "" && !isJavaPrimitive(cn) && isJavaTypeName(cn) {
+						ckey := ownerID + "|ctorcall|" + cn + "|" + strconv.Itoa(line)
+						if !seen[ckey] {
+							seen[ckey] = true
+							result.Edges = append(result.Edges, &graph.Edge{
+								From:     ownerID,
+								To:       "unresolved::*." + cn + ".<init>",
+								Kind:     graph.EdgeCalls,
+								FilePath: filePath,
+								Line:     line,
+								Meta:     map[string]any{"receiver_type": cn, "via": "constructor"},
+							})
+						}
+					}
+				}
 			}
 
 		case "array_creation_expression":
