@@ -16,11 +16,11 @@ import (
 // recompiled its query and ran an independent cursor over the whole
 // tree). Capture names are disjoint across patterns so the dispatch in
 // Extract can branch on which name is set. Class membership is
-// resolved via a strict parent walk on the captured node — the function
-// must be a direct child of `block` whose direct parent is
-// `class_definition`. This mirrors the legacy `pyQClassMethod` nesting
-// (decorated methods land in the free-function bucket — same bug, same
-// behaviour).
+// resolved via a parent walk on the captured node — the function must
+// be a direct child of `block` whose direct parent is
+// `class_definition`, with an optional `decorated_definition` wrapper
+// between the def and the block (decorated methods are methods too —
+// see pyDirectClassParent).
 const qPyAll = `
 [
   (function_definition
@@ -386,12 +386,11 @@ func (e *PythonExtractor) Extract(filePath string, src []byte) (*parser.Extracti
 
 // --- Per-match emit helpers -----------------------------------------
 
-// emitFunction handles every function_definition. Strict parent check
-// (function → block → class_definition) mirrors the legacy nested
-// pyQClassMethod pattern: only direct children of a class body emit as
-// receiver-qualified methods. Decorated methods (wrapped in
-// decorated_definition) and nested functions land in the free-function
-// bucket — same as the legacy code.
+// emitFunction handles every function_definition. The parent check
+// (function → [decorated_definition →] block → class_definition)
+// classifies direct children of a class body — decorated or not — as
+// receiver-qualified methods. Nested functions land in the
+// free-function bucket.
 func (e *PythonExtractor) emitFunction(m parser.QueryResult, filePath, fileID string, src []byte, result *parser.ExtractionResult, seen, annotationSeen map[string]bool) {
 	name := m.Captures["func.name"].Text
 	def := m.Captures["func.def"]
@@ -1052,15 +1051,25 @@ func (e *PythonExtractor) emitTopLevelVar(m parser.QueryResult, filePath, fileID
 // --- Helpers --------------------------------------------------------
 
 // pyDirectClassParent returns the enclosing class name when fn is a
-// direct child of a class_definition's body block, mirroring the
-// legacy nested pyQClassMethod pattern. Returns "" for decorated
-// methods (wrapped in decorated_definition), nested functions, and
-// top-level functions — preserving legacy behaviour exactly.
+// direct child of a class_definition's body block. Decorated methods
+// (`@property def encoding`, `@contextmanager def stream`, …) are
+// wrapped in a `decorated_definition` node between the def and the
+// class body — the walk hops over that wrapper so they classify as
+// methods of the class, exactly like their undecorated siblings.
+// Without the hop, two same-named decorated members of different
+// classes in one file (httpx's Headers.encoding / Response.encoding)
+// collapsed into bare colliding `<file>::<name>` IDs, and every
+// consumer addressing the class-qualified ID silently landed on the
+// wrong declaration. Returns "" for nested functions and top-level
+// functions.
 func pyDirectClassParent(fn *sitter.Node, src []byte) string {
 	if fn == nil {
 		return ""
 	}
 	parent := fn.Parent()
+	if parent != nil && parent.Type() == "decorated_definition" {
+		parent = parent.Parent()
+	}
 	if parent == nil || parent.Type() != "block" {
 		return ""
 	}

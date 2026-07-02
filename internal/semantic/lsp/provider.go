@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -234,6 +235,113 @@ func scopedPath(repoPrefix, rel string) string {
 	return repoPrefix + "/" + rel
 }
 
+// edgeSiteRelPath returns the repo-relative path of the file holding
+// the edge's recorded call site, falling back to the caller node's
+// path when the edge carries none.
+func edgeSiteRelPath(e *graph.Edge, repoPrefix, callerRel string) string {
+	if e.FilePath == "" {
+		return callerRel
+	}
+	if repoPrefix != "" {
+		return strings.TrimPrefix(e.FilePath, repoPrefix+"/")
+	}
+	return e.FilePath
+}
+
+// rebindTargetAcceptable reports whether a node kind is a sensible
+// rebind target for a reference-shaped edge. Files, imports and params
+// are containers/positions, never the declaration a call site binds to.
+func rebindTargetAcceptable(k graph.NodeKind) bool {
+	switch k {
+	case graph.KindFile, graph.KindImport, graph.KindParam:
+		return false
+	}
+	return true
+}
+
+// edgeExistsAt reports whether an edge (from, to, kind) already exists
+// at the given site line — used to avoid minting a duplicate when a
+// rebind would land exactly on an edge another pass already recorded.
+func edgeExistsAt(g graph.Store, from, to string, kind graph.EdgeKind, line int) bool {
+	for _, e := range g.GetOutEdges(from) {
+		if e.To == to && e.Kind == kind && e.Line == line {
+			return true
+		}
+	}
+	return false
+}
+
+// definitionNodeAtSite asks the language server which declaration the
+// identifier `name` at (siteRel, siteLine) resolves to, and maps the
+// answer back to a graph node by declaration file + line + name.
+//
+// Returns (node, true) when the server answered and the definition
+// landed on a known node; (nil, true) when the server answered but no
+// graph node anchors there (external / builtin / unindexed target);
+// (nil, false) when there is no verdict (identifier not on the line,
+// open/transport failure, empty response) — callers must not draw
+// conclusions from a no-verdict.
+//
+// cache memoises verdicts per (file, line, name) within one enrichment
+// pass; multiple ambiguous edges can share a call site.
+func (p *Provider) definitionNodeAtSite(g graph.Store, repoPrefix, absRoot, siteRel string, siteLine int, name string, cache map[string]*graph.Node) (*graph.Node, bool) {
+	if siteRel == "" || siteLine <= 0 || name == "" {
+		return nil, false
+	}
+	key := siteRel + "\x00" + strconv.Itoa(siteLine) + "\x00" + name
+	if cached, ok := cache[key]; ok {
+		return cached, true
+	}
+	if err := p.openDocument(absRoot, siteRel); err != nil {
+		return nil, false
+	}
+	defer func() { _ = p.closeDocument(filepath.Join(absRoot, siteRel)) }()
+
+	col, found := identifierColumnStrict(p.getSource(absRoot, siteRel), siteLine, name)
+	if !found {
+		// The identifier is not on the recorded line — a definition
+		// request would return junk for whatever token sits there.
+		return nil, false
+	}
+	locs, err := p.FindDefinition(absRoot, siteRel, siteLine-1, col, lspCallTimeout())
+	if err != nil || len(locs) == 0 {
+		return nil, false
+	}
+	defPath := uriToPath(locs[0].URI, absRoot)
+	if defPath == "" {
+		// Definition outside the workspace (stdlib, site-packages…).
+		cache[key] = nil
+		return nil, true
+	}
+	node := findDeclarationNode(g, scopedPath(repoPrefix, defPath), locs[0].Range.Start.Line+1, name)
+	cache[key] = node
+	return node, true
+}
+
+// findDeclarationNode locates the graph node whose declaration matches
+// (filePath, oneBasedLine, name). Exact StartLine match wins; a ±1
+// slack covers servers that anchor the definition on the identifier
+// line of a multi-line declaration header. The name must match — that
+// is the identity check this lookup exists for.
+func findDeclarationNode(g graph.Store, filePath string, oneBasedLine int, name string) *graph.Node {
+	var near *graph.Node
+	for _, n := range g.GetFileNodes(filePath) {
+		if n == nil || n.Name != name {
+			continue
+		}
+		if n.Kind == graph.KindFile || n.Kind == graph.KindImport || n.Kind == graph.KindParam {
+			continue
+		}
+		if n.StartLine == oneBasedLine {
+			return n
+		}
+		if near == nil && n.StartLine >= oneBasedLine-1 && n.StartLine <= oneBasedLine+1 {
+			near = n
+		}
+	}
+	return near
+}
+
 // Enrich runs the full LSP enrichment pass for a single-repo (un-
 // prefixed) graph. It delegates to EnrichRepoContext with an empty prefix.
 func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResult, error) {
@@ -420,6 +528,7 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			if existing != nil {
 				if existing.Confidence < 1.0 {
 					semantic.ConfirmEdge(existing, p.Name())
+					semantic.PersistEdge(g, existing)
 					result.EdgesConfirmed++
 				}
 			} else {
@@ -431,7 +540,17 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		rmu.Unlock()
 	}
 
-	// Query references for AMBIGUOUS edges to confirm/refute.
+	// Query references for AMBIGUOUS edges to confirm/refute. Promotion
+	// to the lsp tier is identity-anchored: the server's evidence must
+	// name the EDGE'S OWN call site, not merely fall somewhere inside
+	// the caller's body. The old span-containment check promoted a
+	// heuristically-misbound edge whenever the caller referenced BOTH
+	// same-named declarations (test exercising sync Client.stream and
+	// async AsyncClient.stream in one function): one genuine reference
+	// of the wrong target inside the caller's span rubber-stamped the
+	// edge bound at the OTHER member's line — a compiler-grade tier
+	// serving the wrong declaration.
+	defSiteCache := map[string]*graph.Node{}
 	for _, t := range targets {
 		if ctx.Err() != nil {
 			break
@@ -454,28 +573,77 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		col := identifierColumn(p.getSource(absRoot, toRel), toNode.StartLine, toNode.Name)
 		refs, err := p.findReferences(absRoot, toRel, line, col)
 		_ = p.closeDocument(filepath.Join(absRoot, toRel))
-		if err != nil || len(refs) == 0 {
+		if err != nil {
 			continue
 		}
 
-		// Check if any reference matches the caller's location. uriToPath
-		// returns a repo-relative path while the node FilePath is prefixed,
-		// so compare against the caller's stripped path.
+		// uriToPath returns a repo-relative path while node/edge FilePaths
+		// are prefixed, so compare against stripped paths.
 		callerRel := nodeRelPath(t.node)
+		siteRel := edgeSiteRelPath(t.edge, repoPrefix, callerRel)
+		siteLine := t.edge.Line
+
 		confirmed := false
 		for _, ref := range refs {
 			refPath := uriToPath(ref.URI, absRoot)
+			refLine := ref.Range.Start.Line + 1
+			if siteLine > 0 {
+				// Site-anchored: a reference of the target declaration at
+				// the edge's recorded line proves this site binds to this
+				// declaration. ±1 tolerates wrapped call expressions where
+				// the extractor and the server anchor on adjacent lines.
+				if refPath == siteRel && refLine >= siteLine-1 && refLine <= siteLine+1 {
+					confirmed = true
+					break
+				}
+				continue
+			}
+			// Legacy fallback for edges without a recorded site line:
+			// containment in the caller's span is the best we can do.
 			if refPath == callerRel &&
-				ref.Range.Start.Line+1 >= t.node.StartLine &&
-				ref.Range.Start.Line+1 <= t.node.EndLine {
+				refLine >= t.node.StartLine &&
+				refLine <= t.node.EndLine {
 				confirmed = true
 				break
+			}
+		}
+
+		if !confirmed && siteLine > 0 {
+			// The reference sweep did not tie this site to the edge's
+			// target. Ask the server what the site actually resolves to
+			// (textDocument/definition at the site identifier): when the
+			// definition lands back on the target we confirm anyway
+			// (reference lists can be incomplete); when it names a
+			// DIFFERENT known declaration we rebind the edge to the
+			// correct target instead of leaving a misattribution behind.
+			cand, ok := p.definitionNodeAtSite(g, repoPrefix, absRoot, siteRel, siteLine, toNode.Name, defSiteCache)
+			switch {
+			case !ok || cand == nil:
+				// No verdict — leave the edge at its heuristic tier so
+				// min_tier filtering excludes it.
+			case cand.ID == toNode.ID:
+				confirmed = true
+			case rebindTargetAcceptable(cand.Kind) && !edgeExistsAt(g, t.edge.From, cand.ID, t.edge.Kind, t.edge.Line):
+				rmu.Lock()
+				// Mutate the full edge state BEFORE ReindexEdge: disk
+				// backends persist the post-mutation struct verbatim
+				// (delete old key + insert current state), so anything
+				// stamped afterwards would be dropped.
+				oldTo := t.edge.To
+				t.edge.To = cand.ID
+				semantic.ConfirmEdge(t.edge, p.Name())
+				t.edge.Meta["rebound_from"] = oldTo
+				g.ReindexEdge(t.edge, oldTo)
+				rmu.Unlock()
+				result.EdgesConfirmed++
+				continue
 			}
 		}
 
 		if confirmed {
 			rmu.Lock()
 			semantic.ConfirmEdge(t.edge, p.Name())
+			semantic.PersistEdge(g, t.edge)
 			rmu.Unlock()
 			result.EdgesConfirmed++
 		}
@@ -2028,12 +2196,14 @@ func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string
 	// (from, to, calls) edge by line so per-line dedup and per-site
 	// promotion share a single fetch.
 	var existing *graph.Edge
+	pairEdges := 0
 	byLine := map[int][]*graph.Edge{}
 	for _, e := range g.GetOutEdges(from.ID) {
 		if e.Kind != graph.EdgeCalls || e.To != to.ID {
 			continue
 		}
 		byLine[e.Line] = append(byLine[e.Line], e)
+		pairEdges++
 		if existing == nil {
 			existing = e
 		}
@@ -2042,17 +2212,24 @@ func (p *Provider) recordHierarchyCall(g graph.Store, repoPrefix, absRoot string
 		if graph.OriginRank(e.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
 			semantic.ConfirmEdge(e, p.Name())
 			e.Origin = graph.OriginLSPResolved
+			semantic.PersistEdge(g, e)
 			result.EdgesConfirmed++
 		}
 	}
 
 	lines := callSiteLines(fromRanges)
 	if len(lines) == 0 {
-		// No precise ranges from the server. Preserve the legacy
-		// behaviour: promote the first pair edge, or land one
-		// declaration-anchored edge when the pair does not exist.
+		// No precise ranges from the server. The (from → to) pair is
+		// still server-verified, but WHICH line each edge sits on is
+		// not: promote only when the pair has exactly one candidate
+		// edge. With several candidate lines and no ranges, promoting
+		// the first was an arbitrary pick that could stamp the lsp
+		// tier onto a heuristically-misbound site — those stay at
+		// their heuristic tier instead.
 		if existing != nil {
-			promote(existing)
+			if pairEdges == 1 {
+				promote(existing)
+			}
 			return
 		}
 		semantic.AddSemanticEdge(g, from.ID, to.ID, graph.EdgeCalls,
@@ -2133,6 +2310,7 @@ func (p *Provider) linkTypeHierarchy(g graph.Store, repoPrefix, absRoot string, 
 		if graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
 			semantic.ConfirmEdge(existing, p.Name())
 			existing.Origin = graph.OriginLSPResolved
+			semantic.PersistEdge(g, existing)
 			result.EdgesConfirmed++
 		}
 	} else {
@@ -2189,6 +2367,7 @@ func addOverrideEdges(g graph.Store, child, parent *graph.Node, provider, origin
 			if graph.OriginRank(existing.Origin) < graph.OriginRank(origin) {
 				semantic.ConfirmEdge(existing, provider)
 				existing.Origin = origin
+				semantic.PersistEdge(g, existing)
 				if result != nil {
 					result.EdgesConfirmed++
 				}
@@ -2196,8 +2375,9 @@ func addOverrideEdges(g graph.Store, child, parent *graph.Node, provider, origin
 			continue
 		}
 		ed := semantic.AddSemanticEdge(g, m.ID, pm.ID, graph.EdgeOverrides, m.FilePath, m.StartLine, provider)
-		if ed != nil {
+		if ed != nil && ed.Origin != origin {
 			ed.Origin = origin
+			semantic.PersistEdge(g, ed)
 		}
 		if result != nil {
 			result.EdgesAdded++
@@ -2379,8 +2559,18 @@ func lspLine(n *graph.Node) (int, bool) {
 // — col=0 is the `func` keyword, not `Bar`). Resolving to the actual
 // identifier column unblocks the bulk of cross-file edge promotion.
 func identifierColumn(src []byte, oneBasedLine int, name string) int {
+	col, _ := identifierColumnStrict(src, oneBasedLine, name)
+	return col
+}
+
+// identifierColumnStrict is identifierColumn with an explicit found
+// flag: (0, false) when the source has no such line or the line does
+// not contain the whole identifier. Callers that would otherwise fire
+// an LSP request at a junk position (column 0 of an unrelated token)
+// can skip the round trip instead.
+func identifierColumnStrict(src []byte, oneBasedLine int, name string) (int, bool) {
 	if name == "" || oneBasedLine <= 0 || len(src) == 0 {
-		return 0
+		return 0, false
 	}
 	// Walk to the start of the requested line.
 	target := oneBasedLine - 1
@@ -2394,7 +2584,7 @@ func identifierColumn(src []byte, oneBasedLine int, name string) int {
 		cur++
 	}
 	if target > 0 {
-		return 0
+		return 0, false
 	}
 	lineEnd := lineStart
 	for lineEnd < len(src) && src[lineEnd] != '\n' {
@@ -2403,9 +2593,9 @@ func identifierColumn(src []byte, oneBasedLine int, name string) int {
 	line := string(src[lineStart:lineEnd])
 	idx := identifierIndex(line, name)
 	if idx < 0 {
-		return 0
+		return 0, false
 	}
-	return idx
+	return idx, true
 }
 
 // identifierIndex returns the column of the first occurrence of name in

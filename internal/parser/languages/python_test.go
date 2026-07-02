@@ -438,3 +438,80 @@ from app import service
 	require.NotNil(t, req)
 	assert.Equal(t, true, req.Meta["is_external"])
 }
+
+// Decorated methods (@property, @staticmethod, @contextmanager, ...) are
+// wrapped in a decorated_definition node between the def and the class
+// body. They must still classify as class members: two same-named
+// decorated properties on two classes in one file used to collapse into
+// bare colliding `<file>::<name>` IDs (httpx's Headers.encoding vs
+// Response.encoding), so every consumer addressing the class-qualified
+// ID silently landed on the wrong declaration.
+func TestPyExtractor_DecoratedMethodsAreClassMembers(t *testing.T) {
+	src := []byte(`class Headers:
+    @property
+    def encoding(self):
+        return "ascii"
+
+class Response:
+    @property
+    def encoding(self):
+        return "utf-8"
+
+    @staticmethod
+    def build():
+        return Response()
+
+def caller():
+    @wraps
+    def inner():
+        pass
+    return inner
+`)
+	e := NewPythonExtractor()
+	result, err := e.Extract("m.py", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	he := byID["m.py::Headers.encoding"]
+	require.NotNil(t, he, "decorated property must get a class-qualified ID (got IDs: %v)", pyNodeIDs(result.Nodes))
+	assert.Equal(t, graph.KindMethod, he.Kind)
+	assert.Equal(t, 3, he.StartLine)
+	assert.Equal(t, "Headers", he.Meta["receiver"])
+
+	re := byID["m.py::Response.encoding"]
+	require.NotNil(t, re, "same-named decorated property on a second class must stay distinct")
+	assert.Equal(t, graph.KindMethod, re.Kind)
+	assert.Equal(t, 8, re.StartLine)
+	assert.Equal(t, "Response", re.Meta["receiver"])
+
+	rb := byID["m.py::Response.build"]
+	require.NotNil(t, rb, "@staticmethod def must classify as a method")
+	assert.Equal(t, graph.KindMethod, rb.Kind)
+
+	// A decorated function nested inside a function is NOT a class
+	// member — it stays in the free-function bucket.
+	in := byID["m.py::inner"]
+	require.NotNil(t, in)
+	assert.Equal(t, graph.KindFunction, in.Kind)
+
+	// member_of edges link each decorated method to its class.
+	memberTo := map[string]string{}
+	for _, ed := range edgesOfKind(result.Edges, graph.EdgeMemberOf) {
+		memberTo[ed.From] = ed.To
+	}
+	assert.Equal(t, "m.py::Headers", memberTo["m.py::Headers.encoding"])
+	assert.Equal(t, "m.py::Response", memberTo["m.py::Response.encoding"])
+	assert.Equal(t, "m.py::Response", memberTo["m.py::Response.build"])
+}
+
+func pyNodeIDs(nodes []*graph.Node) []string {
+	out := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, n.ID)
+	}
+	return out
+}
