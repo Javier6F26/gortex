@@ -44,14 +44,26 @@ func runCodexPostToolUse(data []byte, port int) {
 	}
 
 	cmd, _ := input.ToolInput["command"].(string)
-	if classifyBashCommand(cmd).Action != BashActionGrepLike {
+	classification := classifyBashCommand(cmd)
+	switch classification.Action {
+	case BashActionGrepLike:
+		// Codex wraps grep/rg/ag in Bash. Re-label that narrow shape as Grep so
+		// the existing PostToolUse enrichment can parse path:line output and do
+		// the graph lookup without changing Claude Code behavior.
+		input.ToolName = "Grep"
+	case BashActionReadSource:
+		if classification.Path == "" {
+			return
+		}
+		if input.ToolInput == nil {
+			input.ToolInput = make(map[string]any)
+		}
+		input.ToolName = "Read"
+		input.ToolInput["file_path"] = classification.Path
+	default:
 		return
 	}
 
-	// Codex wraps grep/rg/ag in Bash. Re-label that narrow shape as Grep so
-	// the existing PostToolUse enrichment can parse path:line output and do
-	// the graph lookup without changing Claude Code behavior.
-	input.ToolName = "Grep"
 	normalized, err := json.Marshal(input)
 	if err != nil {
 		return

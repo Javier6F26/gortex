@@ -86,6 +86,57 @@ func TestRunCodexPostToolUseBashGrepOutputAdditionalContext(t *testing.T) {
 	}
 }
 
+func TestRunCodexPostToolUseBashReadSourceAdditionalContext(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "cat",
+			command: "cat internal/a.go",
+		},
+		{
+			name:    "head",
+			command: "head -20 internal/a.go",
+		},
+		{
+			name:    "tail",
+			command: "tail -n 50 internal/a.go",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			port := stubBridge(t, map[string]int{"internal/a.go": 3}, nil, map[string]int{"internal/a.go": 2})
+
+			data := codexPostBashPayload(tt.command, "package internal\n")
+			out := captureStdout(t, func() { runCodex(data, port) })
+			if out == "" {
+				t.Fatal("expected Codex Bash PostToolUse Read graph context, got empty output")
+			}
+			hso := decodeHookOutput(t, out).HookSpecificOutput
+			if hso == nil {
+				t.Fatalf("missing hookSpecificOutput: %s", out)
+			}
+			if hso.HookEventName != "PostToolUse" {
+				t.Fatalf("hookEventName=%q want PostToolUse", hso.HookEventName)
+			}
+			if !strings.Contains(hso.AdditionalContext, "Graph footprint for internal/a.go") {
+				t.Fatalf("additionalContext missing file footprint: %q", hso.AdditionalContext)
+			}
+			if !strings.Contains(hso.AdditionalContext, "3 indexed symbol(s)") {
+				t.Fatalf("additionalContext missing symbol count: %q", hso.AdditionalContext)
+			}
+			if !strings.Contains(hso.AdditionalContext, "2 unique external caller(s)") {
+				t.Fatalf("additionalContext missing caller count: %q", hso.AdditionalContext)
+			}
+			if hso.PermissionDecision != "" || hso.PermissionDecisionReason != "" {
+				t.Fatalf("Codex PostToolUse enrichment must not deny: %#v", hso)
+			}
+		})
+	}
+}
+
 func TestRunCodexPostToolUseBashCommandShapes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -108,7 +159,7 @@ func TestRunCodexPostToolUseBashCommandShapes(t *testing.T) {
 			response: "internal/handler.go\n",
 		},
 		{
-			name:     "cat source output stays quiet",
+			name:     "unindexed cat source output stays quiet",
 			command:  "cat /repo/handler.go",
 			response: "internal/a.go:7:type MyType struct{}\n",
 		},
