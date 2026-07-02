@@ -75,7 +75,9 @@ func ResolveRustScopeCalls(g graph.Store) int {
 		return bound
 	}
 
-	resolved := 0
+	// Trait-impl override edges bind independently of unresolved call edges,
+	// so resolve them before the call-edge early-out below.
+	resolved := resolveRustTraitOverrides(g, idx)
 	var reindexBatch []graph.EdgeReindex
 
 	// Collect candidate edges (still-unresolved Rust EdgeCalls) plus the
@@ -102,7 +104,7 @@ func ResolveRustScopeCalls(g graph.Store) int {
 		}
 	}
 	if len(cands) == 0 {
-		return bound
+		return bound + resolved
 	}
 
 	fromList := make([]string, 0, len(fromIDs))
@@ -138,6 +140,76 @@ func ResolveRustScopeCalls(g graph.Store) int {
 		g.ReindexEdges(reindexBatch)
 	}
 	return bound + resolved
+}
+
+// resolveRustTraitOverrides binds the unresolved EdgeOverrides the extractor
+// emits for `impl Trait for Type` methods (target unresolved::<Trait>.<method>)
+// to the trait declaration's method node. The trait may live in another file
+// or crate, so the binding runs off the trait-method index rather than the
+// caller's file. Returns the number of override edges bound.
+func resolveRustTraitOverrides(g graph.Store, idx *rustScopeIndex) int {
+	var cands []*graph.Edge
+	fromIDs := make(map[string]struct{})
+	for e := range g.EdgesByKind(graph.EdgeOverrides) {
+		if e == nil || !graph.IsUnresolvedTarget(e.To) {
+			continue
+		}
+		if _, _, ok := parseRustOverrideTarget(e.To); !ok {
+			continue
+		}
+		cands = append(cands, e)
+		if e.From != "" {
+			fromIDs[e.From] = struct{}{}
+		}
+	}
+	if len(cands) == 0 {
+		return 0
+	}
+	fromList := make([]string, 0, len(fromIDs))
+	for id := range fromIDs {
+		fromList = append(fromList, id)
+	}
+	fromNodes := g.GetNodesByIDs(fromList)
+
+	bound := 0
+	var batch []graph.EdgeReindex
+	for _, e := range cands {
+		trait, method, _ := parseRustOverrideTarget(e.To)
+		from := fromNodes[e.From]
+		if from == nil || from.Language != "rust" {
+			continue
+		}
+		target := idx.uniqueTraitMethod(from.RepoPrefix, trait, method)
+		if target == "" || target == e.To {
+			continue
+		}
+		oldTo := e.To
+		e.To = target
+		e.Origin = graph.OriginASTResolved
+		e.Confidence = 1.0
+		e.ConfidenceLabel = graph.ConfidenceLabelFor(graph.EdgeOverrides, 1.0)
+		if e.Meta == nil {
+			e.Meta = map[string]any{}
+		}
+		e.Meta["rust_resolution"] = "trait_override"
+		batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: oldTo})
+		bound++
+	}
+	if len(batch) > 0 {
+		g.ReindexEdges(batch)
+	}
+	return bound
+}
+
+// parseRustOverrideTarget splits an unresolved::<Trait>.<method> override
+// target into its trait + method components.
+func parseRustOverrideTarget(to string) (trait, method string, ok bool) {
+	name := graph.UnresolvedName(to)
+	i := strings.LastIndex(name, ".")
+	if i <= 0 || i >= len(name)-1 {
+		return "", "", false
+	}
+	return name[:i], name[i+1:], true
 }
 
 // rustScopeEdgeCandidate reports whether an unresolved call edge is one
@@ -334,6 +406,28 @@ func (idx *rustScopeIndex) uniqueMethod(repo, owner, name string) string {
 		}
 		if hit != "" && hit != m.ID {
 			return "" // ambiguous
+		}
+		hit = m.ID
+	}
+	return hit
+}
+
+// uniqueTraitMethod returns the ID of the single trait-declaration method
+// named `name` owned by trait `owner` in repo, or "" on no match or
+// ambiguity. Only nodes marked Meta["trait_decl"]="true" qualify, so an
+// inherent method on a same-named type is never mistaken for the trait's.
+func (idx *rustScopeIndex) uniqueTraitMethod(repo, owner, name string) string {
+	cands := idx.methodsByOwner[rustOwnerKey{repo: repo, owner: owner}]
+	var hit string
+	for _, m := range cands {
+		if m.Name != name || m.Meta == nil {
+			continue
+		}
+		if td, _ := m.Meta["trait_decl"].(string); td != "true" {
+			continue
+		}
+		if hit != "" && hit != m.ID {
+			return ""
 		}
 		hit = m.ID
 	}
