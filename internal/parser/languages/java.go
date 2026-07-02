@@ -408,7 +408,17 @@ func (e *JavaExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 			Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 		}
 		if c.isSelector {
-			if recvType, ok := tenv[c.receiver]; ok {
+			// `this.<field>` receivers resolve through the enclosing class's
+			// field types exactly like the bare `<field>` spelling: strip the
+			// `this.` qualifier and look the field up in the type env (field
+			// declarations already seed tenv). The two spellings must behave
+			// identically so a DI-injected repository called as `this.owners.x()`
+			// and `owners.x()` both stamp the field's declared type.
+			recv := c.receiver
+			if field, ok := strings.CutPrefix(recv, "this."); ok && field != "" && !strings.ContainsAny(field, ".([") {
+				recv = field
+			}
+			if recvType, ok := tenv[recv]; ok {
 				edge.Meta = map[string]any{"receiver_type": recvType}
 			} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
 				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
@@ -801,11 +811,25 @@ func (e *JavaExtractor) emitMethod(m parser.QueryResult, filePath, fileID string
 		return
 	}
 	seen[id] = true
-	result.Nodes = append(result.Nodes, &graph.Node{
+	flatNode := &graph.Node{
 		ID: id, Kind: graph.KindMethod, Name: name,
 		FilePath: filePath, StartLine: startLine1, EndLine: def.EndLine + 1,
 		Language: "java",
-	})
+	}
+	// Interface and enum method nodes keep the flat `<file>::<name>` ID (the
+	// bench arm and existing graphs depend on it) but carry their declaring
+	// type as Meta["receiver"] so the resolver's exact-type method-call passes
+	// (nodeReceiverType == receiver_type) can bind to them the same way they
+	// bind to class methods.
+	if enclosing != nil {
+		switch enclosing.Type() {
+		case "interface_declaration", "enum_declaration":
+			if recv := javaIdentifierName(enclosing, src); recv != "" {
+				flatNode.Meta = map[string]any{"receiver": recv}
+			}
+		}
+	}
+	result.Nodes = append(result.Nodes, flatNode)
 	result.Edges = append(result.Edges, &graph.Edge{
 		From: fileID, To: id, Kind: graph.EdgeDefines, FilePath: filePath, Line: startLine1,
 	})

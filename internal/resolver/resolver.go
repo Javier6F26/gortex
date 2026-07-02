@@ -2202,6 +2202,18 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 		e.Origin = graph.OriginASTInferred
 	}
 
+	// A Java member call with exactly one method candidate for the name is a
+	// grounded inference, not a text-grade guess: there is nowhere else it
+	// could bind. Lift it to the ast_inferred tier so min_tier filtering and
+	// the cross-package guard treat it as the resolved target it is (the
+	// guard's Java lone-definition exception keeps it from being reverted).
+	if methodCount == 1 && anyMethod != nil && anyMethod.Language == "java" && e.Origin == "" {
+		e.Origin = graph.OriginASTInferred
+		if e.Confidence == 0 {
+			e.Confidence = 0.7
+		}
+	}
+
 	if sameDirMethod != nil {
 		e.To = sameDirMethod.ID
 		stats.Resolved++
