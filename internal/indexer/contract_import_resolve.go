@@ -150,14 +150,25 @@ func (mi *MultiIndexer) tsAliasMapFor(srcFile string) (*tsalias.Map, string) {
 	}
 	for _, m := range mi.AllMetadata() {
 		prefix := m.RepoPrefix
-		if prefix == "" || !strings.HasPrefix(srcFile, prefix+"/") {
+		rel := srcFile
+		switch {
+		case m.Unprefixed || prefix == "":
+			// A lone tracked repo mints unprefixed nodes: srcFile is
+			// already repo-relative, and any resolved target must stay
+			// unprefixed to line up with graph FilePaths. Skipping this
+			// case (the old `prefix == "" → continue`) disabled
+			// tsconfig-paths alias resolution for every single-repo
+			// daemon user.
+			prefix = ""
+		case strings.HasPrefix(srcFile, prefix+"/"):
+			rel = strings.TrimPrefix(srcFile, prefix+"/")
+		default:
 			continue
 		}
 		coll := loadTSAliasCollection(m.RootPath)
 		if coll == nil {
 			return nil, prefix
 		}
-		rel := strings.TrimPrefix(srcFile, prefix+"/")
 		return coll.FindForFile(path.Dir(rel)), prefix
 	}
 	return nil, ""

@@ -1525,14 +1525,6 @@ func isStdlibLike(importPath string) bool {
 func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *ResolveStats) {
 	callerRepo := r.callerRepoPrefix(e)
 
-	// npm-alias rewrite: a JS/TS import of a package.json alias key
-	// (`"shared": "npm:@acme/shared-lib@1.4.0"`) actually targets the
-	// real package. Rewrite the specifier before any lookup so a
-	// locally-vendored `@acme/shared-lib` resolves to its real node
-	// instead of falling through to an external stub. A no-op for
-	// non-aliased specifiers and non-JS/TS callers.
-	importPath, npmAliased := rewriteNpmAliasImport(r.npmAlias, e.FilePath, importPath)
-
 	// JS/TS relative + tsconfig-path-alias / baseUrl import: resolve the
 	// specifier onto the in-repo file (or exported symbol) it names. The
 	// dirIndex cascade below is package-directory-oriented and never
@@ -1541,6 +1533,13 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 	// buildImportClosure of reachability and letting the cross-package
 	// guard revert the callers (issue #136). A no-op for non-JS/TS callers
 	// and for genuine third-party specifiers.
+	//
+	// This runs BEFORE the npm-alias rewrite, mirroring tsserver's
+	// precedence: `compilerOptions.paths` beats node_modules. A library
+	// whose test suite imports its own published name (zustand's tests
+	// import 'zustand', mapped by tsconfig paths onto ./src) must land on
+	// the in-repo source, not on its own installed dist inside
+	// node_modules.
 	if to := resolveJSTSImportTarget(r.cachedGetNode, r.pathAlias, jsTSImportCallerFile(e), importPath); to != "" {
 		e.To = to
 		if callerRepo != "" {
@@ -1550,6 +1549,28 @@ func (r *Resolver) resolveImport(e *graph.Edge, importPath string, stats *Resolv
 		}
 		stats.Resolved++
 		return
+	}
+
+	// npm-alias rewrite: a JS/TS import of a package.json alias key
+	// (`"shared": "npm:@acme/shared-lib@1.4.0"`) actually targets the
+	// real package. Rewrite the specifier before any further lookup so a
+	// locally-vendored `@acme/shared-lib` resolves to its real node
+	// instead of falling through to an external stub. A no-op for
+	// non-aliased specifiers and non-JS/TS callers.
+	importPath, npmAliased := rewriteNpmAliasImport(r.npmAlias, e.FilePath, importPath)
+	if npmAliased {
+		// The rewritten specifier may itself be tsconfig-paths/relative
+		// resolvable (an alias onto a workspace member).
+		if to := resolveJSTSImportTarget(r.cachedGetNode, r.pathAlias, jsTSImportCallerFile(e), importPath); to != "" {
+			e.To = to
+			if callerRepo != "" {
+				if n := r.cachedGetNode(to); n != nil && n.RepoPrefix != "" && n.RepoPrefix != callerRepo {
+					e.CrossRepo = true
+				}
+			}
+			stats.Resolved++
+			return
+		}
 	}
 
 	// Look for a package node with matching qualified name.
@@ -1737,7 +1758,65 @@ func (r *Resolver) resolveFunctionCall(e *graph.Edge, funcName string, stats *Re
 		}
 	}
 
+	// JS/TS last resort: an exported const initialised with a callable the
+	// extractor could not classify as a function (alias-cast exports like
+	// `export const persist = persistImpl as unknown as Persist`) lands as
+	// a KindVariable/KindConstant node, which the function/method loops
+	// above can never bind. Accept a TOP-LEVEL variable/constant callee —
+	// same-directory first, then a unique same-repo match; any ambiguity
+	// refuses so a local binding cannot capture an unrelated call.
+	if isJSTSPath(e.FilePath) {
+		if pick := pickTopLevelValueCallee(candidates, funcName, callerDir, r.dirFor); pick != nil {
+			e.To = pick.ID
+			e.Origin = graph.OriginASTInferred
+			e.Confidence = 0.7
+			if e.Meta == nil {
+				e.Meta = map[string]any{}
+			}
+			e.Meta["resolution"] = "value_callee"
+			stats.Resolved++
+			return
+		}
+	}
+
 	stats.Unresolved++
+}
+
+// pickTopLevelValueCallee returns the variable/constant candidate a JS/TS
+// call edge may bind to when no function/method candidate matched: only a
+// top-level symbol (ID == <file>::<name>, i.e. not a local or an object
+// member) is eligible, same-directory candidates win, and ambiguity at
+// either tier returns nil so no false edge lands.
+func pickTopLevelValueCallee(candidates []*graph.Node, funcName, callerDir string, dirFor func(string) string) *graph.Node {
+	var sameDir, repoWide *graph.Node
+	sameDirAmbiguous, repoAmbiguous := false, false
+	for _, c := range candidates {
+		if c.Kind != graph.KindVariable && c.Kind != graph.KindConstant {
+			continue
+		}
+		if c.ID != c.FilePath+"::"+funcName {
+			continue // nested/local binding — not a top-level value
+		}
+		if dirFor(c.FilePath) == callerDir {
+			if sameDir != nil {
+				sameDirAmbiguous = true
+			} else {
+				sameDir = c
+			}
+		}
+		if repoWide != nil {
+			repoAmbiguous = true
+		} else {
+			repoWide = c
+		}
+	}
+	if sameDir != nil && !sameDirAmbiguous {
+		return sameDir
+	}
+	if repoWide != nil && !repoAmbiguous {
+		return repoWide
+	}
+	return nil
 }
 
 // resolveTypeOrFunc resolves unresolved edges that could be either a type

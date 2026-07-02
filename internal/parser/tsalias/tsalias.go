@@ -43,6 +43,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -179,7 +180,11 @@ func matchAlias(a *Alias, modulePath string) (string, bool) {
 }
 
 // joinTarget resolves a filled-in target against the config's BaseURL and
-// DirPrefix, returning a forward-slashed repo-relative path.
+// DirPrefix, returning a forward-slashed repo-relative path. The result is
+// always path-cleaned: a tsconfig written without a baseUrl (legal since
+// TS 4.1) keeps its targets verbatim (`"zustand": ["./src/index.ts"]`),
+// and an uncleaned `./` prefix would never match a graph file node, so
+// every paths-alias import in such a repo silently failed to resolve.
 func (m *Map) joinTarget(matched string) string {
 	joined := matched
 	if m.BaseURL != "" {
@@ -188,7 +193,10 @@ func (m *Map) joinTarget(matched string) string {
 	if m.DirPrefix != "" {
 		joined = filepath.ToSlash(filepath.Join(m.DirPrefix, joined))
 	}
-	return joined
+	if joined == "" {
+		return ""
+	}
+	return path.Clean(joined)
 }
 
 // probeExts are the source extensions a path-alias target may resolve to,

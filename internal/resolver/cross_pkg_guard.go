@@ -211,25 +211,47 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 	// (caller file + target) in one GetNodesByIDs — a per-edge GetNode here
 	// is a query round-trip per import on a disk backend. Inlines
 	// edgeCallerFile's cached-node logic against the batch map.
-	var imports []*graph.Edge
+	//
+	// Re-export edges ride the same batch: an import that lands on a
+	// barrel (`import { persist } from 'zustand/middleware'` resolving to
+	// src/middleware.ts, which `export { persist } from
+	// './middleware/persist.ts'`) must make the re-exported module's
+	// directory reachable too — the consumer names the barrel, but the
+	// symbol it calls lives behind the re-export hop. Without this, the
+	// guard reverts every legitimate barrel-mediated call as
+	// "not import-reachable".
+	skipTarget := func(to string) bool {
+		return strings.HasPrefix(to, unresolvedPrefix) ||
+			strings.HasPrefix(to, "external::") ||
+			graph.IsStdlibStub(to) ||
+			strings.HasPrefix(to, "dep::")
+	}
+	var imports, reexports []*graph.Edge
 	ids := make(map[string]struct{})
-	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
-		// Skip imports still pointing at an unresolved placeholder or an
-		// out-of-repo stub — neither names an in-repo directory that a
-		// name-only call candidate could legitimately live in.
-		if strings.HasPrefix(e.To, unresolvedPrefix) ||
-			strings.HasPrefix(e.To, "external::") ||
-			graph.IsStdlibStub(e.To) ||
-			strings.HasPrefix(e.To, "dep::") {
-			continue
-		}
-		imports = append(imports, e)
+	collect := func(e *graph.Edge) {
 		if e.From != "" {
 			ids[e.From] = struct{}{}
 		}
 		if e.To != "" {
 			ids[e.To] = struct{}{}
 		}
+	}
+	for e := range r.graph.EdgesByKind(graph.EdgeImports) {
+		// Skip imports still pointing at an unresolved placeholder or an
+		// out-of-repo stub — neither names an in-repo directory that a
+		// name-only call candidate could legitimately live in.
+		if skipTarget(e.To) {
+			continue
+		}
+		imports = append(imports, e)
+		collect(e)
+	}
+	for e := range r.graph.EdgesByKind(graph.EdgeReExports) {
+		if skipTarget(e.To) {
+			continue
+		}
+		reexports = append(reexports, e)
+		collect(e)
 	}
 	if len(imports) == 0 {
 		return closure
@@ -239,6 +261,39 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 		idList = append(idList, id)
 	}
 	nodes := r.graph.GetNodesByIDs(idList)
+
+	// Direct barrel-file → re-export-target-file map, then a memoised
+	// transitive walk so chained barrels (src/index.ts → src/middleware.ts
+	// → src/middleware/persist.ts) contribute every hop's directory.
+	reexpTargets := make(map[string][]string)
+	for _, e := range reexports {
+		barrel := e.FilePath
+		if n := nodes[e.From]; n != nil && n.FilePath != "" {
+			barrel = n.FilePath
+		}
+		if t := nodes[e.To]; t != nil && t.FilePath != "" && barrel != "" {
+			reexpTargets[barrel] = append(reexpTargets[barrel], t.FilePath)
+		}
+	}
+	barrelDirCache := make(map[string][]string)
+	var barrelDirs func(file string, seen map[string]bool) []string
+	barrelDirs = func(file string, seen map[string]bool) []string {
+		if dirs, ok := barrelDirCache[file]; ok {
+			return dirs
+		}
+		if seen[file] {
+			return nil
+		}
+		seen[file] = true
+		var dirs []string
+		for _, tf := range reexpTargets[file] {
+			dirs = append(dirs, filepath.Dir(tf))
+			dirs = append(dirs, barrelDirs(tf, seen)...)
+		}
+		barrelDirCache[file] = dirs
+		return dirs
+	}
+
 	for _, e := range imports {
 		callerFile := e.FilePath
 		if n := nodes[e.From]; n != nil && n.FilePath != "" {
@@ -246,6 +301,9 @@ func (r *Resolver) buildImportClosure() map[string]map[string]struct{} {
 		}
 		if target := nodes[e.To]; target != nil && target.FilePath != "" {
 			add(callerFile, filepath.Dir(target.FilePath))
+			for _, d := range barrelDirs(target.FilePath, map[string]bool{}) {
+				add(callerFile, d)
+			}
 		}
 	}
 	return closure

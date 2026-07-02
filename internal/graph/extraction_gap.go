@@ -27,6 +27,15 @@ const (
 	// symbol may well be live; the graph just does not know. This is
 	// the dangerous case for a delete-or-rewrite decision.
 	ZeroEdgePossibleExtractionGap ZeroEdgeClass = "possible_extraction_gap"
+
+	// ZeroEdgeCoverageIncomplete means the symbol has no resolved
+	// incoming call/reference edges, but the graph DOES carry
+	// import-level evidence that consumers exist: inbound `imports` /
+	// `re_exports` edges land on the symbol itself, or (for a public
+	// JS/TS symbol) on its file. The usage query is incomplete, not
+	// empty — reference-level resolution failed somewhere upstream —
+	// so an agent must NOT read the empty result as safe-to-remove.
+	ZeroEdgeCoverageIncomplete ZeroEdgeClass = "coverage_incomplete"
 )
 
 // ZeroEdgeCaveat is the structured caveat attached to an empty graph
@@ -112,7 +121,47 @@ func ClassifyZeroEdge(g Store, symbolID string) ZeroEdgeClass {
 			return ZeroEdgeNone
 		}
 	}
+	if importConsumerCount(g, symbolID) > 0 {
+		return ZeroEdgeCoverageIncomplete
+	}
 	return ZeroEdgeLikelyUnused
+}
+
+// importConsumerCount counts the import-level consumer evidence for a
+// symbol: inbound `imports` / `re_exports` edges on the symbol itself
+// (any language — a per-binding import that resolved onto the symbol is
+// direct proof a consumer names it), plus, for a public JS/TS symbol,
+// inbound module-level import edges on its file node (a module-level
+// `import ... from './file'` lands on the file, but still proves the
+// file's exports have consumers).
+func importConsumerCount(g Store, symbolID string) int {
+	count := 0
+	for _, e := range g.GetInEdges(symbolID) {
+		if e.Kind == EdgeImports || e.Kind == EdgeReExports {
+			count++
+		}
+	}
+	if count > 0 {
+		return count
+	}
+	n := g.GetNode(symbolID)
+	if n == nil || n.FilePath == "" || n.FilePath == symbolID {
+		return 0
+	}
+	switch n.Language {
+	case "typescript", "tsx", "javascript", "jsx":
+	default:
+		return 0 // module-level file imports imply consumers only for JS/TS
+	}
+	if vis, _ := n.Meta["visibility"].(string); vis != "public" {
+		return 0
+	}
+	for _, e := range g.GetInEdges(n.FilePath) {
+		if e.Kind == EdgeImports || e.Kind == EdgeReExports {
+			count++
+		}
+	}
+	return count
 }
 
 // zeroEdgeMessages maps each classification to its human-readable
@@ -125,6 +174,10 @@ var zeroEdgeMessages = map[ZeroEdgeClass]string{
 		"normally indexed symbol always has at least a structural edge, so the " +
 		"extractor most likely did not process it — treat this empty result as " +
 		"unverified, not as proof the symbol is unused.",
+	ZeroEdgeCoverageIncomplete: "no resolved call or reference edges, but import/" +
+		"re-export edges point at this symbol or its file — consumers exist and " +
+		"reference-level resolution is incomplete for them. Treat this empty result " +
+		"as UNVERIFIED coverage, not as proof the symbol is unused or safe to remove.",
 }
 
 // zeroEdgeNotFoundMessage is the caveat text when the queried id is not in

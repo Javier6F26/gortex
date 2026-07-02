@@ -28,7 +28,16 @@ const tsQAll = `
   (lexical_declaration
     (variable_declarator
       name: (identifier) @arrow.name
-      value: (arrow_function) @arrow.body)) @arrow.def
+      value: [
+        (arrow_function) @arrow.body
+        (parenthesized_expression (arrow_function) @arrow.body)
+        (as_expression (arrow_function) @arrow.body)
+        (as_expression (parenthesized_expression (arrow_function) @arrow.body))
+        (as_expression (as_expression (arrow_function) @arrow.body))
+        (as_expression (as_expression (parenthesized_expression (arrow_function) @arrow.body)))
+        (satisfies_expression (arrow_function) @arrow.body)
+        (satisfies_expression (parenthesized_expression (arrow_function) @arrow.body))
+      ])) @arrow.def
 
   (pair
     key: (property_identifier) @objfn.name
@@ -441,7 +450,13 @@ func (e *TypeScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
-			continue
+			// Module-top-level call, or a call inside an anonymous
+			// callback (`it('...', () => { create(...) })`) that produced
+			// no function node. Attribute the call site to the file node
+			// instead of dropping it: dropping made every such callee
+			// invisible to find_usages / get_callers — a test-suite-heavy
+			// repo loses the bulk of its public-API call sites.
+			callerID = fileID
 		}
 		if !c.isMember {
 			if binding, ok := destructured[c.name]; ok {

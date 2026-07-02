@@ -304,7 +304,11 @@ func (e *JavaScriptExtractor) Extract(filePath string, src []byte) (*parser.Extr
 	for _, c := range calls {
 		callerID := findEnclosingFunc(funcRanges, c.line)
 		if callerID == "" {
-			continue
+			// Module-top-level call, or a call inside an anonymous
+			// callback that produced no function node: attribute the
+			// call site to the file node instead of dropping it (same
+			// rationale as the TypeScript extractor).
+			callerID = fileID
 		}
 		if c.isMember {
 			// Object-literal member call (`api.process()` where
