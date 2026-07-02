@@ -112,6 +112,14 @@ type rustDeferredLet struct {
 	value    *sitter.Node // RHS expression node, or nil
 }
 
+// rustFuncDef buffers a function/method definition node for the post-emit
+// per-function receiver-scope build (paramsByFunc).
+type rustFuncDef struct {
+	node  *sitter.Node
+	owner string // impl/trait type that self binds to; "" for free functions
+	line  int    // 1-based start line, mapped back to the emitted id via funcRanges
+}
+
 func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.ExtractionResult, error) {
 	tree, err := parser.ParseFile(src, e.lang)
 	if err != nil {
@@ -136,15 +144,24 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 
 	var calls []rustDeferredCall
 	var lets []rustDeferredLet
+	var funcDefs []rustFuncDef
 
 	parser.EachMatch(e.qAll, root, src, func(m parser.QueryResult) {
 		switch {
 
 		case m.Captures["func.def"] != nil:
 			e.emitFunction(m, filePath, fileID, src, result, seen, annotationSeen)
+			fd := m.Captures["func.def"]
+			owner := rustImplMethodReceiver(fd.Node, src)
+			if owner == "" {
+				owner = rustTraitMethodOwner(fd.Node, src)
+			}
+			funcDefs = append(funcDefs, rustFuncDef{node: fd.Node, owner: owner, line: fd.StartLine + 1})
 
 		case m.Captures["sig.def"] != nil:
 			e.recordTraitMethod(m, filePath, fileID, src, result, traitMethods, seen, annotationSeen)
+			sd := m.Captures["sig.def"]
+			funcDefs = append(funcDefs, rustFuncDef{node: sd.Node, owner: rustTraitMethodOwner(sd.Node, src), line: sd.StartLine + 1})
 
 		case m.Captures["struct.def"] != nil:
 			e.emitStruct(m, filePath, fileID, src, result, seen, annotationSeen)
@@ -271,6 +288,21 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 	// their enclosing definition.
 	funcRanges := buildFuncRanges(result)
 
+	// Per-function receiver scope: map each function/method's parameters and
+	// self receiver to their types so a selector call on a parameter receiver
+	// (args.foo()) resolves — mirroring Go's paramsByFunc. Keyed by the
+	// enclosing function id via funcRanges.
+	paramsByFunc := make(map[string]map[string]string)
+	for _, fd := range funcDefs {
+		id := findEnclosingFunc(funcRanges, fd.line)
+		if id == "" {
+			continue
+		}
+		if pm := rustFuncParamTypes(fd.node, fd.owner, src); len(pm) > 0 {
+			paramsByFunc[id] = pm
+		}
+	}
+
 	// Emit a cross-file type-usage edge for every `let x: Type = ...`
 	// binding annotation. Without this a type referenced only in a local
 	// binding (never in a param/return) is invisible to find_usages
@@ -298,7 +330,7 @@ func (e *RustExtractor) Extract(filePath string, src []byte) (*parser.Extraction
 				From: callerID, To: "unresolved::*." + c.name,
 				Kind: graph.EdgeCalls, FilePath: filePath, Line: c.line,
 			}
-			if recvType, ok := tenv[c.receiver]; ok {
+			if recvType, ok := lookupRustRecvType(paramsByFunc, tenv, callerID, c.receiver); ok {
 				edge.Meta = map[string]any{"receiver_type": recvType}
 			} else if strings.Contains(c.receiver, ".") || strings.Contains(c.receiver, "(") {
 				stampFactoryChainReceiver(edge, c.receiver, resolveChainType(c.receiver, tenv, result))
@@ -1234,6 +1266,61 @@ func normalizeRustTypeName(t string) string {
 		return ""
 	}
 	return t
+}
+
+// rustFuncParamTypes returns a map from parameter name to its normalized,
+// non-primitive type for a function/method node. A self parameter binds to
+// ownerType (the enclosing impl/trait type) when known. Mirrors Go's
+// paramsByFunc so a selector call on a parameter or self receiver resolves.
+func rustFuncParamTypes(fn *sitter.Node, ownerType string, src []byte) map[string]string {
+	if fn == nil {
+		return nil
+	}
+	params := fn.ChildByFieldName("parameters")
+	if params == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for i, n := 0, int(params.NamedChildCount()); i < n; i++ {
+		p := params.NamedChild(i)
+		if p == nil {
+			continue
+		}
+		switch p.Type() {
+		case "self_parameter":
+			if ownerType != "" {
+				out["self"] = ownerType
+			}
+		case "parameter":
+			pat := p.ChildByFieldName("pattern")
+			ty := p.ChildByFieldName("type")
+			if pat == nil || ty == nil {
+				continue
+			}
+			if t := normalizeRustTypeName(ty.Content(src)); t != "" {
+				out[pat.Content(src)] = t
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// lookupRustRecvType resolves a selector-call receiver name to a type,
+// checking the caller's own parameter/self scope before the file-wide let
+// environment so a parameter shadows a same-named binding elsewhere.
+func lookupRustRecvType(paramsByFunc map[string]map[string]string, tenv typeEnv, callerID, name string) (string, bool) {
+	if callerID != "" {
+		if scope, ok := paramsByFunc[callerID]; ok {
+			if t, ok := scope[name]; ok {
+				return t, true
+			}
+		}
+	}
+	t, ok := tenv[name]
+	return t, ok
 }
 
 // inferTypeFromRustExpr inspects a tree-sitter expression node to infer

@@ -277,8 +277,15 @@ func buildRustScopeIndex(g graph.Store) *rustScopeIndex {
 		if owner == "" {
 			continue
 		}
-		idx.methodsByOwner[rustOwnerKey{repo: n.RepoPrefix, owner: owner}] = append(
-			idx.methodsByOwner[rustOwnerKey{repo: n.RepoPrefix, owner: owner}], n)
+		// Index under the verbatim owner AND a generics/lifetime-stripped
+		// base (Candidate<'a> -> Candidate) so a call qualifier or inferred
+		// receiver_type that names the base binds to a method whose impl type
+		// carries generic args. The module path is kept to avoid cross-module
+		// name collisions (io::Error stays io::Error).
+		for _, key := range rustOwnerLookupKeys(owner) {
+			k := rustOwnerKey{repo: n.RepoPrefix, owner: key}
+			idx.methodsByOwner[k] = append(idx.methodsByOwner[k], n)
+		}
 		any = true
 	}
 	for n := range g.NodesByKind(graph.KindFunction) {
@@ -513,4 +520,37 @@ func rustParentDir(path string) string {
 		return path[:i]
 	}
 	return ""
+}
+
+// rustOwnerLookupKeys returns the keys a method's verbatim owner type should
+// be indexed under: the verbatim text plus a generics/lifetime/ref-stripped
+// base (module path kept). "Candidate<'a>" -> ["Candidate<'a>", "Candidate"];
+// "io::Error" -> ["io::Error"]; "Foo" -> ["Foo"].
+func rustOwnerLookupKeys(owner string) []string {
+	keys := []string{owner}
+	if base := rustBaseTypeName(owner); base != "" && base != owner {
+		keys = append(keys, base)
+	}
+	return keys
+}
+
+// rustBaseTypeName strips references, a leading lifetime and generic args from
+// a verbatim Rust type, keeping the module path: "&'a mut Candidate<'a>" ->
+// "Candidate", "io::Error" -> "io::Error".
+func rustBaseTypeName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "&mut ")
+	s = strings.TrimPrefix(s, "&")
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "'") {
+		if i := strings.IndexByte(s, ' '); i >= 0 {
+			s = strings.TrimSpace(s[i+1:])
+			s = strings.TrimPrefix(s, "mut ")
+			s = strings.TrimSpace(s)
+		}
+	}
+	if i := strings.Index(s, "<"); i >= 0 {
+		s = strings.TrimSpace(s[:i])
+	}
+	return s
 }
