@@ -320,10 +320,15 @@ var Servers = []ServerSpec{
 		Name:    "clangd",
 		Command: "clangd",
 		// `--background-index` keeps a project-wide symbol index hot in
-		// the daemon, which is essential for type-hierarchy precision in
-		// large C++ trees. `--header-insertion=never` avoids tactical
-		// edits when we only want graph signal.
-		Args:      []string{"--background-index", "--header-insertion=never"},
+		// the daemon, which is essential for cross-file references and
+		// type-hierarchy precision in large C++ trees. `--header-insertion=never`
+		// avoids tactical edits when we only want graph signal.
+		// `--clang-tidy=false` disables lint matchers during enrichment:
+		// Gortex consumes semantic graph signal, not clang-tidy diagnostics,
+		// and a broad repo `.clang-tidy` can crash clangd mid-pass — which,
+		// with reconnect, becomes a crash→reconnect→reindex loop that pins the
+		// server at high CPU for the whole pass.
+		Args:      []string{"--background-index", "--header-insertion=never", "--clang-tidy=false"},
 		Languages: []string{"c", "cpp", "objc", "objcpp"},
 		Extensions: []string{
 			".c", ".h",

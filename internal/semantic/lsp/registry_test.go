@@ -219,3 +219,22 @@ func TestSpecWithOverrides(t *testing.T) {
 		t.Errorf("base spec mutated: command=%q env=%v", base.Command, base.Env)
 	}
 }
+
+// TestClangdDisablesClangTidy pins that the clangd enrichment spec turns off
+// clang-tidy: Gortex consumes semantic graph signal, not lint diagnostics, and
+// a broad repo .clang-tidy can crash clangd into a reconnect/high-CPU loop.
+func TestClangdDisablesClangTidy(t *testing.T) {
+	spec := SpecByName("clangd")
+	if spec == nil {
+		t.Fatal("clangd spec missing")
+	}
+	joined := strings.Join(spec.Args, " ")
+	if !strings.Contains(joined, "--clang-tidy=false") {
+		t.Errorf("clangd args must disable clang-tidy, got %v", spec.Args)
+	}
+	// Cross-file references still need the background index — it must NOT be
+	// disabled.
+	if strings.Contains(joined, "--background-index=false") {
+		t.Errorf("clangd must keep --background-index for cross-file references, got %v", spec.Args)
+	}
+}
