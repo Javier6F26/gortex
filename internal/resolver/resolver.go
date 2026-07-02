@@ -2078,6 +2078,12 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 	// only survivor — so the exact-type match must see every candidate, not
 	// just the reachable ones.
 	if receiverType != "" {
+		// An exact receiver-type match is structural evidence — the
+		// receiver's type is known and the method belongs to it — so it
+		// resolves at ast_resolved (not the name-only ast_inferred tier the
+		// cross-package guard reverts) and does not need import-reachability
+		// corroboration, which Rust re-exports and unsplit `use a::{b, c}`
+		// import groups routinely leave unresolved.
 		// Pass 1: same-directory + exact type match (highest confidence).
 		for _, c := range rawCandidates {
 			if c.Kind == graph.KindMethod &&
@@ -2085,18 +2091,30 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 				nodeReceiverType(c) == receiverType {
 				e.To = c.ID
 				e.Confidence = 0.95
+				e.Origin = graph.OriginASTResolved
 				stats.Resolved++
 				return
 			}
 		}
-		// Pass 2: exact type match, any directory.
+		// Pass 2: exact type match, any directory, over the UNFILTERED
+		// candidate set with a uniqueness guard (so a same-named type in
+		// another package is never mis-picked).
+		var exact *graph.Node
 		for _, c := range rawCandidates {
 			if c.Kind == graph.KindMethod && nodeReceiverType(c) == receiverType {
-				e.To = c.ID
-				e.Confidence = 0.9
-				stats.Resolved++
-				return
+				if exact != nil && exact.ID != c.ID {
+					exact = nil
+					break
+				}
+				exact = c
 			}
+		}
+		if exact != nil {
+			e.To = exact.ID
+			e.Confidence = 0.85
+			e.Origin = graph.OriginASTResolved
+			stats.Resolved++
+			return
 		}
 		// Pass 2b: DI useClass binding. When receiver_type is an
 		// abstract/base class that has no method of this name (Passes
