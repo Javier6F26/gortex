@@ -539,6 +539,29 @@ func enrichRepoTimeout(nodeCount int) time.Duration {
 	}
 }
 
+// enrichOuterCeiling is the generous outer bound the Manager places on a
+// ContextEnricher's context and its abandon-grace timer. The provider narrows
+// it to a lazy, candidate-scaled deadline once selection is done (see
+// EnrichDeadlinePolicy) — so the outer path is sized to the hard per-repo
+// ceiling, NOT the whole-repo node estimate, which is exactly the headroom
+// lazy budgeting reclaims. This only ever backstops a provider wedged in an
+// uncancellable call. GORTEX_LSP_ENRICH_TIMEOUT pins it verbatim (matching the
+// inner enrichRepoTimeout policy so the override still wins end to end);
+// "0" / "off" / "none" disables the bound; garbage falls back to the ceiling.
+func enrichOuterCeiling() time.Duration {
+	switch v := strings.TrimSpace(os.Getenv("GORTEX_LSP_ENRICH_TIMEOUT")); v {
+	case "":
+		return maxEnrichRepoTimeout
+	case "0", "off", "none":
+		return 0
+	default:
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+		return maxEnrichRepoTimeout
+	}
+}
+
 // setEnrichStatus records the lifecycle state of one (repo, provider)
 // enrichment pass for the index_health surface. result may be nil.
 func (m *Manager) setEnrichStatus(repo, provider, lang, state string, deadline time.Duration, result *EnrichResult, detail string) {
@@ -729,7 +752,19 @@ func (m *Manager) runEnrichOne(g graph.Store, repoName, repoRoot, lang string, p
 		rcancel()
 	}
 
-	d := enrichRepoTimeout(nodeCount)
+	_, isContextEnricher := provider.(ContextEnricher)
+	// A ContextEnricher derives its real per-repo deadline lazily from the
+	// post-filter candidate count (see EnrichDeadlinePolicy) — the Manager only
+	// holds a generous outer ceiling so a wedged pass can't pin the WaitGroup.
+	// Legacy providers, which never select candidates, keep the eager whole-repo
+	// scaled deadline. d is updated to the provider's lazy value (once known)
+	// before the terminal status is recorded.
+	var d time.Duration
+	if isContextEnricher {
+		d = enrichOuterCeiling()
+	} else {
+		d = enrichRepoTimeout(nodeCount)
+	}
 	m.logger.Info("semantic enrichment starting",
 		zap.String("provider", provider.Name()),
 		zap.String("language", lang),
@@ -746,13 +781,15 @@ func (m *Manager) runEnrichOne(g graph.Store, repoName, repoRoot, lang string, p
 	var result *EnrichResult
 	var err error
 	if ce, ok := provider.(ContextEnricher); ok {
-		// Cooperative path: the provider checks ctx between work items,
-		// lands completed work incrementally, and returns a Partial
-		// result once ctx expires at the deadline. We still wait for it
-		// on a goroutine with a bounded grace window past the deadline:
-		// a provider wedged in an uncancellable call (e.g. an unbounded
-		// LSP initialize) must not pin the enrichment WaitGroup forever
-		// — that liveness guarantee is what the old detach provided.
+		// Cooperative path: ctx carries only the generous outer ceiling; the
+		// provider narrows it to a lazy, candidate-scaled deadline (via the
+		// enrichRepoTimeout policy) once selection is done, checks it between
+		// work items, lands completed work incrementally, and returns a Partial
+		// result once it expires. We still wait on a goroutine with a bounded
+		// grace window past the ceiling: a provider wedged in an uncancellable
+		// call (e.g. an unbounded LSP initialize) must not pin the enrichment
+		// WaitGroup forever — that liveness guarantee is what the old detach
+		// provided.
 		ctx := context.Background()
 		var cancel context.CancelFunc
 		if d > 0 {
@@ -765,7 +802,11 @@ func (m *Manager) runEnrichOne(g graph.Store, repoName, repoRoot, lang string, p
 		}
 		done := make(chan enrichOutcome, 1)
 		go func() {
-			r, e := ce.EnrichRepoContext(ctx, g, repoName, repoRoot)
+			// enrichRepoTimeout is the lazy deadline policy: the provider calls
+			// it with its post-filter candidate count to size its own context
+			// bound (and honour the GORTEX_LSP_ENRICH_TIMEOUT override) inside
+			// the generous outer ceiling already on ctx.
+			r, e := ce.EnrichRepoContext(ctx, g, repoName, repoRoot, enrichRepoTimeout)
 			done <- enrichOutcome{r, e}
 		}()
 		if d > 0 {
@@ -836,6 +877,12 @@ func (m *Manager) runEnrichOne(g graph.Store, repoName, repoRoot, lang string, p
 			oc := <-done
 			result, err = oc.result, oc.err
 		}
+	}
+	// Surface the deadline the ContextEnricher actually derived from its
+	// candidate count (lazy budgeting) rather than the outer ceiling. 0 means
+	// the pass ran unbounded or was a legacy provider; keep d as computed.
+	if result != nil && result.BudgetSeconds > 0 {
+		d = time.Duration(result.BudgetSeconds * float64(time.Second))
 	}
 	if err != nil {
 		m.logger.Warn("semantic enrichment failed",

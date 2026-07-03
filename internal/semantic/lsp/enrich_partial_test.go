@@ -127,7 +127,7 @@ func TestLSP_Provider_PartialLandingOnCanceledContext(t *testing.T) {
 	var err error
 	go func() {
 		defer close(done)
-		result, err = p.EnrichRepoContext(ctx, g, "", repoRoot)
+		result, err = p.EnrichRepoContext(ctx, g, "", repoRoot, nil)
 	}()
 	select {
 	case <-done:

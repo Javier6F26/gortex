@@ -540,14 +540,14 @@ func findDeclarationNode(g graph.Store, filePath string, oneBasedLine int, name 
 // Enrich runs the full LSP enrichment pass for a single-repo (un-
 // prefixed) graph. It delegates to EnrichRepoContext with an empty prefix.
 func (p *Provider) Enrich(g graph.Store, repoRoot string) (*semantic.EnrichResult, error) {
-	return p.EnrichRepoContext(context.Background(), g, "", repoRoot)
+	return p.EnrichRepoContext(context.Background(), g, "", repoRoot, nil)
 }
 
 // EnrichRepo runs the full LSP enrichment pass with no cancellation
 // bound. Kept so the provider still satisfies semantic.RepoScopedProvider
 // for callers that don't thread a context.
 func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*semantic.EnrichResult, error) {
-	return p.EnrichRepoContext(context.Background(), g, repoPrefix, repoRoot)
+	return p.EnrichRepoContext(context.Background(), g, repoPrefix, repoRoot, nil)
 }
 
 // EnrichRepoContext runs the full LSP enrichment pass over the nodes that
@@ -573,7 +573,14 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 // deadline) the pass stops scheduling new work, keeps everything already
 // flushed, marks the result Partial, and returns — completed work is
 // never discarded and no writer goroutine outlives the pass.
-func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*semantic.EnrichResult, error) {
+//
+// deadline (may be nil) sizes the pass's context bound LAZILY, from the
+// count of hover candidates left after already-stamped nodes are skipped.
+// A warm restart where most nodes are already stamped lands a small budget;
+// a cold repo (nothing stamped) keeps the full size-scaled headroom. The
+// incoming ctx already carries the Manager's generous outer ceiling; the
+// derived bound only ever narrows it.
+func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, deadline semantic.EnrichDeadlinePolicy) (*semantic.EnrichResult, error) {
 	start := time.Now()
 
 	absRoot, err := filepath.Abs(repoRoot)
@@ -714,6 +721,21 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	result.HoverCandidates = len(langNodes)
 	result.SymbolsTotal = len(langNodes) + skippedAlreadyStamped
 	result.SymbolsCovered = skippedAlreadyStamped
+
+	// Lazy per-repo deadline: now that candidate selection is done, size the
+	// window on the count of symbols this pass will actually hover — the
+	// already-stamped nodes were skipped above, so a warm restart with few
+	// unstamped nodes lands a small budget while a cold repo keeps full
+	// headroom. Only ever narrows the Manager's outer ceiling already on ctx;
+	// BudgetSeconds records the derived value for the status surface.
+	if deadline != nil {
+		if d := deadline(len(langNodes)); d > 0 {
+			result.BudgetSeconds = d.Seconds()
+			var cancelBudget context.CancelFunc
+			ctx, cancelBudget = context.WithTimeout(ctx, d)
+			defer cancelBudget()
+		}
+	}
 
 	// The graph-mutation blocks in this pass serialise on the backend
 	// resolve mutex (the same lock every other edge-mutating pass holds)

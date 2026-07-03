@@ -81,7 +81,7 @@ func TestLSP_Enrich_SkipsFilesOutsideProviderCoverage(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_, err := p.EnrichRepoContext(ctx, g, "", repoRoot)
+	_, err := p.EnrichRepoContext(ctx, g, "", repoRoot, nil)
 	require.NoError(t, err)
 
 	pngURI := pathToURI(filepath.Join(repoRoot, "logo.png"))

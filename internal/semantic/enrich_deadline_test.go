@@ -103,11 +103,11 @@ func TestManager_EnrichOne_DisabledDeadline(t *testing.T) {
 // so the Manager dispatches it on the cooperative-cancellation path.
 type mockCtxProvider struct {
 	mockProvider
-	enrichCtxFunc func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error)
+	enrichCtxFunc func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, deadline EnrichDeadlinePolicy) (*EnrichResult, error)
 }
 
-func (m *mockCtxProvider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error) {
-	return m.enrichCtxFunc(ctx, g, repoPrefix, repoRoot)
+func (m *mockCtxProvider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, deadline EnrichDeadlinePolicy) (*EnrichResult, error) {
+	return m.enrichCtxFunc(ctx, g, repoPrefix, repoRoot, deadline)
 }
 
 // TestManager_EnrichOne_ContextProviderPartialIsCounted verifies the
@@ -132,7 +132,7 @@ func TestManager_EnrichOne_ContextProviderPartialIsCounted(t *testing.T) {
 			languages: []string{"go"},
 			available: true,
 		},
-		enrichCtxFunc: func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error) {
+		enrichCtxFunc: func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, _ EnrichDeadlinePolicy) (*EnrichResult, error) {
 			// Simulate a pass that lands work incrementally and is cut
 			// by the deadline: block until cancellation, then report the
 			// work already landed.
@@ -206,7 +206,7 @@ func TestManager_EnrichOne_ContextProviderWedgedPastGraceIsAbandoned(t *testing.
 			languages: []string{"go"},
 			available: true,
 		},
-		enrichCtxFunc: func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error) {
+		enrichCtxFunc: func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, _ EnrichDeadlinePolicy) (*EnrichResult, error) {
 			<-release // ignores ctx entirely
 			return &EnrichResult{Provider: "wedged-go", Language: "go"}, nil
 		},
@@ -315,6 +315,82 @@ func TestScaleEnrichTimeout(t *testing.T) {
 			assert.Equal(t, tc.want, scaleEnrichTimeout(tc.nodeCount))
 		})
 	}
+}
+
+// TestEnrichOuterCeiling verifies the generous outer bound the Manager
+// holds over a ContextEnricher: the hard ceiling when unset (NOT the
+// whole-repo scaled value — lazy budgeting reclaims that headroom), the
+// env override verbatim, the off switch, and a garbage fallback.
+func TestEnrichOuterCeiling(t *testing.T) {
+	t.Run("unset is the hard ceiling", func(t *testing.T) {
+		t.Setenv("GORTEX_LSP_ENRICH_TIMEOUT", "")
+		assert.Equal(t, maxEnrichRepoTimeout, enrichOuterCeiling())
+	})
+	t.Run("explicit override wins verbatim", func(t *testing.T) {
+		t.Setenv("GORTEX_LSP_ENRICH_TIMEOUT", "5m")
+		assert.Equal(t, 5*time.Minute, enrichOuterCeiling())
+	})
+	t.Run("off disables the bound", func(t *testing.T) {
+		t.Setenv("GORTEX_LSP_ENRICH_TIMEOUT", "off")
+		assert.Equal(t, time.Duration(0), enrichOuterCeiling())
+	})
+	t.Run("garbage falls back to the ceiling", func(t *testing.T) {
+		t.Setenv("GORTEX_LSP_ENRICH_TIMEOUT", "not-a-duration")
+		assert.Equal(t, maxEnrichRepoTimeout, enrichOuterCeiling())
+	})
+}
+
+// TestManager_EnrichOne_RecordsLazyDeadlineOnStatus verifies the lazy
+// budget: a ContextEnricher derives its per-repo deadline from the
+// candidate count it reports (not the whole-repo node count), and the
+// Manager surfaces that value on the enrichment status. A small candidate
+// set lands near the floor, well under the ceiling; a large cold set
+// retains headroom toward the 90-minute ceiling.
+func TestManager_EnrichOne_RecordsLazyDeadlineOnStatus(t *testing.T) {
+	// No override: the lazy policy scales with the reported candidate count.
+	t.Setenv("GORTEX_LSP_ENRICH_TIMEOUT", "")
+
+	run := func(t *testing.T, candidates int) EnrichmentStatus {
+		t.Helper()
+		cfg := Config{
+			Enabled: true,
+			Providers: []ProviderConfig{
+				{Name: "ctx-go", Languages: []string{"go"}, Priority: 1, Enabled: true},
+			},
+		}
+		mgr := NewManager(cfg, zap.NewNop())
+		mgr.RegisterProvider(&mockCtxProvider{
+			mockProvider: mockProvider{name: "ctx-go", languages: []string{"go"}, available: true},
+			enrichCtxFunc: func(ctx context.Context, g graph.Store, repoPrefix, repoRoot string, deadline EnrichDeadlinePolicy) (*EnrichResult, error) {
+				// Size the window from the (simulated) post-filter candidate
+				// count and report it, exactly as the real provider does.
+				d := deadline(candidates)
+				return &EnrichResult{
+					Provider:        "ctx-go",
+					Language:        "go",
+					HoverCandidates: candidates,
+					BudgetSeconds:   d.Seconds(),
+				}, nil
+			},
+		})
+		g := graph.New()
+		g.AddNode(&graph.Node{ID: "main.go::main", Kind: graph.KindFunction, Name: "main", FilePath: "main.go", Language: "go"})
+		_, _, err := mgr.EnrichAll(g, map[string]string{"default": "/tmp/test"}, EnrichOptions{})
+		require.NoError(t, err)
+		statuses := mgr.EnrichmentStatuses()
+		require.Len(t, statuses, 1)
+		return statuses[0]
+	}
+
+	t.Run("few candidates land near the floor, under the ceiling", func(t *testing.T) {
+		st := run(t, 200)
+		assert.InDelta(t, scaleEnrichTimeout(200).Seconds(), st.DeadlineSeconds, 0.001)
+		assert.Less(t, st.DeadlineSeconds, maxEnrichRepoTimeout.Seconds())
+	})
+	t.Run("a large cold candidate set keeps headroom toward the ceiling", func(t *testing.T) {
+		st := run(t, 10_000_000)
+		assert.Equal(t, maxEnrichRepoTimeout.Seconds(), st.DeadlineSeconds)
+	})
 }
 
 // TestEnrichRepoTimeout_EnvResolution verifies the env override wins
