@@ -33,6 +33,36 @@ class UserService {
 	assert.GreaterOrEqual(t, len(methods), 1)
 }
 
+func TestPHPExtractor_ScopeInterfaces(t *testing.T) {
+	src := []byte(`<?php
+interface HandlerInterface {}
+interface ProcessableInterface extends HandlerInterface {}
+class StreamHandler extends AbstractHandler implements HandlerInterface, ProcessableInterface {
+    public function handle(): bool { return true; }
+}
+`)
+	e := NewPHPExtractor()
+	result, err := e.Extract("h.php", src)
+	require.NoError(t, err)
+
+	byName := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byName[n.Name] = n
+	}
+
+	cls := byName["StreamHandler"]
+	require.NotNil(t, cls)
+	assert.Equal(t, "AbstractHandler", cls.Meta["scope_parent"], "extends → scope_parent")
+	ifaces, _ := cls.Meta["scope_interfaces"].(string)
+	assert.Contains(t, ifaces, "HandlerInterface", "implements → scope_interfaces")
+	assert.Contains(t, ifaces, "ProcessableInterface", "implements → scope_interfaces")
+
+	pi := byName["ProcessableInterface"]
+	require.NotNil(t, pi)
+	pifaces, _ := pi.Meta["scope_interfaces"].(string)
+	assert.Contains(t, pifaces, "HandlerInterface", "interface extends → scope_interfaces")
+}
+
 func TestPHPExtractor_Function(t *testing.T) {
 	src := []byte(`<?php
 function greet($name) {

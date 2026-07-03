@@ -552,6 +552,12 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// Runs after the guard so its ast_inferred edges are never reverted.
 	r.resolveJavaOverrideDispatch()
 
+	// PHP dispatch resolution: bind ambiguous member/scoped calls the guard
+	// left unresolved via the class hierarchy — parent::/self:: up the extends
+	// chain, and interface/abstract/trait override families fanned out to
+	// every implementation. Same post-guard placement as the Java pass.
+	r.resolvePHPOverrideDispatch()
+
 	total := &ResolveStats{}
 	for i := range allStats {
 		total.Resolved += allStats[i].Resolved

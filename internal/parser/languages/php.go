@@ -188,6 +188,9 @@ func (e *PHPExtractor) extractClass(
 	if parent := extractPhpParentClass(node, src); parent != "" {
 		meta["scope_parent"] = parent
 	}
+	if ifaces := phpTypeClauseNames(node, src, "class_interface_clause"); len(ifaces) > 0 {
+		meta["scope_interfaces"] = strings.Join(ifaces, ",")
+	}
 	meta["type_flavor"] = "class"
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindType, Name: className,
@@ -244,6 +247,12 @@ func (e *PHPExtractor) extractInterface(
 		meta["doc"] = doc
 	}
 	meta["type_flavor"] = "interface"
+	// An interface's `extends A, B` is modelled as a base_clause in
+	// tree-sitter-php, so its parent interfaces land under scope_interfaces —
+	// feeding the dispatch resolver's ancestor closure.
+	if parents := phpTypeClauseNames(node, src, "base_clause"); len(parents) > 0 {
+		meta["scope_interfaces"] = strings.Join(parents, ",")
+	}
 	result.Nodes = append(result.Nodes, &graph.Node{
 		ID: id, Kind: graph.KindInterface, Name: ifaceName,
 		FilePath: filePath, StartLine: startLine, EndLine: endLine,
@@ -1498,6 +1507,24 @@ func extractPhpParentClass(classNode *sitter.Node, src []byte) string {
 		}
 	}
 	return ""
+}
+
+// phpTypeClauseNames returns the type names listed in the first direct child
+// of clauseType — "class_interface_clause" for a class's `implements I, J`,
+// "base_clause" for an interface's `extends A, B`. Names keep their namespace
+// qualification; the dispatch resolver reduces them to simple names. Nil when
+// there is no such clause.
+func phpTypeClauseNames(node *sitter.Node, src []byte, clauseType string) []string {
+	if node == nil {
+		return nil
+	}
+	for i, _nc := 0, int(node.NamedChildCount()); i < _nc; i++ {
+		child := node.NamedChild(i)
+		if child != nil && child.Type() == clauseType {
+			return phpClauseTypeNames(child, src)
+		}
+	}
+	return nil
 }
 
 // phpMemberVisibility returns the access modifier for a PHP class
