@@ -2,6 +2,7 @@ package query
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -435,6 +436,11 @@ func (e *Engine) FindUsagesScoped(nodeID string, opts QueryOptions) *SubGraph {
 			}
 		}
 	}
+	// Expand any edge carrying Meta["call_sites"] into one usage row per site
+	// (a synthesized producer keeps one edge and records its extra sites there;
+	// see internal/graph/call_sites.go). Done here so both the GCX and
+	// plain-JSON find_usages paths render from the same edge slice.
+	filtered = expandCallSites(filtered)
 	// Include the target node itself (already in the batch above).
 	if n := fromByID[nodeID]; n != nil {
 		if !opts.hasScopeFilter() || opts.ScopeAllows(n) {
@@ -1523,6 +1529,58 @@ func calleeBoundariesFromAdjacency(
 			if len(out) >= 50 {
 				return out
 			}
+		}
+	}
+	return out
+}
+
+// expandCallSites fans an edge that carries additional Meta["call_sites"]
+// into one usage edge per recorded site (the primary stays in FilePath/Line).
+// Rows are deduped by (from, file, line) so a site that already exists as its
+// own edge is never double-counted; real edges are emitted first so they win
+// over a call_sites clone at the same location. Cheap no-op when no edge in
+// the set carries call_sites (the overwhelmingly common case).
+func expandCallSites(edges []*graph.Edge) []*graph.Edge {
+	hasSites := false
+	for _, e := range edges {
+		if len(graph.CallSites(e)) > 0 {
+			hasSites = true
+			break
+		}
+	}
+	if !hasSites {
+		return edges
+	}
+	key := func(from, file string, line int) string {
+		return from + "\x00" + file + ":" + strconv.Itoa(line)
+	}
+	seen := make(map[string]struct{}, len(edges))
+	out := make([]*graph.Edge, 0, len(edges))
+	// Pass 1: the real edges, deduped by location.
+	for _, e := range edges {
+		k := key(e.From, e.FilePath, e.Line)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, e)
+	}
+	// Pass 2: expand call_sites, skipping any location already emitted.
+	for _, e := range edges {
+		for _, site := range graph.CallSites(e) {
+			file, line := graph.SplitCallSite(site)
+			if file == "" {
+				continue
+			}
+			k := key(e.From, file, line)
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			clone := *e
+			clone.FilePath = file
+			clone.Line = line
+			out = append(out, &clone)
 		}
 	}
 	return out

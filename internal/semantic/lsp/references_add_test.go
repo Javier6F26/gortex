@@ -100,6 +100,66 @@ func TestLSP_Provider_ReferencesAddPass_AddsCallEdges(t *testing.T) {
 	}
 }
 
+// Two reference sites from one caller collapse to a single minted edge whose
+// extra site is recorded in call_sites (so find_usages still renders both).
+func TestLSP_Provider_ReferencesAddPass_RecordsMultipleSites(t *testing.T) {
+	repoRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "handler.php"),
+		[]byte("<?php\ninterface HandlerInterface {\n    public function handle(array $record): bool;\n}\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(repoRoot, "app.php"),
+		[]byte("<?php\nfunction run(HandlerInterface $h): void {\n    $h->handle([]);\n    $h->handle([]);\n}\n"),
+		0o644,
+	))
+
+	// Two call sites inside run(): 0-based lines 2 and 3 (1-based 3 and 4).
+	server := newFakeLSPServer()
+	server.handle("textDocument/hover", func(params json.RawMessage) (any, *jsonRPCError) { return nil, nil })
+	server.handle("textDocument/references", func(params json.RawMessage) (any, *jsonRPCError) {
+		return []Location{
+			{URI: pathToURI(filepath.Join(repoRoot, "app.php")), Range: Range{Start: Position{Line: 2, Character: 8}}},
+			{URI: pathToURI(filepath.Join(repoRoot, "app.php")), Range: Range{Start: Position{Line: 3, Character: 8}}},
+		}, nil
+	})
+
+	p, cleanup := providerWithFakeServer(t, server, []string{"php"})
+	defer cleanup()
+	p.caps = ServerCapabilities{ReferencesProvider: true, HoverProvider: true}
+
+	g := graph.New()
+	g.AddNode(&graph.Node{
+		ID: "handler.php::HandlerInterface", Kind: graph.KindInterface, Name: "HandlerInterface",
+		FilePath: "handler.php", StartLine: 2, EndLine: 4, Language: "php",
+	})
+	g.AddNode(&graph.Node{
+		ID: "handler.php::HandlerInterface.handle", Kind: graph.KindMethod, Name: "handle",
+		FilePath: "handler.php", StartLine: 3, EndLine: 3, Language: "php",
+		Meta: map[string]any{"receiver": "HandlerInterface"},
+	})
+	g.AddNode(&graph.Node{
+		ID: "app.php::run", Kind: graph.KindFunction, Name: "run",
+		FilePath: "app.php", StartLine: 2, EndLine: 5, Language: "php",
+	})
+
+	result, err := p.Enrich(g, repoRoot)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.EdgesAdded, "the two sites collapse to one edge")
+
+	var edge *graph.Edge
+	for _, e := range g.GetOutEdges("app.php::run") {
+		if e.Kind == graph.EdgeCalls && e.To == "handler.php::HandlerInterface.handle" {
+			edge = e
+			break
+		}
+	}
+	require.NotNil(t, edge)
+	assert.Equal(t, 3, edge.Line, "the first site is the primary")
+	assert.Equal(t, []string{"app.php:4"}, graph.CallSites(edge), "the second site is recorded in call_sites")
+}
+
 // When the server advertises call hierarchy, the references-add pass must NOT
 // run (call hierarchy is the richer add path) — the gate must be exclusive.
 func TestLSP_Provider_ReferencesAddPass_SkippedWhenCallHierarchyPresent(t *testing.T) {

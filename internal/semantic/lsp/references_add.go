@@ -39,11 +39,14 @@ func (p *Provider) referencesAddPass(ctx context.Context, g graph.Store, repoPre
 	// repo-relative path. Site files are read from disk, never opened on the
 	// server — attribution uses the graph, not the LSP.
 	siteSrc := map[string][]byte{}
-	// Within one pass a (caller, target) pair collapses to a single edge
-	// (first site wins its FilePath/Line), independent of backend write
-	// visibility, so a caller with N call sites to the same target does not
-	// mint N duplicate edges.
-	minted := map[string]bool{}
+	// Within one pass a (caller, target) pair maps to a single edge: the
+	// first site wins its FilePath/Line, later sites are recorded on the
+	// edge's call_sites so find_usages still renders one row per site (see
+	// internal/graph/call_sites.go). Edges W2 minted accumulate call_sites;
+	// pre-existing edges (which the AST already emits per call site) are only
+	// promoted, so their per-line siblings carry the multiplicity.
+	mintedEdge := map[string]*graph.Edge{}
+	promoted := map[string]bool{}
 
 	for _, n := range targets {
 		if ctx.Err() != nil {
@@ -79,9 +82,6 @@ func (p *Provider) referencesAddPass(ctx context.Context, g graph.Store, repoPre
 				continue // unattributable, or the declaration's own identifier
 			}
 			key := enclosing.ID + "\x00" + n.ID
-			if minted[key] {
-				continue
-			}
 			// Cheap text guard: the site line must actually contain the
 			// target's whole name token, to defuse a stale position or a
 			// server bug before minting a compiler-grade edge.
@@ -90,6 +90,18 @@ func (p *Provider) referencesAddPass(ctx context.Context, g graph.Store, repoPre
 					continue
 				}
 			}
+			// A later site of an edge W2 already minted: record it on the edge
+			// instead of minting a duplicate.
+			if e0, ok := mintedEdge[key]; ok {
+				graph.AppendCallSite(e0, enclosing.FilePath, siteLine)
+				semantic.PersistEdge(g, e0)
+				continue
+			}
+			// A later site of an edge the AST already produced per line — the
+			// promotion already ran, and its per-line siblings carry the sites.
+			if promoted[key] {
+				continue
+			}
 			if existing := semantic.FindMatchingEdge(g, enclosing.ID, n.ID, graph.EdgeCalls); existing != nil {
 				if graph.OriginRank(existing.Origin) < graph.OriginRank(graph.OriginLSPResolved) {
 					semantic.ConfirmEdge(existing, p.Name())
@@ -97,13 +109,12 @@ func (p *Provider) referencesAddPass(ctx context.Context, g graph.Store, repoPre
 					semantic.PersistEdge(g, existing)
 					result.EdgesConfirmed++
 				}
-				minted[key] = true
+				promoted[key] = true
 				continue
 			}
-			semantic.AddSemanticEdge(g, enclosing.ID, n.ID, graph.EdgeCalls,
+			mintedEdge[key] = semantic.AddSemanticEdge(g, enclosing.ID, n.ID, graph.EdgeCalls,
 				enclosing.FilePath, siteLine, p.Name())
 			result.EdgesAdded++
-			minted[key] = true
 		}
 		rmu.Unlock()
 	}
