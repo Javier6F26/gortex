@@ -133,6 +133,35 @@ func TestTokenTruncator_OverBudgetCutAtSpanBoundary(t *testing.T) {
 	}
 }
 
+// TestTokenTruncator_TruncateAll covers the batch API actually wired into every
+// provider's EmbedBatch: over-budget entries are shortened, in-budget entries are
+// returned untouched, and an all-fits batch returns the input slice unmodified.
+func TestTokenTruncator_TruncateAll(t *testing.T) {
+	dir := writeModelDir(t, 7) // budget 5
+	tr, err := newTokenTruncator(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const over = "hello world test the a is this" // 7 tokens > budget 5
+
+	out := tr.TruncateAll([]string{over, "hello", "hello world"})
+	if len(out) != 3 {
+		t.Fatalf("got %d results, want 3", len(out))
+	}
+	if len(tr.tk.EncodeWithAnnotations(out[0]).IDs) > tr.budget {
+		t.Fatalf("over-budget entry not truncated: %q", out[0])
+	}
+	if out[1] != "hello" || out[2] != "hello world" {
+		t.Fatalf("in-budget entries changed: %q, %q", out[1], out[2])
+	}
+
+	// Nothing over budget -> the exact same slice is returned (no allocation).
+	fits := []string{"hello", "world"}
+	if got := tr.TruncateAll(fits); &got[0] != &fits[0] {
+		t.Fatal("TruncateAll should return the input slice when nothing needs truncating")
+	}
+}
+
 func TestReadTokenBudget(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -255,8 +284,10 @@ func TestNewTokenTruncator_CorruptTokenizerRuneClamp(t *testing.T) {
 	if tr.tk != nil {
 		t.Fatal("tk must be nil in rune-clamp mode")
 	}
-	if tr.budget != 10 || tr.clamp != 40 {
-		t.Fatalf("budget=%d clamp=%d, want 10/40", tr.budget, tr.clamp)
+	// clamp must equal the budget (not a multiple): a token spans >= 1 rune, so
+	// budget runes bound the token count to budget — a looser cap would not.
+	if tr.budget != 10 || tr.clamp != 10 {
+		t.Fatalf("budget=%d clamp=%d, want 10/10", tr.budget, tr.clamp)
 	}
 	// A long multibyte text is clamped (not split mid-rune) rather than passed through.
 	long := ""

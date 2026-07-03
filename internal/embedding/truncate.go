@@ -22,11 +22,14 @@ const (
 	// truncation budget is max_position_embeddings minus this.
 	specialTokenReserve = 2
 
-	// runeClampFactor bounds the rune-clamp fallback when no real tokenizer is
-	// available: a WordPiece token spans at least one rune, so clamping to
-	// factor*budget runes is a loose-but-safe cap that keeps a corrupt tokenizer.json
-	// from letting an over-long text through to the pipeline.
-	runeClampFactor = 4
+	// runeClampBudgetFactor caps the rune-clamp fallback at budget runes. A
+	// WordPiece token spans at least one rune, so token_count <= rune_count;
+	// clamping to budget runes therefore guarantees token_count <= budget. A
+	// looser cap (e.g. 4*budget) would NOT bound the token count and could let a
+	// token-dense input (CJK, single-char words) overflow the window it is meant
+	// to protect. Recall loss in this rare fallback is an acceptable price for a
+	// hard safety bound.
+	runeClampBudgetFactor = 1
 )
 
 // tokenTruncator caps input texts at a model's positional budget before they reach
@@ -57,7 +60,7 @@ type tokenTruncator struct {
 // be loaded) so the caller can warn without disabling the provider.
 func newTokenTruncator(modelDir string) (*tokenTruncator, error) {
 	budget, budgetErr := readTokenBudget(modelDir)
-	t := &tokenTruncator{budget: budget, clamp: budget * runeClampFactor}
+	t := &tokenTruncator{budget: budget, clamp: budget * runeClampBudgetFactor}
 
 	tkBytes, err := os.ReadFile(filepath.Join(modelDir, "tokenizer.json"))
 	if err != nil {
@@ -87,9 +90,12 @@ func (t *tokenTruncator) Truncate(text string) string {
 	if t == nil || t.budget <= 0 || text == "" {
 		return text
 	}
-	// Fast path (DD-3): a WordPiece token spans at least one rune, so a rune count
+	// Fast path: a WordPiece/subword token spans at least one rune (true for every
+	// registered variant — MiniLM/BGE/Jina are all WordPiece), so a rune count
 	// within budget guarantees the token count is too. Only longer texts pay for the
-	// extra tokenizer pass; tokenization is µs–ms while inference dominates.
+	// extra tokenizer pass; tokenization is µs–ms while inference dominates. (A
+	// byte-level-BPE variant, where one rune can yield several tokens, would need
+	// this invariant revisited — but the exact-tokenize path below is always correct.)
 	if utf8.RuneCountInString(text) <= t.budget {
 		return text
 	}
@@ -105,7 +111,11 @@ func (t *tokenTruncator) Truncate(text string) string {
 		return clampRunes(text, t.clamp)
 	}
 	cut := enc.Spans[t.budget-1].End
-	if cut <= 0 || cut > len(text) {
+	// cut must land strictly inside the text: we only reach here with more than
+	// budget tokens, so the budget-th token ends before the end. cut == len(text)
+	// means a degenerate (zero-width) later span — fall back to the rune clamp
+	// rather than returning the full over-budget text.
+	if cut <= 0 || cut >= len(text) {
 		return clampRunes(text, t.clamp)
 	}
 	// Defensive: token spans already align to rune boundaries, but never hand back a
