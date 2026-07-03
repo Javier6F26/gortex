@@ -411,6 +411,17 @@ func encodeFindUsages(sg *query.SubGraph, g graph.Store) ([]byte, error) {
 	if sg.SuppressionCaveat != "" {
 		meta = append(meta, "suppression_caveat", sg.SuppressionCaveat)
 	}
+	if s := sg.UsageSummary; s != nil {
+		// Completeness rollup, same three numbers as the JSON / TOON
+		// usage_summary so an agent reads the split without re-grepping
+		// tests. n_refs mirrors edges above; both are kept so the summary
+		// is self-contained across wire formats.
+		meta = append(meta,
+			"n_refs", fmt.Sprintf("%d", s.NRefs),
+			"n_files", fmt.Sprintf("%d", s.NFiles),
+			"n_test_refs", fmt.Sprintf("%d", s.NTestRefs),
+		)
+	}
 	enc := newGCX(&buf, "find_usages",
 		[]string{"from", "to", "edge_kind", "context", "return_usage", "origin", "tier", "confidence", "from_name", "from_path", "from_line", "from_is_test", "from_test_role", "from_test_runner", "from_type_flavor", "from_ui_component"},
 		meta...,

@@ -118,6 +118,7 @@ type toonSubGraphResult struct {
 	TextMatchedSuppressed int                   `toon:"text_matched_suppressed,omitempty"`
 	SuppressionCaveat     string                `toon:"suppression_caveat,omitempty"`
 	CallerNotes           []toonCallerNoteRow   `toon:"caller_notes,omitempty"`
+	UsageSummary          *query.UsageSummary   `toon:"usage_summary,omitempty"`
 }
 
 // toonSearchResult wraps search results for TOON tabular output.
@@ -342,6 +343,7 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		TextMatchedSuppressed: sg.TextMatchedSuppressed,
 		SuppressionCaveat:     sg.SuppressionCaveat,
 		CallerNotes:           callerNotesToTOONRows(sg.CallerNotes),
+		UsageSummary:          sg.UsageSummary,
 	}
 	data, err := toon.Marshal(result)
 	if err != nil {
@@ -2492,6 +2494,11 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 		// classification when the emptiness was NOT caused by min_tier.
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
+	// Completeness rollup (n_refs / n_files / n_test_refs) so an agent can
+	// tell at a glance whether the usage list already covers tests instead
+	// of re-grepping *_test.go files. Rides every wire format below; nil
+	// for an empty result (the Caveat above covers that case).
+	sg.UsageSummary = usageSummaryOf(sg)
 	// group_by:"file" buckets the usages by the file each reference
 	// originates in -- an opt-in shape for callers that want a
 	// per-file rollup. The flat SubGraph stays the default so
@@ -2777,6 +2784,45 @@ func groupUsagesByFile(sg *query.SubGraph) map[string]any {
 		"total_uses": len(sg.Edges),
 		"groups":     out,
 		"truncated":  sg.Truncated,
+	}
+}
+
+// usageSummaryOf computes the compact completeness rollup attached to a
+// find_usages response: the total reference count, the number of
+// distinct files those references live in, and how many originate in
+// test files. It reuses the exact per-node test classification
+// (nodeIsTest — the from_is_test column) and file resolution as the
+// per-usage rows, so the rollup never disagrees with the edges it
+// summarizes. Returns nil for an empty result — the zero-edge Caveat
+// already explains that case, and an all-zero summary would be noise.
+func usageSummaryOf(sg *query.SubGraph) *query.UsageSummary {
+	if sg == nil || len(sg.Edges) == 0 {
+		return nil
+	}
+	nodeByID := make(map[string]*graph.Node, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		nodeByID[n.ID] = n
+	}
+	files := make(map[string]struct{}, len(sg.Edges))
+	testRefs := 0
+	for _, e := range sg.Edges {
+		from := nodeByID[e.From]
+		file := e.FilePath
+		if file == "" && from != nil {
+			file = from.FilePath
+		}
+		if file == "" {
+			file = "(unknown)"
+		}
+		files[file] = struct{}{}
+		if nodeIsTest(from) {
+			testRefs++
+		}
+	}
+	return &query.UsageSummary{
+		NRefs:     len(sg.Edges),
+		NFiles:    len(files),
+		NTestRefs: testRefs,
 	}
 }
 
