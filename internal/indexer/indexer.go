@@ -236,6 +236,14 @@ type Indexer struct {
 	// inference mutex.
 	embedAPIConcurrency int
 
+	// lastVectorBuildErr records why the most recent buildSearchIndex pass
+	// shipped text-only instead of a vector index (chunk-embed failure,
+	// all-vectors-invalid, or the symbol-count guard). Nil after a build that
+	// produced a vector index. Read via LastVectorBuildError once a build has
+	// finished — it lets `gortex eval embedders` report the real cause instead
+	// of a bare "no vector data".
+	lastVectorBuildErr error
+
 	// semanticMgr is the optional semantic enrichment manager.
 	semanticMgr *semantic.Manager
 
@@ -1132,6 +1140,13 @@ func (idx *Indexer) SetEmbeddingMaxSymbols(n int) { idx.embedMaxSymbols = n }
 // in parallel against an API-backed embedder. Zero keeps the built-in
 // default. Has no effect on in-process embedders.
 func (idx *Indexer) SetEmbeddingAPIConcurrency(n int) { idx.embedAPIConcurrency = n }
+
+// LastVectorBuildError returns why the most recent index build produced no
+// vector index (chunk-embed failure, all vectors invalid, or the symbol-count
+// guard), or nil when a vector index was built or the embedder was unset. Read
+// it after an index build completes; it is not safe to call concurrently with
+// one.
+func (idx *Indexer) LastVectorBuildError() error { return idx.lastVectorBuildErr }
 
 // SetSemanticManager sets the semantic enrichment manager.
 // When set, the indexer runs semantic enrichment after resolution.
@@ -4024,6 +4039,10 @@ func (idx *Indexer) buildSearchIndex() {
 		return
 	}
 
+	// Fresh attempt: clear any failure recorded by a previous build so the
+	// LastVectorBuildError seam reflects only this pass.
+	idx.lastVectorBuildErr = nil
+
 	// Provisional dimensionality: trust the embedder's own report.
 	// A provider that can't state its width yet (an APIProvider before
 	// its first call returns 0) gets a neutral placeholder — the value
@@ -4098,6 +4117,7 @@ func (idx *Indexer) buildSearchIndex() {
 			zap.Int("texts", len(texts)),
 			zap.Int("threshold", embedMaxSymbols),
 			zap.String("hint", "BM25 text search remains active; raise embedding.max_symbols if you have memory headroom"))
+		idx.lastVectorBuildErr = fmt.Errorf("embedding text count %d exceeds threshold %d (raise embedding.max_symbols)", len(texts), embedMaxSymbols)
 		return
 	}
 
@@ -4150,6 +4170,7 @@ func (idx *Indexer) buildSearchIndex() {
 		// text-only search rather than ship an inconsistent hybrid
 		// backend.
 		idx.logger.Warn("vector index aborted on chunk failure", zap.Error(err))
+		idx.lastVectorBuildErr = fmt.Errorf("chunk embedding failed: %w", err)
 		return
 	}
 
@@ -4215,6 +4236,7 @@ func (idx *Indexer) buildSearchIndex() {
 			zap.Int("dropped", droppedVectors),
 			zap.Int("dimensions", dims),
 			zap.Strings("sample_ids", droppedSample))
+		idx.lastVectorBuildErr = fmt.Errorf("all %d embedding vectors were invalid (want width %d)", droppedVectors, dims)
 		return
 	}
 	if persistSink != nil && len(backendItems) > 0 {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 
 	"github.com/zzet/gortex/internal/config"
@@ -194,6 +195,16 @@ func pickVariants(csv string) []string {
 	}
 }
 
+// vectorBuildNote turns an indexer's LastVectorBuildError into the row note:
+// the concrete cause when the vector build failed, otherwise the generic
+// "empty corpus" note.
+func vectorBuildNote(err error) string {
+	if err != nil {
+		return "vector build failed: " + err.Error()
+	}
+	return "no vector data after indexing"
+}
+
 // benchVariant loads one ONNX variant, measures init + embed latency,
 // optionally re-indexes + runs the semantic ranker, and returns one row.
 func benchVariant(name string, probeTexts []string, fixture recall.Fixture, cfg *config.Config, absIndex string, skipQuality bool) (embedderResult, error) {
@@ -242,7 +253,15 @@ func benchVariant(name string, probeTexts []string, fixture recall.Fixture, cfg 
 	g := graph.New()
 	reg := parser.NewRegistry()
 	languages.RegisterAll(reg)
-	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
+	// A WARN-level stderr logger (not zap.NewNop) so the indexer's vector-build
+	// warnings — chunk timeouts, the over-threshold guard, the chunk-failure
+	// abort — are visible during the benchmark instead of being swallowed.
+	warnLog := zap.New(zapcore.NewCore(
+		zapcore.NewConsoleEncoder(zap.NewDevelopmentEncoderConfig()),
+		zapcore.AddSync(os.Stderr),
+		zapcore.WarnLevel,
+	))
+	idx := indexer.New(g, reg, cfg.Index, warnLog)
 	idx.SetEmbedder(prov)
 
 	idxStart := time.Now()
@@ -258,7 +277,10 @@ func benchVariant(name string, probeTexts []string, fixture recall.Fixture, cfg 
 	}
 	hybrid, _ := inner.(*search.HybridBackend)
 	if hybrid == nil || hybrid.VectorIndex() == nil || hybrid.VectorIndex().Count() == 0 {
-		row.Notes = "no vector data after indexing"
+		// Distinguish an actual vector-build failure (chunk-embed error,
+		// all-invalid vectors, over-threshold guard) from a genuinely empty
+		// corpus, so the row reports the real cause rather than a bare note.
+		row.Notes = vectorBuildNote(idx.LastVectorBuildError())
 		return row, nil
 	}
 

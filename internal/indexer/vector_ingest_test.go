@@ -120,6 +120,8 @@ func TestBuildSearchIndex_DropsInvalidVectors(t *testing.T) {
 	require.Less(t, emb.good, emb.seen, "test precondition: some vectors were dropped")
 	assert.Equal(t, emb.good, hybrid.VectorIndex().Count(),
 		"only the valid vectors should be in the index")
+	assert.NoError(t, idx.LastVectorBuildError(),
+		"a partially-valid build is a success, not a recorded failure")
 }
 
 // TestBuildSearchIndex_AllInvalidAbortsToTextOnly: when every vector is invalid
@@ -132,4 +134,6 @@ func TestBuildSearchIndex_AllInvalidAbortsToTextOnly(t *testing.T) {
 	_, isHybrid := sw.Inner().(*search.HybridBackend)
 	assert.False(t, isHybrid,
 		"an all-invalid embedding pass must leave a text-only backend, not an empty vector index")
+	assert.Error(t, idx.LastVectorBuildError(),
+		"the vector-build failure must be recorded for eval to surface")
 }
