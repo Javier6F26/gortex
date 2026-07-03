@@ -426,7 +426,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 
 	// Embeddings: explicit flag/env > `embedding:` config > default (on,
 	// static GloVe).
-	embedder, embDesc, embErr := ResolveEmbedder(cfg.Embedder, conf)
+	embedder, embDesc, embReport, embErr := ResolveEmbedder(cfg.Embedder, conf)
 	// Probe API-backed providers up front so Dimensions() is truthful before
 	// we log it and — crucially — before EmbedderDims gates snapshot-vector
 	// reload. An APIProvider reports 0 until its first embed; without this the
@@ -445,6 +445,20 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			} else {
 				logger.Info("serverstack: embedding dimension probed", zap.Int("dim", dim))
 			}
+		}
+	}
+	// Surface every backend the local auto-selection tried. A degradation all
+	// the way to the static fallback is a real problem the user should see, so
+	// warn; the benign failures behind a successfully-chosen backend (e.g. the
+	// onnx/gomlx stubs in a default build) are only interesting when debugging.
+	degradedToStatic := embReport.Chosen == "static" && len(embReport.Attempts) > 0
+	for _, a := range embReport.Attempts {
+		if degradedToStatic {
+			logger.Warn("serverstack: embedding backend unavailable — degraded to static fallback",
+				zap.String("backend", a.Backend), zap.Error(a.Err))
+		} else {
+			logger.Debug("serverstack: embedding backend not available",
+				zap.String("backend", a.Backend), zap.Error(a.Err))
 		}
 	}
 	switch {

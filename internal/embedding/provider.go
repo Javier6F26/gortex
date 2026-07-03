@@ -109,23 +109,88 @@ func NewProviderFromConfig(cfg ProviderConfig) (Provider, error) {
 	}
 }
 
-// NewLocalProvider returns the best available local embedding provider.
-// Preference order: ONNX (fastest, requires libonnxruntime) → GoMLX (XLA) →
-// Hugot (pure Go, always compiled in) → Static (GloVe word vectors fallback).
-func NewLocalProvider() (Provider, error) {
-	// Opt-in transformer backends (compiled in via build tags), then the
-	// default Hugot pure-Go ONNX runtime which auto-downloads MiniLM-L6-v2
-	// to ~/.gortex/models/ on first use.
-	factories := []func() (Provider, error){
-		newONNXProvider,
-		newGoMLXProvider,
-		newHugotProvider,
-	}
-	for _, factory := range factories {
-		if p, err := factory(); err == nil {
-			return p, nil
+// NewProviderFromConfigWithReport is NewProviderFromConfig plus a SelectionReport
+// for the auto-selected local backend (Provider "local" with no pinned Variant),
+// so the caller can log which backend was constructed and which were skipped.
+// For every other provider the report is empty.
+func NewProviderFromConfigWithReport(cfg ProviderConfig) (Provider, SelectionReport, error) {
+	if cfg.Provider == "local" && cfg.Variant == "" {
+		p, report := NewLocalProviderWithReport()
+		if p == nil {
+			err := fmt.Errorf("no embedding provider available")
+			if n := len(report.Attempts); n > 0 {
+				err = report.Attempts[n-1].Err
+			}
+			return nil, report, err
 		}
+		return p, report, nil
+	}
+	p, err := NewProviderFromConfig(cfg)
+	return p, SelectionReport{}, err
+}
+
+// SelectionAttempt records one backend the local-provider chain tried and the
+// error that made it fall through. It exists so a silent degradation to the
+// static GloVe fallback becomes observable to the caller.
+type SelectionAttempt struct {
+	Backend string
+	Err     error
+}
+
+// SelectionReport describes how NewLocalProviderWithReport chose a backend: the
+// backend actually constructed, its dimension, and every rejected attempt.
+// Chosen is the backend name (e.g. "hugot", "static"); it is "static" when the
+// chain fell all the way through to the GloVe fallback.
+type SelectionReport struct {
+	Chosen   string
+	Dims     int
+	Attempts []SelectionAttempt
+}
+
+// NewLocalProviderWithReport returns the best available local embedding provider
+// along with a report of every backend it tried. Preference order: ONNX
+// (fastest, requires libonnxruntime) → GoMLX (XLA) → Hugot (pure Go, always
+// compiled in) → Static (GloVe word vectors fallback). A nil provider means even
+// the static fallback failed to construct (its error is the last attempt).
+func NewLocalProviderWithReport() (Provider, SelectionReport) {
+	factories := []struct {
+		name    string
+		factory func() (Provider, error)
+	}{
+		{"onnx", newONNXProvider},
+		{"gomlx", newGoMLXProvider},
+		{"hugot", newHugotProvider},
+	}
+	var report SelectionReport
+	for _, nf := range factories {
+		p, err := nf.factory()
+		if err == nil {
+			report.Chosen = nf.name
+			report.Dims = p.Dimensions()
+			return p, report
+		}
+		report.Attempts = append(report.Attempts, SelectionAttempt{Backend: nf.name, Err: err})
 	}
 	// Fallback: static word vectors (always available, no network).
-	return NewStaticProvider()
+	p, err := NewStaticProvider()
+	if err != nil {
+		report.Attempts = append(report.Attempts, SelectionAttempt{Backend: "static", Err: err})
+		return nil, report
+	}
+	report.Chosen = "static"
+	report.Dims = p.Dimensions()
+	return p, report
+}
+
+// NewLocalProvider returns the best available local embedding provider,
+// discarding the selection report. See NewLocalProviderWithReport.
+func NewLocalProvider() (Provider, error) {
+	p, report := NewLocalProviderWithReport()
+	if p == nil {
+		if n := len(report.Attempts); n > 0 {
+			return nil, report.Attempts[n-1].Err
+		}
+		return nil, fmt.Errorf("no embedding provider available")
+	}
+	return p, nil
 }

@@ -12,5 +12,6 @@ import (
 type embedderRequest = serverstack.EmbedderRequest
 
 func resolveEmbedder(req embedderRequest, cfg *config.Config) (embedding.Provider, string, error) {
-	return serverstack.ResolveEmbedder(req, cfg)
+	p, desc, _, err := serverstack.ResolveEmbedder(req, cfg)
+	return p, desc, err
 }

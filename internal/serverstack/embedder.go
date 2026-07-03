@@ -34,12 +34,14 @@ type EmbedderRequest struct {
 // enablement and the provider comes from the `embedding:` config; else
 // the config decides (default: semantic search ON with the zero-download
 // static GloVe provider). The returned string describes the decision for
-// logging ("" when no embedder was built); a non-nil error means an
-// embedder was requested but could not be constructed.
-func ResolveEmbedder(req EmbedderRequest, cfg *config.Config) (embedding.Provider, string, error) {
+// logging ("" when no embedder was built); the SelectionReport records every
+// backend the local auto-selection tried (empty for other providers) so a
+// silent degradation to static is observable; a non-nil error means an embedder
+// was requested but could not be constructed.
+func ResolveEmbedder(req EmbedderRequest, cfg *config.Config) (embedding.Provider, string, embedding.SelectionReport, error) {
 	if url := firstNonEmpty(req.FlagURL, os.Getenv("GORTEX_EMBEDDINGS_URL")); url != "" {
 		model := firstNonEmpty(req.FlagModel, os.Getenv("GORTEX_EMBEDDINGS_MODEL"))
-		return embedding.NewAPIProvider(url, model), fmt.Sprintf("api (%s)", url), nil
+		return embedding.NewAPIProvider(url, model), fmt.Sprintf("api (%s)", url), embedding.SelectionReport{}, nil
 	}
 
 	embCfg := config.EmbeddingConfig{}
@@ -50,7 +52,7 @@ func ResolveEmbedder(req EmbedderRequest, cfg *config.Config) (embedding.Provide
 	explicitEnabled, haveExplicit := explicitEmbeddingToggle(req)
 	if haveExplicit {
 		if !explicitEnabled {
-			return nil, "", nil
+			return nil, "", embedding.SelectionReport{}, nil
 		}
 		return buildConfiguredEmbedder(embCfg, "enabled by flag/env")
 	}
@@ -58,7 +60,7 @@ func ResolveEmbedder(req EmbedderRequest, cfg *config.Config) (embedding.Provide
 	// No explicit flag/env toggle. An explicit `embedding.enabled: false`
 	// still wins and disables the vector channel.
 	if embCfg.Enabled != nil && !*embCfg.Enabled {
-		return nil, "", nil
+		return nil, "", embedding.SelectionReport{}, nil
 	}
 	// An explicit `embedding.enabled: true` builds whatever provider is
 	// configured, including the baked static GloVe one.
@@ -75,7 +77,7 @@ func ResolveEmbedder(req EmbedderRequest, cfg *config.Config) (embedding.Provide
 	if isRealEmbedder(embCfg.EmbeddingProviderOrDefault()) {
 		return buildConfiguredEmbedder(embCfg, "real embedder configured")
 	}
-	return nil, "", nil
+	return nil, "", embedding.SelectionReport{}, nil
 }
 
 // isRealEmbedder reports whether the named provider is a model-backed
@@ -110,24 +112,33 @@ func explicitEmbeddingToggle(req EmbedderRequest) (enabled, haveExplicit bool) {
 }
 
 // buildConfiguredEmbedder constructs the provider named by the config
-// block (defaulting to the static GloVe provider).
-func buildConfiguredEmbedder(embCfg config.EmbeddingConfig, why string) (embedding.Provider, string, error) {
+// block (defaulting to the static GloVe provider). The returned description
+// names the backend actually constructed — "local (hugot)" for an
+// auto-selected local backend, or "local → static fallback" when the chain
+// degraded — so the startup log tells the truth rather than echoing the
+// configured name.
+func buildConfiguredEmbedder(embCfg config.EmbeddingConfig, why string) (embedding.Provider, string, embedding.SelectionReport, error) {
 	provider := embCfg.EmbeddingProviderOrDefault()
 	variant := firstNonEmpty(os.Getenv("GORTEX_EMBEDDINGS_VARIANT"), embCfg.Variant)
-	p, err := embedding.NewProviderFromConfig(embedding.ProviderConfig{
+	p, report, err := embedding.NewProviderFromConfigWithReport(embedding.ProviderConfig{
 		Provider: provider,
 		APIURL:   embCfg.APIURL,
 		APIModel: embCfg.APIModel,
 		Variant:  variant,
 	})
 	if err != nil {
-		return nil, "", err
+		return nil, "", report, err
 	}
 	desc := provider
-	if variant != "" && provider == "local" {
+	switch {
+	case variant != "" && provider == "local":
 		desc = fmt.Sprintf("%s/%s", provider, variant)
+	case provider == "local" && report.Chosen == "static":
+		desc = "local → static fallback"
+	case provider == "local" && report.Chosen != "":
+		desc = fmt.Sprintf("local (%s)", report.Chosen)
 	}
-	return p, fmt.Sprintf("%s — %s", desc, why), nil
+	return p, fmt.Sprintf("%s — %s", desc, why), report, nil
 }
 
 // EmbeddingChunkOptions translates the chunking knobs of an
