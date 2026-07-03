@@ -165,7 +165,7 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 	// gate — providers fall through to their own per-pass gate as before.
 	// nodeCounts (enrichable nodes per repo) feeds the size-scaled per-repo
 	// deadline — see enrichRepoTimeout.
-	present, nodeCounts := m.repoLanguages(g, roots)
+	present, nodeCounts, langCounts := m.repoLanguages(g, roots)
 	gateOnPresence := len(present) > 0
 	if gateOnPresence {
 		langs := make([]string, 0, len(present))
@@ -180,7 +180,15 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 
 	var results []*EnrichResult
 
-	for lang, provider := range langProviders {
+	// Deterministic, primary-language-first order: the language with the most
+	// enrichable nodes runs first, so on a multi-language repo the dominant
+	// language's provider claims the bounded enrichment window before a minor
+	// language's. Ties break by language name. This replaces a Go map-range
+	// whose randomised order let whichever language the map happened to yield
+	// first win the wall-clock — a Go-primary repo with a minor TS tree could
+	// see its gopls pass never run because tsserver enriched first.
+	for _, lang := range orderLangsByComposition(langProviders, langCounts) {
+		provider := langProviders[lang]
 		if !provider.Available() {
 			m.logger.Debug("semantic provider unavailable, skipping",
 				zap.String("provider", provider.Name()),
@@ -251,7 +259,8 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 			// Fetch a provider per repo root (keyed by workspace) rather than
 			// one shared default-workspace provider, so concurrent cross-repo
 			// enrichment never shares a single LSP connection or document cache.
-			for repoName, repoRoot := range roots {
+			for _, repoName := range sortedRootNames(roots, nodeCounts) {
+				repoRoot := roots[repoName]
 				provider, err := m.lspRouter.ProviderForSpecWorkspace(name, repoRoot)
 				if err != nil {
 					m.logger.Debug("router-backed LSP provider unavailable, skipping",
@@ -304,10 +313,15 @@ func (m *Manager) EnrichAll(g graph.Store, roots map[string]string) ([]*EnrichRe
 //
 // The second return value counts the enrichable nodes per repo (same
 // filters), which sizes the per-repo enrichment deadline — see
-// enrichRepoTimeout.
-func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[string]bool, map[string]int) {
+// enrichRepoTimeout. The third counts them per language across all repos — the
+// composition signal EnrichAll orders providers by (primary language first).
+func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[string]bool, map[string]int, map[string]int) {
 	present := make(map[string]bool)
 	counts := make(map[string]int, len(roots))
+	// langCounts is the enrichable-node count per language across all repos —
+	// the composition signal EnrichAll ranks providers by so the dominant
+	// language enriches first.
+	langCounts := make(map[string]int)
 	for repoPrefix := range roots {
 		// Code-only enumeration: content (data_class=content) sections carry
 		// no enrichable language (pdf/text have no semantic provider), so
@@ -331,9 +345,10 @@ func (m *Manager) repoLanguages(g graph.Store, roots map[string]string) (map[str
 			}
 			present[n.Language] = true
 			counts[repoPrefix]++
+			langCounts[n.Language]++
 		}
 	}
-	return present, counts
+	return present, counts, langCounts
 }
 
 // anyLangPresent reports whether any of langs is in the present set.
@@ -344,6 +359,42 @@ func anyLangPresent(langs []string, present map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// orderLangsByComposition returns the languages of langProviders sorted by the
+// repo set's composition: most enrichable nodes first (from langCounts), ties
+// broken by language name. It gives EnrichAll a deterministic, primary-first
+// provider run order in place of a randomised map-range.
+func orderLangsByComposition(langProviders map[string]Provider, langCounts map[string]int) []string {
+	langs := make([]string, 0, len(langProviders))
+	for lang := range langProviders {
+		langs = append(langs, lang)
+	}
+	sort.Slice(langs, func(i, j int) bool {
+		if ci, cj := langCounts[langs[i]], langCounts[langs[j]]; ci != cj {
+			return ci > cj
+		}
+		return langs[i] < langs[j]
+	})
+	return langs
+}
+
+// sortedRootNames returns the repo keys of roots in a deterministic order (most
+// enrichable nodes first, ties by name), so a per-repo enrichment loop no
+// longer visits repos in Go's randomised map-iteration order. counts may be nil
+// (falls back to name order).
+func sortedRootNames(roots map[string]string, counts map[string]int) []string {
+	names := make([]string, 0, len(roots))
+	for name := range roots {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if ci, cj := counts[names[i]], counts[names[j]]; ci != cj {
+			return ci > cj
+		}
+		return names[i] < names[j]
+	})
+	return names
 }
 
 // providerDisabled reports an explicit `enabled: false` config entry
@@ -375,8 +426,8 @@ func (m *Manager) configPriorityFor(name string) (int, bool) {
 // the logging + lastResults bookkeeping between eager and Router-backed
 // providers.
 func (m *Manager) runEnrichForProvider(g graph.Store, roots map[string]string, lang string, provider Provider, nodeCounts map[string]int, results []*EnrichResult) []*EnrichResult {
-	for repoName, repoRoot := range roots {
-		results = m.runEnrichOne(g, repoName, repoRoot, lang, provider, nodeCounts[repoName], results)
+	for _, repoName := range sortedRootNames(roots, nodeCounts) {
+		results = m.runEnrichOne(g, repoName, roots[repoName], lang, provider, nodeCounts[repoName], results)
 	}
 	return results
 }
