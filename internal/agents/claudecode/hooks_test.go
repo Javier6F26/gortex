@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -158,6 +159,31 @@ func TestResolveHookCommand(t *testing.T) {
 		got := ResolveHookCommand(io.Discard)
 		assert.NotContains(t, got, "\\",
 			"baked hook command must use forward slashes — Git Bash on Windows mangles backslash paths")
+	})
+
+	t.Run("agreesWithMCPStanzaBinary", func(t *testing.T) {
+		// The hook command and the MCP server stanza must launch the same
+		// gortex binary; a side-by-side install must never split them
+		// across two daemons. With a gortex on PATH the hook pins the
+		// absolute path while the stanza collapses to the bare name — both
+		// resolve to the same file.
+		dir := t.TempDir()
+		fake := filepath.Join(dir, "gortex")
+		require.NoError(t, os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+		t.Setenv("PATH", dir)
+
+		hookBin := strings.TrimSuffix(ResolveHookCommand(io.Discard), " hook")
+		mcpCmd := agents.ResolveGortexCommand()
+		// Map the bare name to the PATH gortex it launches, then compare
+		// the concrete on-disk binaries.
+		launched := func(cmd string) string {
+			if cmd == "gortex" {
+				return fake
+			}
+			return cmd
+		}
+		assert.Equal(t, launched(mcpCmd), launched(hookBin),
+			"hook command and MCP stanza must resolve to the same gortex binary")
 	})
 }
 

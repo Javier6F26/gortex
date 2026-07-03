@@ -118,6 +118,7 @@ type toonSubGraphResult struct {
 	TextMatchedSuppressed int                   `toon:"text_matched_suppressed,omitempty"`
 	SuppressionCaveat     string                `toon:"suppression_caveat,omitempty"`
 	CallerNotes           []toonCallerNoteRow   `toon:"caller_notes,omitempty"`
+	UsageSummary          *query.UsageSummary   `toon:"usage_summary,omitempty"`
 }
 
 // toonSearchResult wraps search results for TOON tabular output.
@@ -342,6 +343,7 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		TextMatchedSuppressed: sg.TextMatchedSuppressed,
 		SuppressionCaveat:     sg.SuppressionCaveat,
 		CallerNotes:           callerNotesToTOONRows(sg.CallerNotes),
+		UsageSummary:          sg.UsageSummary,
 	}
 	data, err := toon.Marshal(result)
 	if err != nil {
@@ -900,7 +902,7 @@ func (s *Server) registerCoreTools() {
 
 	s.addTool(
 		mcp.NewTool("search_symbols",
-			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT."),
+			mcp.WithDescription("Use instead of Grep to find symbols across the whole codebase. Supports natural language queries with camelCase-aware tokenization and BM25 ranking — 'validate token auth' finds validateToken, AuthMiddleware, parseJWT. For the concrete types that implement an interface, or the methods that override a method, use find_implementations / find_overrides — a name search alone can't tell an implementor from an unrelated same-named symbol."),
 			mcp.WithString("query", mcp.Required(), mcp.Description("Search query — symbol name, concept, or keywords. Also accepts inline field-qualified clauses: `kind:function lang:go path:internal/ repo:gortex project:web validateToken` — recognised fields are kind, flavor, lang (aliases ts/js/py/rs/…), path, repo, project; everything else is free text. A field-qualified query that matches nothing retries on the free text alone (response carries `filters_relaxed: true`).")),
 			mcp.WithNumber("limit", mcp.Description("Max results (default: 20)")),
 			mcp.WithString("cursor", mcp.Description("Opaque pagination cursor returned in `next_cursor` from a previous call. Pass it back to fetch the next page. Omit for the first page.")),
@@ -1009,7 +1011,7 @@ func (s *Server) registerCoreTools() {
 
 	s.addTool(
 		mcp.NewTool("get_callers",
-			mcp.WithDescription("Returns all callers of a function without reading source. Use instead of Grep when you need to know who calls a function."),
+			mcp.WithDescription("Returns all callers of a function without reading source. Use instead of Grep when you need to know who calls a function. For every reference — not just call sites, but type uses, field access, and imports — use find_usages."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Function node ID")),
 			mcp.WithNumber("depth", mcp.Description("Traversal depth (default: 2)")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
@@ -1030,7 +1032,7 @@ func (s *Server) registerCoreTools() {
 
 	s.addTool(
 		mcp.NewTool("find_implementations",
-			mcp.WithDescription("Finds all concrete types that implement an interface. Use before changing an interface to identify all types that will be affected."),
+			mcp.WithDescription("Finds all concrete types that implement an interface — 'what implements X', interface satisfaction, which structs satisfy this contract. Use before changing an interface to identify all types that will be affected. For method-level overrides (which methods override this one, or the parents it overrides) use find_overrides."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Interface node ID")),
 			mcp.WithString("format", mcp.Description("Output format: json (default), gcx (GCX1 compact wire format), or toon")),
 			mcp.WithNumber("max_bytes", mcp.Description("Cap the marshaled response at this many bytes. The longest list is trimmed; truncation metadata rides on the response. Omit for no cap.")),
@@ -1085,7 +1087,7 @@ func (s *Server) registerCoreTools() {
 
 	s.addTool(
 		mcp.NewTool("find_usages",
-			mcp.WithDescription("Use instead of Grep to find every reference to a symbol across the codebase. Returns precise locations with zero false positives."),
+			mcp.WithDescription("Use instead of Grep to find every reference to a symbol across the codebase. Returns precise locations with zero false positives. For just the call sites of a function use get_callers; for the concrete types that implement an interface use find_implementations."),
 			mcp.WithString("id", mcp.Required(), mcp.Description("Node ID")),
 			mcp.WithNumber("limit", mcp.Description("Max nodes (default: 50)")),
 			mcp.WithBoolean("compact", mcp.Description("One-line-per-symbol text output (saves 50-70% tokens)")),
@@ -2492,6 +2494,11 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 		// classification when the emptiness was NOT caused by min_tier.
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
+	// Completeness rollup (n_refs / n_files / n_test_refs) so an agent can
+	// tell at a glance whether the usage list already covers tests instead
+	// of re-grepping *_test.go files. Rides every wire format below; nil
+	// for an empty result (the Caveat above covers that case).
+	sg.UsageSummary = usageSummaryOf(sg)
 	// group_by:"file" buckets the usages by the file each reference
 	// originates in -- an opt-in shape for callers that want a
 	// per-file rollup. The flat SubGraph stays the default so
@@ -2777,6 +2784,45 @@ func groupUsagesByFile(sg *query.SubGraph) map[string]any {
 		"total_uses": len(sg.Edges),
 		"groups":     out,
 		"truncated":  sg.Truncated,
+	}
+}
+
+// usageSummaryOf computes the compact completeness rollup attached to a
+// find_usages response: the total reference count, the number of
+// distinct files those references live in, and how many originate in
+// test files. It reuses the exact per-node test classification
+// (nodeIsTest — the from_is_test column) and file resolution as the
+// per-usage rows, so the rollup never disagrees with the edges it
+// summarizes. Returns nil for an empty result — the zero-edge Caveat
+// already explains that case, and an all-zero summary would be noise.
+func usageSummaryOf(sg *query.SubGraph) *query.UsageSummary {
+	if sg == nil || len(sg.Edges) == 0 {
+		return nil
+	}
+	nodeByID := make(map[string]*graph.Node, len(sg.Nodes))
+	for _, n := range sg.Nodes {
+		nodeByID[n.ID] = n
+	}
+	files := make(map[string]struct{}, len(sg.Edges))
+	testRefs := 0
+	for _, e := range sg.Edges {
+		from := nodeByID[e.From]
+		file := e.FilePath
+		if file == "" && from != nil {
+			file = from.FilePath
+		}
+		if file == "" {
+			file = "(unknown)"
+		}
+		files[file] = struct{}{}
+		if nodeIsTest(from) {
+			testRefs++
+		}
+	}
+	return &query.UsageSummary{
+		NRefs:     len(sg.Edges),
+		NFiles:    len(files),
+		NTestRefs: testRefs,
 	}
 }
 

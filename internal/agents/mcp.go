@@ -173,6 +173,57 @@ func resolveGortexCommandFrom(exe string, exeErr error, lookPath string, lookErr
 	return "gortex"
 }
 
+// ResolveGortexHookBinary returns the gortex binary reference a Claude
+// Code hook command should embed. It shares ResolveGortexCommand's
+// same-file decision core so the hook process and the MCP server/daemon
+// never resolve to different binaries — a side-by-side install (CI
+// sandbox, a downloaded release run before linking, a dev build) would
+// otherwise bake the running binary into the MCP stanza but a stray
+// PATH gortex into the hook, and the hook could then consult a
+// different daemon than the one serving the session's graph tools.
+//
+// It differs from ResolveGortexCommand only in output preference: a
+// hook fires in a shell whose PATH may not match install time, so it
+// pins an absolute path whenever the running binary is usable rather
+// than the bare name. The returned value is a bare binary reference
+// with no subcommand — callers append " hook" (and any --mode suffix).
+func ResolveGortexHookBinary() string {
+	exe, exeErr := os.Executable()
+	lp, lpErr := exec.LookPath("gortex")
+	return resolveGortexHookBinaryFrom(exe, exeErr, lp, lpErr, sameFile)
+}
+
+// resolveGortexHookBinaryFrom is the pure decision core of
+// ResolveGortexHookBinary, split out so the PATH/executable inputs can
+// be injected in tests. It resolves to the same on-disk binary as
+// resolveGortexCommandFrom in every case where the running binary is
+// usable (both pin the running exe, or the bare name that PATH resolves
+// back to it); it only prefers an absolute path over the bare name.
+//
+// The ephemeral guard is deliberately on the running binary alone
+// (exeUsable's !isUnderTempDir(exe)): a `go run` transient build must
+// never be baked into a long-lived hook, so we fall back to the PATH
+// gortex — the same file the MCP stanza collapses to — instead. A
+// PATH lookup that itself points into a temp dir is the user's own
+// PATH and is left to resolve, matching resolveGortexCommandFrom.
+func resolveGortexHookBinaryFrom(exe string, exeErr error, lookPath string, lookErr error, same func(a, b string) bool) string {
+	exeUsable := exeErr == nil && exe != "" && gortexCommandBase(exe) == "gortex" && !isUnderTempDir(exe)
+	if exeUsable {
+		// The running binary is a stable, non-ephemeral gortex: pin it.
+		// This is the same file the MCP stanza launches — whether that
+		// stanza used the bare name (PATH gortex IS this binary) or the
+		// absolute exe (off-PATH, or a different gortex on PATH).
+		return exe
+	}
+	if lookErr == nil && lookPath != "" {
+		// Running binary isn't a bakeable path (go run temp build,
+		// unstattable, or not named gortex). Fall back to PATH's gortex
+		// — the file the MCP stanza collapses to — as an absolute path.
+		return lookPath
+	}
+	return "gortex"
+}
+
 // isUnderTempDir reports whether p lives under the OS temp directory —
 // the tell-tale of a `go run` / `go test` transient build that must not
 // be baked into a long-lived config.

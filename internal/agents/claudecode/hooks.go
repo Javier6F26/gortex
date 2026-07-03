@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -82,23 +81,27 @@ func hookCommandWithMode(base, mode string) string {
 }
 
 // ResolveHookCommand returns the shell command to bake into Claude
-// Code's hook config. It prefers the `gortex` binary on PATH so
-// installers (brew, `go install`) get a stable absolute path; falls
-// back to bare "gortex hook" when no installed binary is found.
+// Code's hook config. It routes through agents.ResolveGortexHookBinary,
+// which shares the same same-file decision core as the MCP server
+// stanza (agents.ResolveGortexCommand): the hook and the MCP stanza
+// must resolve to the same binary file whenever the running binary is
+// usable, so a side-by-side install can never point the hook at a
+// different daemon than the one serving the session's graph tools. The
+// hook keeps an absolute-path preference (it avoids PATH-at-fire-time
+// fragility); it falls back to bare "gortex hook" only when no stable
+// binary is resolvable at all.
 //
-// A warning is written to w because the fallback relies on PATH
-// resolution at hook-fire time — fragile when the user's shell
+// A warning is written to w on the bare fallback because it relies on
+// PATH resolution at hook-fire time — fragile when the user's shell
 // environment differs between Claude Code and a terminal.
 func ResolveHookCommand(w io.Writer) string {
-	if path, err := exec.LookPath("gortex"); err == nil {
-		return shellSafeHookBinary(path) + " hook"
-	}
-	if w != nil {
+	bin := agents.ResolveGortexHookBinary()
+	if bin == "gortex" && w != nil {
 		fmt.Fprintln(w,
 			"[gortex init] warning: `gortex` not found on PATH; "+
 				"writing bare \"gortex hook\" into settings — install gortex to PATH for a stable hook command")
 	}
-	return "gortex hook"
+	return shellSafeHookBinary(bin) + " hook"
 }
 
 // shellSafeHookBinary normalizes a resolved binary path into a form

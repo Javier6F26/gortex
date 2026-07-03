@@ -275,3 +275,84 @@ func TestResolveGortexCommandFrom(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveGortexHookBinaryFrom mirrors TestResolveGortexCommandFrom's
+// table for the hook resolver, and additionally asserts the load-bearing
+// invariant: the hook binary and the MCP stanza launch the SAME on-disk
+// file in every case. The hook only prefers an absolute path over the
+// bare name (it fires in a shell whose PATH may differ from install
+// time); it must never point at a different gortex than the MCP server.
+func TestResolveGortexHookBinaryFrom(t *testing.T) {
+	sameTrue := func(a, b string) bool { return true }
+	sameFalse := func(a, b string) bool { return false }
+	notFound := errors.New("executable file not found in $PATH")
+
+	cases := []struct {
+		name     string
+		exe      string
+		exeErr   error
+		lookPath string
+		lookErr  error
+		same     func(a, b string) bool
+		want     string
+	}{
+		{
+			name:     "on PATH and same binary -> pin absolute (hook avoids PATH at fire time)",
+			exe:      "/usr/local/bin/gortex",
+			lookPath: "/usr/local/bin/gortex",
+			same:     sameTrue,
+			want:     "/usr/local/bin/gortex",
+		},
+		{
+			name:     "installed but not on PATH -> pin absolute path",
+			exe:      `C:\Users\daoti\AppData\Local\Programs\gortex\gortex.exe`,
+			lookPath: "",
+			lookErr:  notFound,
+			same:     sameFalse,
+			want:     `C:\Users\daoti\AppData\Local\Programs\gortex\gortex.exe`,
+		},
+		{
+			name:     "on PATH but a different gortex -> pin the running binary, not the PATH one",
+			exe:      "/opt/build/gortex",
+			lookPath: "/usr/local/bin/gortex",
+			same:     sameFalse,
+			want:     "/opt/build/gortex",
+		},
+		{
+			name:     "go run transient temp build + gortex on PATH -> PATH gortex, never the temp build",
+			exe:      filepath.Join(os.TempDir(), "go-build1234", "agents.test"),
+			lookPath: "/usr/local/bin/gortex",
+			same:     sameFalse,
+			want:     "/usr/local/bin/gortex",
+		},
+		{
+			name:    "nothing resolvable -> bare gortex last resort",
+			exe:     "",
+			exeErr:  errors.New("os.Executable failed"),
+			lookErr: notFound,
+			same:    sameFalse,
+			want:    "gortex",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveGortexHookBinaryFrom(tc.exe, tc.exeErr, tc.lookPath, tc.lookErr, tc.same)
+			if got != tc.want {
+				t.Errorf("resolveGortexHookBinaryFrom() = %q, want %q", got, tc.want)
+			}
+			// Map each resolver output to the concrete file it launches:
+			// an absolute path is itself; the bare name resolves via PATH
+			// to lookPath. The two must never disagree.
+			launched := func(resolved string) string {
+				if resolved == "gortex" {
+					return tc.lookPath
+				}
+				return resolved
+			}
+			mcp := resolveGortexCommandFrom(tc.exe, tc.exeErr, tc.lookPath, tc.lookErr, tc.same)
+			if hf, mf := launched(got), launched(mcp); hf != mf {
+				t.Errorf("hook/MCP disagree on binary file: hook %q -> %q, mcp %q -> %q", got, hf, mcp, mf)
+			}
+		})
+	}
+}

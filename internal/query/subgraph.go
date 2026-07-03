@@ -78,6 +78,25 @@ type SubGraph struct {
 	// Boundaries names the unresolved/dispatch sites that made the result a
 	// floor. Populated only by call-graph traversals; omitted when empty.
 	Boundaries []graph.EpistemicBoundary `json:"boundaries,omitempty"`
+	// UsageSummary is a compact completeness rollup attached only by
+	// find_usages: the total reference count, the number of distinct
+	// files those references span, and the test-file share. Nil — and
+	// omitted — for every other traversal that shares this struct, and
+	// for an empty result (the Caveat already explains that case). Lets
+	// an agent see at a glance whether the usage list already covers
+	// tests instead of re-grepping *_test.go files to find out.
+	UsageSummary *UsageSummary `json:"usage_summary,omitempty"`
+}
+
+// UsageSummary is the compact completeness rollup on a find_usages
+// result: NRefs total references, spread across NFiles distinct files,
+// of which NTestRefs originate in test files. It is derived from the
+// same edges and per-node test classification as the per-usage rows, so
+// the rollup never disagrees with the references it summarizes.
+type UsageSummary struct {
+	NRefs     int `json:"n_refs" toon:"n_refs"`
+	NFiles    int `json:"n_files" toon:"n_files"`
+	NTestRefs int `json:"n_test_refs" toon:"n_test_refs"`
 }
 
 // QueryOptions controls traversal depth, result limits, and detail level.
