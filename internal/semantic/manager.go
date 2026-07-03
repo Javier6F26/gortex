@@ -459,10 +459,32 @@ func (m *Manager) setEnrichStatus(repo, provider, lang, state string, deadline t
 		st.EdgesConfirmed = result.EdgesConfirmed
 		st.EdgesAdded = result.EdgesAdded
 		st.NodesEnriched = result.NodesEnriched
+		st.SymbolsTotal = result.SymbolsTotal
+		st.SymbolsCovered = result.SymbolsCovered
+		st.CoveragePercent = result.CoveragePercent
+		// Fill (and back-stamp) the bounding reason so a "completed" state
+		// that covered < 100% of its targets is never read as full coverage.
+		if result.BoundReason == "" {
+			result.BoundReason = enrichBoundReason(state, result)
+		}
+		st.BoundReason = result.BoundReason
 	}
 	m.mu.Lock()
 	m.enrichStatus[repo+"\x00"+provider] = st
 	m.mu.Unlock()
+}
+
+// enrichBoundReason classifies why the add-phase stopped: a cut pass is
+// budget-bound; a finished pass that skipped some targets is cap-bound; a
+// finished pass that visited every target is completed-all.
+func enrichBoundReason(state string, r *EnrichResult) string {
+	if r.Partial || state == EnrichStatePartial || state == EnrichStateAbandoned {
+		return EnrichBoundBudget
+	}
+	if r.SymbolsTotal > 0 && r.SymbolsCovered < r.SymbolsTotal {
+		return EnrichBoundCap
+	}
+	return EnrichBoundCompletedAll
 }
 
 // EnrichmentStatuses returns a stable-ordered snapshot of every

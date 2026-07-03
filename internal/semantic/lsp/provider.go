@@ -224,6 +224,22 @@ func nodeRelPath(n *graph.Node) string {
 	return n.FilePath
 }
 
+// enrichNodeHasUnresolvedDemand reports whether a callable declaration still
+// has unresolved same-name call candidates in the graph — `unresolved::*.<name>`
+// edges the resolver never bound. Such declarations are the ones an LSP
+// references pass can actually connect, so the add-phase enriches them first.
+// Unresolved call stubs are indexed by their target string, so this is a
+// single reverse-edge lookup, not a scan.
+func enrichNodeHasUnresolvedDemand(g graph.Store, n *graph.Node) bool {
+	if n == nil || n.Name == "" {
+		return false
+	}
+	if n.Kind != graph.KindMethod && n.Kind != graph.KindFunction {
+		return false
+	}
+	return len(g.GetInEdges(graph.UnresolvedMarker+"*."+n.Name)) > 0
+}
+
 // scopedPath re-attaches repoPrefix to a repo-relative path the language
 // server handed back: uriToPath returns repo-relative, but graph node
 // FilePaths are prefixed, so node lookups must re-prefix to match in a
@@ -789,8 +805,9 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	// spans all of its symbols. Files keep encounter order; symbols keep
 	// their order within a file.
 	type fileTargets struct {
-		rel   string
-		nodes []*graph.Node
+		rel    string
+		nodes  []*graph.Node
+		demand int // declarations still carrying unresolved same-name candidates
 	}
 	var fileList []*fileTargets
 	fileIndex := map[string]*fileTargets{}
@@ -806,7 +823,18 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			fileList = append(fileList, ft)
 		}
 		ft.nodes = append(ft.nodes, n)
+		if enrichNodeHasUnresolvedDemand(g, n) {
+			ft.demand++
+		}
 	}
+	// Demand-driven ordering: enrich the files whose declarations still carry
+	// unresolved same-name call candidates first. Under a per-repo deadline the
+	// budget is then spent where the LSP references pass will actually bind
+	// dropped call sites, instead of on declarations static resolution already
+	// covered. Stable so files of equal demand keep encounter order.
+	sort.SliceStable(fileList, func(i, j int) bool {
+		return fileList[i].demand > fileList[j].demand
+	})
 
 	// Call- and type-hierarchy hops are collected per file (while the
 	// file is open) and applied in that file's flush below, so each
@@ -1240,7 +1268,14 @@ func (p *Provider) dialOrSpawn(workspaceRoot string) (*Client, error) {
 	if p.command == "" {
 		return nil, fmt.Errorf("lsp: no command configured and no passive attach available")
 	}
-	return NewClient(p.command, p.args, p.env, workspaceRoot, p.logger)
+	args := p.args
+	// jdtls with no -data lets the launcher default its Eclipse workspace to
+	// ~/Library/Caches/jdtls/<hash>, outside Gortex's cache isolation. Pin it
+	// under the resolved cache home per repo instead.
+	if isJdtlsCommand(p.command) {
+		args = jdtlsDataArgs(args, workspaceRoot)
+	}
+	return NewClient(p.command, args, p.env, workspaceRoot, p.logger)
 }
 
 // defaultLSPCallTimeout bounds a single post-initialize LSP request.

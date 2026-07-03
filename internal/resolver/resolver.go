@@ -544,6 +544,14 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// dep-module bridge has had its chance.
 	r.attributeNonGoModuleImports()
 
+	// Java override-dispatch fan-out. An ambiguous member call on a
+	// supertype-typed receiver (`x.toString()` with two candidate
+	// overrides) stays unresolved after the cross-package guard reverts
+	// the name-only guess; this pass fans it out to every override in the
+	// hierarchy, the call-hierarchy semantics the language server presents.
+	// Runs after the guard so its ast_inferred edges are never reverted.
+	r.resolveJavaOverrideDispatch()
+
 	total := &ResolveStats{}
 	for i := range allStats {
 		total.Resolved += allStats[i].Resolved
@@ -2061,10 +2069,17 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 	callerDir := r.dirFor(e.FilePath)
 	receiverType := edgeReceiverType(e)
 
-	// If we have a type hint, try exact type match first.
+	// If we have a type hint, try exact type match first. These passes scan
+	// the UNFILTERED candidate set: a receiver typed as T binds to T's method
+	// regardless of whether the caller's file imports T's package. Import-
+	// reachability filtering can drop the receiver's own type when it lives in
+	// a sibling Maven directory (src/main vs src/test) the caller never
+	// imports, leaving a same-named method in the caller's own class as the
+	// only survivor — so the exact-type match must see every candidate, not
+	// just the reachable ones.
 	if receiverType != "" {
 		// Pass 1: same-directory + exact type match (highest confidence).
-		for _, c := range candidates {
+		for _, c := range rawCandidates {
 			if c.Kind == graph.KindMethod &&
 				r.dirFor(c.FilePath) == callerDir &&
 				nodeReceiverType(c) == receiverType {
@@ -2075,10 +2090,10 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 			}
 		}
 		// Pass 2: exact type match, any directory.
-		for _, c := range candidates {
+		for _, c := range rawCandidates {
 			if c.Kind == graph.KindMethod && nodeReceiverType(c) == receiverType {
 				e.To = c.ID
-				e.Confidence = 0.85
+				e.Confidence = 0.9
 				stats.Resolved++
 				return
 			}
@@ -2200,6 +2215,18 @@ func (r *Resolver) resolveMethodCall(e *graph.Edge, methodName string, stats *Re
 		// ast_inferred is what this actually is. The LSP hierarchy
 		// pass upgrades (or fans out) the truly verified sites.
 		e.Origin = graph.OriginASTInferred
+	}
+
+	// A Java member call with exactly one method candidate for the name is a
+	// grounded inference, not a text-grade guess: there is nowhere else it
+	// could bind. Lift it to the ast_inferred tier so min_tier filtering and
+	// the cross-package guard treat it as the resolved target it is (the
+	// guard's Java lone-definition exception keeps it from being reverted).
+	if methodCount == 1 && anyMethod != nil && anyMethod.Language == "java" && e.Origin == "" {
+		e.Origin = graph.OriginASTInferred
+		if e.Confidence == 0 {
+			e.Confidence = 0.7
+		}
 	}
 
 	if sameDirMethod != nil {

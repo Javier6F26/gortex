@@ -76,7 +76,21 @@ type EnrichResult struct {
 	// graph. AbortReason carries the cause when Partial is true.
 	Partial     bool   `json:"partial,omitempty"`
 	AbortReason string `json:"abort_reason,omitempty"`
+	// BoundReason states why the add-phase stopped where it did, so a
+	// "completed" state that covered < 100% of its targets is never read as
+	// full coverage: "budget" (a deadline cut the pass), "cap" (the pass
+	// finished but some targets were skipped, e.g. no source position or an
+	// unservable file), or "completed_all" (every target visited).
+	BoundReason string `json:"bound_reason,omitempty"`
 }
+
+// Bounding reasons for the enrichment add-phase (EnrichResult.BoundReason /
+// EnrichmentStatus.BoundReason).
+const (
+	EnrichBoundBudget       = "budget"
+	EnrichBoundCap          = "cap"
+	EnrichBoundCompletedAll = "completed_all"
+)
 
 // Enrichment lifecycle states surfaced per (repo, provider) via
 // Manager.EnrichmentStatuses — the health signal that lets an agent see
@@ -102,6 +116,14 @@ type EnrichmentStatus struct {
 	EdgesConfirmed  int     `json:"edges_confirmed"`
 	EdgesAdded      int     `json:"edges_added"`
 	NodesEnriched   int     `json:"nodes_enriched"`
+	// Add-phase coverage — the targets eligible for the hover/references
+	// pass, how many were visited, and why the pass stopped. Always emitted
+	// so a "completed" state that covered < 100% of targets is legible as a
+	// coverage sliver rather than trusted as full enrichment.
+	SymbolsTotal    int     `json:"symbols_total"`
+	SymbolsCovered  int     `json:"symbols_covered"`
+	CoveragePercent float64 `json:"coverage_percent"`
+	BoundReason     string  `json:"bound_reason,omitempty"`
 	Detail          string  `json:"detail,omitempty"`
 }
 

@@ -83,11 +83,21 @@ func (r *Resolver) guardCrossPackageCallEdges(jobs []reindexJob, closure map[str
 			continue
 		}
 		callerFile := r.edgeCallerFile(j.edge)
+		callerNode := r.cachedGetNode(j.edge.From)
 		target := r.cachedGetNode(j.newTo)
 		if callerFile == "" || target == nil {
 			continue
 		}
-		if r.targetImportReachable(callerFile, target, closure) {
+		if r.targetImportReachable(callerFile, callerNode, target, closure) {
+			continue
+		}
+		// A Java member call whose only in-repo definition of the name is
+		// this target is not a cross-package mis-guess — there is nowhere
+		// else the call could bind. Java's same-package callers import
+		// nothing and inherited-method calls (owner.getId() → BaseEntity.getId
+		// two packages up) never name the declaring package, so the import
+		// closure structurally misses them. Keep the resolution.
+		if r.javaLoneMemberDefnKeep(target, j.edge, j.oldTo) {
 			continue
 		}
 		// Not reachable — revert to the unresolved placeholder and
@@ -159,7 +169,7 @@ func (r *Resolver) edgeCallerFile(e *graph.Edge) string {
 // targetImportReachable reports whether target sits in a package the
 // caller's file can see: the caller's own directory (same package), or
 // a directory present in the caller's import closure.
-func (r *Resolver) targetImportReachable(callerFile string, target *graph.Node, closure map[string]map[string]struct{}) bool {
+func (r *Resolver) targetImportReachable(callerFile string, callerNode, target *graph.Node, closure map[string]map[string]struct{}) bool {
 	if target.FilePath == "" {
 		// A target with no file (synthetic / external stub) can't be
 		// shown unreachable — leave the edge alone.
@@ -168,6 +178,15 @@ func (r *Resolver) targetImportReachable(callerFile string, target *graph.Node, 
 	callerDir := filepath.Dir(callerFile)
 	targetDir := filepath.Dir(target.FilePath)
 	if targetDir == callerDir {
+		return true
+	}
+	// Same source package across different directories is reachable without
+	// an import edge. Maven splits one package across src/main/java and
+	// src/test/java, and JVM same-package callers import nothing — so a
+	// directory-only closure reports a false "unreachable" for every
+	// test→production same-package call. scope_pkg is stamped only on JVM
+	// member nodes, so this never fires for directory-scoped ecosystems.
+	if sameScopePackage(callerNode, target) {
 		return true
 	}
 	dirs, ok := closure[callerFile]
@@ -179,6 +198,78 @@ func (r *Resolver) targetImportReachable(callerFile string, target *graph.Node, 
 	}
 	_, reachable := dirs[targetDir]
 	return reachable
+}
+
+// scopePkgOf returns a node's stamped source package (scope_pkg Meta),
+// empty when absent. Only JVM extractors (Java / Kotlin) stamp it.
+func scopePkgOf(n *graph.Node) string {
+	if n == nil || n.Meta == nil {
+		return ""
+	}
+	if p, ok := n.Meta["scope_pkg"].(string); ok {
+		return p
+	}
+	return ""
+}
+
+// sameScopePackage reports whether two nodes belong to the same source
+// package of the same language. Empty package on either side is never a
+// match, so directory-scoped ecosystems (no scope_pkg) never qualify.
+func sameScopePackage(a, b *graph.Node) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	pa := scopePkgOf(a)
+	if pa == "" {
+		return false
+	}
+	return pa == scopePkgOf(b) && a.Language == b.Language
+}
+
+// javaLoneMemberDefnKeep reports whether a to-be-reverted Java member-call
+// edge should survive the cross-package guard because its target is the sole
+// in-repo definition of the method name. A name with exactly one candidate
+// cannot be a cross-package mis-guess. Scoped to Java — the guard's revert is
+// load-bearing for Go / TS / Python precision — and gated on the receiver, when
+// known, naming an in-repo type so an external-typed receiver (a logging
+// facade's `logger.info`) still reverts rather than latching onto an unrelated
+// same-named local method.
+func (r *Resolver) javaLoneMemberDefnKeep(target *graph.Node, e *graph.Edge, oldTo string) bool {
+	if target == nil || target.Language != "java" {
+		return false
+	}
+	name := strings.TrimPrefix(graph.UnresolvedName(oldTo), "*.")
+	if name == "" {
+		return false
+	}
+	repo := r.callerRepoPrefix(e)
+	if rt := edgeReceiverType(e); rt != "" && !r.hasInRepoType(rt, repo) {
+		return false
+	}
+	n := 0
+	for _, c := range r.cachedFindNodesByNameInRepo(name, repo) {
+		if c.Language != "java" {
+			continue
+		}
+		if c.Kind == graph.KindMethod || c.Kind == graph.KindFunction {
+			if n++; n > 1 {
+				return false
+			}
+		}
+	}
+	return n == 1
+}
+
+// hasInRepoType reports whether the repo defines a type/interface named
+// typeName — the gate that keeps javaLoneMemberDefnKeep from latching a
+// call on an external-typed receiver onto an unrelated in-repo method.
+func (r *Resolver) hasInRepoType(typeName, repo string) bool {
+	for _, c := range r.cachedFindNodesByNameInRepo(typeName, repo) {
+		if c.Kind == graph.KindType || c.Kind == graph.KindInterface {
+			return true
+		}
+	}
+	return false
 }
 
 // buildImportClosure maps each caller file path to the set of directories

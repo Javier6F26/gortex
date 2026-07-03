@@ -277,6 +277,15 @@ func (r *Resolver) preferJavaScopeCandidate(e *graph.Edge, caller *graph.Node, n
 	if enclosing == "" {
 		return nil
 	}
+	// A selector call whose receiver is typed as a DIFFERENT class is not an
+	// enclosing-class call: `testee.triggerException()` must bind to the
+	// receiver's type, not to a same-named method that merely happens to live
+	// in the caller's own class. Only bare calls (no receiver type) and calls
+	// on a receiver typed as the enclosing class itself use this rule; the
+	// receiver-type passes own everything else.
+	if rt := edgeReceiverType(e); rt != "" && rt != enclosing {
+		return nil
+	}
 	// Pass 1: exact same enclosing class.
 	for _, c := range candidates {
 		if c.Kind != graph.KindMethod {
