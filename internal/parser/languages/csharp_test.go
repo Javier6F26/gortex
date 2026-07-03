@@ -122,6 +122,39 @@ func TestCSharpExtractor_InterfaceMembers(t *testing.T) {
 	assert.Contains(t, names, "Describe")
 }
 
+// TestCSharpExtractor_ExtensionMethod verifies extension methods (a static
+// method whose first parameter carries the `this` modifier) are stamped with
+// extension=true + this_param_type, keep their <StaticClass>.<name> id, and a
+// plain static method is not misflagged.
+func TestCSharpExtractor_ExtensionMethod(t *testing.T) {
+	src := []byte(`public static class Exts {
+    public static string Dehumanize(this string value) { return value; }
+    public static int AddTo(this int x, int y) { return x + y; }
+    public static string Plain(string value) { return value; }
+}
+`)
+	e := NewCSharpExtractor()
+	result, err := e.Extract("Exts.cs", src)
+	require.NoError(t, err)
+
+	deh := nodeByID(result.Nodes, "Exts.cs::Exts.Dehumanize")
+	require.NotNil(t, deh, "extension method id stays <StaticClass>.<name>")
+	assert.Equal(t, true, deh.Meta["extension"])
+	assert.Equal(t, "string", deh.Meta["this_param_type"])
+	assert.Equal(t, true, deh.Meta["static"])
+
+	add := nodeByID(result.Nodes, "Exts.cs::Exts.AddTo")
+	require.NotNil(t, add)
+	assert.Equal(t, true, add.Meta["extension"])
+	assert.Equal(t, "int", add.Meta["this_param_type"])
+
+	// A plain static method (no `this`) must not be flagged an extension.
+	plain := nodeByID(result.Nodes, "Exts.cs::Exts.Plain")
+	require.NotNil(t, plain)
+	_, isExt := plain.Meta["extension"]
+	assert.False(t, isExt, "plain static method must not be an extension")
+}
+
 // csharpSymbolNames returns the set of non-file node names in a result.
 func csharpSymbolNames(res *parser.ExtractionResult) map[string]bool {
 	names := map[string]bool{}

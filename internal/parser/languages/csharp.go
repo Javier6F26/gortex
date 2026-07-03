@@ -554,6 +554,59 @@ func csharpHasModifier(decl *sitter.Node, src []byte, mod string) bool {
 	return false
 }
 
+// csharpExtensionReceiverType returns the generics- and namespace-stripped
+// type of a method's first parameter when that parameter carries the `this`
+// modifier — the receiver type of a C# extension method (`static int Foo(this
+// string s)` → "string"). Returns "" for a non-extension method. Unlike
+// normalizeCSharpTypeName it keeps primitive receivers (string / int), since
+// extension methods commonly extend them.
+func csharpExtensionReceiverType(methodNode *sitter.Node, src []byte) string {
+	if methodNode == nil {
+		return ""
+	}
+	params := methodNode.ChildByFieldName("parameters")
+	if params == nil {
+		return ""
+	}
+	var first *sitter.Node
+	for i, _nc := 0, int(params.NamedChildCount()); i < _nc; i++ {
+		c := params.NamedChild(i)
+		if c != nil && c.Type() == "parameter" {
+			first = c
+			break
+		}
+	}
+	if first == nil {
+		return ""
+	}
+	hasThis := false
+	for i, _nc := 0, int(first.ChildCount()); i < _nc; i++ {
+		c := first.Child(i)
+		if c == nil {
+			continue
+		}
+		// The `this` marker is a `modifier` child (grammar revisions may also
+		// spell it `parameter_modifier` or a bare `this` keyword node).
+		ct := c.Type()
+		if (ct == "modifier" || ct == "parameter_modifier") && strings.TrimSpace(c.Content(src)) == "this" {
+			hasThis = true
+			break
+		}
+		if ct == "this" {
+			hasThis = true
+			break
+		}
+	}
+	if !hasThis {
+		return ""
+	}
+	t := first.ChildByFieldName("type")
+	if t == nil {
+		return ""
+	}
+	return normalizeCSharpBaseName(t.Content(src))
+}
+
 // csharpEnclosingNamespace returns the dotted name of the nearest enclosing
 // namespace declaration (block or file-scoped), or "".
 func csharpEnclosingNamespace(node *sitter.Node, src []byte) string {
@@ -752,6 +805,13 @@ func (e *CSharpExtractor) emitMethod(m parser.QueryResult, filePath, fileID stri
 	}
 	if csharpHasModifier(def.Node, src, "static") {
 		meta["static"] = true
+	}
+	// Extension method: a static method whose first parameter carries the
+	// `this` modifier. Record the receiver type it extends so member-call
+	// resolution can bind `x.Foo()` to it (the id stays <StaticClass>.<name>).
+	if extType := csharpExtensionReceiverType(def.Node, src); extType != "" {
+		meta["extension"] = true
+		meta["this_param_type"] = extType
 	}
 	if ns := csharpEnclosingNamespace(def.Node, src); ns != "" {
 		meta["scope_ns"] = ns
