@@ -2454,6 +2454,16 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 		return errResult, nil
 	}
 	eng := s.engineFor(ctx)
+	// Barrel re-export resolve-through: a public import path that names a
+	// forwarded binding (`src/middleware.ts::persist`) has no node of its own —
+	// map it to the canonical declaration so find_usages answers with the real
+	// usages instead of not_found. Gated on the id not already being a node, so
+	// a real symbol's result is never altered.
+	if eng.GetSymbol(id) == nil {
+		if canon := reExportBindingCanonical(s.graph, id, 0); canon != "" {
+			id = canon
+		}
+	}
 	if node := eng.GetSymbol(id); node != nil && !resolvedScopeAllowsNode(resolved, node) {
 		return symbolNotFoundGuidance(id), nil
 	}

@@ -1737,6 +1737,32 @@ func (p *Provider) ensureClient(workspaceRoot string) error {
 	return nil
 }
 
+// WaitReady implements semantic.ReadinessProber for the Roslyn / MSBuild-class
+// C# servers (csharp-ls, OmniSharp), whose workspace load continues past
+// `initialize` and serves empty results until the solution finishes loading.
+// Bringing the client up here — spawn, optional `dotnet restore`, and the
+// `initialize` handshake — moves that cold-start latency OUT of the per-repo
+// enrichment deadline the Manager starts immediately afterward, so the query
+// budget is not consumed by the load. Every other server is ready to answer
+// once initialized and does not implement ReadinessProber, so it never waits.
+// The call runs synchronously (it completes before the enrichment pass calls
+// ensureClient again, which then no-ops), so there is no concurrent client
+// setup to race; ctx bounds the caller's expectation and short-circuits an
+// already-cancelled budget.
+func (p *Provider) WaitReady(ctx context.Context, repoRoot string) error {
+	if !p.servesCSharp() {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	absRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return err
+	}
+	return p.ensureClient(absRoot)
+}
+
 // fanoutDiagnostics wakes everyone who called WaitForDiagnostics for
 // this absPath AND invokes the persistent hook installed via
 // SetDiagnosticsHook (if any). Runs with no provider lock held.

@@ -58,6 +58,22 @@ type ContextEnricher interface {
 	EnrichRepoContext(ctx context.Context, g graph.Store, repoPrefix, repoRoot string) (*EnrichResult, error)
 }
 
+// ReadinessProber is an optional interface a Provider MAY implement when its
+// server answers `initialize` quickly but is not ready to serve semantic
+// queries until a slower background load finishes — the Roslyn / MSBuild
+// solution load a csharp-ls / OmniSharp pass sits behind. The Manager calls
+// WaitReady BEFORE it starts the per-repo enrichment deadline, so that cold
+// load does not consume the query budget (which otherwise elapses during the
+// load, leaving the pass with zero useful edges). WaitReady must respect ctx
+// (a bounded readiness budget) and should return promptly for a server that is
+// already ready — providers whose servers serve queries immediately after
+// initialize simply do not implement this interface. The returned error is
+// best-effort: enrichment proceeds regardless, so a probe failure never blocks
+// the pass.
+type ReadinessProber interface {
+	WaitReady(ctx context.Context, repoRoot string) error
+}
+
 // EnrichResult contains statistics from an enrichment pass.
 type EnrichResult struct {
 	Provider        string  `json:"provider"`
