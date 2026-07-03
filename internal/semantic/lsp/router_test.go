@@ -449,3 +449,120 @@ func TestRouter_RegisterAvailable_KeepsConfigOverride(t *testing.T) {
 		t.Errorf("RegisterAvailable clobbered the config args override: %v", got.Args)
 	}
 }
+
+// injectProvider adds a placeholder routedProvider directly into the
+// router's cache, bypassing the spawn path (which needs a real LSP
+// binary). Used by the pool-cap / eviction tests.
+func injectProvider(r *Router, name, workspace string, lastUsed time.Time, inUse int) {
+	p := NewProvider("noop-cmd", nil, []string{"go"}, false, 1, zap.NewNop())
+	r.mu.Lock()
+	r.providers[providerKey{specName: name, workspace: workspace}] = &routedProvider{
+		spec:      &ServerSpec{Name: name, Languages: []string{"go"}},
+		workspace: workspace,
+		provider:  p,
+		lastUsed:  lastUsed,
+		inUse:     inUse,
+	}
+	r.mu.Unlock()
+}
+
+// TestRouter_SetMaxAlive_RaceSafe exercises SetMaxAlive / MaxAlive /
+// EvictionCount concurrently — the -race detector must stay quiet.
+func TestRouter_SetMaxAlive_RaceSafe(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop()).WithMaxAlive(6)
+	defer r.Close()
+
+	const goroutines = 16
+	done := make(chan struct{})
+	for i := 0; i < goroutines; i++ {
+		go func(n int) {
+			for j := 0; j < 200; j++ {
+				r.SetMaxAlive(4 + (n+j)%8)
+				_ = r.MaxAlive()
+				_ = r.EvictionCount()
+			}
+			done <- struct{}{}
+		}(i)
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+}
+
+// TestRouter_SetMaxAlive_RaisingPreventsEviction — with more live
+// providers than the base cap, raising the cap above the live count
+// leaves every provider intact and evicts nothing.
+func TestRouter_SetMaxAlive_RaisingPreventsEviction(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop()).WithMaxAlive(2)
+	defer r.Close()
+
+	base := time.Now()
+	injectProvider(r, "spec-a", "/repo/a", base, 0)
+	injectProvider(r, "spec-b", "/repo/b", base.Add(time.Second), 0)
+	injectProvider(r, "spec-c", "/repo/c", base.Add(2*time.Second), 0)
+
+	// Raising the cap to accommodate every live provider evicts none.
+	r.SetMaxAlive(6)
+	if got := len(r.Names()); got != 3 {
+		t.Fatalf("raising the cap evicted providers: want 3 alive, got %d", got)
+	}
+	if got := r.EvictionCount(); got != 0 {
+		t.Fatalf("raising the cap must not evict: EvictionCount=%d", got)
+	}
+}
+
+// TestRouter_SetMaxAlive_LoweringEvictsAndCounts — lowering the cap
+// below the live count evicts the least-recently-used providers and the
+// eviction counter increments once per genuine eviction.
+func TestRouter_SetMaxAlive_LoweringEvictsAndCounts(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop()).WithMaxAlive(6)
+	defer r.Close()
+
+	base := time.Now()
+	injectProvider(r, "spec-a", "/repo/a", base, 0)               // oldest → evicted first
+	injectProvider(r, "spec-b", "/repo/b", base.Add(time.Second), 0)
+	injectProvider(r, "spec-c", "/repo/c", base.Add(2*time.Second), 0) // newest → survives
+
+	r.SetMaxAlive(1)
+
+	if got := len(r.Names()); got != 1 {
+		t.Fatalf("want 1 provider alive after lowering cap to 1, got %d", got)
+	}
+	if got := r.EvictionCount(); got != 2 {
+		t.Fatalf("want EvictionCount=2 after evicting 2 providers, got %d", got)
+	}
+	// The most-recently-used provider is the survivor.
+	names := r.Names()
+	if len(names) != 1 || names[0] != "spec-c@/repo/c" {
+		t.Fatalf("LRU order wrong: survivor names=%v, want [spec-c@/repo/c]", names)
+	}
+}
+
+// TestRouter_SetMaxAlive_NeverEvictsPinned — a provider pinned in-use is
+// never evicted even when it is over the cap; only unpinned providers go.
+func TestRouter_SetMaxAlive_NeverEvictsPinned(t *testing.T) {
+	r := NewRouter(t.TempDir(), zap.NewNop()).WithMaxAlive(6)
+	defer r.Close()
+
+	base := time.Now()
+	injectProvider(r, "pinned", "/repo/p", base, 1)              // oldest but pinned
+	injectProvider(r, "spec-b", "/repo/b", base.Add(time.Second), 0)
+	injectProvider(r, "spec-c", "/repo/c", base.Add(2*time.Second), 0)
+
+	r.SetMaxAlive(1)
+
+	names := r.Names()
+	found := false
+	for _, n := range names {
+		if n == "pinned@/repo/p" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pinned provider was evicted: alive=%v", names)
+	}
+	// Only the two unpinned providers may be evicted.
+	if got := r.EvictionCount(); got != 2 {
+		t.Fatalf("want 2 unpinned evictions, got %d", got)
+	}
+}

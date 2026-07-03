@@ -498,7 +498,25 @@ func (mi *MultiIndexer) RunPreEnrichResolve(ctx context.Context) {
 // repo's LSP provider in-use for the duration of its pass, so the router's
 // LRU evictor never closes a provider another repo is still enriching against.
 func (mi *MultiIndexer) runDeferredEnrichParallel(indexers []*Indexer) {
+	// Per-repo language sets computed once from a single graph-stats scan,
+	// shared by the spec-grouped ordering and the batch pool-raise sizing
+	// so the Manager's per-repo enrichment scan is not duplicated here.
+	langSets := mi.batchLanguageSets(indexers)
+	// Deterministic, spec-grouped order: repos needing the same language
+	// servers run contiguously so the router's capped provider pool cycles
+	// through far fewer distinct (spec, workspace) keys — a warmed server
+	// stays alive across the runs that need it instead of being evicted and
+	// respawned per repo.
+	indexers = orderIndexersBySpecGroup(indexers, langSets)
+
 	conc := enrichConcurrency(len(indexers))
+
+	// Temporarily raise the router's live-provider cap for the batch so the
+	// concurrent passes don't evict each other's warmed servers, restoring
+	// it (and logging the churn observed) when the batch drains.
+	restore := mi.scopeRouterPoolForBatch(langSets, conc)
+	defer restore()
+
 	if conc <= 1 {
 		for _, idx := range indexers {
 			idx.runDeferredEnrich()
@@ -517,6 +535,125 @@ func (mi *MultiIndexer) runDeferredEnrichParallel(indexers []*Indexer) {
 		}(idx)
 	}
 	wg.Wait()
+}
+
+// maxBatchProviders caps the temporary live-provider pool raise during
+// batch enrichment. Even a batch touching many distinct language servers
+// at high concurrency is held to this ceiling so warmup cannot spawn an
+// unbounded number of LSP subprocesses at once.
+const maxBatchProviders = 12
+
+// batchLanguageSets returns each indexer's sorted set of present languages,
+// computed from a single RepoStats scan (one pass over the shared graph)
+// rather than a per-repo node scan. The sets drive both the spec-grouped
+// enrich ordering and the batch pool-raise sizing.
+func (mi *MultiIndexer) batchLanguageSets(indexers []*Indexer) map[*Indexer][]string {
+	out := make(map[*Indexer][]string, len(indexers))
+	var stats map[string]graph.GraphStats
+	if mi.graph != nil {
+		stats = mi.graph.RepoStats()
+	}
+	for _, idx := range indexers {
+		var langs []string
+		if s, ok := stats[idx.repoPrefix]; ok {
+			for l := range s.ByLanguage {
+				langs = append(langs, l)
+			}
+		}
+		sort.Strings(langs)
+		out[idx] = langs
+	}
+	return out
+}
+
+// orderIndexersBySpecGroup returns a stable, deterministic ordering of
+// indexers grouped by their language set (so repos needing the same LSP
+// servers run contiguously), breaking ties by repo prefix. It does not
+// mutate the input slice.
+func orderIndexersBySpecGroup(indexers []*Indexer, langSets map[*Indexer][]string) []*Indexer {
+	out := make([]*Indexer, len(indexers))
+	copy(out, indexers)
+	sort.SliceStable(out, func(i, j int) bool {
+		ki := strings.Join(langSets[out[i]], ",")
+		kj := strings.Join(langSets[out[j]], ",")
+		if ki != kj {
+			return ki < kj
+		}
+		return out[i].repoPrefix < out[j].repoPrefix
+	})
+	return out
+}
+
+// distinctBatchSpecs counts the enabled, available LSP specs whose
+// languages intersect any language present in the batch — i.e. how many
+// distinct language servers the batch will actually drive.
+func distinctBatchSpecs(langSets map[*Indexer][]string, router semantic.LSPRouter) int {
+	langs := make(map[string]bool)
+	for _, ls := range langSets {
+		for _, l := range ls {
+			langs[l] = true
+		}
+	}
+	if len(langs) == 0 {
+		return 0
+	}
+	seen := make(map[string]bool)
+	for _, name := range router.EnabledSpecNames() {
+		if !router.SpecAvailable(name) {
+			continue
+		}
+		for _, l := range router.SpecLanguages(name) {
+			if langs[l] {
+				seen[name] = true
+				break
+			}
+		}
+	}
+	return len(seen)
+}
+
+// scopeRouterPoolForBatch raises the LSP router's live-provider cap to
+// enrichConcurrency × distinct-provider-specs (ceiling maxBatchProviders)
+// for the duration of a batch enrichment pass, so the concurrent passes
+// don't evict each other's warmed servers. It returns a restore closure
+// that puts the cap back and logs the eviction churn observed during the
+// batch. Safe no-op when no router is installed.
+func (mi *MultiIndexer) scopeRouterPoolForBatch(langSets map[*Indexer][]string, conc int) func() {
+	if mi.semanticMgr == nil {
+		return func() {}
+	}
+	router := mi.semanticMgr.LSPRouter()
+	if router == nil {
+		return func() {}
+	}
+	before := router.EvictionCount()
+	old := router.MaxAlive()
+	raised := false
+	if specs := distinctBatchSpecs(langSets, router); specs > 0 {
+		needed := conc * specs
+		if needed > maxBatchProviders {
+			needed = maxBatchProviders
+		}
+		if needed > old {
+			router.SetMaxAlive(needed)
+			raised = true
+			mi.logger.Info("LSP router pool temporarily raised for batch enrichment",
+				zap.Int("from", old),
+				zap.Int("to", needed),
+				zap.Int("distinct_specs", specs),
+				zap.Int("concurrency", conc),
+			)
+		}
+	}
+	return func() {
+		if raised {
+			router.SetMaxAlive(old)
+		}
+		mi.logger.Info("batch enrichment LSP provider churn",
+			zap.Uint64("evictions", router.EvictionCount()-before),
+			zap.Bool("pool_raised", raised),
+		)
+	}
 }
 
 // enrichConcurrency caps how many repos enrich at once during batch warmup.

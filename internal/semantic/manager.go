@@ -58,6 +58,17 @@ type LSPRouter interface {
 	// mid-pass by another repo's concurrent spawn.
 	ReleaseSpecWorkspace(name, workspace string)
 
+	// MaxAlive returns the current live-provider cap (zero = unbounded),
+	// and SetMaxAlive changes it at runtime. Batch enrichment raises the
+	// cap for the duration of a multi-repo pass so concurrent passes do
+	// not evict each other's warmed servers, then restores it.
+	MaxAlive() int
+	SetMaxAlive(n int)
+
+	// EvictionCount returns the lifetime count of LRU evictions, sampled
+	// before/after a batch to observe provider churn.
+	EvictionCount() uint64
+
 	// Close shuts down every active provider. Called by Manager.Close.
 	Close() error
 }

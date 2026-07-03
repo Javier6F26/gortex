@@ -175,6 +175,8 @@ type fakeRouter struct {
 	providers    map[string]Provider
 	closeCalls   int
 	providerErrs map[string]error
+	maxAlive     int
+	evictions    uint64
 	calls        []string // method-name trace for ordering assertions
 }
 
@@ -241,6 +243,21 @@ func (f *fakeRouter) ProviderForSpecWorkspace(name, workspace string) (Provider,
 
 func (f *fakeRouter) ReleaseSpecWorkspace(name, workspace string) {
 	f.calls = append(f.calls, "ReleaseSpecWorkspace:"+name)
+}
+
+func (f *fakeRouter) MaxAlive() int {
+	f.calls = append(f.calls, "MaxAlive")
+	return f.maxAlive
+}
+
+func (f *fakeRouter) SetMaxAlive(n int) {
+	f.calls = append(f.calls, "SetMaxAlive")
+	f.maxAlive = n
+}
+
+func (f *fakeRouter) EvictionCount() uint64 {
+	f.calls = append(f.calls, "EvictionCount")
+	return f.evictions
 }
 
 func (f *fakeRouter) Close() error {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -78,10 +79,17 @@ type Router struct {
 	providers map[providerKey]*routedProvider // (spec.Name, workspace) → cached provider
 	enabled   map[string]*ServerSpec          // spec.Name → spec marked enabled by config (no spawn until For/ForSpec)
 
-	// limits — zero means "no limit / no reaping".
+	// limits — zero means "no limit / no reaping". maxAlive is guarded by
+	// r.mu; SetMaxAlive mutates it at runtime (batch enrichment raises the
+	// cap so concurrent passes don't evict each other's warmed servers).
 	idleTimeout    time.Duration
 	reaperInterval time.Duration
 	maxAlive       int
+
+	// evictions counts LRU evictions (maybeEvictLRULocked) over the life
+	// of the router. Read via EvictionCount to observe provider churn
+	// during batch enrichment. Atomic so the accessor needn't take r.mu.
+	evictions atomic.Uint64
 
 	stopReaper chan struct{}
 
@@ -351,10 +359,38 @@ func (r *Router) WithReaperInterval(d time.Duration) *Router {
 }
 
 // WithMaxAlive caps the number of concurrent live providers. When
-// exceeded, the least-recently-used provider is evicted.
+// exceeded, the least-recently-used provider is evicted. Construction-
+// only and unlocked — use SetMaxAlive to change the cap at runtime.
 func (r *Router) WithMaxAlive(n int) *Router {
 	r.maxAlive = n
 	return r
+}
+
+// SetMaxAlive changes the live-provider cap at runtime under r.mu.
+// Raising the cap lets a batch of concurrent enrichment passes keep more
+// warmed language servers alive at once instead of churning through the
+// LRU evictor; lowering it evicts any now-excess (unpinned) providers so
+// the invariant len(providers) <= maxAlive is restored. A provider held
+// in-use by an in-flight pass is never evicted, matching the LRU rule.
+func (r *Router) SetMaxAlive(n int) {
+	r.mu.Lock()
+	r.maxAlive = n
+	r.maybeEvictLRULocked()
+	r.mu.Unlock()
+}
+
+// MaxAlive returns the current live-provider cap. Zero means unbounded.
+func (r *Router) MaxAlive() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.maxAlive
+}
+
+// EvictionCount returns the number of LRU evictions the router has
+// performed over its lifetime. Used to observe provider churn across a
+// batch enrichment window (sample before / after).
+func (r *Router) EvictionCount() uint64 {
+	return r.evictions.Load()
 }
 
 // workspaceKey resolves a workspace string to the cache key form
@@ -701,25 +737,29 @@ func (r *Router) Reap() []string {
 	return names
 }
 
-// maybeEvictLRULocked evicts the least-recently-used provider if
-// providers exceed maxAlive. Caller must hold r.mu.
+// maybeEvictLRULocked evicts least-recently-used providers until the
+// live count is within maxAlive (or no unpinned provider remains to
+// evict). Caller must hold r.mu. It loops so a SetMaxAlive that lowers
+// the cap by more than one settles in a single call; the fast path
+// (already within cap) returns before scanning.
 func (r *Router) maybeEvictLRULocked() {
-	if r.maxAlive <= 0 || len(r.providers) <= r.maxAlive {
-		return
-	}
-	var oldest *routedProvider
-	var oldestKey providerKey
-	for key, rp := range r.providers {
-		if rp.inUse > 0 {
-			continue // never evict a provider held by an in-flight pass
+	for r.maxAlive > 0 && len(r.providers) > r.maxAlive {
+		var oldest *routedProvider
+		var oldestKey providerKey
+		for key, rp := range r.providers {
+			if rp.inUse > 0 {
+				continue // never evict a provider held by an in-flight pass
+			}
+			if oldest == nil || rp.lastUsed.Before(oldest.lastUsed) {
+				oldest = rp
+				oldestKey = key
+			}
 		}
-		if oldest == nil || rp.lastUsed.Before(oldest.lastUsed) {
-			oldest = rp
-			oldestKey = key
+		if oldest == nil {
+			return // every over-cap provider is pinned in-use; nothing to evict
 		}
-	}
-	if oldest != nil {
 		delete(r.providers, oldestKey)
+		r.evictions.Add(1)
 		go func() { _ = oldest.provider.Close() }()
 		r.logger.Info("LSP router evicted LRU provider",
 			zap.String("name", formatProviderKey(oldestKey.specName, oldestKey.workspace)))
