@@ -130,6 +130,18 @@ func (c *ConnectSpec) Validate() error {
 type ServerAlt struct {
 	Command string
 	Args    []string
+	// InitializationOptions overrides the spec-level InitializationOptions
+	// when this alternative wins on PATH. The spec-level blob is keyed to
+	// the primary command, so an alternative from a different vendor
+	// (e.g. intelephense standing in for phpactor) can carry its own
+	// options. Empty means "inherit the spec's InitializationOptions".
+	InitializationOptions json.RawMessage `json:"initializationOptions,omitempty"`
+	// InitOptionsFunc, when non-nil, is consulted at initialize time with
+	// the resolved workspace root so an alternative can root a per-repo
+	// cache path inside Gortex's cache home — a path only known at resolve
+	// time, not as a baked literal. It wins over InitializationOptions when
+	// it returns a non-empty result.
+	InitOptionsFunc func(repoRoot string) json.RawMessage `json:"-"`
 }
 
 // Servers is the canonical list of LSP servers Gortex knows how to
@@ -435,8 +447,10 @@ var Servers = []ServerSpec{
 		Daemon:      true,
 		MaxParallel: 6,
 		AlternativeCommands: []ServerAlt{
-			// intelephense ships as a Node CLI.
-			{Command: "intelephense", Args: []string{"--stdio"}},
+			// intelephense ships as a Node CLI. Pin its index cache under
+			// Gortex's cache home per repo so it doesn't write to its
+			// default global location outside the engine's isolation.
+			{Command: "intelephense", Args: []string{"--stdio"}, InitOptionsFunc: intelephenseInitOptions},
 		},
 	},
 	{

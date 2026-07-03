@@ -82,6 +82,11 @@ type EnrichResult struct {
 	// finished but some targets were skipped, e.g. no source position or an
 	// unservable file), or "completed_all" (every target visited).
 	BoundReason string `json:"bound_reason,omitempty"`
+	// ReferencesAddPass reports that the enrich pass added edges via
+	// textDocument/references (rather than call hierarchy) because the
+	// server advertised references but no call hierarchy — e.g. intelephense.
+	// Lets index_health distinguish this add mode from the hierarchy mode.
+	ReferencesAddPass bool `json:"references_add_pass,omitempty"`
 }
 
 // Bounding reasons for the enrichment add-phase (EnrichResult.BoundReason /
@@ -124,7 +129,11 @@ type EnrichmentStatus struct {
 	SymbolsCovered  int     `json:"symbols_covered"`
 	CoveragePercent float64 `json:"coverage_percent"`
 	BoundReason     string  `json:"bound_reason,omitempty"`
-	Detail          string  `json:"detail,omitempty"`
+	// ReferencesAddPass marks that this provider added edges via
+	// textDocument/references (no call hierarchy) — the intelephense-style
+	// add mode. Distinguishes it from the call-hierarchy add mode.
+	ReferencesAddPass bool   `json:"references_add_pass,omitempty"`
+	Detail            string `json:"detail,omitempty"`
 }
 
 // ProviderStatus represents the current state of a semantic provider.

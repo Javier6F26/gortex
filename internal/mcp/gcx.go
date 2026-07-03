@@ -384,6 +384,19 @@ func zeroEdgeCaveatMeta(c *graph.ZeroEdgeCaveat) []string {
 	return []string{"caveat", string(c.Class), "caveat_message", c.Message}
 }
 
+// tierFilteredCaveatMeta lowers a min_tier-filtered caveat into GCX meta so a
+// tier-emptied result reads as "filtered", not "no usages".
+func tierFilteredCaveatMeta(c *graph.TierFilteredCaveat) []string {
+	if c == nil {
+		return nil
+	}
+	return []string{
+		"tier_filtered", c.Class,
+		"edges_below_min_tier", fmt.Sprintf("%d", c.EdgesBelowMinTier),
+		"max_available_tier", c.MaxAvailableTier,
+	}
+}
+
 // encodeFindUsages emits one row per usage edge. Each row names the
 // caller symbol, its location, the edge kind, and the origin tier so
 // agents can filter without a second call.
@@ -391,6 +404,7 @@ func encodeFindUsages(sg *query.SubGraph, g graph.Store) ([]byte, error) {
 	var buf bytes.Buffer
 	meta := []string{"edges", fmt.Sprintf("%d", len(sg.Edges))}
 	meta = append(meta, zeroEdgeCaveatMeta(sg.Caveat)...)
+	meta = append(meta, tierFilteredCaveatMeta(sg.TierFiltered)...)
 	if sg.TextMatchedSuppressed > 0 {
 		meta = append(meta, "text_matched_suppressed", fmt.Sprintf("%d", sg.TextMatchedSuppressed))
 	}

@@ -33,6 +33,83 @@ class UserService {
 	assert.GreaterOrEqual(t, len(methods), 1)
 }
 
+func TestPHPExtractor_ScopeInterfaces(t *testing.T) {
+	src := []byte(`<?php
+interface HandlerInterface {}
+interface ProcessableInterface extends HandlerInterface {}
+class StreamHandler extends AbstractHandler implements HandlerInterface, ProcessableInterface {
+    public function handle(): bool { return true; }
+}
+`)
+	e := NewPHPExtractor()
+	result, err := e.Extract("h.php", src)
+	require.NoError(t, err)
+
+	byName := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byName[n.Name] = n
+	}
+
+	cls := byName["StreamHandler"]
+	require.NotNil(t, cls)
+	assert.Equal(t, "AbstractHandler", cls.Meta["scope_parent"], "extends → scope_parent")
+	ifaces, _ := cls.Meta["scope_interfaces"].(string)
+	assert.Contains(t, ifaces, "HandlerInterface", "implements → scope_interfaces")
+	assert.Contains(t, ifaces, "ProcessableInterface", "implements → scope_interfaces")
+
+	pi := byName["ProcessableInterface"]
+	require.NotNil(t, pi)
+	pifaces, _ := pi.Meta["scope_interfaces"].(string)
+	assert.Contains(t, pifaces, "HandlerInterface", "interface extends → scope_interfaces")
+}
+
+func TestPHPExtractor_DocMethodVirtuals(t *testing.T) {
+	src := []byte(`<?php
+/**
+ * Handler for tests.
+ * @method bool hasErrorRecords()
+ * @method static self create(int $x)
+ * @method mixed getRecords()
+ */
+class TestHandler {
+    public function getRecords() { return []; }
+    public function __call($name, $args) {}
+}
+`)
+	e := NewPHPExtractor()
+	result, err := e.Extract("TestHandler.php", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	// A @method with no concrete declaration is minted as a virtual node.
+	v := byID["TestHandler.php::TestHandler.hasErrorRecords"]
+	require.NotNil(t, v, "phpdoc @method must mint a node")
+	assert.Equal(t, graph.KindMethod, v.Kind)
+	assert.Equal(t, "phpdoc_method", v.Meta["virtual"])
+	assert.Equal(t, "TestHandler", v.Meta["receiver"])
+	assert.Equal(t, 8, v.StartLine, "positioned on the class declaration line")
+
+	// static @method carries the static marker + return type.
+	c := byID["TestHandler.php::TestHandler.create"]
+	require.NotNil(t, c)
+	assert.Equal(t, true, c.Meta["static"])
+	assert.Equal(t, "self", c.Meta["return_type"])
+
+	// A concrete declaration wins: getRecords is NOT a virtual node.
+	g := byID["TestHandler.php::TestHandler.getRecords"]
+	require.NotNil(t, g)
+	assert.Nil(t, g.Meta["virtual"], "concrete method must not be marked virtual")
+
+	// __call marks the class magic-call surface.
+	cls := byID["TestHandler.php::TestHandler"]
+	require.NotNil(t, cls)
+	assert.Equal(t, true, cls.Meta["has_magic_call"])
+}
+
 func TestPHPExtractor_Function(t *testing.T) {
 	src := []byte(`<?php
 function greet($name) {

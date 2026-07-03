@@ -55,6 +55,23 @@ type ZeroImpactCaveat struct {
 	Message string        `json:"message" toon:"message"`
 }
 
+// TierFilteredClass is the machine-checkable class of a min_tier-emptied
+// result — distinct from ZeroEdgeClass so a safety gate never confuses
+// "filtered out by min_tier" with "genuinely has no usages".
+const TierFilteredClass = "tier_filtered"
+
+// TierFilteredCaveat is attached to a find_usages / get_* result whose edge
+// list was emptied (or thinned) by a min_tier filter while lower-tier edges
+// still exist. Without it a min_tier that filters every edge is
+// indistinguishable from "no usages" — the honesty bug it fixes. Class is
+// always TierFilteredClass; EdgesBelowMinTier counts the edges dropped by the
+// filter and MaxAvailableTier names the best tier actually present.
+type TierFilteredCaveat struct {
+	Class            string `json:"class" toon:"class"`
+	EdgesBelowMinTier int   `json:"edges_below_min_tier" toon:"edges_below_min_tier"`
+	MaxAvailableTier string `json:"max_available_tier" toon:"max_available_tier"`
+}
+
 // usageEdgeKinds are the incoming edge kinds that count as a symbol
 // being "used" — calls, references, and the type/instantiation edges
 // that find_usages itself treats as usages. An incoming edge of any of

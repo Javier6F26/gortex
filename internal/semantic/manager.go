@@ -468,6 +468,7 @@ func (m *Manager) setEnrichStatus(repo, provider, lang, state string, deadline t
 			result.BoundReason = enrichBoundReason(state, result)
 		}
 		st.BoundReason = result.BoundReason
+		st.ReferencesAddPass = result.ReferencesAddPass
 	}
 	m.mu.Lock()
 	m.enrichStatus[repo+"\x00"+provider] = st

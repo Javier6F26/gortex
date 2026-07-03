@@ -10,6 +10,38 @@ import (
 	"github.com/zzet/gortex/internal/parser"
 )
 
+// Regression: a bodyless interface-method signature must mint a
+// <file>::<Iface>.<name> KindMethod node (marked iface_member) so its id
+// resolves and dispatch calls bind to it — parity with PHP's extractMethod.
+func TestCSharpExtractor_BodylessInterfaceMethodNode(t *testing.T) {
+	src := []byte(`namespace App {
+    public interface ISink {
+        void Write(string msg);
+        string Flush();
+    }
+    public class FileSink : ISink {
+        public void Write(string msg) {}
+        public string Flush() { return ""; }
+    }
+}`)
+	e := NewCSharpExtractor()
+	result, err := e.Extract("Sink.cs", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	m := byID["Sink.cs::ISink.Write"]
+	require.NotNil(t, m, "bodyless interface method must mint a node")
+	assert.Equal(t, graph.KindMethod, m.Kind)
+	assert.Equal(t, "ISink", m.Meta["receiver"])
+	assert.Equal(t, true, m.Meta["iface_member"])
+
+	require.NotNil(t, byID["Sink.cs::ISink.Flush"], "every bodyless interface method mints a node")
+}
+
 func TestCSharpExtractor_ClassWithMethods(t *testing.T) {
 	src := []byte(`public class UserService {
     public User FindById(string id) {

@@ -37,6 +37,11 @@ type SubGraph struct {
 	// empty result reflects genuinely unused code or an extraction gap.
 	// Nil — and omitted from the response — for any non-empty result.
 	Caveat *graph.ZeroEdgeCaveat `json:"caveat,omitempty"`
+	// TierFiltered is attached when a min_tier filter dropped edges while
+	// lower-tier edges still existed — so a min_tier that empties the result
+	// is legible as "filtered", not "no usages". Set by FilterByMinTier;
+	// omitted when no min_tier was applied or nothing was below the tier.
+	TierFiltered *graph.TierFilteredCaveat `json:"tier_filtered,omitempty"`
 	// CallerNotes carries concurrency-safety annotations keyed by node
 	// ID. Populated only by get_callers (which classifies each caller);
 	// other traversal tools share this struct and leave it nil, so it
@@ -291,12 +296,33 @@ func (sg *SubGraph) FilterByMinTier(minTier string) {
 		return
 	}
 	kept := make([]*graph.Edge, 0, len(sg.Edges))
+	dropped := 0
+	maxDroppedRank := -1
+	maxDroppedOrigin := ""
 	for _, e := range sg.Edges {
-		if graph.MeetsMinTier(effectiveOrigin(e), minTier) {
+		origin := effectiveOrigin(e)
+		if graph.MeetsMinTier(origin, minTier) {
 			kept = append(kept, e)
+			continue
+		}
+		dropped++
+		if r := graph.OriginRank(origin); r > maxDroppedRank {
+			maxDroppedRank = r
+			maxDroppedOrigin = origin
 		}
 	}
 	sg.Edges = kept
+	// Record a caveat when the filter dropped edges that still exist below the
+	// tier — so an empty (or thinned) result reads as "tier-filtered", not as
+	// "no usages". Only meaningful when the filter actually emptied the visible
+	// set; a min_tier that leaves edges keeps its own rows as the signal.
+	if dropped > 0 && len(kept) == 0 {
+		sg.TierFiltered = &graph.TierFilteredCaveat{
+			Class:             graph.TierFilteredClass,
+			EdgesBelowMinTier: dropped,
+			MaxAvailableTier:  maxDroppedOrigin,
+		}
+	}
 }
 
 // effectiveOrigin returns the edge's origin tier, backfilled for edges

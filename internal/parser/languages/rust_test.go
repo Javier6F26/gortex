@@ -9,6 +9,40 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 )
 
+// Regression: a bodyless trait-method signature must mint a
+// <file>::<Trait>.<name> KindMethod node (marked trait_decl) — the node
+// rust-analyzer binds every dispatch call site to. Parity with PHP's
+// extractMethod / C#'s bodyless interface methods.
+func TestRsExtractor_BodylessTraitMethodNode(t *testing.T) {
+	src := []byte(`trait Sink {
+    fn write(&self, msg: &str);
+    fn error_message(&self) -> String;
+}
+struct FileSink;
+impl Sink for FileSink {
+    fn write(&self, msg: &str) {}
+    fn error_message(&self) -> String { String::new() }
+}
+`)
+	e := NewRustExtractor()
+	result, err := e.Extract("sink.rs", src)
+	require.NoError(t, err)
+
+	byID := map[string]*graph.Node{}
+	for _, n := range result.Nodes {
+		byID[n.ID] = n
+	}
+
+	m := byID["sink.rs::Sink.write"]
+	require.NotNil(t, m, "bodyless trait method must mint a node")
+	assert.Equal(t, graph.KindMethod, m.Kind)
+	assert.Equal(t, "Sink", m.Meta["receiver"])
+	assert.Equal(t, "true", m.Meta["trait_decl"])
+
+	require.NotNil(t, byID["sink.rs::Sink.error_message"],
+		"a bodyless trait method with a return type mints a node too")
+}
+
 func TestRsExtractor_Function(t *testing.T) {
 	src := []byte(`fn greet(name: &str) -> String {
     format!("Hello {}", name)

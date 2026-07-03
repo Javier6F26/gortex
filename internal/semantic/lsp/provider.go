@@ -44,6 +44,14 @@ type Provider struct {
 	// invocations — those fall back to single-language routing.
 	spec *ServerSpec
 
+	// altInitOptions / altInitOptionsFunc carry the InitializationOptions
+	// of the alternative command that won on PATH in NewProviderFromSpec.
+	// effectiveInitializationOptions(spec) cannot see them because it keys
+	// on the spec's primary command; a resolved-alternative server (e.g.
+	// intelephense standing in for phpactor) sends these instead.
+	altInitOptions     json.RawMessage
+	altInitOptionsFunc func(repoRoot string) json.RawMessage
+
 	client *Client
 
 	// sourceCache holds file contents read by openDocument so the
@@ -162,11 +170,15 @@ func NewProvider(command string, args []string, languages []string, daemon bool,
 func NewProviderFromSpec(spec *ServerSpec, logger *zap.Logger) *Provider {
 	cmd := spec.Command
 	args := spec.Args
+	var altInitOptions json.RawMessage
+	var altInitOptionsFunc func(repoRoot string) json.RawMessage
 	if _, err := exec.LookPath(cmd); err != nil {
 		for _, alt := range spec.AlternativeCommands {
 			if _, err := exec.LookPath(alt.Command); err == nil {
 				cmd = alt.Command
 				args = alt.Args
+				altInitOptions = alt.InitializationOptions
+				altInitOptionsFunc = alt.InitOptionsFunc
 				break
 			}
 		}
@@ -187,14 +199,35 @@ func NewProviderFromSpec(spec *ServerSpec, logger *zap.Logger) *Provider {
 		docVersions:      map[string]int{},
 		openDocs:         map[string]bool{},
 		lastDiag:         map[string][]Diagnostic{},
-		diagWaiters:      map[string][]chan []Diagnostic{},
-		dynamicCaps:      map[string]Registration{},
-		connect:          spec.Connect,
-		dialBackoff:      dialBackoffStart,
-		dialBackoffStart: dialBackoffStart,
-		maxDialBackoff:   maxDialBackoff,
+		diagWaiters:        map[string][]chan []Diagnostic{},
+		dynamicCaps:        map[string]Registration{},
+		connect:            spec.Connect,
+		altInitOptions:     altInitOptions,
+		altInitOptionsFunc: altInitOptionsFunc,
+		dialBackoff:        dialBackoffStart,
+		dialBackoffStart:   dialBackoffStart,
+		maxDialBackoff:     maxDialBackoff,
 	}
 	return p
+}
+
+// effectiveInitOptions resolves the initializationOptions to send in this
+// provider's initialize request. When the provider was built from a spec
+// whose primary command was absent and an alternative won on PATH, that
+// alternative's options take precedence over the spec-level blob (which is
+// keyed to the primary command and cannot see the resolved alternative).
+// InitOptionsFunc is consulted first so an alternative can root a per-repo
+// cache path under Gortex's cache home using workspaceRoot.
+func (p *Provider) effectiveInitOptions(workspaceRoot string) json.RawMessage {
+	if p.altInitOptionsFunc != nil {
+		if opts := p.altInitOptionsFunc(workspaceRoot); len(opts) > 0 {
+			return opts
+		}
+	}
+	if len(p.altInitOptions) > 0 {
+		return p.altInitOptions
+	}
+	return effectiveInitializationOptions(p.spec)
 }
 
 func (p *Provider) Name() string        { return "lsp-" + p.command }
@@ -710,6 +743,16 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 			rmu.Unlock()
 			result.EdgesConfirmed++
 		}
+	}
+
+	// References-driven add pass: a server that enumerates references but has
+	// no call hierarchy (e.g. intelephense) never runs the per-file sweep's
+	// hierarchy hops, so the dispatch call sites it can see are confirmed but
+	// never ADDED. Ask textDocument/references per declaration and mint those
+	// call edges. Runs under the targeted budget (before the hover sweep) so
+	// a deadline cut sheds hover work, not the recall-bearing add.
+	if p.Supports("textDocument/references") && !p.Supports("textDocument/prepareCallHierarchy") {
+		p.referencesAddPass(targetedCtx, g, repoPrefix, absRoot, langNodes, rmu, result)
 	}
 
 	// Per-file document lifecycle + bounded concurrency. The original
@@ -1660,8 +1703,9 @@ func (p *Provider) ensureClient(workspaceRoot string) error {
 		},
 	}
 	// Pass server-specific InitializationOptions (e.g. Maven/Gradle import
-	// settings for jdtls) when the provider was built from a ServerSpec.
-	if opts := effectiveInitializationOptions(p.spec); len(opts) > 0 {
+	// settings for jdtls, or a per-repo storagePath for a resolved-
+	// alternative intelephense) when the provider was built from a ServerSpec.
+	if opts := p.effectiveInitOptions(workspaceRoot); len(opts) > 0 {
 		initParams.InitializationOptions = opts
 	}
 

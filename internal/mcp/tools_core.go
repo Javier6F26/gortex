@@ -2486,7 +2486,10 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// FROM node's own ui_component for `component`). Orphan nodes left
 	// with no incident edge are pruned.
 	s.filterUsagesByFlavor(sg, id, strings.TrimSpace(req.GetString("flavor", "")))
-	if len(sg.Edges) == 0 {
+	if len(sg.Edges) == 0 && sg.TierFiltered == nil {
+		// A tier_filtered emptiness is not "no usages" — FilterByMinTier
+		// already recorded why. Only reach for the extraction-gap / unused
+		// classification when the emptiness was NOT caused by min_tier.
 		sg.Caveat = graph.CaveatForZeroEdge(s.graph, id)
 	}
 	// group_by:"file" buckets the usages by the file each reference

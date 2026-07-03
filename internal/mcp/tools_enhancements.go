@@ -3102,6 +3102,21 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 	if len(enrichStatuses) > 0 {
 		result["semantic_enrichment"] = enrichStatuses
 		result["semantic_enrichment_ok"] = !enrichmentIncomplete
+		// Per-language lsp-tier edge rollup from the enrichment statuses — a
+		// cheap, graph-pass-free signal for whether min_tier=lsp_resolved is
+		// usable on a given language. Near-zero for a language means
+		// tier-filtered queries will under-report (the find_usages
+		// tier_filtered caveat explains it per query; this shows it up front).
+		lspEdgesByLang := map[string]int{}
+		for _, st := range enrichStatuses {
+			if st.Language == "" {
+				continue
+			}
+			lspEdgesByLang[st.Language] += st.EdgesAdded + st.EdgesConfirmed
+		}
+		if len(lspEdgesByLang) > 0 {
+			result["lsp_resolved_edges_by_language"] = lspEdgesByLang
+		}
 	}
 	if recommendation != "" {
 		result["recommendation"] = recommendation
