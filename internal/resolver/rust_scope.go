@@ -405,6 +405,14 @@ func (idx *rustScopeIndex) resolve(e *graph.Edge, caller *graph.Node) string {
 			idx.set(graph.OriginASTResolved, 0.9, "impl_owner_path")
 			return id
 		}
+		// Still ambiguous, and the call named no disambiguating path segment
+		// (bare `RegexMatcherBuilder::new()`). Prefer the candidate defined in
+		// the caller's own crate: a same-crate associated-function call almost
+		// always means the same-crate type.
+		if id := idx.methodBySameCrate(repo, qualifier, last, caller.FilePath); id != "" {
+			idx.set(graph.OriginASTResolved, 0.85, "impl_owner_crate")
+			return id
+		}
 		return ""
 
 	default:
@@ -473,6 +481,46 @@ func (idx *rustScopeIndex) methodByPathSegments(repo, owner, name string, segmen
 		}
 	}
 	return hit
+}
+
+// methodBySameCrate disambiguates a `Type::method` call that names no
+// disambiguating path segment by preferring the candidate defined in the
+// caller's own crate. Returns the ID only when exactly one candidate lives
+// in that crate.
+func (idx *rustScopeIndex) methodBySameCrate(repo, owner, name, callerFile string) string {
+	callerCrate := rustCrateOf(callerFile)
+	if callerCrate == "" {
+		return ""
+	}
+	cands := idx.methodsByOwner[rustOwnerKey{repo: repo, owner: owner}]
+	var hit string
+	for _, m := range cands {
+		if m.Name != name {
+			continue
+		}
+		if rustCrateOf(m.FilePath) != callerCrate {
+			continue
+		}
+		if hit != "" && hit != m.ID {
+			return "" // more than one candidate in the caller's crate
+		}
+		hit = m.ID
+	}
+	return hit
+}
+
+// rustCrateOf returns a stable identifier for the crate a Rust source file
+// belongs to: the path up to (and excluding) the "/src/" segment that marks
+// a cargo crate root (crates/regex/src/matcher.rs -> "crates/regex",
+// myproj/src/lib.rs -> "myproj"). Files with no "/src/" segment — flat
+// scripts, test-dir files, or synthetic fixtures — have no determinable
+// crate and return "", so the same-crate tiebreaker stays conservative and
+// never guesses across an unknown boundary.
+func rustCrateOf(path string) string {
+	if i := strings.Index(path, "/src/"); i >= 0 {
+		return path[:i]
+	}
+	return ""
 }
 
 // uniqueTraitMethod returns the ID of the single trait-declaration method
