@@ -3218,8 +3218,18 @@ func (idx *Indexer) indexFile(filePath string, resolve bool) error {
 
 	// Reuse prior resolutions for edges whose source-side shape is unchanged
 	// (the common case on a small edit), so the resolver below only handles
-	// genuinely-new references instead of re-resolving the whole file.
-	if reused := applyResolvedOutEdges(idx.graph, result.Edges, reuseIdx); reused > 0 {
+	// genuinely-new references instead of re-resolving the whole file. The
+	// about-to-be-added node IDs let the reuse recover same-file targets that
+	// eviction removed and this AddBatch re-adds under identical IDs — without
+	// them a same-file call's resolution + tier is lost to a full re-resolve on
+	// every structural save.
+	newNodeIDs := make(map[string]struct{}, len(result.Nodes))
+	for _, n := range result.Nodes {
+		if n != nil {
+			newNodeIDs[n.ID] = struct{}{}
+		}
+	}
+	if reused := applyResolvedOutEdges(idx.graph, result.Edges, reuseIdx, newNodeIDs); reused > 0 {
 		idx.logger.Debug("indexer: reused prior resolutions",
 			zap.Int("edges", reused), zap.String("file", graphPath))
 	}

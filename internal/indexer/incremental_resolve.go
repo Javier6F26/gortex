@@ -104,7 +104,18 @@ func captureIncrementalState(g graph.Store, graphPath string) (reuse map[reuseKe
 // applyResolvedOutEdges pre-resolves freshly extracted unresolved edges that
 // match a captured resolution, BEFORE they are added to the graph (so no edge
 // re-keying is needed). Returns how many edges were reused.
-func applyResolvedOutEdges(g graph.Store, edges []*graph.Edge, idx map[reuseKey]*reuseVal) int {
+//
+// newIDs holds the IDs of the nodes about to be re-added by the caller's
+// AddBatch. It exists for the same-file case: when a call's target lives in the
+// re-parsed file, eviction removed the target node before this runs, so a bare
+// GetNode(v.to) lookup would miss and the edge would fall through to a full
+// re-resolve — which rebinds the target correctly but drops its origin/tier to
+// the resolver's heuristic default. Because node IDs are file::Name (line- and
+// content-independent), a same-file target re-appears under an identical ID, so
+// "present in newIDs" recovers exactly the reuse that a not-yet-added target
+// would otherwise lose. A target absent from BOTH the graph and newIDs was
+// genuinely deleted and is still skipped.
+func applyResolvedOutEdges(g graph.Store, edges []*graph.Edge, idx map[reuseKey]*reuseVal, newIDs map[string]struct{}) int {
 	if len(idx) == 0 {
 		return 0
 	}
@@ -123,7 +134,11 @@ func applyResolvedOutEdges(g graph.Store, edges []*graph.Edge, idx map[reuseKey]
 			continue // miss, or poisoned ambiguous key
 		}
 		if g.GetNode(v.to) == nil {
-			continue // captured target deleted since the snapshot
+			if _, reAdded := newIDs[v.to]; !reAdded {
+				continue // captured target genuinely deleted since the snapshot
+			}
+			// Same-file target: evicted above, re-added by AddBatch below under
+			// an identical ID — reuse its prior resolution and provenance tier.
 		}
 		e.To = v.to
 		e.Confidence = v.confidence

@@ -30,13 +30,20 @@ func fnNodeID(t *testing.T, g graph.Store, file, name string) string {
 // node `fromID`.
 func callTargetFrom(t *testing.T, g graph.Store, fromID string) string {
 	t.Helper()
+	return callEdgeFrom(t, g, fromID).To
+}
+
+// callEdgeFrom returns the (single) EdgeCalls edge pointer leaving node
+// `fromID`, failing the test if there is none.
+func callEdgeFrom(t *testing.T, g graph.Store, fromID string) *graph.Edge {
+	t.Helper()
 	for _, e := range g.GetOutEdges(fromID) {
 		if e.Kind == graph.EdgeCalls {
-			return e.To
+			return e
 		}
 	}
 	t.Fatalf("no call edge from %s", fromID)
-	return ""
+	return nil
 }
 
 // TestIncrementalReindex_PreservesIncomingCallerEdges is the proof of
@@ -121,4 +128,54 @@ func TestEvictFile_DropsEnrichmentSidecars(t *testing.T) {
 	assert.Empty(t, g.(graph.ChurnEnrichmentReader).ChurnRows(""), "churn rows must be evicted with the file")
 	assert.Empty(t, g.(graph.CoverageEnrichmentReader).CoverageRows(""), "coverage rows must be evicted")
 	assert.Empty(t, g.(graph.BlameEnrichmentReader).BlameRows(""), "blame rows must be evicted")
+}
+
+// TestIncrementalReuse_SameFileEdge_KeepsTier is the F1 regression: a call
+// whose target lives in the SAME file must keep its resolved provenance across
+// a structural re-parse of that file. Before the fix, eviction removed the
+// target node before applyResolvedOutEdges ran, so the same-file edge missed
+// reuse (GetNode(v.to) == nil) and the forward resolver rebound it at the
+// heuristic default — silently demoting an lsp_resolved edge, which find_usages
+// then suppresses. Node IDs are file::Name (line/content-independent), so an
+// EOF append re-adds the target under an identical ID and the reuse must
+// recover the prior resolution AND its tier.
+func TestIncrementalReuse_SameFileEdge_KeepsTier(t *testing.T) {
+	dir := t.TempDir()
+	aPath := filepath.Join(dir, "a.go")
+	writeFile(t, aPath, "package p\n\nfunc Foo() {}\n\nfunc Baz() { Foo() }\n")
+
+	g := graph.New()
+	idx := New(g, newTestRegistry(), config.IndexConfig{Workers: 1}, zap.NewNop())
+	idx.search = search.NewBM25()
+	idx.SetRootPath(dir)
+	_, err := idx.IndexCtx(testCtx(), dir)
+	require.NoError(t, err)
+
+	fooID := fnNodeID(t, g, "a.go", "Foo")
+	bazID := fnNodeID(t, g, "a.go", "Baz")
+	require.Equal(t, fooID, callTargetFrom(t, g, bazID),
+		"baseline: Baz's same-file call must resolve to Foo")
+
+	// Stamp the same-file call edge compiler-grade (lsp), the tier the
+	// semantic-enrichment pass mints once at track time.
+	e := callEdgeFrom(t, g, bazID)
+	g.SetEdgeProvenance(e, graph.OriginLSPResolved)
+	e.Tier = graph.ResolvedBy(graph.OriginLSPResolved)
+	e.Confidence = 1.0
+
+	// EOF-append a new function: a structural edit that drives the single-file
+	// incremental reindex (evict -> re-parse -> reuse -> resolve) without
+	// shifting Foo's or Baz's lines.
+	writeFile(t, aPath, "package p\n\nfunc Foo() {}\n\nfunc Baz() { Foo() }\n\nfunc Extra() {}\n")
+	require.NoError(t, idx.IndexFile(aPath))
+
+	// The call still points at Foo AND keeps its resolved provenance — not
+	// demoted to the resolver's heuristic default.
+	after := callEdgeFrom(t, g, fnNodeID(t, g, "a.go", "Baz"))
+	assert.Equal(t, fnNodeID(t, g, "a.go", "Foo"), after.To,
+		"same-file call must still resolve to Foo after the re-parse")
+	assert.Equal(t, graph.OriginLSPResolved, after.Origin,
+		"same-file edge must keep its lsp_resolved origin across the re-parse (F1)")
+	assert.Equal(t, graph.ResolvedBy(graph.OriginLSPResolved), after.Tier,
+		"same-file edge must keep its lsp tier across the re-parse (F1)")
 }
