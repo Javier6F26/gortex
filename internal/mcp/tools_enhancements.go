@@ -3079,6 +3079,10 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		"edge_count":           stats.TotalEdges,
 		"edges_ok":             edgesOK,
 		"nodes_per_file":       nodesPerFile,
+		// Shape-degradation guard firings since process start. Nonzero means
+		// the daemon caught (and self-healed) a live-patch or boot-reload
+		// resolution regression rather than silently serving a shrunken graph.
+		"resolution_regressions": indexer.ResolutionRegressions(),
 	}
 	if indexedFileCount > 0 {
 		result["indexed_file_count"] = indexedFileCount

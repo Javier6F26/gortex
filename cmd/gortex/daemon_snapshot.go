@@ -42,6 +42,13 @@ type snapshotRepo struct {
 	RepoPrefix string
 	RootPath   string
 	FileMtimes map[string]int64
+	// NodeCount / EdgeCount are the per-repo graph shape at save time. Added
+	// additively — a snapshot written before this field decodes them as zero,
+	// which the boot shape-degradation guard reads as "no baseline to compare"
+	// and skips. Used on reload to catch a persisted graph that came back
+	// materially short of what it held when saved.
+	NodeCount int
+	EdgeCount int
 }
 
 // snapshotContract is the wire form of contracts.Contract. Persisted so
@@ -538,6 +545,25 @@ func snapshotWouldCollapse(path string, newNodes, newEdges int, logger *zap.Logg
 		zap.Int("new_edges", newEdges),
 		zap.Int("shrink_floor_percent", snapshotShrinkFloorPercent))
 	return true
+}
+
+// bootShapeShortfall reports whether a warm-reloaded repo's live node/edge
+// counts have collapsed against what the snapshot recorded for it — the
+// per-repo, boot-time analogue of snapshotWouldCollapse (which guards the
+// whole graph at save time). Only a drastic drop trips (the same floor share
+// as the persist-side shrink guard); a snapshot with no recorded counts
+// (legacy / newly tracked, both zero) returns false, since there is nothing
+// trustworthy to compare against.
+func bootShapeShortfall(snap map[string]*snapshotRepo, prefix string, liveNodes, liveEdges int) bool {
+	rec, ok := snap[prefix]
+	if !ok || rec == nil || rec.NodeCount == 0 || rec.EdgeCount == 0 {
+		return false
+	}
+	// Cross-multiply to avoid floating-point rounding:
+	//   live < rec * floor/100   ⇔   live*100 < rec*floor
+	nodesShort := liveNodes*100 < rec.NodeCount*snapshotShrinkFloorPercent
+	edgesShort := liveEdges*100 < rec.EdgeCount*snapshotShrinkFloorPercent
+	return nodesShort || edgesShort
 }
 
 // toSnapshotContract flattens a contracts.Contract into its wire form.

@@ -51,20 +51,20 @@ type SymbolChangeCallback func(filePath string, oldSymbols, newSymbols []*graph.
 
 // Watcher keeps the knowledge graph in live sync with the filesystem.
 type Watcher struct {
-	indexer   *Indexer
-	fsw       fswatcher.Watcher
-	fsCancel  context.CancelFunc
-	config    config.WatchConfig
+	indexer  *Indexer
+	fsw      fswatcher.Watcher
+	fsCancel context.CancelFunc
+	config   config.WatchConfig
 	// degradedNoFsnotify is set when Start detected a slow mount (a WSL2
 	// 9p/drvfs Windows drive, an SMB share) and skipped the native fsnotify
 	// backend, relying on the adaptive poller + git hooks instead.
 	degradedNoFsnotify bool
 	excludes           *excludes.Matcher
-	events    chan GraphChangeEvent
-	history   []GraphChangeEvent
-	historyMu sync.Mutex
-	pending   map[string]*time.Timer
-	mu        sync.Mutex
+	events             chan GraphChangeEvent
+	history            []GraphChangeEvent
+	historyMu          sync.Mutex
+	pending            map[string]*time.Timer
+	mu                 sync.Mutex
 	// patchMu serialises per-path patchGraph invocations so the
 	// post-patch reach rebuild (which scans every Node.Meta) cannot
 	// race with another debounced patch's IndexFile / EvictFile /
@@ -133,6 +133,15 @@ type Watcher struct {
 	pendingScanDirs map[string]struct{}
 	dirScanActive   bool
 	scanFn          func(map[string]struct{})
+
+	// pendingReresolve coalesces files the shape-degradation guard flagged
+	// for a forced scoped re-resolve (see enqueueReresolve). reresolveActive
+	// guards a single in-flight drainer; reresolveFn is a test seam, nil in
+	// production (the real ReresolveFileScoped runs). All three are guarded
+	// by reconcileMu.
+	pendingReresolve map[string]struct{}
+	reresolveActive  bool
+	reresolveFn      func(map[string]struct{})
 }
 
 const maxHistory = 1000
@@ -996,6 +1005,7 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		// the net node delta is zero.
 		priorNodes := w.indexer.graph.GetFileNodes(relPath)
 		fileEdgesBefore := w.countFileEdges(priorNodes)
+		resolvedBefore := w.countResolvedFileEdges(priorNodes)
 		if err := w.indexer.IndexFile(path); err != nil {
 			w.logger.Warn("reindex file failed", zap.String("path", path), zap.Error(err))
 			return
@@ -1013,6 +1023,11 @@ func (w *Watcher) patchGraph(path string, kind ChangeKind) {
 		} else {
 			edgesRemoved = fileEdgesBefore - fileEdgesAfter
 		}
+		// Shape-degradation guard: a modify that kept its symbols but lost
+		// most of its resolved edges is a transient resolution failure, not a
+		// real deletion — flag it and enqueue a forced scoped re-resolve so it
+		// self-heals instead of persisting the degraded shape.
+		w.guardResolvedEdgeRegression(path, len(priorNodes), len(newSymbols), resolvedBefore, w.countResolvedFileEdges(newSymbols))
 
 		// Notify callback with old and new symbols.
 		w.symbolChangeCbMu.RLock()
@@ -1114,6 +1129,110 @@ func (w *Watcher) countFileEdges(nodes []*graph.Node) int {
 		}
 	}
 	return total
+}
+
+// resolvedEdgeRegressionFloor is the minimum pre-patch resolved-edge count
+// below which the shape-degradation guard stays quiet — a 1→0 or 3→1 file is
+// noise, not a resolution collapse worth self-healing.
+const resolvedEdgeRegressionFloor = 4
+
+// countResolvedFileEdges counts this file's OUTGOING edges whose target is a
+// concrete (resolved) node — an edge pointing at an `unresolved::` stub does
+// not count. Restricted to out-edges: an incoming edge's resolution state is
+// owned by the OTHER file, not this one. This is the signal countFileEdges
+// cannot give: an edge demoted from a resolved target to a stub keeps the total
+// incident-edge count identical while losing a resolution.
+func (w *Watcher) countResolvedFileEdges(nodes []*graph.Node) int {
+	if len(nodes) == 0 {
+		return 0
+	}
+	ids := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		ids = append(ids, n.ID)
+	}
+	total := 0
+	for _, edges := range w.indexer.graph.GetOutEdgesByNodeIDs(ids) {
+		for _, e := range edges {
+			if e != nil && !graph.IsUnresolvedTarget(e.To) {
+				total++
+			}
+		}
+	}
+	return total
+}
+
+// guardResolvedEdgeRegression fires when a modify patch KEPT (or grew) its
+// symbols but lost more than half its resolved out-edges — a transient
+// resolution failure (a dependency mid-write, an LSP provider not yet warm),
+// not a real deletion. It logs loudly, bumps the process-global regression
+// counter, and enqueues the file for a forced scoped re-resolve so the graph
+// self-heals instead of persisting the degraded shape.
+func (w *Watcher) guardResolvedEdgeRegression(path string, nodesBefore, nodesAfter, resolvedBefore, resolvedAfter int) {
+	if resolvedBefore < resolvedEdgeRegressionFloor {
+		return
+	}
+	if nodesAfter < nodesBefore {
+		return // symbols were removed — a real deletion, not a resolution loss
+	}
+	if resolvedAfter*2 >= resolvedBefore {
+		return // dropped <= 50%
+	}
+	RecordResolutionRegression()
+	if w.logger != nil {
+		w.logger.Warn("watcher: resolved-edge regression — file kept its symbols but lost most resolved edges; enqueuing forced scoped re-resolve",
+			zap.String("file", path),
+			zap.Int("nodes_before", nodesBefore),
+			zap.Int("nodes_after", nodesAfter),
+			zap.Int("resolved_edges_before", resolvedBefore),
+			zap.Int("resolved_edges_after", resolvedAfter))
+	}
+	w.enqueueReresolve(path)
+}
+
+// enqueueReresolve batches shape-degraded files for a forced scoped re-resolve.
+// Copies enqueueDirScan's coalescing drainer so a save-storm of degraded files
+// runs at most one drainer goroutine and only ever O(file) scoped re-resolves
+// (never a whole-graph pass). reresolveFn is a test seam.
+func (w *Watcher) enqueueReresolve(path string) {
+	w.reconcileMu.Lock()
+	if w.pendingReresolve == nil {
+		w.pendingReresolve = make(map[string]struct{})
+	}
+	w.pendingReresolve[path] = struct{}{}
+	if w.reresolveActive {
+		w.reconcileMu.Unlock()
+		return
+	}
+	w.reresolveActive = true
+	w.reconcileMu.Unlock()
+
+	go func() {
+		for {
+			w.reconcileMu.Lock()
+			files := w.pendingReresolve
+			w.pendingReresolve = nil
+			if len(files) == 0 {
+				w.reresolveActive = false
+				w.reconcileMu.Unlock()
+				return
+			}
+			fn := w.reresolveFn
+			w.reconcileMu.Unlock()
+			func() {
+				defer w.guardWatcherPanic("reresolve")
+				if fn != nil {
+					fn(files)
+					return
+				}
+				for p := range files {
+					if err := w.indexer.ReresolveFileScoped(p); err != nil && w.logger != nil {
+						w.logger.Warn("watcher: forced scoped re-resolve failed",
+							zap.String("file", p), zap.Error(err))
+					}
+				}
+			}()
+		}
+	}()
 }
 
 // recordInertModify finishes a ChangeModified patch that the

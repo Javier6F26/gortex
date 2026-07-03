@@ -388,6 +388,31 @@ func warmupDaemonState(state *daemonState, logger *zap.Logger, markReady func())
 							} else {
 								scopeUnknown.Store(true)
 							}
+						default:
+							// Warm no-op path: the repo re-indexed nothing, so its
+							// graph is served straight from the persisted store.
+							// Vet the freshly-recomputed per-repo counts against
+							// what the snapshot recorded — a material shortfall
+							// means the store came back shape-degraded relative to
+							// the snapshot metadata (a persisted resolution
+							// regression). Mark the repo changed so the
+							// end-of-warmup global re-resolve + derivation passes
+							// run for it instead of silently serving the shrunken
+							// graph, and surface the event so a ratchet can't hide
+							// behind an all-green index_health.
+							if res != nil && bootShapeShortfall(state.snapshotRepos, res.RepoPrefix, res.NodeCount, res.EdgeCount) {
+								indexer.RecordResolutionRegression()
+								logger.Warn("daemon: boot shape-degradation guard — repo graph materially short of snapshot; re-running resolution",
+									zap.String("prefix", res.RepoPrefix),
+									zap.Int("live_nodes", res.NodeCount),
+									zap.Int("live_edges", res.EdgeCount))
+								changedRepos.Add(1)
+								if res.RepoPrefix != "" {
+									changedPrefixes.Store(res.RepoPrefix, struct{}{})
+								} else {
+									scopeUnknown.Store(true)
+								}
+							}
 						}
 					} else {
 						// No prior mtimes → full cold (re)index of this repo,
@@ -807,6 +832,8 @@ func collectSnapshotRepos(mi *indexer.MultiIndexer) []snapshotRepo {
 			RepoPrefix: prefix,
 			RootPath:   m.RootPath,
 			FileMtimes: mtimes,
+			NodeCount:  m.NodeCount,
+			EdgeCount:  m.EdgeCount,
 		})
 	}
 	return out

@@ -159,7 +159,11 @@ func wireContractGolden(name string) string {
 		// Previously bumped when BinaryMtimeUnix was added.
 		return "a0f604616d04c757ffec4d084fc53cf6c3db03c8add1a8af0f32f902c1b1fe92"
 	case "snapshotRepo":
-		return "8a78544c6e8d6c384f95b971df43408e7bc5f5ab4c7f2052d038bd3ffa4e1311"
+		// Bumped when the per-repo NodeCount / EdgeCount fields were added —
+		// the baseline the boot shape-degradation guard compares a reloaded
+		// repo against. Additive: gob decodes older snapshots with both zero,
+		// which the guard reads as "no baseline to compare" and skips.
+		return "ddb90a625b70b681e3ac4015db3192991c37e6cdf8b0edef501db282bdfe3de3"
 	case "snapshotContract":
 		// New wire type introduced with per-repo contract persistence.
 		// Mirrors contracts.Contract but stores Type/Role as strings so

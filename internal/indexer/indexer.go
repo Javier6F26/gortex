@@ -3532,6 +3532,40 @@ func (idx *Indexer) EvictFile(filePath string) (int, int) {
 	return idx.graph.EvictFile(graphPath)
 }
 
+// ReresolveFileScoped forces the scoped re-resolution + LSP re-verify a normal
+// IndexFile performs, WITHOUT re-parsing and WITHOUT the IsStale gate — used by
+// the watcher's shape-degradation self-heal, where the file's mtime is already
+// current (IndexFile just ran) yet its resolved edges came out degraded, so a
+// plain IncrementalReindexPaths would stale-gate it out. Re-runs only this
+// file's forward + incoming resolve and, when a watch-enabled provider is
+// wired, its incremental enrichment. O(file), no whole-graph pass. No-op when
+// the file has no nodes (evicted since it was enqueued).
+func (idx *Indexer) ReresolveFileScoped(filePath string) error {
+	absPath := filePath
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(idx.rootPath, filePath)
+	}
+	graphPath := idx.prefixPath(idx.relKey(absPath))
+	if len(idx.graph.GetFileNodes(graphPath)) == 0 {
+		return nil // file gone / evicted; nothing to re-resolve
+	}
+	idx.resolver.ResolveFileAndIncoming(graphPath)
+	providersPresent := idx.semanticMgr != nil && idx.semanticMgr.Enabled() && idx.semanticMgr.HasProviders()
+	reEnriched := false
+	if providersPresent {
+		if _, err := idx.semanticMgr.EnrichFile(idx.graph, idx.rootPath, graphPath); err != nil {
+			idx.logger.Debug("indexer: forced scoped enrichment failed",
+				zap.String("file", graphPath), zap.Error(err))
+		} else {
+			reEnriched = idx.semanticMgr.EnrichesOnWatch()
+		}
+	}
+	// Keep the find_usages staleness marker consistent with the enrichment
+	// that actually ran during this forced re-resolve (mirrors indexFile).
+	idx.setReparsePendingEnrichment(graphPath, providersPresent && !reEnriched)
+	return nil
+}
+
 // restubIncomingRefs rewrites every resolved reference edge that points
 // INTO a symbol of graphPath from a surviving (other-file) source back
 // to an `unresolved::<Name>` stub, in place, BEFORE the file's nodes are
