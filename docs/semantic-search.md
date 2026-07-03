@@ -72,11 +72,13 @@ The combo store now keys symbol associations both on the whole query and per key
 Opt-in faster local backends via build tags:
 
 ```bash
-go build -tags embeddings_onnx ./cmd/gortex/   # needs: brew install onnxruntime
-go build -tags embeddings_gomlx ./cmd/gortex/  # auto-downloads XLA plugin
+go build -tags embeddings_onnx ./cmd/gortex/          # needs: brew install onnxruntime
+go build -tags "embeddings_gomlx XLA" ./cmd/gortex/   # activates the XLA/GoMLX backend; PJRT plugin auto-downloads at runtime
 ```
 
 The `embeddings_onnx` backend (GTE-small) **never auto-downloads**: place `model.onnx` and `vocab.txt` in `~/.gortex/models/gte-small/` yourself and install the ONNX Runtime native library (`brew install onnxruntime`, or the distro equivalent). Without both, the backend reports "ONNX model not found" and the local chain falls through to the pure-Go Hugot backend.
+
+The GoMLX/XLA backend requires **both** tags — `embeddings_gomlx` alone links a disabled XLA stub and always falls through to the pure-Go backend; the `XLA` tag is what compiles the real XLA session. The tag pair is compile-verified, but XLA/PJRT runtime viability is platform-dependent and still experimental — if the plugin fails to load, the local chain degrades to the pure-Go Hugot backend and the startup log names the failed backend (see Troubleshooting). The default pure-Go backend needs no tags and is the reliable path.
 
 The legacy `--embeddings` / `--embeddings-url` / `--embeddings-model` CLI flags and the `GORTEX_EMBEDDINGS*` env vars still take precedence over the config block — useful for one-shot overrides without editing `.gortex.yaml`.
 

@@ -90,8 +90,11 @@ jobs:
       - name: Build default (Hugot bundled — no tag)
         run: go build -o gortex-default ./cmd/gortex/
 
-      - name: Build with GoMLX tag
-        run: go build -tags embeddings_gomlx -o gortex-gomlx ./cmd/gortex/
+      - name: Build with GoMLX + XLA tags
+        run: go build -tags "embeddings_gomlx XLA" -o gortex-gomlx ./cmd/gortex/
+
+      - name: Build with GoMLX tag only (compat — some docs/scripts still pass it alone)
+        run: go build -tags embeddings_gomlx -o gortex-gomlx-noxla ./cmd/gortex/
 
   benchmark:
     runs-on: ubuntu-latest
