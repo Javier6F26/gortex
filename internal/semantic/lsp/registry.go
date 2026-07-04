@@ -79,6 +79,16 @@ type ServerSpec struct {
 	// for a "composed bundle" on spawn unless BUNDLE_GEMFILE is already set;
 	// pointing it at the project Gemfile skips that install for enrichment.
 	UseWorkspaceBundleGemfile bool
+	// NeedsCompileDB marks a server that cannot produce full semantic
+	// signal without a compilation database in the workspace. clangd is
+	// the case: with no compile_commands.json every didOpen becomes a
+	// header-less fallback translation unit — a full preamble + AST
+	// rebuild per file — so the hover / hierarchy sweep pays a per-file
+	// rebuild for little return, and opening a header directly makes it a
+	// standalone TU. When this is set and no database is found, enrichment
+	// degrades to reference confirmation: it skips the sweep and header
+	// files and warns with the remediation.
+	NeedsCompileDB bool
 }
 
 // ConnectSpec carries the transport coordinates for passive LSP attach
@@ -365,6 +375,11 @@ var Servers = []ServerSpec{
 		Priority:    5,
 		Daemon:      true,
 		MaxParallel: 6,
+		// clangd's hover / call- and type-hierarchy signal needs a
+		// compilation database; without one it rebuilds a fallback AST
+		// per didOpen, so the enrichment pass degrades to reference
+		// confirmation instead of driving that churn.
+		NeedsCompileDB: true,
 	},
 	{
 		Name:       "jdtls",

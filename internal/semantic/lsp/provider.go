@@ -628,6 +628,27 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		return result, nil
 	}
 
+	// Compile-database preflight: a server that needs a compilation database
+	// (clangd) but has none rebuilds a full fallback AST on every didOpen, so
+	// the hover / hierarchy sweep churns for little signal and a directly
+	// opened header becomes a standalone TU. Degrade to reference confirmation
+	// — the confirm / rebind passes work inside the fallback TU on fallback
+	// flags — and skip the sweep, the interface pass, and header files.
+	degraded := p.spec != nil && p.spec.NeedsCompileDB && !hasCompileDB(absRoot)
+	var degradedSkipFile func(rel string) bool
+	if degraded {
+		degradedSkipFile = isCXXHeaderFile
+		result.Degraded = true
+		result.DegradedReason = "no compilation database found; enrichment limited to reference confirmation (hover, hierarchy, and header translation units skipped)"
+		if p.logger != nil {
+			p.logger.Warn("LSP enrich: degrading to reference confirmation, compilation database missing",
+				zap.String("provider", p.Name()),
+				zap.String("repo_prefix", repoPrefix),
+				zap.String("remediation", "generate compile_commands.json (cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, bear -- make, or meson), then re-index"),
+			)
+		}
+	}
+
 	// Start or reuse the client now that there is work to do.
 	if err := p.ensureClient(absRoot); err != nil {
 		return nil, fmt.Errorf("start LSP server: %w", err)
@@ -674,8 +695,10 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	// targetedCtx caps the targeted-edge passes (implementations + confirm) at
 	// a fraction of the window, reserving the remainder for the sweep so both
 	// phases make progress. With no deadline (tests) it is the parent context.
+	// A degraded pass skips the sweep entirely, so there is nothing to reserve
+	// for — give the confirm pass the whole window.
 	targetedCtx := ctx
-	if dl, ok := ctx.Deadline(); ok {
+	if dl, ok := ctx.Deadline(); ok && !degraded {
 		window := dl.Sub(start)
 		reserve := time.Duration(float64(window) * enrichSweepReserveFraction)
 		if reserve > 0 && reserve < window {
@@ -685,8 +708,13 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		}
 	}
 
-	// Query implementations for interface nodes.
+	// Query implementations for interface nodes. A degraded pass skips this:
+	// the query opens each interface's file, and a database-less clangd cannot
+	// resolve implementations across translation units regardless.
 	for _, n := range langNodes {
+		if degraded {
+			break
+		}
 		if targetedCtx.Err() != nil {
 			break
 		}
@@ -761,7 +789,7 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 	// fallback opens arbitrary call-site files, so it runs serially afterward
 	// over the targets the sweep left unconfirmed, keeping document open/close
 	// from overlapping across goroutines.
-	confirmGroups := p.groupConfirmTargets(g, targets)
+	confirmGroups := p.groupConfirmTargets(g, targets, degradedSkipFile)
 	var confirmMu sync.Mutex
 	var fallback []enrichTarget
 	{
@@ -874,6 +902,9 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		if !p.servesFile(siteRel) {
 			continue // never open a call-site file this server can't compile
 		}
+		if degradedSkipFile != nil && degradedSkipFile(siteRel) {
+			continue // degraded mode: never open this call-site (e.g. a header)
+		}
 		// Hold one open document per run of same-file sites: acquire on the
 		// first site of a file, release when the file changes (and once more
 		// after the loop). A failed acquire yields nil content, which
@@ -917,6 +948,38 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		}
 	}
 	releaseSite()
+
+	// Degraded finalisation: the interface pass, the references-add pass, and
+	// the per-file hover / hierarchy sweep are all skipped when a needed
+	// compilation database is missing — only the reference-confirm and
+	// definition-rebind passes ran, working inside the fallback translation
+	// unit. Finalise the result here, before the sweep machinery below.
+	if degraded {
+		if result.SymbolsTotal > 0 {
+			result.CoveragePercent = float64(result.SymbolsCovered) / float64(result.SymbolsTotal) * 100
+		}
+		result.DurationMs = time.Since(start).Milliseconds()
+		if ctx.Err() != nil {
+			result.Partial = true
+			result.AbortReason = ctx.Err().Error()
+		}
+		if p.logger != nil {
+			didOpens, reopenedFiles, docEvictions, peakOpenDocs := session.stats()
+			p.logger.Info("LSP enrich: degraded pass complete (reference confirmation only)",
+				zap.String("provider", p.Name()),
+				zap.String("repo_prefix", repoPrefix),
+				zap.Bool("degraded", true),
+				zap.Int("edges_confirmed", result.EdgesConfirmed),
+				zap.Int("did_opens", didOpens),
+				zap.Int("reopened_files", reopenedFiles),
+				zap.Int("doc_evictions", docEvictions),
+				zap.Int("peak_open_docs", peakOpenDocs),
+				zap.Int64("req_references", p.reqStats.references.Load()),
+				zap.Int64("req_definitions", p.reqStats.definitions.Load()),
+			)
+		}
+		return result, nil
+	}
 
 	// References-driven add pass: a server that enumerates references but has
 	// no call hierarchy (e.g. intelephense) never runs the per-file sweep's

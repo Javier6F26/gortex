@@ -36,7 +36,11 @@ type confirmGroup struct {
 // where a confirmation resolves the most tiers — have already run. Ordering is
 // deterministic (count desc, then path) so a resumed / replayed index is
 // stable.
-func (p *Provider) groupConfirmTargets(g graph.Store, targets []enrichTarget) []*confirmGroup {
+//
+// skipFile, when non-nil, drops any referent file the predicate rejects —
+// the compile-database-degraded pass passes it to keep clangd from opening
+// header translation units it cannot resolve without a database.
+func (p *Provider) groupConfirmTargets(g graph.Store, targets []enrichTarget, skipFile func(rel string) bool) []*confirmGroup {
 	byFile := map[string]*confirmGroup{}
 	var order []*confirmGroup
 	for _, t := range targets {
@@ -53,6 +57,9 @@ func (p *Provider) groupConfirmTargets(g graph.Store, targets []enrichTarget) []
 		}
 		if !p.servesFile(rel) {
 			continue // never open a referent file this server can't compile
+		}
+		if skipFile != nil && skipFile(rel) {
+			continue // degraded mode: never open this referent (e.g. a header)
 		}
 		grp := byFile[rel]
 		if grp == nil {

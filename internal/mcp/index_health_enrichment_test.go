@@ -108,3 +108,51 @@ func TestIndexHealth_SemanticEnrichmentCompletedIsGreen(t *testing.T) {
 	rec, _ := payload["recommendation"].(string)
 	assert.False(t, strings.Contains(rec, "Semantic enrichment"), "completed enrichment must not warn, got: %q", rec)
 }
+
+// TestIndexHealth_SurfacesDegradedEnrichment verifies a compile-db-degraded
+// pass (reference confirmation only) is not treated as a failure — ok stays
+// true — but surfaces the status flag, its reason as detail, and a
+// remediation recommendation.
+func TestIndexHealth_SurfacesDegradedEnrichment(t *testing.T) {
+	srv, _ := setupTestServer(t)
+
+	mgr := semantic.NewManager(semantic.Config{
+		Enabled: true,
+		Providers: []semantic.ProviderConfig{
+			{Name: "lsp-clangd", Languages: []string{"c"}, Priority: 1, Enabled: true},
+		},
+	}, zap.NewNop())
+	mgr.RegisterProvider(&fakeSemProvider{
+		name: "lsp-clangd",
+		result: &semantic.EnrichResult{
+			Provider:       "lsp-clangd",
+			Language:       "c",
+			EdgesConfirmed: 3,
+			Degraded:       true,
+			DegradedReason: "no compilation database found; enrichment limited to reference confirmation",
+		},
+	})
+	_, err := mgr.EnrichAll(srv.graph, map[string]string{"repo-a": t.TempDir()})
+	require.NoError(t, err)
+	srv.SetSemanticManager(mgr)
+
+	payload := srv.buildIndexHealthPayload()
+	require.NotNil(t, payload)
+
+	statuses, ok := payload["semantic_enrichment"].([]semantic.EnrichmentStatus)
+	require.True(t, ok)
+	require.Len(t, statuses, 1)
+	assert.True(t, statuses[0].Degraded, "the status must carry the degraded flag")
+	assert.Equal(t, semantic.EnrichStateCompleted, statuses[0].State, "degradation is not a failure state")
+	assert.Contains(t, statuses[0].Detail, "compilation database", "the degraded reason should surface as detail")
+
+	// Degradation is intentional — it must not flip the ok flag.
+	okFlag, ok := payload["semantic_enrichment_ok"].(bool)
+	require.True(t, ok)
+	assert.True(t, okFlag, "a degraded pass is not a failure and must keep semantic_enrichment_ok true")
+
+	rec, _ := payload["recommendation"].(string)
+	assert.True(t, strings.Contains(rec, "degraded") && strings.Contains(rec, "compile_commands.json"),
+		"a degraded pass must recommend generating a compile database, got: %q", rec)
+	assert.Contains(t, rec, "lsp-clangd in repo-a", "the recommendation should name the repo/provider")
+}

@@ -103,6 +103,13 @@ type EnrichResult struct {
 	// server advertised references but no call hierarchy — e.g. intelephense.
 	// Lets index_health distinguish this add mode from the hierarchy mode.
 	ReferencesAddPass bool `json:"references_add_pass,omitempty"`
+	// Degraded reports that the pass ran in a reduced mode — reference
+	// confirmation only, no hover / hierarchy sweep — because a server that
+	// needs a compilation database (clangd) found none. It is an intentional
+	// degradation, not a failure: the confirmed edges are trustworthy, but
+	// hover types and hierarchy edges are absent. DegradedReason carries why.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
 }
 
 // Bounding reasons for the enrichment add-phase (EnrichResult.BoundReason /
@@ -148,8 +155,14 @@ type EnrichmentStatus struct {
 	// ReferencesAddPass marks that this provider added edges via
 	// textDocument/references (no call hierarchy) — the intelephense-style
 	// add mode. Distinguishes it from the call-hierarchy add mode.
-	ReferencesAddPass bool   `json:"references_add_pass,omitempty"`
-	Detail            string `json:"detail,omitempty"`
+	ReferencesAddPass bool `json:"references_add_pass,omitempty"`
+	// Degraded marks that this provider ran in reference-confirmation-only
+	// mode because a needed compilation database was missing. Not a failure —
+	// State stays "completed" — but hover / hierarchy edges are absent, so
+	// index_health can flag it with the remediation. DegradedReason says why.
+	Degraded       bool   `json:"degraded,omitempty"`
+	DegradedReason string `json:"degraded_reason,omitempty"`
+	Detail         string `json:"detail,omitempty"`
 }
 
 // ProviderStatus represents the current state of a semantic provider.

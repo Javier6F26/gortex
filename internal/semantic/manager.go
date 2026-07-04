@@ -527,6 +527,8 @@ func (m *Manager) setEnrichStatus(repo, provider, lang, state string, deadline t
 		}
 		st.BoundReason = result.BoundReason
 		st.ReferencesAddPass = result.ReferencesAddPass
+		st.Degraded = result.Degraded
+		st.DegradedReason = result.DegradedReason
 	}
 	m.mu.Lock()
 	m.enrichStatus[repo+"\x00"+provider] = st
@@ -733,7 +735,13 @@ func (m *Manager) runEnrichOne(g graph.Store, repoName, repoRoot, lang string, p
 		if result.Partial {
 			state = EnrichStatePartial
 		}
-		m.setEnrichStatus(repoName, provider.Name(), lang, state, d, result, result.AbortReason)
+		// A degraded (compile-db-missing) pass completes normally; surface its
+		// reason as the status detail when there is no abort reason to report.
+		detail := result.AbortReason
+		if detail == "" {
+			detail = result.DegradedReason
+		}
+		m.setEnrichStatus(repoName, provider.Name(), lang, state, d, result, detail)
 
 		m.logger.Info("semantic enrichment complete",
 			zap.String("provider", provider.Name()),

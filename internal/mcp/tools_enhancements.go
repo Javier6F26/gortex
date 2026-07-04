@@ -3069,6 +3069,25 @@ func (s *Server) buildIndexHealthPayload() map[string]any {
 		}
 	}
 
+	// Compile-database-degraded providers: a clangd pass with no
+	// compile_commands.json intentionally runs reference confirmation only (no
+	// hover / hierarchy sweep). This is not a failure — semantic_enrichment_ok
+	// stays true — but the missing tiers are worth flagging with the remediation.
+	var degradedProviders []string
+	for _, st := range enrichStatuses {
+		if st.Degraded {
+			degradedProviders = append(degradedProviders, st.Provider+" in "+st.Repo)
+		}
+	}
+	if len(degradedProviders) > 0 {
+		msg := "Semantic enrichment ran in degraded (reference-confirmation-only) mode for " + strings.Join(degradedProviders, ", ") + " because no compilation database was found — hover types and call/type-hierarchy edges were skipped. Generate compile_commands.json (cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON, bear -- make, or meson) at the repo root, then reindex_repository."
+		if recommendation == "" {
+			recommendation = msg
+		} else {
+			recommendation = msg + " " + recommendation
+		}
+	}
+
 	result := map[string]any{
 		"health_score":         healthScore,
 		"total_detected":       totalDetected,
