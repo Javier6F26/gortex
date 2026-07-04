@@ -52,6 +52,12 @@ language. `gopls` is `3` so it beats SCIP-based providers (`5`) for Go;
 `jdtls` is `6` so it's lower-priority than the SCIP-java path that
 ships separately.
 
+`clangd` is the one server that needs a compilation database for full
+enrichment. Point it at a `compile_commands.json` (or a `compile_flags.txt`
+/ `.clangd`) at the repo root; without one, gortex degrades that repository's
+enrichment to reference confirmation — see
+[Enrichment cost model](#enrichment-cost-model).
+
 ## Enabling a server
 
 Add it to `.gortex.yaml`:
@@ -155,6 +161,141 @@ These defaults suit a polyglot workspace where most languages are
 touched only intermittently. Override them by editing the
 `lsp.NewRouter(...).With...` chain in your build if you need a longer
 warm pool or a tighter memory bound.
+
+## Enrichment cost model
+
+The resolution path (use 1 at the top of this page) runs as a batch
+**enrichment pass** — one pass per (repository × language server) — that walks
+the repo's nodes for that language and upgrades edges the AST resolver left
+ambiguous. A pass runs up to five phases:
+
+1. **Interface pass** — for each interface / abstract declaration, asks the
+   server for its implementations (`textDocument/implementation`) and links the
+   dispatch edges.
+2. **Confirm pass** — for every ambiguous edge (one whose confidence the
+   resolver could not raise to certainty), asks for the referent's references
+   (`textDocument/references`) and confirms or refutes the edge. Grouped by
+   referent file so each file opens once.
+3. **Definition-rebind fallback** — for edges the confirm pass could not settle
+   from references alone, asks for the call site's definition
+   (`textDocument/definition`) and rebinds the edge to the concrete target.
+4. **References-add pass** — only for servers that expose references but not a
+   call hierarchy; recovers the caller edges a declaration's references imply.
+5. **Per-file sweep** — the whole-repo hover / hierarchy phase. Per function or
+   method it prepares a call hierarchy and reads outgoing (and, where it helps,
+   incoming) calls; per type or interface it reads the super/subtype hierarchy;
+   per symbol it hovers for a type string.
+
+Each phase opens the files it touches on the language server (`didOpen`) and
+closes them when done (`didClose`). The first four phases carry most of the
+precision gain; the sweep carries most of the cost — on a warm restart, where
+every node already reloads with its resolved edges and type stamp, the sweep is
+almost pure churn.
+
+### Bounded document session
+
+All five phases share one **document session** per pass. It opens each file on a
+server at most once while the file is in use, keeps recently-closed files warm
+in an LRU tail so a later phase reuses the open document instead of reopening
+it, and closes everything at pass end. The simultaneously-open ceiling is
+`2 × max_parallel` documents per server (floor 4): the pinned working set stays
+within `max_parallel` (bounded by the pass's file semaphore) and the extra
+headroom is the warm tail. `didOpen` / `didClose` stay paired per (file,
+server) — a file opened on a server that later dies still gets its close attempt
+on that server — while the server's open-document set stays bounded.
+
+This matters most for `clangd` without a compilation database: every `didOpen`
+triggers a full fallback-preamble + AST rebuild, so reopening the same file
+across phases multiplies that cost.
+
+### Sweep modes
+
+The per-file sweep (phase 5) is gated by a **sweep mode**:
+
+| Mode     | Behaviour                                                                                                                                                                                                                                                                                                                                                              |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `demand` | **Default.** Sweep a file only when its declarations still carry unresolved same-name call candidates (enrichment demand) or it declares a type / interface whose super/subtype hierarchy the sweep recovers. A file with neither signal is skipped, so a warm restart pays no sweep for it. Within a swept file, a node that already carries a `semantic_type` stamp from an earlier pass is not re-hovered. |
+| `full`   | Sweep every file of the language — maximal hover and hierarchy coverage, the right choice for a first cold index.                                                                                                                                                                                                                                                       |
+| `off`    | Skip the per-file sweep entirely. The confirm / rebind / references-add / interface passes still run, so edge tiers and recall are unaffected — only hover type strings and sweep-recovered hierarchy edges are dropped.                                                                                                                                                 |
+
+Resolution precedence, highest first:
+
+1. The `GORTEX_LSP_SWEEP` environment variable (`demand` / `full` / `off`, with
+   `none` accepted as an alias for `off`; case- and whitespace-insensitive). Set
+   it where you launch `gortex daemon` / `gortex server` to dial one run without
+   editing config.
+2. The `.gortex.yaml` key `semantic.lsp_sweep` (same values).
+3. The `demand` default.
+
+An unrecognised value at any level is ignored and the next source applies.
+
+```yaml
+semantic:
+  enabled: true
+  lsp_sweep: demand   # demand (default) | full | off
+```
+
+### Incoming-calls policy
+
+In the sweep's call-hierarchy step, outgoing calls are always fetched — the
+sweep visits every caller, so a declaration's outgoing hops alone reconstruct
+every intra-repo static call edge. Incoming calls are fetched only where the
+outgoing side is blind: a dispatch-relevant declaration (whose concrete callers
+land on the incoming side of an interface method, not its outgoing side) or one
+that still carries unresolved demand — or under `full` mode. Files are swept
+demand-first, so a declaration whose incoming calls are skipped at a deadline
+cut still loses no reachable edge. The count of declined round trips rides on
+the pass-complete log as `incoming_calls_skipped`.
+
+### Compile-database preflight (clangd)
+
+Before enriching a repository with a server that needs a compilation database
+(`clangd`), gortex checks the workspace root for one of:
+
+- `compile_commands.json` — canonical CMake / Bear output
+- `build*/compile_commands.json` — out-of-tree build directories
+- `compile_flags.txt` — clangd's flat-flags fallback
+- `.clangd` — a hand-written clangd config
+
+If none is present, clangd rebuilds a full fallback AST on every `didOpen`, and
+opening a header directly makes it a standalone translation unit with no
+cross-file signal to show for the cost. Rather than drive that churn, the pass
+**degrades to reference confirmation**: it runs the confirm and rebind passes
+(which work inside the fallback translation unit on fallback flags) and skips
+the interface pass, the references-add pass, the entire per-file sweep, and all
+header files. Edge tiers and confirmed / refuted edges are unaffected; hover
+type strings and call / type-hierarchy edges are absent for that pass.
+
+A degraded pass warns once with the remediation and marks its result
+`degraded`. `index_health` surfaces a recommendation naming the repository and
+provider:
+
+> generate compile_commands.json (cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON,
+> bear -- make, or meson) at the repo root, then reindex
+
+Degradation is deliberate, not a failure — `semantic_enrichment_ok` stays true.
+
+### Telemetry
+
+The pass-complete log line (`LSP enrich: hover phase complete`) carries the cost
+accounting for the pass:
+
+| Field | Meaning |
+| ----- | ------- |
+| `sweep_mode` | The effective sweep mode for the pass. |
+| `did_opens` | Total `didOpen` calls across every phase. |
+| `reopened_files` | Files opened more than once (a warm-tail miss). |
+| `doc_evictions` | LRU evictions — a `didClose` forced to make room. |
+| `peak_open_docs` | Peak simultaneously-open documents on any one server. |
+| `req_references`, `req_implementations`, `req_definitions`, `req_hovers` | Per-method request counts. |
+| `req_prepare_call_hierarchy`, `req_outgoing_calls`, `req_incoming_calls` | Call-hierarchy request counts. |
+| `incoming_calls_skipped` | Incoming-calls round trips the policy above declined. |
+| `req_prepare_type_hierarchy`, `req_supertypes`, `req_subtypes` | Type-hierarchy request counts. |
+| `skipped_already_stamped` | Nodes whose hover was skipped because they already carried a `semantic_type`. |
+
+A degraded pass logs `LSP enrich: degraded pass complete (reference
+confirmation only)` instead, with `degraded=true` and the document-open counters
+but no hover / hierarchy counts.
 
 ## Diagnostics
 
