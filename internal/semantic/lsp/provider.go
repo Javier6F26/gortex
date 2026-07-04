@@ -156,6 +156,10 @@ type requestStats struct {
 	prepareTypeHierarchy atomic.Int64
 	supertypes           atomic.Int64
 	subtypes             atomic.Int64
+	// incomingSkipped counts the callHierarchy/incomingCalls round trips the
+	// sweep declined to make because the declaration's callers are already
+	// recoverable from the outgoing side — a derived saving, not a request.
+	incomingSkipped atomic.Int64
 }
 
 // reset zeroes every counter at the start of an enrichment pass.
@@ -170,6 +174,7 @@ func (r *requestStats) reset() {
 	r.prepareTypeHierarchy.Store(0)
 	r.supertypes.Store(0)
 	r.subtypes.Store(0)
+	r.incomingSkipped.Store(0)
 }
 
 // Dial-retry constants for passive-attach reconnect. The window
@@ -326,6 +331,57 @@ func enrichNodeIsDispatchRelevant(n *graph.Node) bool {
 		return false
 	}
 	return n.Kind == graph.KindType || n.Kind == graph.KindInterface
+}
+
+// enrichCallableIsDispatchRelevant reports whether a function or method takes
+// part in dynamic dispatch, so its incoming callers name concrete targets the
+// outgoing side of the sweep cannot reach. Every intra-repo static call is
+// recoverable from its caller's outgoing hop — collected for every caller by
+// the file sweep — so a declaration's incoming callers only add signal when a
+// call to it dispatches through another declaration: a call through an
+// interface / abstract member lands the caller's outgoing edge on that member,
+// leaving the concrete implementation's real call sites visible only from its
+// incoming side. A declaration qualifies when it is itself an abstract /
+// interface / virtual member, when it overrides (or is overridden by) another
+// declaration, or when its declaring type implements or extends another type.
+func enrichCallableIsDispatchRelevant(g graph.Store, n *graph.Node) bool {
+	if n == nil || (n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
+		return false
+	}
+	if isAbstractMarked(n) {
+		return true
+	}
+	var parentType string
+	for _, e := range g.GetOutEdges(n.ID) {
+		switch e.Kind {
+		case graph.EdgeOverrides:
+			return true
+		case graph.EdgeMemberOf:
+			parentType = e.To
+		}
+	}
+	for _, e := range g.GetInEdges(n.ID) {
+		if e.Kind == graph.EdgeOverrides {
+			return true
+		}
+	}
+	if parentType == "" {
+		return false
+	}
+	// The declaring type implementing / extending another type makes its
+	// methods dispatch targets: a call through the interface or base type
+	// binds elsewhere, so this method's callers surface only via incoming.
+	for _, e := range g.GetOutEdges(parentType) {
+		if e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeExtends {
+			return true
+		}
+	}
+	for _, e := range g.GetInEdges(parentType) {
+		if e.Kind == graph.EdgeImplements || e.Kind == graph.EdgeExtends {
+			return true
+		}
+	}
+	return false
 }
 
 // nodeHasSemanticType reports whether a node already carries a non-empty
@@ -1149,11 +1205,28 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 						if err != nil {
 							continue
 						}
+						// Outgoing always: the file sweep visits every caller,
+						// so a declaration's outgoing hops alone reconstruct
+						// every intra-repo static call edge. Incoming only adds
+						// what the outgoing side is blind to — the concrete
+						// callers of a dynamic-dispatch target, and names the
+						// resolver still could not bind — so it is fetched only
+						// for a dispatch-relevant or demand-bearing declaration
+						// (or under a full sweep). Demand-first file ordering
+						// sweeps the demand-bearing callers before any deadline
+						// cut, so a skipped incoming costs no reachable edge.
+						wantIncoming := sweepMode == sweepModeFull ||
+							enrichCallableIsDispatchRelevant(g, n) ||
+							enrichNodeHasUnresolvedDemand(g, n)
 						for _, item := range items {
 							if outs, oerr := p.outgoingCalls(item); oerr == nil {
 								for _, oc := range outs {
 									cHops = append(cHops, callHop{n: n, other: oc.To, asOutgoing: true, fromRanges: oc.FromRanges})
 								}
+							}
+							if !wantIncoming {
+								p.reqStats.incomingSkipped.Add(1)
+								continue
 							}
 							if ins, ierr := p.incomingCalls(item); ierr == nil {
 								for _, ic := range ins {
@@ -1329,6 +1402,7 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		zap.Int64("req_prepare_call_hierarchy", p.reqStats.prepareCallHierarchy.Load()),
 		zap.Int64("req_outgoing_calls", p.reqStats.outgoingCalls.Load()),
 		zap.Int64("req_incoming_calls", p.reqStats.incomingCalls.Load()),
+		zap.Int64("incoming_calls_skipped", p.reqStats.incomingSkipped.Load()),
 		zap.Int64("req_prepare_type_hierarchy", p.reqStats.prepareTypeHierarchy.Load()),
 		zap.Int64("req_supertypes", p.reqStats.supertypes.Load()),
 		zap.Int64("req_subtypes", p.reqStats.subtypes.Load()),
