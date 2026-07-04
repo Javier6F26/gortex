@@ -165,9 +165,9 @@ func TestMissingFields_IntegrationViaDispatch(t *testing.T) {
 
 func TestIsNullableField_AllForms(t *testing.T) {
 	cases := map[string]map[string]any{
-		"nullable":      {"nullable": true},
-		"optional":      {"optional": true},
-		"omitempty":     {"json_tag": `json:"x,omitempty"`},
+		"nullable":  {"nullable": true},
+		"optional":  {"optional": true},
+		"omitempty": {"json_tag": `json:"x,omitempty"`},
 	}
 	for name, meta := range cases {
 		n := &graph.Node{Meta: meta}

@@ -20,8 +20,6 @@ import (
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -49,8 +47,7 @@ func Caller() {
 `), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
@@ -348,8 +345,8 @@ func Target() {}
 
 	ctx := WithSessionID(context.Background(), sessID)
 	res := callToolByName(t, srv, ctx, "get_symbol_source", map[string]any{
-		"id":             "target.go::Target",
-		"context_lines":  10,
+		"id":            "target.go::Target",
+		"context_lines": 10,
 	})
 	require.False(t, res.IsError, "get_symbol_source: %s", toolText(res))
 	require.Contains(t, toolText(res), "EditorSentinel",

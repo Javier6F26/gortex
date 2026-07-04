@@ -14,8 +14,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -42,8 +40,7 @@ func corpusTestServerProse(t *testing.T, indexProse bool) *Server {
 			"## Troubleshooting\n\nCheck the logs when a request times out.\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	cfg.Index.IndexProse = indexProse
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())

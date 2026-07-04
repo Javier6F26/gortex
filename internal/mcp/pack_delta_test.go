@@ -23,9 +23,9 @@ func TestExtractPackViewAndDiff(t *testing.T) {
 	), false)
 
 	current := extractPackView(packResult(
-		symEntry("a.go::A", 1, "func A() {}"),            // unchanged
-		symEntry("b.go::B", 5, "func B() { changed }"),   // changed body
-		symEntry("c.go::C", 9, "func C() {}"),            // added
+		symEntry("a.go::A", 1, "func A() {}"),          // unchanged
+		symEntry("b.go::B", 5, "func B() { changed }"), // changed body
+		symEntry("c.go::C", 9, "func C() {}"),          // added
 	), true)
 
 	delta := diffPackViews(prior, current, "root1", "root2")

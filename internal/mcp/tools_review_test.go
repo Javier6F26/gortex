@@ -16,8 +16,6 @@ import (
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
 	"github.com/zzet/gortex/internal/llm"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/review"
 )
@@ -74,8 +72,7 @@ func siblingDiffGitRepo(t *testing.T) (root, fileA, fileB, fileC string) {
 func indexedSiblingServer(t *testing.T, dir string) *Server {
 	t.Helper()
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)

@@ -57,9 +57,9 @@ func TestAnchorUnprefixedExisting(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
 		require.NoError(t, os.WriteFile(p, []byte("package x\n"), 0o644))
 	}
-	mustWrite(a, "internal/x.go")     // only in repo "alpha"
-	mustWrite(a, "shared/y.go")       // in both repos
-	mustWrite(b, "shared/y.go")       //
+	mustWrite(a, "internal/x.go") // only in repo "alpha"
+	mustWrite(a, "shared/y.go")   // in both repos
+	mustWrite(b, "shared/y.go")   //
 	mi := fakeRepoRoots{roots: map[string]string{"alpha": a, "beta": b}}
 
 	// Unique existing match → anchored to the lone owning repo, with the

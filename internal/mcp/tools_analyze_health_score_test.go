@@ -94,9 +94,9 @@ func TestAnalyzeHealthScore_CoverageOnly_ScoresCorrectly(t *testing.T) {
 func TestAnalyzeHealthScore_StaleCodeScoresWorse(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	now := time.Now().Unix()
-	fresh := now - int64((10 * 24 * time.Hour).Seconds())                  // 10 days
-	stale := now - int64((time.Duration(800*24) * time.Hour).Seconds())    // 800 days
-	dead := now - int64((time.Duration(1500*24) * time.Hour).Seconds())    // 1500 days
+	fresh := now - int64((10 * 24 * time.Hour).Seconds())               // 10 days
+	stale := now - int64((time.Duration(800*24) * time.Hour).Seconds()) // 800 days
+	dead := now - int64((time.Duration(1500*24) * time.Hour).Seconds()) // 1500 days
 
 	addHealthFn(srv.graph, "lib.go::Fresh", "lib.go", map[string]any{
 		"last_authored": map[string]any{"timestamp": fresh, "email": "x@y", "commit": "abc"},
@@ -374,9 +374,9 @@ func TestAnalyzeHealthScore_RecencyCurve(t *testing.T) {
 	}{
 		{0, 100},
 		{30, 100},
-		{197, 75},      // halfway through the OK band
+		{197, 75}, // halfway through the OK band
 		{365, 50},
-		{730, 25},      // halfway through the stale band
+		{730, 25}, // halfway through the stale band
 		{1095, 0},
 		{5000, 0},
 	}

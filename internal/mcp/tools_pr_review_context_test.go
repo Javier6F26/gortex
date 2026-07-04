@@ -23,8 +23,8 @@ func callPRReviewContext(t *testing.T, srv *Server, ctx context.Context, args ma
 
 // prReviewOut is the decoded JSON envelope.
 type prReviewOut struct {
-	Verdict        string `json:"verdict"`
-	ChangedSymbols int    `json:"changed_symbols"`
+	Verdict        string   `json:"verdict"`
+	ChangedSymbols int      `json:"changed_symbols"`
 	ChangedFiles   []string `json:"changed_files"`
 	Gates          []struct {
 		Name   string `json:"name"`

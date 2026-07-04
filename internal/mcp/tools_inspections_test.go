@@ -197,7 +197,7 @@ func TestRunInspections_MaxPerInspectionCap(t *testing.T) {
 		s.graph.AddNode(&graph.Node{
 			ID: "p/extra.go::todo" + string(rune('A'+i)), Kind: graph.KindTodo,
 			FilePath: "p/extra.go", StartLine: i + 1,
-			Meta:     map[string]any{"tag": "TODO", "text": "x"},
+			Meta: map[string]any{"tag": "TODO", "text": "x"},
 		})
 	}
 

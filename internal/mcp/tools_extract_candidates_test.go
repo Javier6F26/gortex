@@ -205,10 +205,10 @@ func TestExtractCandidates_RationaleSignalNaming(t *testing.T) {
 		line, caller, fanOut int
 		mustContain          []string
 	}{
-		"very-long":      {60, 2, 5, []string{"very long"}},
-		"widely-called":  {30, 15, 5, []string{"widely called"}},
-		"orchestration":  {30, 5, 20, []string{"orchestration shape"}},
-		"baseline":       {21, 2, 5, []string{"long", "multi-caller", "complex body"}},
+		"very-long":     {60, 2, 5, []string{"very long"}},
+		"widely-called": {30, 15, 5, []string{"widely called"}},
+		"orchestration": {30, 5, 20, []string{"orchestration shape"}},
+		"baseline":      {21, 2, 5, []string{"long", "multi-caller", "complex body"}},
 	}
 	for name, c := range cases {
 		got := buildExtractRationale(c.line, c.caller, c.fanOut)

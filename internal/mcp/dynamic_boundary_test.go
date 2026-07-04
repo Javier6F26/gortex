@@ -12,10 +12,10 @@ import (
 func TestDynamicBoundaryEmitsSiteFormKeyCandidates(t *testing.T) {
 	body := strings.Join([]string{
 		"def route(self, name, payload):",            // line 10 (startLine)
-		"    handler = getattr(self, name)",           // 11 reflection, key=name
-		"    return self.handlers[action](payload)",   // 12 computed_member, key=action
-		"    # self.bus.emit('ignored.in.comment')",   // 13 comment — must be skipped
-		"    self.bus.emit('user.created', payload)",  // 14 event_bus, key=user.created
+		"    handler = getattr(self, name)",          // 11 reflection, key=name
+		"    return self.handlers[action](payload)",  // 12 computed_member, key=action
+		"    # self.bus.emit('ignored.in.comment')",  // 13 comment — must be skipped
+		"    self.bus.emit('user.created', payload)", // 14 event_bus, key=user.created
 	}, "\n")
 
 	// Stub candidate resolver: 'name' resolves to two handler symbols, one of

@@ -142,7 +142,7 @@ func TestAnalyzeKustomize_OverlayRollup(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	overlay := &graph.Node{
 		ID: "kustomize::k8s/overlays/staging", Kind: graph.KindKustomization,
-		Name: "k8s/overlays/staging",
+		Name:     "k8s/overlays/staging",
 		FilePath: "k8s/overlays/staging/kustomization.yaml", StartLine: 1,
 		Meta: map[string]any{"dir": "k8s/overlays/staging"},
 	}

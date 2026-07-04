@@ -66,8 +66,7 @@ func TestHandleReindexRepository_WholeRepoSingleMode(t *testing.T) {
 		[]byte("package pkg\n\nfunc Util() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
@@ -109,8 +108,7 @@ func TestHandleReindexRepository_PathScopedSingleMode(t *testing.T) {
 		[]byte("package out\n\nfunc B() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
@@ -152,8 +150,7 @@ func TestHandleReindexRepository_RelativePathScoped(t *testing.T) {
 		[]byte("package sub\n\nfunc C() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
@@ -187,8 +184,7 @@ func TestHandleReindexRepository_BlankPathsTreatedAsWholeRepo(t *testing.T) {
 		[]byte("package main\n\nfunc Main() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)
@@ -372,8 +368,7 @@ func TestReindexRepositoryTool_RegisteredAndDiscoverable(t *testing.T) {
 		[]byte("package main\n\nfunc Main() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)

@@ -61,8 +61,7 @@ func Handle() {
 `)
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)

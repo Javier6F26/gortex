@@ -14,8 +14,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -65,8 +63,7 @@ func Bar() int { return Foo(21) }
 `), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)

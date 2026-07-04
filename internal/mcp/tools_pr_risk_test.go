@@ -15,8 +15,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -158,8 +156,7 @@ func TestPRRisk_BasePath(t *testing.T) {
 	dir := prRiskGitRepo(t)
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)

@@ -11,8 +11,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -164,8 +162,7 @@ func setupPresetServer(t *testing.T, cfg ToolPolicyConfig) *Server {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"),
 		[]byte("package app\n\nfunc Main() {}\n"), 0o644))
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	conf := config.Default()
 	idx := indexer.New(g, reg, conf.Index, zap.NewNop())
 	_, err := idx.Index(dir)

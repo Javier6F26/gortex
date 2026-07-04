@@ -42,17 +42,17 @@ func returnUsageServer(t *testing.T) (*Server, string) {
 	g.AddEdge(&graph.Edge{
 		From: "pkg/a.go::drop", To: fetch.ID, Kind: graph.EdgeCalls,
 		FilePath: "pkg/a.go", Line: 3,
-		Meta:     map[string]any{graph.MetaReturnUsage: graph.ReturnUsageDiscarded},
+		Meta: map[string]any{graph.MetaReturnUsage: graph.ReturnUsageDiscarded},
 	})
 	g.AddEdge(&graph.Edge{
 		From: "pkg/a.go::keep", To: fetch.ID, Kind: graph.EdgeCalls,
 		FilePath: "pkg/a.go", Line: 9,
-		Meta:     map[string]any{graph.MetaReturnUsage: graph.ReturnUsageAssigned},
+		Meta: map[string]any{graph.MetaReturnUsage: graph.ReturnUsageAssigned},
 	})
 	g.AddEdge(&graph.Edge{
 		From: "pkg/b.go::relay", To: fetch.ID, Kind: graph.EdgeCalls,
 		FilePath: "pkg/b.go", Line: 5,
-		Meta:     map[string]any{graph.MetaReturnUsage: graph.ReturnUsageReturned},
+		Meta: map[string]any{graph.MetaReturnUsage: graph.ReturnUsageReturned},
 	})
 	g.AddEdge(&graph.Edge{
 		From: "pkg/b.go::opaque", To: fetch.ID, Kind: graph.EdgeCalls,

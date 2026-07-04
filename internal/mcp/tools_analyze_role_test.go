@@ -94,9 +94,9 @@ func TestAnalyzeRole_AdapterDetectedViaCommunities(t *testing.T) {
 	s.analysisMu.Lock()
 	s.communities = &analysis.CommunityResult{
 		NodeToComm: map[string]string{
-			"p/main.go::Run":      "c-edge",
-			"p/svc.go::Process":   "c-mid",
-			"p/util.go::Leaf":     "c-core",
+			"p/main.go::Run":    "c-edge",
+			"p/svc.go::Process": "c-mid",
+			"p/util.go::Leaf":   "c-core",
 		},
 	}
 	s.analysisMu.Unlock()

@@ -14,13 +14,12 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 
-	"github.com/zzet/gortex/internal/config"
 	"os"
 	"path/filepath"
+
+	"github.com/zzet/gortex/internal/config"
 )
 
 func setupTestServer(t *testing.T) (*Server, string) {
@@ -44,8 +43,7 @@ func helper() {}
 `), 0o644)
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)

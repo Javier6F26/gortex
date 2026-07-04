@@ -148,7 +148,10 @@ func TestConflictsPRs_SuppliedDataYieldsCluster(t *testing.T) {
 
 	// Both seams fail the test if hit — supplied data must short-circuit.
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 
@@ -191,7 +194,10 @@ func TestConflictsPRs_DisjointPRsNoCluster(t *testing.T) {
 	// Only PR #1 touches a known file; PR #2 touches an unindexed file with
 	// no symbols → no community → no overlap.
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 	prsJSON, _ := json.Marshal([]forge.PR{{Number: 1}, {Number: 2}})
@@ -275,7 +281,10 @@ func TestConflictsPRs_GCXTOONBudget(t *testing.T) {
 	filesJSON, _ := json.Marshal(files)
 
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 

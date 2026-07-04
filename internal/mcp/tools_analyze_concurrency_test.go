@@ -13,8 +13,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -26,8 +24,7 @@ import (
 func concurrencyServer(t *testing.T) *Server {
 	t.Helper()
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	eng := query.NewEngine(g)

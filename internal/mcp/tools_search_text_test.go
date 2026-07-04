@@ -35,8 +35,7 @@ func TestSearchText(t *testing.T) {
 		[]byte("package app\n\nfunc Gamma() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
@@ -85,8 +84,7 @@ func TestSearchText_EnclosingSymbol(t *testing.T) {
 		[]byte("package app\n\nfunc Alpha() {\n\tprintln(\"needle_here\")\n}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
@@ -123,8 +121,7 @@ func TestSearchText_PathScoping(t *testing.T) {
 		[]byte("package auth\n\n// shared_marker here\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)
@@ -457,8 +454,7 @@ func TestSearchText_Regexp(t *testing.T) {
 		[]byte("package app\n\nfunc HandleAlpha() {}\n\nfunc HandleBeta() {}\n\nfunc Other() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	cfg := config.Default()
 	idx := indexer.New(g, reg, cfg.Index, zap.NewNop())
 	_, err := idx.Index(dir)

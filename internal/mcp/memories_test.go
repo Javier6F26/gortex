@@ -198,8 +198,8 @@ func TestSurface_RanksSymbolAnchorAbovePinned(t *testing.T) {
 	})
 	// Symbol anchor match — should rank above pinned.
 	anchorID, _ := mm.Save(persistence.MemoryEntry{
-		Body:      "anchor match",
-		SymbolIDs: []string{"pkg/foo.go::Bar"},
+		Body:       "anchor match",
+		SymbolIDs:  []string{"pkg/foo.go::Bar"},
 		Importance: 3,
 	})
 

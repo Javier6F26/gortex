@@ -16,8 +16,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
 )
@@ -58,8 +56,7 @@ func newIsolationServer(t *testing.T) (srv *Server, repoA, repoB string) {
 	require.NoError(t, err)
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	bm := search.NewBM25()
 	mi := indexer.NewMultiIndexer(g, reg, bm, cm, zap.NewNop())
 	_, err = mi.IndexScoped("", "") // index every configured repo

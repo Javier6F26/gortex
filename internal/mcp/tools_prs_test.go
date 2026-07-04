@@ -86,15 +86,15 @@ func TestGetPRImpact_SuppliedFilesNoForge(t *testing.T) {
 	require.False(t, seamHit, "the forge seam must NOT be called when files are supplied")
 
 	var out struct {
-		Number         int     `json:"number"`
-		Risk           string  `json:"risk"`
-		Score          float64 `json:"score"`
+		Number         int      `json:"number"`
+		Risk           string   `json:"risk"`
+		Score          float64  `json:"score"`
 		ChangedFiles   []string `json:"changed_files"`
 		ChangedSymbols []struct {
 			ID   string `json:"id"`
 			Name string `json:"name"`
 		} `json:"changed_symbols"`
-		Blast map[string]any `json:"blast"`
+		Blast            map[string]any `json:"blast"`
 		ReviewPriorities []struct {
 			Axis  string  `json:"axis"`
 			Score float64 `json:"score"`
@@ -127,7 +127,10 @@ func TestGetPRImpact_SuppliedFilesNoForge(t *testing.T) {
 func TestGetPRImpact_ReceiptEmitted(t *testing.T) {
 	srv, file := prToolsTestServer(t)
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 	filesJSON, _ := json.Marshal([]string{file})
@@ -205,7 +208,10 @@ func TestChangedSymbolsForFiles_RepoPrefixJoin(t *testing.T) {
 func TestListPRs_ClassifiesSupplied(t *testing.T) {
 	srv, _ := prToolsTestServer(t)
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		nil,
 	)
 
@@ -260,7 +266,10 @@ func TestTriagePRs_SortedDescending(t *testing.T) {
 	filesJSON, _ := json.Marshal(filesMap)
 
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 
@@ -565,7 +574,10 @@ func triageRows(t *testing.T, srv *Server, hubFile string) (prsJSON, filesJSON s
 	pj, _ := json.Marshal(prs)
 	fj, _ := json.Marshal(map[string][]string{"1": {"pkg/unrelated.go"}, "2": {hubFile}})
 	withSeams(t,
-		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) { t.Fatal("list seam hit"); return nil, nil },
+		func(context.Context, string, forge.ListOpts) ([]forge.PR, error) {
+			t.Fatal("list seam hit")
+			return nil, nil
+		},
 		func(context.Context, string, int) ([]string, error) { t.Fatal("files seam hit"); return nil, nil },
 	)
 	return string(pj), string(fj)

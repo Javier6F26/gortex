@@ -13,8 +13,6 @@ import (
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 )
 
@@ -22,8 +20,7 @@ import (
 // RootPath so collectRepoRoots / pickRepoRoot resolve the CODEOWNERS repo. It
 // indexes nothing.
 func rootOnlyIndexer(repoRoot string) *indexer.Indexer {
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(graph.New(), reg, config.Default().Index, zap.NewNop())
 	idx.SetRootPath(repoRoot)
 	return idx

@@ -12,9 +12,9 @@ import (
 // navTestEng adapts a graph.Store to the engineLike surface navCallers needs.
 type navTestEng struct{ g graph.Store }
 
-func (e navTestEng) GetSymbol(id string) *graph.Node      { return e.g.GetNode(id) }
-func (e navTestEng) GetOutEdges(id string) []*graph.Edge  { return e.g.GetOutEdges(id) }
-func (e navTestEng) GetInEdges(id string) []*graph.Edge   { return e.g.GetInEdges(id) }
+func (e navTestEng) GetSymbol(id string) *graph.Node     { return e.g.GetNode(id) }
+func (e navTestEng) GetOutEdges(id string) []*graph.Edge { return e.g.GetOutEdges(id) }
+func (e navTestEng) GetInEdges(id string) []*graph.Edge  { return e.g.GetInEdges(id) }
 
 // TestCallbackRegistrationCallers is part of the C3 named set: a function
 // registered as a callback (a callback-registration reference edge) shows up

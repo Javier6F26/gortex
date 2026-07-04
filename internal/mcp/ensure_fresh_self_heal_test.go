@@ -7,6 +7,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"os"
+	"path/filepath"
+
 	"github.com/zzet/gortex/internal/config"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
@@ -14,8 +17,6 @@ import (
 	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
-	"os"
-	"path/filepath"
 )
 
 // TestEnsureFresh_MultiRepoSelfHealsStaleFile is the regression test for the
@@ -82,8 +83,7 @@ func TestEnsureFresh_SingleRepoSelfHealsStaleFile(t *testing.T) {
 		[]byte("package main\n\nfunc Hello() {}\n"), 0o644))
 
 	g := graph.New()
-	reg := parser.NewRegistry()
-	languages.RegisterAll(reg)
+	reg := testRegistry()
 	idx := indexer.New(g, reg, config.Default().Index, zap.NewNop())
 	_, err := idx.Index(dir)
 	require.NoError(t, err)

@@ -11,7 +11,8 @@ import (
 )
 
 // seedWalkCommunityGraph injects a two-community call chain:
-//   x.go::X (comm "alpha") -> y.go::Y (comm "alpha") -> z.go::Z (comm "beta")
+//
+//	x.go::X (comm "alpha") -> y.go::Y (comm "alpha") -> z.go::Z (comm "beta")
 func seedWalkCommunityGraph(t *testing.T, srv *Server) {
 	t.Helper()
 	g := srv.graph

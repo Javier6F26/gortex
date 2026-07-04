@@ -235,8 +235,8 @@ func Cold() { panic("b") }
 	}
 
 	out := callSearchAST(t, srv, map[string]any{
-		"detector":                       "panic-in-library",
-		"min_fan_in_of_enclosing_func":   float64(2),
+		"detector":                     "panic-in-library",
+		"min_fan_in_of_enclosing_func": float64(2),
 	})
 	total, _ := out["total"].(float64)
 	if total != 1 {

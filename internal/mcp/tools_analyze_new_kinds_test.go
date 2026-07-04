@@ -88,11 +88,11 @@ func TestMineFixCommits_DetectsFixSubjects(t *testing.T) {
 		t.Skip("git not available")
 	}
 	dir := t.TempDir()
-	mustGit(t, dir,"init", "-q")
+	mustGit(t, dir, "init", "-q")
 	commit := func(body, msg string) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte(body), 0o644))
-		mustGit(t, dir,"add", "a.go")
-		mustGit(t, dir,"commit", "-q", "-m", msg)
+		mustGit(t, dir, "add", "a.go")
+		mustGit(t, dir, "commit", "-q", "-m", msg)
 	}
 	commit("package a\n", "add feature a")
 	commit("package a\n// v2\n", "fix: nil deref in a")
@@ -110,13 +110,13 @@ func TestAnalyzeFixesHistory_EndToEnd(t *testing.T) {
 		t.Skip("git not available")
 	}
 	srv, dir := setupTestServer(t)
-	mustGit(t, dir,"init", "-q")
-	mustGit(t, dir,"add", "main.go")
-	mustGit(t, dir,"commit", "-q", "-m", "initial commit")
+	mustGit(t, dir, "init", "-q")
+	mustGit(t, dir, "add", "main.go")
+	mustGit(t, dir, "commit", "-q", "-m", "initial commit")
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"),
 		[]byte("package main\n\nfunc main() {}\n"), 0o644))
-	mustGit(t, dir,"add", "main.go")
-	mustGit(t, dir,"commit", "-q", "-m", "fix: correct main logic")
+	mustGit(t, dir, "add", "main.go")
+	mustGit(t, dir, "commit", "-q", "-m", "fix: correct main logic")
 
 	out := callAnalyze(t, srv, "fixes_history", map[string]any{})
 	if got, _ := out["total_fix_commits"].(float64); got < 1 {

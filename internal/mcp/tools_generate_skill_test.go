@@ -237,11 +237,11 @@ func TestGenerateSkill_RejectsNonDirectory(t *testing.T) {
 
 func TestSluggify(t *testing.T) {
 	cases := map[string]string{
-		"my-skill":           "my-skill",
-		"My Skill":           "my-skill",
-		"my!skill!":          "my-skill",
-		"  spaces  ":         "spaces",
-		"My_skill.123":       "my-skill-123",
+		"my-skill":     "my-skill",
+		"My Skill":     "my-skill",
+		"my!skill!":    "my-skill",
+		"  spaces  ":   "spaces",
+		"My_skill.123": "my-skill-123",
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, sluggify(in), "sluggify(%q)", in)

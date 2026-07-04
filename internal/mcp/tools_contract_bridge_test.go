@@ -16,8 +16,6 @@ import (
 	"github.com/zzet/gortex/internal/contracts"
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/indexer"
-	"github.com/zzet/gortex/internal/parser"
-	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
 	"github.com/zzet/gortex/internal/search"
 )
@@ -125,8 +123,7 @@ func fetchUsers() {
 	cm, err := config.NewConfigManager(tmpCfg)
 	require.NoError(t, err)
 
-	preg := parser.NewRegistry()
-	languages.RegisterAll(preg)
+	preg := testRegistry()
 
 	g := graph.New()
 	mi := indexer.NewMultiIndexer(g, preg, search.NewBM25(), cm, zap.NewNop())
