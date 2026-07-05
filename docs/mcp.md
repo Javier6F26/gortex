@@ -1,6 +1,6 @@
 # MCP surface
 
-Gortex exposes a knowledge-graph query surface over the [Model Context Protocol](https://modelcontextprotocol.io): **100+ tools, 16 resources, 3 prompts**. Agents call the same surface from stdio, the daemon Unix socket, or the MCP 2026 Streamable HTTP endpoint.
+Gortex exposes a knowledge-graph query surface over the [Model Context Protocol](https://modelcontextprotocol.io): **100+ tools, 18 resources, 3 prompts**. Agents call the same surface from stdio, the daemon Unix socket, or the MCP 2026 Streamable HTTP endpoint.
 
 - [Tool discovery (lazy mode)](#tool-discovery-lazy-mode)
 - [Restricting the tool surface (presets)](#restricting-the-tool-surface-presets)
@@ -22,7 +22,7 @@ Gortex exposes a knowledge-graph query surface over the [Model Context Protocol]
 - [Multi-repo management](#multi-repo-management)
 - [Live editor buffers (overlay sessions)](#live-editor-buffers-overlay-sessions)
 - [Speculative execution](#speculative-execution)
-- [MCP resources (16)](#mcp-resources-16)
+- [MCP resources (18)](#mcp-resources-18)
 - [MCP prompts (3)](#mcp-prompts-3)
 
 ## Tool discovery (lazy mode)
@@ -357,7 +357,7 @@ Built on the same shadow-graph substrate, `preview_edit` and `simulate_chain` an
 | `preview_edit` | Single-shot WorkspaceEdit → impact report. Optional `diagnostics: false` skips the LSP round-trip. `inherit_overlay: true` layers on top of the caller's current overlay |
 | `simulate_chain` | Ordered sequence of WorkspaceEdits applied in order with per-step impact + cumulative rollup + per-step diagnostics delta. `stop_on_error: true` (default) aborts on the first new ERROR-severity diagnostic. `keep: true` promotes the final simulated state into a real overlay session bound to the caller |
 
-## MCP resources (16)
+## MCP resources (18)
 
 Read-only, URI-addressable, no args. Clients that speak resources can `resources/subscribe` once and receive `notifications/resources/updated` after each graph re-warm — no polling.
 
@@ -366,6 +366,8 @@ Read-only, URI-addressable, no args. Clients that speak resources can `resources
 | `gortex://session` | Current session state and activity |
 | `gortex://stats` | Graph statistics (node/edge counts) |
 | `gortex://schema` | Graph schema reference |
+| `gortex://guide` | On-demand reference: LLM-provider matrix, capabilities, token-economy, analyze/search_ast catalogs, workflow |
+| `gortex://guide/{topic}` | One guide section by topic (providers, capabilities, tokens, analyze, search_ast, resources, workflow) |
 | `gortex://index-health` | Health score, parse failures, stale files |
 | `gortex://workspace` | Workspace identity and discovered member set |
 | `gortex://repos` | Tracked repo / project list |

@@ -30,6 +30,7 @@ gortex export [path]         Export the graph to Cypher, GraphML, or Mermaid (--
 gortex githook <sub>         install / uninstall / status — manage the post-commit hook
 gortex clean                 Remove Gortex files from a project
 gortex telemetry <sub>       on / off / status — control anonymous, opt-in usage telemetry (off by default; honours DO_NOT_TRACK)
+gortex guide [topic]         Print the reference guide (providers, capabilities, tokens, analyze, search_ast, resources, workflow) — same content as the gortex://guide resource
 gortex version               Print version
 ```
 
