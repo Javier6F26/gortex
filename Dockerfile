@@ -22,8 +22,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Cache go modules
-COPY go.mod go.sum ./
+# Cache go modules. Copy the thirdparty dir too because go.mod has
+# replace directives pointing at ./internal/thirdparty/*. Without
+# these directories go mod download fails with "no such file".
+COPY go.mod go.sum internal/thirdparty/ ./internal/thirdparty/
 RUN go mod download
 
 COPY . .
