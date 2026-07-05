@@ -50,6 +50,11 @@ var bulkDroppableIndexes = []bulkDroppableIndex{
 	{"edges_by_from", `CREATE INDEX IF NOT EXISTS edges_by_from ON edges(from_id, kind)`},
 	{"edges_by_to", `CREATE INDEX IF NOT EXISTS edges_by_to ON edges(to_id, kind)`},
 	{"edges_by_kind", `CREATE INDEX IF NOT EXISTS edges_by_kind ON edges(kind)`},
+	// Partial index over exactly the not-yet-semantically-stamped nodes per
+	// repo. Stays small in steady state (most nodes end up stamped), so a
+	// future "unstamped nodes in this repo" query is an index scan over the
+	// residual few instead of a full-table decode of every node's meta.
+	{"nodes_semantic_pending", `CREATE INDEX IF NOT EXISTS nodes_semantic_pending ON nodes(repo_prefix) WHERE semantic_type IS NULL`},
 }
 
 // bulkCacheSizeKiB is the page cache the fast path requests on its pinned

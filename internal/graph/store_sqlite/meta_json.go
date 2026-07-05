@@ -752,6 +752,8 @@ var promotedMetaColumns = []struct {
 	{"is_exported", "is_exported INTEGER"},
 	{"updated_at", "updated_at INTEGER"},
 	{"data_class", "data_class TEXT"},
+	{"semantic_type", "semantic_type TEXT"},
+	{"semantic_source", "semantic_source TEXT"},
 }
 
 // structNodeColumns are typed nodes columns read and written directly from
@@ -771,6 +773,7 @@ var structNodeColumns = []struct {
 // type and stayed in the blob).
 type promotedNodeMeta struct {
 	sig, vis, doc, returnType, dataClass                sql.NullString
+	semanticType, semanticSource                        sql.NullString
 	external, isAsync, isStatic, isAbstract, isExported sql.NullBool
 	updatedAt                                           sql.NullInt64
 }
@@ -876,6 +879,14 @@ func extractPromotedMeta(m map[string]any) (p promotedNodeMeta, rest map[string]
 			if nv, ok := str(v); ok {
 				p.dataClass, promoted = nv, true
 			}
+		case "semantic_type":
+			if nv, ok := str(v); ok {
+				p.semanticType, promoted = nv, true
+			}
+		case "semantic_source":
+			if nv, ok := str(v); ok {
+				p.semanticSource, promoted = nv, true
+			}
 		case "external":
 			if nv, ok := boolean(v); ok {
 				p.external, promoted = nv, true
@@ -932,7 +943,8 @@ func metaToInt64(v any) (int64, bool) {
 // survives.
 func restorePromotedMeta(n *graph.Node, p promotedNodeMeta) {
 	if !p.sig.Valid && !p.vis.Valid && !p.doc.Valid && !p.returnType.Valid &&
-		!p.dataClass.Valid && !p.external.Valid && !p.isAsync.Valid &&
+		!p.dataClass.Valid && !p.semanticType.Valid && !p.semanticSource.Valid &&
+		!p.external.Valid && !p.isAsync.Valid &&
 		!p.isStatic.Valid && !p.isAbstract.Valid && !p.isExported.Valid &&
 		!p.updatedAt.Valid {
 		return
@@ -954,6 +966,12 @@ func restorePromotedMeta(n *graph.Node, p promotedNodeMeta) {
 	}
 	if p.dataClass.Valid {
 		n.Meta["data_class"] = p.dataClass.String
+	}
+	if p.semanticType.Valid {
+		n.Meta["semantic_type"] = p.semanticType.String
+	}
+	if p.semanticSource.Valid {
+		n.Meta["semantic_source"] = p.semanticSource.String
 	}
 	if p.external.Valid {
 		n.Meta["external"] = p.external.Bool

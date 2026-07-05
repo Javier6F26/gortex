@@ -290,6 +290,15 @@ func openWith(path string, current int, migrations []schemaMigration, allowRebui
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite schema: %w", err)
 	}
+	// Add the promoted node columns to databases created before they
+	// existed (CREATE TABLE IF NOT EXISTS won't alter an existing table).
+	// Must run before the droppable-index loop below — nodes_semantic_pending
+	// references a promoted column — and before prepare(), whose node INSERT
+	// references them too.
+	if err := ensureNodeColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite node columns: %w", err)
+	}
 	// Create the droppable secondary indexes from the shared set so their
 	// initial-creation DDL is byte-identical to the DDL the bulk-load fast
 	// path rebuilds them with (BeginBulkLoad drops these, FlushBulk
@@ -311,14 +320,6 @@ func openWith(path string, current int, migrations []schemaMigration, allowRebui
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite edges_external index: %w", err)
 	}
-	// Add the promoted node columns to databases created before they
-	// existed (CREATE TABLE IF NOT EXISTS won't alter an existing table).
-	// Must run before prepare(), whose node INSERT references them.
-	if err := ensureNodeColumns(db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("sqlite node columns: %w", err)
-	}
-
 	// Backfill the FTS rowid sidecar for databases built before it existed,
 	// so the first incremental UpsertSymbolFTS on an already-indexed symbol
 	// can do its O(log n) docid delete instead of leaking a duplicate row.
@@ -467,7 +468,7 @@ func (s *Store) prepare() error {
 	const nodeCols = lookupNodeCols
 
 	prep(&s.stmtInsertNode,
-		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		`INSERT OR REPLACE INTO nodes (`+nodeCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	prep(&s.stmtGetNode,
 		`SELECT `+nodeCols+` FROM nodes WHERE id = ?`)
 	prep(&s.stmtGetNodeByQual,
@@ -581,7 +582,7 @@ func scanNode(scanner interface {
 		&n.RepoPrefix, &n.WorkspaceID, &n.ProjectID,
 		&p.sig, &p.vis, &p.doc, &p.external, &p.returnType,
 		&p.isAsync, &p.isStatic, &p.isAbstract, &p.isExported, &p.updatedAt,
-		&p.dataClass, &metaBlob,
+		&p.dataClass, &p.semanticType, &p.semanticSource, &metaBlob,
 	)
 	if err != nil {
 		return nil, err
@@ -691,7 +692,7 @@ func (s *Store) insertNodeLocked(stmt *sql.Stmt, n *graph.Node) error {
 		n.RepoPrefix, n.WorkspaceID, n.ProjectID,
 		p.sig, p.vis, p.doc, p.external, p.returnType,
 		p.isAsync, p.isStatic, p.isAbstract, p.isExported, p.updatedAt,
-		p.dataClass, metaBlob,
+		p.dataClass, p.semanticType, p.semanticSource, metaBlob,
 	)
 	return err
 }
