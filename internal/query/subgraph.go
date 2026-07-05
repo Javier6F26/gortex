@@ -32,6 +32,13 @@ type SubGraph struct {
 	// result — and since suppression only runs when a stronger edge exists,
 	// the two never coexist.
 	SuppressionCaveat string `json:"suppression_caveat,omitempty"`
+	// RelatedTools is a one-line, additive completeness cue naming a
+	// deferred tool whose trigger the response content just matched (e.g. a
+	// find_usages on a dispatch-heavy interface → find_implementations). It
+	// is emitted at most once per tool per session so a discovery hint
+	// surfaces without repeating. Empty (omitted) when nothing matched or the
+	// cue was already shown this session.
+	RelatedTools string `json:"related_tools,omitempty"`
 	// Caveat is attached only when an edge-returning query (find_usages,
 	// get_callers) comes back with no edges, classifying whether the
 	// empty result reflects genuinely unused code or an extraction gap.

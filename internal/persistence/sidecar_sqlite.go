@@ -189,6 +189,22 @@ CREATE TABLE IF NOT EXISTS cli_events (
 );
 CREATE INDEX IF NOT EXISTS idx_cli_events_ts      ON cli_events (ts);
 CREATE INDEX IF NOT EXISTS idx_cli_events_session ON cli_events (session_id, ts);
+
+CREATE TABLE IF NOT EXISTS promoted_tools (
+	repo_key        TEXT NOT NULL,
+	tool            TEXT NOT NULL,
+	workspace_id    TEXT NOT NULL DEFAULT '',
+	promoted_epoch  INTEGER NOT NULL DEFAULT 0,
+	last_used_epoch INTEGER NOT NULL DEFAULT 0,
+	use_count       INTEGER NOT NULL DEFAULT 0,
+	updated_at      INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (repo_key, tool)
+) WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS tool_surface_meta (
+	repo_key      TEXT NOT NULL PRIMARY KEY,
+	session_epoch INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;
 `
 
 // DefaultSidecarPath is the canonical location of the side-store DB:

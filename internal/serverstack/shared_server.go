@@ -622,6 +622,10 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	sideCfg := cfg.SideStores
 	srv.InitFeedback(sideCfg.FeedbackDir, sideCfg.FeedbackRepo)
 	srv.InitNotes(sideCfg.NotesDir, sideCfg.NotesRepo)
+	// Learned tool surface: re-promote tools this workspace promoted in
+	// prior sessions (demoting the ones that fell out of use). Runs after
+	// the NewServer register sweep, so the cold tools are already deferred.
+	srv.InitLearnedTools(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitMemories(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitSuppressions(sideCfg.NotesDir, sideCfg.NotesRepo)
 	srv.InitNotebook(sideCfg.NotebookPath)

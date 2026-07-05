@@ -216,6 +216,13 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		configManager: state.configManager,
 		logger:        logger,
 	}
+	if state.mcpServer != nil {
+		srv := state.mcpServer
+		controller.toolSurface = func() (string, string, int) {
+			preset, mode := srv.ActivePreset()
+			return preset, mode, srv.LearnedToolCount()
+		}
+	}
 	controller.onShutdown = func() error {
 		// Stop watchers first so no late events race the snapshot
 		// write — we want the snapshot to reflect a quiescent graph,

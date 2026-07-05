@@ -232,7 +232,11 @@ Temporal (with temporal_kind + temporal_name):
 - temporal.start      — service→workflow start, ExecuteWorkflow/SignalWithStartWorkflow (resolved)
 - temporal.handler    — workflow exposes query/signal/update handler (provider)
 - temporal.signal-send / temporal.query-call — sender→running workflow (consumer)
-`
+
+## analyze kinds
+` + analyzeCatalogText() + `
+## search_ast detectors
+` + searchASTDetectorCatalogText()
 	return []mcp.ResourceContents{
 		mcp.TextResourceContents{
 			URI:      req.Params.URI,

@@ -54,30 +54,6 @@ func (s *Server) registerASTTools() {
 	)
 }
 
-// buildSearchASTDescription assembles a tool description that
-// enumerates every bundled detector with its severity and supported
-// languages. Hand-rolled at call time so adding a detector to
-// astquery.detectors.go automatically updates the agent-visible
-// docs without a parallel doc edit.
-func buildSearchASTDescription() string {
-	var b strings.Builder
-	b.WriteString("Structural, graph-aware code search. ")
-	b.WriteString("Run a tree-sitter pattern (`pattern: \"...\"`) or a bundled detector (`detector: \"<name>\"`) ")
-	b.WriteString("across every indexed file in scope. Each result is enriched with the enclosing function's `symbol_id` ")
-	b.WriteString("so you can chain straight into `find_usages`, `verify_change`, or `apply_code_action`.\n\n")
-	b.WriteString("Graph-aware filters that ast-grep can't express: `path_prefix`, `repo`/`project`/`ref`, `min_fan_in_of_enclosing_func`. ")
-	b.WriteString("Test files are excluded by default for detectors; opt back in via `exclude_tests: false`.\n\n")
-	b.WriteString("**Bundled detectors:**\n")
-	for _, d := range astquery.DescribeDetectors() {
-		fmt.Fprintf(&b, "- `%s` (%s) — %s [%s]\n",
-			d.Name, d.Severity, d.Description, strings.Join(d.Languages, ", "))
-	}
-	b.WriteString("\n**Raw pattern syntax:** standard tree-sitter S-expression queries. Anchor the match span with `@match`. ")
-	b.WriteString("Predicates: `(#eq? @x \"literal\")`, `(#match? @x \"regex\")`. ")
-	b.WriteString("Example: `((call_expression function: (identifier) @fn) @match (#eq? @fn \"panic\"))` finds every direct panic() call.")
-	return b.String()
-}
-
 // handleSearchAST is the MCP entry point. It builds the target file
 // list from the graph (applying scope predicates), wires a graph-
 // backed SymbolLookup, runs the engine, and applies post-match graph
@@ -88,6 +64,11 @@ func (s *Server) handleSearchAST(ctx context.Context, req mcp.CallToolRequest) (
 	args := req.GetArguments()
 	pattern := strings.TrimSpace(stringArg(args, "pattern"))
 	detector := strings.TrimSpace(stringArg(args, "detector"))
+	// detector:"help" dumps the full detector catalogue (moved out of the
+	// tool description to keep the cold schema lean). No graph needed.
+	if strings.EqualFold(detector, "help") {
+		return mcp.NewToolResultText(searchASTHelpResult()), nil
+	}
 	if pattern == "" && detector == "" {
 		return mcp.NewToolResultError("search_ast: either `pattern` or `detector` is required (call with no args to see the bundled detector list in the tool description)"), nil
 	}

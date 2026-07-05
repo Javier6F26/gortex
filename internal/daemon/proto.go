@@ -39,6 +39,17 @@ type Handshake struct {
 	CWD        string         `json:"cwd,omitempty"`
 	ClientName string         `json:"client,omitempty"` // e.g. "claude-code", "kiro", "cli"
 	PID        int            `json:"pid,omitempty"`
+	// Tools / ToolsMode carry the client-side tool-surface preference
+	// (GORTEX_TOOLS / --tools and GORTEX_TOOLS_MODE / --tools-mode of the
+	// `gortex mcp` proxy). The daemon serves a shared graph, so a per-client
+	// preset can only be honoured if the client hands its choice over at
+	// connect time — the proxy's own byte-pump filter can subtract from the
+	// daemon's list but never widen it. Forwarding the spec lets the daemon
+	// resolve the effective surface for THIS session authoritatively (env
+	// override wins), covering both narrower and wider presets. Empty means
+	// "no client preference — use the daemon default / client-name default".
+	Tools     string `json:"tools,omitempty"`
+	ToolsMode string `json:"tools_mode,omitempty"`
 }
 
 // HandshakeAck is the daemon's reply to a handshake. On failure ErrorCode
@@ -205,6 +216,14 @@ type StatusResponse struct {
 	// when matching against ConfiguredServers — set from servers.toml
 	// `default` or the first entry. Empty when no servers.toml.
 	LocalServerSlug string `json:"local_server_slug,omitempty"`
+
+	// ToolPreset / ToolPresetMode report the active MCP tool-surface preset
+	// and mode; LearnedTools is the per-workspace learned-promotion count
+	// (deferred tools promoted through use, persisted across restarts). Empty
+	// / zero on a control-only daemon.
+	ToolPreset     string `json:"tool_preset,omitempty"`
+	ToolPresetMode string `json:"tool_preset_mode,omitempty"`
+	LearnedTools   int    `json:"learned_tools,omitempty"`
 
 	// LSPRouter reports the daemon's LSP-router state — every
 	// registered spec, whether its binary resolves on PATH, and

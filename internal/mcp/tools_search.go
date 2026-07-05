@@ -128,6 +128,12 @@ func (s *Server) handleToolsSearch(ctx context.Context, req mcp.CallToolRequest)
 	var promotedNames []string
 	if promote && len(names) > 0 {
 		promotedNames = s.lazy.Promote(names...)
+		// Persist the discovery as a learned promotion so it survives a
+		// daemon restart (subject to demotion after disuse).
+		cwd := SessionCWDFromContext(ctx)
+		for _, n := range promotedNames {
+			s.RecordLearnedPromotion(n, cwd)
+		}
 	}
 
 	payload := toolsSearchPayload{

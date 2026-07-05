@@ -67,6 +67,16 @@ func runStatusViaDaemon(cmd *cobra.Command) error {
 		if st.MemoryBytes > 0 {
 			fmt.Fprintf(w, "memory      %.1f MB\n", float64(st.MemoryBytes)/(1024*1024))
 		}
+		if st.ToolPreset != "" {
+			line := st.ToolPreset
+			if st.ToolPresetMode != "" {
+				line += "/" + st.ToolPresetMode
+			}
+			if st.LearnedTools > 0 {
+				line += fmt.Sprintf(" (+%d learned)", st.LearnedTools)
+			}
+			fmt.Fprintf(w, "tools       %s\n", line)
+		}
 	}
 	if len(st.TrackedRepos) == 0 {
 		fmt.Fprintln(w, "tracked repos: (none — run `gortex track <path>` to add one)")

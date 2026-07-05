@@ -411,6 +411,9 @@ func encodeFindUsages(sg *query.SubGraph, g graph.Store) ([]byte, error) {
 	if sg.SuppressionCaveat != "" {
 		meta = append(meta, "suppression_caveat", sg.SuppressionCaveat)
 	}
+	if sg.RelatedTools != "" {
+		meta = append(meta, "related_tools", sg.RelatedTools)
+	}
 	if s := sg.UsageSummary; s != nil {
 		// Completeness rollup, same three numbers as the JSON / TOON
 		// usage_summary so an agent reads the split without re-grepping
@@ -514,6 +517,9 @@ func encodeSubGraph(tool string, sg *query.SubGraph) ([]byte, error) {
 	}
 	if sg.SuppressionCaveat != "" {
 		edgeMeta = append(edgeMeta, "suppression_caveat", sg.SuppressionCaveat)
+	}
+	if sg.RelatedTools != "" {
+		edgeMeta = append(edgeMeta, "related_tools", sg.RelatedTools)
 	}
 	edgeEnc := newGCX(&buf, tool+".edges",
 		// line + file_path on the edge let the caller distinguish two

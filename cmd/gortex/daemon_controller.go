@@ -58,6 +58,11 @@ type realController struct {
 	// main to flush savings, close the snapshot store, etc.
 	onShutdown func() error
 
+	// toolSurface reports the active tool-surface preset + mode and the
+	// per-workspace learned-promotion count for `gortex daemon status`.
+	// Nil when the MCP server isn't wired (control-only daemon).
+	toolSurface func() (preset, mode string, learned int)
+
 	// ready flips to true once references are resolved and the graph is
 	// queryable — find_usages / get_callers return complete results from
 	// this point. The socket accepts connections before this; queries
@@ -791,7 +796,7 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
-	return daemon.StatusResponse{
+	resp := daemon.StatusResponse{
 		TrackedRepos:  tracked,
 		MemoryBytes:   mem.Alloc,
 		SearchBackend: searchBackendForResponse,
@@ -815,7 +820,11 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 		LocalServerSlug:    c.localServerSlug(),
 		LSPRouter:          c.collectLSPRouterStatus(),
 		Enrichment:         c.collectEnrichmentProgress(),
-	}, nil
+	}
+	if c.toolSurface != nil {
+		resp.ToolPreset, resp.ToolPresetMode, resp.LearnedTools = c.toolSurface()
+	}
+	return resp, nil
 	// MCPSessions is populated by the daemon Server (it owns the
 	// SessionRegistry — the controller doesn't have a back-pointer).
 	// See internal/daemon/server.go around the ControlStatus handler.

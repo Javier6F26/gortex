@@ -54,17 +54,20 @@ Returned tools are auto-promoted (`promote:false` opts out) and the server fires
 
 The full ~180-tool surface is more than many agents need. A **tool preset** picks what the server publishes — the basis both for the lean shipped default and for a minimal, headless editing harness (an agent on a trusted box driving a remote daemon through a small, fixed tool set).
 
-Five built-in presets:
+Six built-in presets:
 
 | Preset | Surface |
 |--------|---------|
-| `core` (**default**) | the curated dev-cycle set (~34 tools): orient + search/navigate + read + edit + verify/test + `analyze` + review + the memory workflow. Aliases: `default`, `classic` |
+| `agent` (**default for known coding-agent clients**) | the lean coding-agent working set (~16 tools): search/navigate + read + orient + edit/verify. Parameter descriptions are compacted (the full prose is one `tools_search` / `full` hop away). Aliases: `coding-agent` |
+| `core` (**default for editors / unknown clients**) | the curated dev-cycle set (~34 tools): orient + search/navigate + read + edit + verify/test + `analyze` + review + the memory workflow. Aliases: `default`, `classic` |
 | `full` | every tool (the pre-`core` behaviour — opt back in here) |
 | `readonly` | everything except the mutating tools (`edit_file`, `write_file`, `index_repository`, …) |
 | `edit` | the minimal headless editing set — orient + navigate + mutate + verify (`smart_context`, `search_symbols`, `find_files`, `edit_file`, `verify_change`, `get_test_targets`, …) |
 | `nav` | read-only navigation / exploration; no editors |
 
 `tool_profile` and `tools_search` are always kept. Layer per-tool deltas on any preset with `allow` / `deny`.
+
+**Client-aware default.** With no `GORTEX_TOOLS` / config preset, the server picks the default per connection: a **known coding-agent client** (the same set that defaults the wire format to GCX — `claude-code`, `cursor`, `vscode`, `zed`, `aider`, `kilocode`, `opencode`, `openclaw`, `codex`, `omp-coding-agent`) gets `agent`; every other client keeps `core`. `GORTEX_TOOLS` always overrides. The `gortex mcp` proxy forwards its `GORTEX_TOOLS` / `--tools` to the daemon in the handshake, so a client's preset applies over the shared daemon (it can both narrow and widen the surface, not just subtract).
 
 **Two modes** (`mode`):
 
@@ -77,7 +80,7 @@ Select a preset three ways (precedence: **env > flag > config > default**):
 # .gortex.yaml — config file
 mcp:
   tools:
-    preset: full          # core (default) | full | readonly | edit | nav
+    preset: full          # agent | core (default) | full | readonly | edit | nav
     mode: defer           # defer | hide
     allow: [find_files]   # add tools on top of the preset
     deny: [write_file]    # remove tools from the preset

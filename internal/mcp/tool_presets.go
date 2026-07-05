@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"context"
 	"os"
 	"strings"
 
@@ -78,6 +79,41 @@ var corePresetTools = []string{
 	"surface_memories", "save_note", "store_memory",
 }
 
+// agentFloorTools is the measured coding-agent working set — the tools a
+// headless coding agent actually reaches for across a navigate → read →
+// edit → verify cycle, from adoption probes and dogfooding. This is the
+// FLOOR: it never shrinks, and it is the default eager surface for known
+// coding-agent clients. Everything else defers behind tools_search (still
+// callable by name via promote-on-demand). tool_profile / tools_search are
+// always kept on top (isAlwaysKeptTool).
+var agentFloorTools = []string{
+	// search / navigate
+	"search_symbols", "find_usages", "find_implementations",
+	"get_callers", "get_call_chain", "get_dependencies", "get_dependents",
+	// read
+	"get_symbol_source", "get_file_summary", "get_editing_context", "read_file",
+	// orient
+	"smart_context", "index_health",
+	// edit / verify
+	"edit_file", "write_file", "verify_change",
+}
+
+// agentTailTools is the workflow-mandated memory trio — the negotiable
+// tail added on top of the floor ONLY when the byte budget holds. It does
+// not: even under aggressive compaction the trio's rich descriptions push
+// the cold tools/list past its ceiling, so the trio stays DEFERRED (still
+// reachable by name via tools_search / promote-on-demand and surfaced by
+// the related_tools cue). Cut from here first, never from the floor.
+var agentTailTools = []string{
+	"distill_session", "surface_memories", "store_memory",
+}
+
+// agentPresetTools is the eager surface of the `agent` preset: exactly the
+// floor. The tail is deferred (see agentTailTools). Kept lean enough that
+// the cold tools/list stays a few thousand tokens — see the byte-ceiling
+// regression test (TestAgentPresetByteCeiling).
+var agentPresetTools = append([]string{}, agentFloorTools...)
+
 // editPresetTools is the minimal headless code-editing surface: orient,
 // navigate, mutate, verify. Sized so an agent can edit code safely on a
 // remote box without the full 170-tool catalogue. tool_profile and
@@ -118,6 +154,8 @@ func builtinToolPresetSet(name string) (set map[string]bool, denyMutating, known
 		return nil, false, true
 	case "core", "default", "classic":
 		return toToolSet(corePresetTools), false, true
+	case "agent", "coding-agent":
+		return toToolSet(agentPresetTools), false, true
 	case "readonly", "read-only", "read_only":
 		return nil, true, true
 	case "edit", "editor", "edit-harness":
@@ -130,7 +168,7 @@ func builtinToolPresetSet(name string) (set map[string]bool, denyMutating, known
 }
 
 // builtinPresetNames lists the recognised preset names for diagnostics.
-var builtinPresetNames = []string{"core", "full", "readonly", "edit", "nav"}
+var builtinPresetNames = []string{"agent", "core", "full", "readonly", "edit", "nav"}
 
 // toolPolicy is the resolved, in-memory restriction applied to the tool
 // surface by the lazy registry (defer mode) and toolSurfaceFilter /
@@ -143,6 +181,11 @@ type toolPolicy struct {
 	allow        map[string]bool // force-include (overrides the preset)
 	deny         map[string]bool // force-exclude (overrides everything)
 	active       bool
+	// lean, set for the `agent` preset, applies an extra per-parameter
+	// description compaction on this session's tools/list so the coding-
+	// agent surface stays inside its byte ceiling. The full parameter prose
+	// is always one tools_search / `full` preset away.
+	lean bool
 }
 
 func toToolSet(names []string) map[string]bool {
@@ -195,6 +238,8 @@ func newToolPolicy(cfg ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
 			label = "full"
 		case "default", "classic":
 			label = "core"
+		case "coding-agent":
+			label = "agent"
 		}
 	} else {
 		// A typo'd preset fails open to the full surface (never strands
@@ -215,6 +260,7 @@ func newToolPolicy(cfg ToolPolicyConfig, logger *zap.Logger) *toolPolicy {
 		allow:        allow,
 		deny:         deny,
 		active:       active,
+		lean:         label == "agent",
 	}
 }
 
@@ -390,6 +436,91 @@ func (s *ToolSurface) Preset() string {
 		return "full"
 	}
 	return s.p.preset
+}
+
+// effectiveSessionPolicy resolves the tool-surface policy in force for
+// the current request's session. Precedence: a client-forwarded preset /
+// spec (GORTEX_TOOLS / --tools of the `gortex mcp` proxy, relayed through
+// the daemon handshake) wins; else the client-aware preset default (a
+// known coding-agent client gets the lean `agent` surface); else the
+// server's global preset (the `core` default). The result is cached on the
+// session so it is derived once, not on every tools/list. Never nil.
+//
+// This is the single authoritative resolution point the diet relies on:
+// wherever tools/list is answered on the daemon, the surface for THIS
+// connection is decided here, so a client preset actually applies instead
+// of being a no-op the proxy can only subtract from.
+func (s *Server) effectiveSessionPolicy(ctx context.Context) *toolPolicy {
+	if s == nil {
+		return nil
+	}
+	sess := s.sessionFor(ctx)
+	if sess == nil {
+		return s.toolPolicy
+	}
+	sess.mu.Lock()
+	if sess.toolPolicyResolved {
+		p := sess.resolvedToolPolicy
+		sess.mu.Unlock()
+		if p != nil {
+			return p
+		}
+		return s.toolPolicy
+	}
+	spec, mode, client := sess.toolSpec, sess.toolMode, sess.clientName
+	sess.mu.Unlock()
+
+	p := s.resolveSessionPolicy(spec, mode, client)
+
+	sess.mu.Lock()
+	sess.resolvedToolPolicy = p
+	sess.toolPolicyResolved = true
+	sess.mu.Unlock()
+
+	if p != nil {
+		return p
+	}
+	return s.toolPolicy
+}
+
+// resolveSessionPolicy builds the effective policy from a client-forwarded
+// spec + mode and the client name, or returns nil to fall back to the
+// server's global policy. A forwarded spec inherits the server's mode when
+// the client did not pin one, so a bare `GORTEX_TOOLS=nav` keeps the
+// daemon's defer semantics instead of silently switching to hide.
+func (s *Server) resolveSessionPolicy(spec, mode, client string) *toolPolicy {
+	if strings.TrimSpace(spec) != "" {
+		cfg := parseToolSpec(spec)
+		switch {
+		case strings.TrimSpace(mode) != "":
+			cfg.Mode = mode
+		case s.toolPolicy != nil:
+			cfg.Mode = s.toolPolicy.mode
+		}
+		return newToolPolicy(cfg, s.logger)
+	}
+	if p := s.clientDefaultPolicy(client); p != nil {
+		return p
+	}
+	return nil
+}
+
+// clientDefaultPolicy returns the preset a known client should get when it
+// forwarded no explicit tool spec, or nil to keep the server's global
+// default. The default surface is client-aware: a known coding-agent client
+// (the same set that defaults the wire format to GCX) gets the lean `agent`
+// working set without any configuration; editors and unknown clients keep
+// the server's global preset. GORTEX_TOOLS always overrides, because a
+// forwarded spec is resolved before this in resolveSessionPolicy.
+func (s *Server) clientDefaultPolicy(client string) *toolPolicy {
+	if !isKnownAgentClient(client) {
+		return nil
+	}
+	mode := toolPolicyModeDefer
+	if s.toolPolicy != nil && s.toolPolicy.mode != "" {
+		mode = s.toolPolicy.mode
+	}
+	return newToolPolicy(ToolPolicyConfig{Preset: "agent", Mode: mode}, s.logger)
 }
 
 // toolPolicyBaseFromOptions extracts the config-supplied tool policy

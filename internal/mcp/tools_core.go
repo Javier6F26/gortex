@@ -117,6 +117,7 @@ type toonSubGraphResult struct {
 	Caveat                *graph.ZeroEdgeCaveat `toon:"caveat,omitempty"`
 	TextMatchedSuppressed int                   `toon:"text_matched_suppressed,omitempty"`
 	SuppressionCaveat     string                `toon:"suppression_caveat,omitempty"`
+	RelatedTools          string                `toon:"related_tools,omitempty"`
 	CallerNotes           []toonCallerNoteRow   `toon:"caller_notes,omitempty"`
 	UsageSummary          *query.UsageSummary   `toon:"usage_summary,omitempty"`
 }
@@ -342,6 +343,7 @@ func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 		Caveat:                sg.Caveat,
 		TextMatchedSuppressed: sg.TextMatchedSuppressed,
 		SuppressionCaveat:     sg.SuppressionCaveat,
+		RelatedTools:          sg.RelatedTools,
 		CallerNotes:           callerNotesToTOONRows(sg.CallerNotes),
 		UsageSummary:          sg.UsageSummary,
 	}
@@ -2550,6 +2552,10 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	// of re-grepping *_test.go files. Rides every wire format below; nil
 	// for an empty result (the Caveat above covers that case).
 	sg.UsageSummary = usageSummaryOf(sg)
+	// Proactive discovery cue: when the target is dispatch-heavy, point at
+	// find_implementations (once per session). Additive — the only response
+	// content the diet adds.
+	s.attachRelatedToolsCue(ctx, sg, id)
 	// group_by:"file" buckets the usages by the file each reference
 	// originates in -- an opt-in shape for callers that want a
 	// per-file rollup. The flat SubGraph stays the default so
