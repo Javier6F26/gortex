@@ -1,32 +1,22 @@
 version: 2
 
-# Run inside ghcr.io/goreleaser/goreleaser-cross — the Docker image ships
-# cross-compile toolchains so CGO (tree-sitter) links cleanly on a single
-# Linux runner. This config builds the LINUX targets + their deb/rpm/apk
-# packages, the checksums, and the GitHub release. darwin and windows are
-# built on NATIVE runners in release.yml (the build-darwin / release-windows
-# jobs) because their toolchains can't be cross-faked safely:
-#   - darwin: the osxcross ld64 in this image omits the __DATA_CONST
-#     SG_READ_ONLY flag that macOS 15+/Tahoe dyld enforces (issue #176), so
-#     darwin must link with Apple's ld on a macOS runner. The homebrew cask
-#     (which references all four os/arch tarballs) is assembled and pushed by
-#     release.yml once the darwin hashes exist — it is NOT generated here.
-#   - windows: the CGo tree-sitter bindings need a real mingw C/C++ toolchain.
+# Simplified goreleaser config for the javier6f26/gortex fork.
+# Builds linux binaries only — darwin and windows are dropped from the
+# original upstream config because this fork targets K8s/AWS + Docker.
+#
+# Docker images are built & pushed by the release.yml workflow (docker
+# buildx) rather than goreleaser's built-in docker builder, so that
+# multi-arch manifests (linux/amd64 + linux/arm64) are a single push.
+
 before:
   hooks:
     - go mod tidy
-    # Tests run in CI on every push. Re-running ./... inside
-    # goreleaser-cross slows the tag-to-artifact loop without catching
-    # anything new — the tag is already on a green commit.
 
 builds:
   - id: main
     main: ./cmd/gortex/
     binary: gortex
     ldflags:
-      # main.version + main.commit get parsed at startup into a SemVer 2.0.0
-      # Version (see internal/version). Commit lands in the +build slot so
-      # `gortex version` output round-trips as canonical semver.
       - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
     env:
       - CGO_ENABLED=1
@@ -35,10 +25,8 @@ builds:
     goarch:
       - amd64
       - arm64
-    # Per-target CC + CXX. goreleaser-cross exposes these cross-toolchains
-    # on PATH; CGO needs both set per target triple because some deps
-    # (tree-sitter yaml scanner, etc.) ship C++. Without CXX, the system
-    # default x86_64-linux-gnu-g++ leaks in.
+    # Per-target CC + CXX for CGO cross-compilation. goreleaser-cross
+    # exposes these toolchains on PATH.
     overrides:
       - goos: linux
         goarch: amd64
@@ -53,15 +41,6 @@ builds:
 
 archives:
   - formats: [tar.gz]
-    # Windows users expect a .zip, not a .tar.gz — and Scoop only
-    # understands zip archives.
-    format_overrides:
-      - goos: windows
-        formats: [zip]
-    # Version intentionally omitted — `/releases/latest/download/<name>` URLs
-    # require an exact filename, and users linking to the latest release
-    # shouldn't need to know the version. Version is still in the release
-    # tag and in `gortex version`.
     name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
 
 checksum:
@@ -74,34 +53,3 @@ changelog:
       - '^docs:'
       - '^test:'
       - '^ci:'
-
-nfpms:
-  - id: gortex
-    # Match the archive naming — version omitted so `/releases/latest/download`
-    # URLs work without templating. Package metadata still carries the version.
-    file_name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
-    ids:
-      - main
-    formats:
-      - deb
-      - rpm
-      - apk
-    vendor: "zzet"
-    homepage: "https://github.com/zzet/gortex"
-    maintainer: "zzet"
-    description: "Code intelligence engine that indexes repositories into an in-memory knowledge graph."
-    license: "Custom"
-
-# NOTE: the homebrew cask is NOT generated here. goreleaser's `homebrew_casks`
-# can only reference archives goreleaser itself built, but darwin is now built
-# on a native macOS runner (issue #176) and the cask references all four
-# os/arch tarballs (incl. darwin). So the cask is assembled and pushed to
-# zzet/homebrew-tap by the "Publish homebrew cask" step in release.yml, once
-# every platform's tarball + sha256 exists. The cask is still install-time
-# completion-generated (`generate_completions_from_executable`, run on the
-# user's machine), so no binary needs to run at release time to build it.
-#
-# NOTE: goreleaser also does NOT generate the Scoop manifest — windows is built
-# by the separate `release-windows` job (native runner) and isn't an artifact
-# of this goreleaser-cross run. That job publishes the manifest to
-# gortexhq/scoop-bucket itself (see its "Publish Scoop manifest" step).

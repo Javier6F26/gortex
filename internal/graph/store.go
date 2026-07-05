@@ -26,11 +26,16 @@ type EdgeProvenanceUpdate struct {
 }
 
 // Store is the persistence-and-query backend the rest of gortex sees
-// behind the *Graph type. The only implementation today is the
-// in-memory *Graph; future implementations will include an on-disk
-// embedded-DB backend (local single-binary) and a remote network
-// client. The interface is the seam that lets the rest of the
-// codebase be backend-agnostic.
+// behind the *Graph type. Implementations:
+//   - in-memory *Graph (reference implementation; nanosecond reads, no persistence).
+//   - store_sqlite.Store — pure-Go embedded SQL via modernc.org/sqlite (default).
+//   - store_pg.Store — PostgreSQL via pgx v5 (opt-in with --backend postgres).
+//     Implements SymbolSearcher (pg_trgm), ContentSearcher (tsvector),
+//     VectorSearcher (pgvector HNSW), BFSCapable (recursive CTE), aggregators,
+//     sidecars, bulk load, and backend resolver.
+//
+// The interface is the seam that lets the rest of the codebase be
+// backend-agnostic.
 //
 // The method set deliberately mirrors *Graph's current public API so
 // the codebase compiles unchanged the day this interface lands. A few

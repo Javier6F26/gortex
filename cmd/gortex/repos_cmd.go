@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -13,7 +14,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/zzet/gortex/internal/config"
+	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pg"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/persistence"
 	"github.com/zzet/gortex/internal/platform"
@@ -34,6 +37,7 @@ var reposCacheDir string
 // Empty resolves to the daemon's default store (~/.gortex/store/store.sqlite).
 // Overridable so tests can point at an isolated store.
 var reposBackendPath string
+var reposPGDSN string
 
 var reposCmd = &cobra.Command{
 	Use:   "repos",
@@ -54,6 +58,7 @@ array suitable for scripting.`,
 
 func init() {
 	reposCmd.Flags().BoolVar(&reposJSON, "json", false, "emit machine-readable JSON instead of a table")
+	reposCmd.Flags().StringVar(&reposPGDSN, "pg-dsn", "", "PostgreSQL DSN to read index state from (alternative to the default SQLite store path)")
 	rootCmd.AddCommand(reposCmd)
 }
 
@@ -142,12 +147,21 @@ func runRepos(cmd *cobra.Command, _ []string) error {
 }
 
 // loadRepoIndexStates reads the daemon's per-repo index-freshness rows
-// (the SQLite repo_index_state table) keyed by repo prefix. It opens the
-// backend store read-only so it is safe to run while a daemon holds the
-// same store. Any failure (no store yet, unreadable cache) degrades to an
-// empty map so `gortex repos` falls back to the snapshot store rather than
-// erroring out.
+// keyed by repo prefix. When --pg-dsn is provided it reads from PostgreSQL;
+// otherwise it auto-detects the daemon's backend and reads from there.
+// Falls back to the default SQLite store when the daemon is not running.
+// Any failure degrades to an empty map so `gortex repos` falls back to the
+// snapshot store.
 func loadRepoIndexStates() map[string]graph.RepoIndexState {
+	if reposPGDSN != "" {
+		return loadRepoIndexStatesFromPG(reposPGDSN)
+	}
+
+	// Auto-detect: query the running daemon for its backend.
+	if dsn := detectDaemonPGDSN(); dsn != "" {
+		return loadRepoIndexStatesFromPG(dsn)
+	}
+
 	path := reposBackendPath
 	if path == "" {
 		path = filepath.Join(platform.StoreDir(), "store.sqlite")
@@ -157,6 +171,55 @@ func loadRepoIndexStates() map[string]graph.RepoIndexState {
 		return map[string]graph.RepoIndexState{}
 	}
 	return states
+}
+
+// detectDaemonPGDSN dials the running daemon and returns its PostgreSQL DSN if
+// the daemon is using the postgres backend. Returns "" when the daemon is not
+// running or using a non-postgres backend.
+func detectDaemonPGDSN() string {
+	if !daemon.IsRunning() {
+		return ""
+	}
+	c, err := daemon.Dial(daemon.Handshake{Mode: daemon.ModeControl, ClientName: "cli"})
+	if err != nil {
+		return ""
+	}
+	defer c.Close()
+	resp, err := c.Control("status", nil)
+	if err != nil || !resp.OK {
+		return ""
+	}
+	var st daemon.StatusResponse
+	if err := json.Unmarshal(resp.Result, &st); err != nil {
+		return ""
+	}
+	if st.Backend == "postgres" && st.PGDSN != "" {
+		return st.PGDSN
+	}
+	return ""
+}
+
+// loadRepoIndexStatesFromPG connects to PostgreSQL and reads every row from
+// the repo_index_state table, returning them as a map keyed by repo_prefix.
+func loadRepoIndexStatesFromPG(dsn string) map[string]graph.RepoIndexState {
+	ctx := context.Background()
+	cfg := store_pg.Config{DSN: dsn}
+	st, err := store_pg.Open(ctx, cfg)
+	if err != nil {
+		return map[string]graph.RepoIndexState{}
+	}
+	defer st.Close()
+
+	rows, err := st.AllRepoIndexStates()
+	if err != nil {
+		return map[string]graph.RepoIndexState{}
+	}
+
+	out := make(map[string]graph.RepoIndexState, len(rows))
+	for _, r := range rows {
+		out[r.RepoPrefix] = r
+	}
+	return out
 }
 
 // describeRepo resolves one RepoEntry into a repoStatus by reading the

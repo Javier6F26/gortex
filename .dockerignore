@@ -1,0 +1,14 @@
+.git
+.gitignore
+.gitattributes
+.github
+.vscode
+.idea
+*.md
+eval
+dist
+testdata
+docs
+results
+Makefile
+docker-compose.yml

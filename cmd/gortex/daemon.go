@@ -53,6 +53,8 @@ var (
 	daemonBackend               string
 	daemonBackendPath           string
 	daemonBackendBufferPoolMB   uint64
+	daemonPGDSN                 string
+	daemonPBPoolSize            int
 	daemonTools                 string
 	daemonToolsMode             string
 )
@@ -122,9 +124,13 @@ func init() {
 	daemonStartCmd.Flags().StringSliceVar(&daemonHTTPConversationAllow, "conversation-host", nil,
 		"extra Host values (beyond loopback) the conversation-log inspector accepts without a token; repeatable")
 	daemonStartCmd.Flags().StringVar(&daemonBackend, "backend", "sqlite",
-		"storage backend: sqlite (default — pure-Go embedded SQL, persists to --backend-path so warm restarts skip re-indexing) | memory (in-process, no persistence — fastest per-op but pays the full cold-warmup cost on every restart)")
+		"storage backend: sqlite (default — pure-Go embedded SQL) | postgres (network database via --pg-dsn) | memory (in-process, no persistence)")
 	daemonStartCmd.Flags().StringVar(&daemonBackendPath, "backend-path", "",
 		"path to the on-disk backend's store file (its parent directory is created if absent). Defaults to ~/.gortex/store/store.sqlite; ignored when --backend is memory")
+	daemonStartCmd.Flags().StringVar(&daemonPGDSN, "pg-dsn", "",
+		"PostgreSQL connection DSN (e.g. postgres://user:pass@host:5432/gortex). Required when --backend is postgres")
+	daemonStartCmd.Flags().IntVar(&daemonPBPoolSize, "pg-pool-size", 0,
+		"max connections in the PostgreSQL pool (0 = NumCPU * 2)")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
 		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	daemonStartCmd.Flags().StringVar(&daemonTools, "tools", "",
@@ -215,6 +221,8 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		multiIndexer:  state.multiIndexer,
 		configManager: state.configManager,
 		logger:        logger,
+		backend:       daemonBackend,
+		pgDSN:         daemonPGDSN,
 	}
 	if state.mcpServer != nil {
 		srv := state.mcpServer
@@ -1496,6 +1504,16 @@ func resolveDaemonBufferPoolMB() uint64 {
 		}
 	}
 	return 0
+}
+
+// resolveBackendPathForDaemon returns the effective backend path.
+// When the backend is postgres, it returns daemonPGDSN;
+// otherwise it returns daemonBackendPath.
+func resolveBackendPathForDaemon() string {
+	if daemonBackend == "postgres" || daemonBackend == "pg" {
+		return daemonPGDSN
+	}
+	return daemonBackendPath
 }
 
 // killByPID is the fallback stop path for stale daemons that have a PID

@@ -247,7 +247,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// busy_timeout serialise in-process writers only; nothing else stops
 	// a second OS process opening the same file and corrupting it.
 	storeLockHeld := false // set true once the exclusive store flock is owned below
-	if cfg.Lifecycle.Writable() && isSqliteBackend(backendName) {
+	if cfg.Lifecycle.Writable() && isOnDiskFileBackend(backendName) {
 		storePath, perr := resolveBackendPath(cfg.BackendPath, "store.sqlite")
 		if perr != nil {
 			return nil, perr

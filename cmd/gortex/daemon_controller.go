@@ -36,7 +36,7 @@ import (
 // Methods are serialized via a mutex — track/reload can race with status
 // otherwise. The mutex is coarse; finer locking is a later optimization.
 type realController struct {
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	graph         graph.Store
 	indexer       *indexer.Indexer
 	multiIndexer  *indexer.MultiIndexer
@@ -62,6 +62,12 @@ type realController struct {
 	// per-workspace learned-promotion count for `gortex daemon status`.
 	// Nil when the MCP server isn't wired (control-only daemon).
 	toolSurface func() (preset, mode string, learned int)
+	// backend stores which storage backend the daemon uses ("sqlite",
+	// "postgres", or "memory"), and pgDSN carries the PostgreSQL DSN
+	// when backend is "postgres". Populated at construction time and
+	// surfaced through Status so CLI tools can auto-detect.
+	backend string
+	pgDSN   string
 
 	// ready flips to true once references are resolved and the graph is
 	// queryable — find_usages / get_callers return complete results from
@@ -82,17 +88,21 @@ type realController struct {
 
 // Track indexes a new repository and persists it to the global config.
 // Path is resolved to an absolute form before the MultiIndexer sees it.
+// The actual index (including a long shadow-to-disk drain) runs WITHOUT
+// holding c.mu so concurrent Status calls are not blocked during drain.
 func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.RawMessage, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.multiIndexer == nil {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("multi-repo indexer not initialized")
 	}
 	absPath, err := filepath.Abs(p.Path)
 	if err != nil {
+		c.mu.Unlock()
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
+	c.mu.Unlock()
+
 	entry := config.RepoEntry{Path: absPath, Name: p.Name, Ref: p.Ref, AsWorktree: p.AsWorktree}
 	result, err := c.multiIndexer.TrackRepoCtx(ctx, entry)
 	if err != nil {
@@ -116,10 +126,9 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 	// run `gortex daemon reload`; track from the daemon-v1 surface just
 	// adds to the top-level repo list.
 
-	// Attach a watcher to the newly-tracked repo so file edits in it
-	// flow back into the graph live without a manual reload. Failures
-	// here are logged but don't fail the track — an indexed-but-
-	// unwatched repo is still queryable, just stale if edited.
+	// Re-acquire the lock for fast bookkeeping: watcher attach + config
+	// save. The long I/O (TrackRepoCtx) ran without the lock.
+	c.mu.Lock()
 	if c.multiWatcher != nil && c.configManager != nil {
 		wcfg := c.configManager.GetRepoConfig(prefix).Watch
 		if err := c.multiWatcher.AddRepo(prefix, wcfg); err != nil {
@@ -136,6 +145,7 @@ func (c *realController) Track(ctx context.Context, p daemon.TrackParams) (json.
 			c.logger.Warn("track: save config failed", zap.Error(err))
 		}
 	}
+	c.mu.Unlock()
 
 	return json.Marshal(map[string]any{
 		"status":     "tracked",
@@ -641,16 +651,16 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 	// control request (status / track / reload) queued on the mutex — the
 	// daemon-looks-crashed symptom. Snapshot the graph handle under a
 	// brief lock, then run the (store-memoised) estimate lock-free.
-	c.mu.Lock()
+	c.mu.RLock()
 	g := c.graph
-	c.mu.Unlock()
+	c.mu.RUnlock()
 	var memEstimates map[string]graph.RepoMemoryEstimate
 	if g != nil {
 		memEstimates = g.AllRepoMemoryEstimates()
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
 	var (
 		tracked                  []daemon.TrackedRepoStatus
@@ -798,6 +808,8 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 
 	resp := daemon.StatusResponse{
 		TrackedRepos:  tracked,
+		Backend:       c.backend,
+		PGDSN:         c.pgDSN,
 		MemoryBytes:   mem.Alloc,
 		SearchBackend: searchBackendForResponse,
 		Runtime: daemon.RuntimeStats{
@@ -967,9 +979,9 @@ func enrichmentProgressFromStatuses(statuses []semantic.EnrichmentStatus) *daemo
 // MCP session. File and Import nodes are excluded — the hook only cares
 // about real symbol matches.
 func (c *realController) SearchSymbols(_ context.Context, p daemon.SearchSymbolsParams) (daemon.SearchSymbolsResult, error) {
-	c.mu.Lock()
+	c.mu.RLock()
 	g := c.graph
-	c.mu.Unlock()
+	c.mu.RUnlock()
 
 	if g == nil || p.Query == "" {
 		return daemon.SearchSymbolsResult{}, nil
@@ -1014,8 +1026,8 @@ func (c *realController) SearchSymbols(_ context.Context, p daemon.SearchSymbols
 // mi.AllMetadata() at startup.
 func (c *realController) AttachWatcher(mw *indexer.MultiWatcher) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.multiWatcher = mw
+	c.mu.Unlock()
 }
 
 // MarkReady flips the ready flag once references are resolved and the graph
@@ -1054,9 +1066,9 @@ func (c *realController) IsEnriched() bool {
 // Shutdown gives the caller (the daemon main) a chance to flush any
 // per-instance stores. The actual socket teardown is the Server's job.
 func (c *realController) Shutdown(_ context.Context) error {
-	c.mu.Lock()
+	c.mu.RLock()
 	hook := c.onShutdown
-	c.mu.Unlock()
+	c.mu.RUnlock()
 	if hook != nil {
 		return hook()
 	}

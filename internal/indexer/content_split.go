@@ -150,6 +150,15 @@ func (idx *Indexer) streamContentSections(nodes []*graph.Node) {
 	if len(items) == 0 {
 		return
 	}
+	// Log a warning when content bodies contain non-UTF-8 bytes.
+	for _, it := range items {
+		if !utf8.ValidString(it.Body) {
+			idx.logger.Warn("indexer: content body has non-UTF-8 bytes; will be sanitized",
+				zap.String("file", it.FilePath),
+				zap.String("node", it.NodeID))
+			break
+		}
+	}
 	if err := cs.AppendContent(idx.RepoPrefix(), items); err != nil {
 		// Keep the full body on the nodes if the append failed, so content
 		// stays searchable via the symbol-search fallback rather than lost.
