@@ -75,12 +75,32 @@ func (s *Server) toolSurfaceFilter(ctx context.Context, tools []mcp.Tool) []mcp.
 //     name before dispatch.
 func (s *Server) applySessionPreset(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	p := s.effectiveSessionPolicy(ctx)
+	shaped := s.shapeToolSurface(tools, p)
+	// The lean (`agent`) preset additionally compacts every parameter
+	// description on THIS session's view so the coding-agent tools/list
+	// stays inside its byte ceiling. Deep-copied — the shared schema is
+	// never mutated.
+	if p.lean {
+		shaped = leanizeAgentTools(shaped)
+	}
+	return shaped
+}
+
+// shapeToolSurface narrows / widens the tool list to the session policy
+// (see applySessionPreset for the two regimes).
+func (s *Server) shapeToolSurface(tools []mcp.Tool, p *toolPolicy) []mcp.Tool {
 	override := p != s.toolPolicy
-	if !override {
+	// A non-lean global preset preserves the server's own behaviour: a defer
+	// preset leaves the eager set alone (so promote-on-demand tools stay
+	// visible), a hide preset removes non-allowed tools. The lean `agent`
+	// preset always presents a strict roster — it drops even tools that were
+	// force-registered live outside the lazy registry (preview_edit,
+	// simulate_chain), so a coding agent's cold surface is exactly its set.
+	if !override && !p.lean {
 		if !p.hideMode() {
-			return tools // global defer preset: leave the eager surface alone
+			return tools
 		}
-		return narrowToPolicy(tools, p) // global hide preset: original behaviour
+		return narrowToPolicy(tools, p)
 	}
 	kept := narrowToPolicy(tools, p)
 	// Widen with the deferred catalogue's finished (scrubbed + budget-

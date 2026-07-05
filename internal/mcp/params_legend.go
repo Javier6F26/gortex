@@ -45,6 +45,94 @@ var sharedParamRewrites = []struct {
 	{"ref", []string{"reference"}, "Reference-tag repository filter; see server instructions."},
 }
 
+// agentParamCap is the target length for a parameter description on the
+// lean `agent` surface. Above it, leanGloss keeps the first sentence (or a
+// word-boundary cut) so the coding-agent tools/list stays inside its byte
+// ceiling. The full prose is always one tools_search / `full` preset away.
+const agentParamCap = 40
+
+// leanGloss compacts a parameter description for the lean agent surface:
+// keep a leading "(qualifier)" if present (it disambiguates kind-specific
+// params), then the first sentence, capped at agentParamCap.
+func leanGloss(desc string) string {
+	desc = strings.TrimSpace(desc)
+	if len(desc) <= agentParamCap {
+		return desc
+	}
+	if i := strings.IndexByte(desc, '.'); i > 0 && i+1 <= agentParamCap {
+		return desc[:i+1]
+	}
+	cut := agentParamCap
+	if sp := strings.LastIndexByte(desc[:cut], ' '); sp > agentParamCap/2 {
+		cut = sp
+	}
+	return strings.TrimRight(desc[:cut], " ,;:—-") + "…"
+}
+
+// agentDescCap caps a tool DESCRIPTION on the lean surface to its leading
+// contract sentences, dropping trailing reference detail / examples (which
+// stay in the `full` preset and tools_search). Kept generous (~5 sentences)
+// so the "what it does + key caveat" contract + trust content survives —
+// only the longest descriptions' reference tails are trimmed. 0 disables.
+const agentDescCap = 600
+
+// leanDescription keeps the leading sentences of a tool description up to
+// agentDescCap, cutting on a sentence boundary so the contract stays whole.
+func leanDescription(desc string) string {
+	if agentDescCap <= 0 || len(desc) <= agentDescCap {
+		return desc
+	}
+	cut := agentDescCap
+	if i := strings.LastIndex(desc[:cut], ". "); i > agentDescCap/2 {
+		return desc[:i+1]
+	}
+	if sp := strings.LastIndexByte(desc[:cut], ' '); sp > agentDescCap/2 {
+		cut = sp
+	}
+	return strings.TrimRight(desc[:cut], " ,;:—-") + "…"
+}
+
+// leanizeAgentTool returns a copy of the tool with every parameter
+// description compacted to a lean gloss (and, when agentDescCap is set, the
+// tool description trimmed to its leading contract sentences). It deep-
+// copies the properties map (and each property object) so the server's
+// shared, registered schema is never mutated — only this session's
+// tools/list view is compacted.
+func leanizeAgentTool(t mcp.Tool) mcp.Tool {
+	t.Description = leanDescription(t.Description)
+	props := t.InputSchema.Properties
+	if len(props) == 0 {
+		return t
+	}
+	out := make(map[string]any, len(props))
+	for name, raw := range props {
+		pm, ok := raw.(map[string]any)
+		if !ok {
+			out[name] = raw
+			continue
+		}
+		cp := make(map[string]any, len(pm))
+		for k, v := range pm {
+			cp[k] = v
+		}
+		if d, ok := cp["description"].(string); ok {
+			cp["description"] = leanGloss(d)
+		}
+		out[name] = cp
+	}
+	t.InputSchema.Properties = out
+	return t
+}
+
+// leanizeAgentTools maps leanizeAgentTool over a slice.
+func leanizeAgentTools(tools []mcp.Tool) []mcp.Tool {
+	out := make([]mcp.Tool, len(tools))
+	for i := range tools {
+		out[i] = leanizeAgentTool(tools[i])
+	}
+	return out
+}
+
 // compactSharedToolParams rewrites the recurring-parameter descriptions on
 // one tool to their terse gloss, having moved the full semantics into the
 // shared legend. Idempotent, allocation-light, and a no-op for any tool

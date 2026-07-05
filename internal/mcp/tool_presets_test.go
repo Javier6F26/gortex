@@ -25,6 +25,14 @@ func TestToolPolicy_Presets(t *testing.T) {
 		{"full", "analyze", true},
 		{"full", "edit_file", true},
 		{"", "analyze", true},
+		// agent → the lean coding-agent floor only.
+		{"agent", "search_symbols", true},
+		{"agent", "edit_file", true},
+		{"agent", "verify_change", true},
+		{"agent", "analyze", false},
+		{"agent", "store_memory", false}, // memory trio deferred (tail cut)
+		{"agent", "get_architecture", false},
+		{"coding-agent", "smart_context", true}, // alias
 		// core (the shipped default) → curated dev-cycle surface only.
 		{"core", "smart_context", true},
 		{"core", "edit_file", true},

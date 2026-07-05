@@ -854,20 +854,34 @@ func (s *Server) NoteSessionToolPolicy(sessionID, spec, mode string) {
 // Lower-cased client name is matched. Unknown clients are not a
 // failure — they just keep the JSON default until they're added.
 func defaultFormatForClient(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "claude-code",
-		"cursor",
-		"vscode",
-		"zed",
-		"aider",
-		"kilocode",
-		"opencode",
-		"openclaw",
-		"codex",
-		"omp-coding-agent":
+	if isKnownAgentClient(name) {
 		return "gcx"
 	}
 	return ""
+}
+
+// knownAgentClients is the set of MCP clients recognised as coding agents:
+// they ship a GCX decoder (so they default to the gcx wire format) AND they
+// get the lean `agent` tool preset by default. One list drives both
+// defaults so the two stay in lock-step. Matched case-insensitively on the
+// exact clientInfo.name.
+var knownAgentClients = map[string]bool{
+	"claude-code":      true,
+	"cursor":           true,
+	"vscode":           true,
+	"zed":              true,
+	"aider":            true,
+	"kilocode":         true,
+	"opencode":         true,
+	"openclaw":         true,
+	"codex":            true,
+	"omp-coding-agent": true,
+}
+
+// isKnownAgentClient reports whether the named MCP client is a recognised
+// coding agent (see knownAgentClients).
+func isKnownAgentClient(name string) bool {
+	return knownAgentClients[strings.ToLower(strings.TrimSpace(name))]
 }
 
 // resolveSessionFormat returns the format the current session prefers
