@@ -126,70 +126,72 @@ func TestCursorMDCFrontmatter(t *testing.T) {
 	assert.Contains(t, out, "BODY")
 }
 
-// TestInstructionsBody_AdvertisesKeyTools is a smoke test: the shared
-// body is the one artefact every agent relies on. A regression that
-// silently emptied it (e.g. moving content into an unused variable)
-// would leave `gortex init` installing a doc block that says nothing
-// about preferring Gortex. We spot-check for tool names that anchor
-// the MANDATORY message.
-func TestInstructionsBody_AdvertisesKeyTools(t *testing.T) {
+// Single-home markers: content that must live in exactly one place. These
+// strings anchor the reference blocks that were relocated OUT of the CLAUDE.md
+// sections into the guide (provider matrix, analyze catalog) or the server
+// instructions (wire-format deep-dive). Their absence from the slim bodies is
+// the enforcement side of the single-home principle; their presence in the
+// guide / server-instructions is asserted in the mcp package.
+const (
+	providerMatrixMarker = "`local` / `anthropic` / `openai` / `azure` / `ollama` / `claudecli` / `codex` / `copilot` / `cursor` / `opencode` / `gemini` / `bedrock` / `deepseek`"
+	analyzeCatalogMarker = "Tarjan's SCC" // from the analyze `cycles` kind doc
+	formatDeepDiveMarker = "compact tabular text, lossy"
+)
+
+// TestInstructionsBody_PolicyCoreAndSingleHome smoke-tests the slim project
+// rule block: it keeps the mandatory graph-tools mapping + the memory-workflow
+// pointers, and it does NOT re-carry the relocated reference content.
+func TestInstructionsBody_PolicyCoreAndSingleHome(t *testing.T) {
 	for _, token := range []string{
-		"search_symbols", "smart_context", "get_editing_context",
-		"contracts", "find_usages", "graph_stats",
-		// CPG-lite dataflow surface (flow_between / taint_paths).
-		"flow_between", "taint_paths",
-		"value_flow", "arg_of", "returns_to",
-		// Infrastructure-as-graph surface (K8s / Kustomize / Dockerfile).
-		"k8s_resources", "images", "kustomize",
-		"uses_env", "configures", "mounts", "exposes", "depends_on",
-		// Push diagnostics + code actions surface.
-		"subscribe_diagnostics", "unsubscribe_diagnostics",
-		"get_diagnostics", "get_code_actions", "apply_code_action",
-		"fix_all_in_file", "notifications/diagnostics",
-		// Structural code search.
-		"search_ast", "error-not-wrapped", "sql-string-concat",
-		"weak-crypto", "panic-in-library", "hardcoded-secret",
-		"min_fan_in_of_enclosing_func",
-		// Content compression (K9): the read_file tool and the
-		// compress_bodies flag — the load-bearing tokens an agent
-		// needs to discover the surface-only read mode.
-		"read_file", "compress_bodies", "source_compressed",
-		// MCP resources surface (bootstrap + analyzer rollups).
-		"gortex://stats", "gortex://index-health", "gortex://workspace",
-		"gortex://repos", "gortex://active-project",
-		"gortex://report", "gortex://god-nodes", "gortex://surprises",
-		"gortex://audit", "gortex://questions",
-		"notifications/resources/updated",
+		// Graph-tools policy core.
+		"search_symbols", "find_usages", "get_callers",
+		"get_symbol_source", "get_editing_context", "get_file_summary",
+		"read_file", "smart_context", "edit_file", "compress_bodies",
+		// Memory workflow (pointer form).
+		"distill_session", "surface_memories", "save_note", "store_memory",
+		"query_notes", "query_memories",
+		// Discovery pointers.
+		"tools_search", "gortex://guide",
 	} {
 		if !strings.Contains(InstructionsBody, token) {
-			t.Errorf("InstructionsBody no longer mentions %q — a doc regression would ship to every adapter", token)
+			t.Errorf("InstructionsBody no longer mentions %q — policy core regression", token)
+		}
+	}
+	for _, banned := range []string{providerMatrixMarker, analyzeCatalogMarker, formatDeepDiveMarker} {
+		if strings.Contains(InstructionsBody, banned) {
+			t.Errorf("InstructionsBody re-carries relocated content %q — single-home violation", banned)
 		}
 	}
 }
 
-// TestGlobalInstructionsBody_AdvertisesKeyTools mirrors the smoke
-// test above for the global block written by `gortex install` into
-// ~/.claude/CLAUDE.md. It's the per-machine surface and gets the
-// shorter dataflow callout — verify both tool names ship.
-func TestGlobalInstructionsBody_AdvertisesKeyTools(t *testing.T) {
+// TestGlobalInstructionsBody_PolicyCoreAndSingleHome mirrors the check for the
+// per-machine block written by `gortex install` into ~/.claude/CLAUDE.md — the
+// single home for the full memory-workflow triggers.
+func TestGlobalInstructionsBody_PolicyCoreAndSingleHome(t *testing.T) {
 	for _, token := range []string{
-		"search_symbols", "smart_context", "get_editing_context",
-		"flow_between", "taint_paths",
-		// Infrastructure surface — also written into the per-machine
-		// block by `gortex install`.
-		"k8s_resources", "images", "kustomize",
-		// Structural code search — also in the per-machine block.
-		"search_ast", "error-not-wrapped",
-		// Content compression (K9): same load-bearing tokens as the
-		// per-project block.
-		"read_file", "compress_bodies", "source_compressed",
-		// MCP resources surface (bootstrap + analyzer rollups).
-		"gortex://stats", "gortex://index-health", "gortex://active-project",
-		"gortex://report", "gortex://god-nodes",
-		"notifications/resources/updated",
+		// Graph-tools policy core.
+		"search_symbols", "find_usages", "get_callers", "get_call_chain",
+		"get_symbol_source", "get_editing_context", "read_file",
+		"smart_context", "edit_file", "rename_symbol", "compress_bodies",
+		// Full memory triggers (the single home).
+		"distill_session", "surface_memories", "save_note", "store_memory",
+		"query_notes", "query_memories",
+		// Discovery pointers.
+		"tools_search", "gortex://guide", "gortex daemon start",
 	} {
 		if !strings.Contains(GlobalInstructionsBody, token) {
 			t.Errorf("GlobalInstructionsBody no longer mentions %q", token)
+		}
+	}
+	for _, banned := range []string{
+		providerMatrixMarker, analyzeCatalogMarker, formatDeepDiveMarker,
+		// Reference catalogs that relocated to the guide / schema resource.
+		// (A bare "search_ast" pointer is allowed; the DETECTOR catalog — named
+		// detectors like error-not-wrapped — must not be inlined.)
+		"k8s_resources", "error-not-wrapped", "gortex://report",
+	} {
+		if strings.Contains(GlobalInstructionsBody, banned) {
+			t.Errorf("GlobalInstructionsBody re-carries relocated content %q — single-home violation", banned)
 		}
 	}
 }
