@@ -1065,7 +1065,9 @@ const serverInstructions = `Gortex is a code-intelligence graph server — it in
 - Use search_symbols (BM25, camelCase-aware) instead of grep; find_usages / get_callers for references and callers; get_symbol_source to read one symbol without its whole file.
 - Before editing, call get_editing_context on the file; for refactors use edit_symbol / rename_symbol / batch_edit.
 - The cold tools/list shows a core set — call tools_search to discover the rest of the catalogue on demand.
-- Pass format:"gcx" to list-shaped tools for a compact, round-trippable wire format (~27% fewer tokens).`
+- Pass format:"gcx" to list-shaped tools for a compact, round-trippable wire format (~27% fewer tokens).
+
+` + sharedParamLegend
 
 // ServerInstructionsUntracked is the inactive-state `instructions` variant
 // returned when a session's cwd is not covered by any tracked repo. Rather than
@@ -2253,6 +2255,11 @@ func (s *Server) addTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
 	// tools' descriptions so the model self-throttles. Runs before the
 	// deferred-vs-live split so a tool keeps the hint after promotion.
 	s.annotateToolBudget(&tool)
+	// Replace the recurring-parameter prose (format / max_bytes / cursor /
+	// fields / scope / repo / project / workspace / ref) with a terse gloss;
+	// the full semantics live once in the server instructions legend. Runs
+	// before the split so deferred tools carry the compact schema too.
+	compactSharedToolParams(&tool)
 	if s.lazy != nil && s.lazy.IsDeferred(tool.Name) {
 		s.lazy.Register(tool, handler)
 		return
