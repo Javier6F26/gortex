@@ -14,7 +14,14 @@ go test -race ./...                 # all test packages must pass
 - **Languages:** go (primary)
 - **Entry point:** `cmd/gortex/main.go`
 - **Source:** 1,338 Go files (728 non-test) across the `cmd/` and `internal/` trees
-- **Graph size:** ~31k nodes, ~206k edges when the daemon indexes this repo
+- **Graph store backends:**
+  - `internal/graph/` — in-memory reference implementation (*Graph)
+  - `internal/graph/store_sqlite/` — pure-Go embedded SQL (default)
+  - `internal/graph/store_pg/` — PostgreSQL via pgx v5 (opt-in with `--backend postgres --pg-dsn <dsn>`)
+    Implements all optional capability interfaces: SymbolSearcher (pg_trgm), ContentSearcher (tsvector),
+    VectorSearcher (pgvector HNSW), SymbolBundleSearcher, BFSCapable (recursive CTE), aggregators,
+    sidecars, bulk load (COPY FROM + UNLOGGED), and backend resolver.
+- **Setup guides:** `docs/pg-setup.md` for PostgreSQL backend setup
 
 ## MANDATORY: Use Gortex's graph tools instead of Read/Grep/Glob
 

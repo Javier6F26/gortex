@@ -166,6 +166,12 @@ type StatusResponse struct {
 	// listener (via the GORTEX_DAEMON_PPROF_ADDR env var). Empty
 	// string means pprof is not enabled on this daemon.
 	PProfAddr string `json:"pprof_addr,omitempty"`
+	// Backend is the storage backend the daemon is using ("sqlite",
+	// "postgres", or "memory"). CLI tools like `gortex repos` use this
+	// to know where to read index freshness from. PGDSN is set only
+	// when Backend is "postgres".
+	Backend string `json:"backend"`
+	PGDSN  string `json:"pg_dsn,omitempty"`
 	// Ready is false while the daemon is still loading the snapshot and
 	// resolving references in the background. It flips true once references
 	// are resolved and the graph is queryable — which can be well before

@@ -182,6 +182,8 @@ func normalizeBackendTag(backend string) string {
 		return "memory"
 	case "sqlite", "sqlite3":
 		return "sqlite"
+	case "postgres", "pg":
+		return "postgres"
 	default:
 		return ""
 	}

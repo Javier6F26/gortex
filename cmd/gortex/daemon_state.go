@@ -130,7 +130,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 	ss, err := serverstack.NewSharedServer(serverstack.SharedServerConfig{
 		Lifecycle:    serverstack.LifecycleDaemon,
 		Backend:      daemonBackend,
-		BackendPath:  daemonBackendPath,
+		BackendPath:  resolveBackendPathForDaemon(),
 		BufferPoolMB: resolveDaemonBufferPoolMB(),
 		Config:       cfg,
 		Global:       gc,

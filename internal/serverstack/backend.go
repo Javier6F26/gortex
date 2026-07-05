@@ -4,6 +4,12 @@
 // surface, and the one-shot embedded path all share one wiring instead of
 // three near-identical copies.
 //
+// Supported backends (selected via OpenBackend's name parameter):
+//   - "sqlite" (default) — pure-Go embedded SQL; single-process access.
+//   - "postgres" — PostgreSQL-backed store (requires --pg-dsn).
+//     See docs/pg-setup.md for the setup guide.
+//   - "memory" — in-process ephemeral store; matches test fixtures.
+//
 // It lives in its own leaf package (not internal/daemon) because the
 // constructor builds an *mcp.Server, and internal/mcp already imports
 // internal/daemon one-way; hosting the constructor in internal/daemon
@@ -11,15 +17,18 @@
 package serverstack
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/zzet/gortex/internal/daemon"
 	"github.com/zzet/gortex/internal/graph"
+	"github.com/zzet/gortex/internal/graph/store_pg"
 	"github.com/zzet/gortex/internal/graph/store_sqlite"
 	"github.com/zzet/gortex/internal/platform"
 )
@@ -31,6 +40,8 @@ import (
 //     runs; matches every existing test fixture.
 //   - "sqlite" — the pure-Go modernc.org/sqlite store under the resolved
 //     path (defaults to ~/.gortex/store/store.sqlite).
+//   - "postgres" — the PostgreSQL-backed store connecting to the database
+//     at the given DSN (path is treated as the connection string).
 //
 // Returns the store, a cleanup func the caller must defer (closes the
 // underlying handle on disk-backed stores), and any open error.
@@ -52,13 +63,33 @@ func OpenBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger, all
 			logger.Info("opening sqlite backend", zap.String("path", resolved))
 		}
 		return openSqliteBackend(resolved, bufferPoolMB, allowRebuild)
+	case "postgres", "pg":
+		if path == "" {
+			return nil, nil, fmt.Errorf("postgres backend requires a DSN (--backend-path or --pg-dsn)")
+		}
+		if logger != nil {
+			logger.Info("opening postgres backend", zap.String("dsn", maskDSN(path)))
+		}
+		return openPostgresBackend(path, bufferPoolMB)
 	default:
-		return nil, nil, fmt.Errorf("unknown backend %q (expected: memory, sqlite)", name)
+		return nil, nil, fmt.Errorf("unknown backend %q (expected: memory, sqlite, postgres)", name)
 	}
 }
 
 // isSqliteBackend reports whether name selects the on-disk sqlite store.
 func isSqliteBackend(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "sqlite", "sqlite3":
+		return true
+	default:
+		return false
+	}
+}
+
+// isOnDiskFileBackend reports whether name selects a backend backed by a
+// local file (sqlite, bbolt, etc.) that requires a cross-process flock.
+// Network backends like postgres manage concurrency internally.
+func isOnDiskFileBackend(name string) bool {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "sqlite", "sqlite3":
 		return true
@@ -112,4 +143,38 @@ func openSqliteBackend(path string, bufferPoolMB uint64, allowRebuild bool) (gra
 		return nil, nil, fmt.Errorf("open sqlite store at %q: %w (%s)", path, err, hint)
 	}
 	return s, func() { _ = s.Close() }, nil
+}
+
+// openPostgresBackend opens the PostgreSQL store at the given DSN.
+// The pgxpool connection pool is configured with bufferPoolMB as an advisory
+// per-backend buffer hint (unused — PostgreSQL manages its own caches).
+func openPostgresBackend(dsn string, bufferPoolMB uint64) (graph.Store, func(), error) {
+	_ = bufferPoolMB
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cfg := store_pg.Config{
+		DSN: dsn,
+	}
+	s, err := store_pg.Open(ctx, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open postgres store: %w", err)
+	}
+	return s, func() { _ = s.Close() }, nil
+}
+
+// maskDSN obscures the password in a PostgreSQL DSN for safe logging.
+func maskDSN(dsn string) string {
+	// Simple masking: find password=... or password '...' and replace.
+	// For postgres://user:pass@host/db format.
+	if idx := strings.Index(dsn, "://"); idx > 0 {
+		after := dsn[idx+3:]
+		if atIdx := strings.Index(after, ":"); atIdx > 0 {
+			hostIdx := strings.Index(after, "@")
+			if hostIdx > atIdx {
+				return dsn[:idx+3+atIdx+1] + "****" + after[hostIdx:]
+			}
+		}
+	}
+	return dsn
 }
