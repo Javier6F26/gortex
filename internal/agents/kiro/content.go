@@ -35,13 +35,13 @@ Gortex is running as an MCP server. It indexes this repository into an in-memory
 
 ## MANDATORY: Use Gortex tools instead of file reads
 
-You **MUST** prefer Gortex graph queries over file reads on every task in this repo. These are not suggestions — the tools below replace the corresponding read/grep flows.
+You **MUST** prefer Gortex graph queries over file reads on every task in this repo. These are not suggestions — the tools below replace the corresponding read/grep flows. From a shell (no MCP tools), every tool below is reachable as ` + "`gortex call <tool> --arg k=v`" + ` (e.g. ` + "`gortex call read_file --arg path=<file>`" + `) — there is no bare ` + "`gortex <tool>`" + ` verb.
 
 ### Navigation and Reading
 
 | Instead of...                         | Use...                                   |
 |---------------------------------------|------------------------------------------|
-| Reading a whole file for one function | ` + "`get_symbol_source`" + ` with ` + "`id: \"path/to/file.go::SymbolName\"`" + ` (80% fewer tokens) — use ` + "`get_file_summary`" + ` first if you don't know the symbol name |
+| Reading a whole file for one function | ` + "`get_symbol_source`" + ` with ` + "`id: \"path/to/file.go::SymbolName\"`" + ` (methods carry the receiver: ` + "`\"path/to/file.go::Recv.Name\"`" + `; 80% fewer tokens) — use ` + "`get_file_summary`" + ` first if you don't know the symbol name |
 | Reading to find a function            | ` + "`get_symbol`" + ` or ` + "`get_editing_context`" + `    |
 | Multiple ` + "`get_symbol`" + ` calls           | ` + "`batch_symbols`" + ` (one call for N symbols) |
 | Searching for references              | ` + "`find_usages`" + ` (zero false positives)     |
