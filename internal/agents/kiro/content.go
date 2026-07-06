@@ -41,7 +41,7 @@ You **MUST** prefer Gortex graph queries over file reads on every task in this r
 
 | Instead of...                         | Use...                                   |
 |---------------------------------------|------------------------------------------|
-| Reading a whole file for one function | ` + "`get_symbol_source`" + ` with ` + "`id: \"path/to/file.go::SymbolName\"`" + ` (80% fewer tokens) — use ` + "`get_file_summary`" + ` first if you don't know the symbol name |
+| Reading a whole file for one function | ` + "`get_symbol_source`" + ` with ` + "`id: \"path/to/file.go::SymbolName\"`" + ` (methods carry the receiver: ` + "`\"path/to/file.go::Recv.Name\"`" + `; 80% fewer tokens) — use ` + "`get_file_summary`" + ` first if you don't know the symbol name |
 | Reading to find a function            | ` + "`get_symbol`" + ` or ` + "`get_editing_context`" + `    |
 | Multiple ` + "`get_symbol`" + ` calls           | ` + "`batch_symbols`" + ` (one call for N symbols) |
 | Searching for references              | ` + "`find_usages`" + ` (zero false positives)     |

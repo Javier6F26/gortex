@@ -14,20 +14,25 @@ import "strings"
 // fallback, so the rendered hint reads `gortex call read_file --arg path=<file>`
 // rather than a shapeless `key=value`. A tool absent here falls back to the
 // generic `key=value`, which is still a valid invocation shape.
+//
+// Symbol-ID placeholders render both forms — `<file>::<Name|Recv.Name>` — so
+// an agent targeting a method knows the ID carries the receiver
+// (`pkg/s.go::Server.Handle`), not the bare method name; the bare form only
+// resolves functions and types.
 var exampleArg = map[string]string{
 	"read_file":           "path=<file>",
-	"get_symbol_source":   "symbol=<file>::<Name>",
+	"get_symbol_source":   "symbol=<file>::<Name|Recv.Name>",
 	"get_editing_context": "path=<file>",
 	"get_file_summary":    "path=<file>",
-	"get_symbol":          "id=<file>::<Name>",
+	"get_symbol":          "id=<file>::<Name|Recv.Name>",
 	"search_symbols":      "query=<name>",
 	"search_text":         "query=<text>",
-	"find_usages":         "symbol=<file>::<Name>",
-	"get_callers":         "symbol=<file>::<Name>",
+	"find_usages":         "symbol=<file>::<Name|Recv.Name>",
+	"get_callers":         "symbol=<file>::<Name|Recv.Name>",
 	"smart_context":       "task=<what you want to do>",
 	"get_repo_outline":    "path_prefix=<dir>/",
 	"edit_file":           "path=<file>",
-	"edit_symbol":         "id=<file>::<Name>",
+	"edit_symbol":         "id=<file>::<Name|Recv.Name>",
 	"index_repository":    "path=<repo-root>",
 	"reindex_repository":  "path=<repo-root>",
 }
