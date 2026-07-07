@@ -99,6 +99,17 @@ type ServerSpec struct {
 	// std-library types the graph never indexes, so its recall lives in
 	// the full sweep rather than in cheaper static confirmation.
 	DefaultSweepMode string
+	// ProjectReady, when non-nil, reports whether a workspace has the
+	// project setup this server needs to resolve anything at all — e.g.
+	// node_modules for tsserver, whose every cross-file / import lookup
+	// returns "no package metadata" without it. When it returns
+	// (false, remediation) the enrichment pass is SKIPPED entirely (not
+	// merely degraded like NeedsCompileDB): such a server spends minutes
+	// indexing and hovering to produce zero semantic signal, and the
+	// tree-sitter floor still covers those files. This is the general form
+	// of NeedsCompileDB for servers whose failure is a missing dependency
+	// tree rather than a missing compilation database.
+	ProjectReady func(root string) (ready bool, remediation string)
 }
 
 // ConnectSpec carries the transport coordinates for passive LSP attach
@@ -267,9 +278,10 @@ var Servers = []ServerSpec{
 			".mjs": "javascript",
 			".cjs": "javascript",
 		},
-		Priority:    5,
-		Daemon:      true,
-		MaxParallel: 10,
+		Priority:     5,
+		Daemon:       true,
+		MaxParallel:  10,
+		ProjectReady: tsProjectReady,
 	},
 	{
 		// tsgo is the native-Go TypeScript compiler (the
@@ -295,9 +307,10 @@ var Servers = []ServerSpec{
 			".mjs": "javascript",
 			".cjs": "javascript",
 		},
-		Priority:    6,
-		Daemon:      true,
-		MaxParallel: 10,
+		Priority:     6,
+		Daemon:       true,
+		MaxParallel:  10,
+		ProjectReady: tsProjectReady,
 	},
 	{
 		Name:       "pyright",

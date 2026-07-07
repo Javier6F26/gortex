@@ -702,6 +702,29 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		return result, nil
 	}
 
+	// Project-readiness preflight: a server whose workspace lacks the project
+	// setup it needs (node_modules for tsserver) resolves nothing — every
+	// import / cross-file request returns "no package metadata" — yet still
+	// pays a full index + per-file hover / call-hierarchy sweep for minutes.
+	// Skip the pass entirely; the tree-sitter floor still covers these files,
+	// and the resolver's static edges are untouched. This is the general form
+	// of the compile-database degrade below, for a missing dependency tree
+	// rather than a missing compilation database.
+	if p.spec != nil && p.spec.ProjectReady != nil {
+		if ready, remediation := p.spec.ProjectReady(absRoot); !ready {
+			if p.logger != nil {
+				p.logger.Warn("LSP enrich: skipped, project not analyzable",
+					zap.String("provider", p.Name()),
+					zap.String("repo_prefix", repoPrefix),
+					zap.String("remediation", remediation),
+				)
+			}
+			result.DegradedReason = remediation
+			result.DurationMs = time.Since(start).Milliseconds()
+			return result, nil
+		}
+	}
+
 	// Compile-database preflight: a server that needs a compilation database
 	// (clangd) but has none rebuilds a full fallback AST on every didOpen, so
 	// the hover / hierarchy sweep churns for little signal and a directly
