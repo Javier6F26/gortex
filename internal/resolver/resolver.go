@@ -3,8 +3,10 @@ package resolver
 import (
 	"fmt"
 	"iter"
+	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +19,10 @@ import (
 )
 
 const unresolvedPrefix = "unresolved::"
+
+// resolveProfileStarted guards the one-shot GORTEX_RESOLVE_CPUPROFILE capture
+// so only the first full resolve pass is profiled.
+var resolveProfileStarted atomic.Bool
 
 // ResolveStats holds counts from a resolution pass.
 type ResolveStats struct {
@@ -392,6 +398,17 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 		zap.Int("terminal_skipped", terminalSkipped),
 		zap.Bool("backend_bulk", backendResolverEnabled()),
 		zap.String("shapes", pendingShapeSummary(pending)))
+	// Diagnostic: capture a CPU profile of the first full (unscoped) resolve
+	// pass when GORTEX_RESOLVE_CPUPROFILE names a path. Env-gated and one-shot
+	// so it never touches steady-state resolution.
+	if p := os.Getenv("GORTEX_RESOLVE_CPUPROFILE"); p != "" && len(r.scope) == 0 &&
+		resolveProfileStarted.CompareAndSwap(false, true) {
+		if f, err := os.Create(p); err == nil {
+			if pprof.StartCPUProfile(f) == nil {
+				defer pprof.StopCPUProfile()
+			}
+		}
+	}
 	var processed atomic.Int64
 	progressDone := make(chan struct{})
 	go func() {
