@@ -346,52 +346,91 @@ func (p *Provider) EnrichRepo(g graph.Store, repoPrefix, repoRoot string) (*sema
 	result.EdgesConfirmed += p.enrichImplements(g, pkgs, objToNode)
 	result.EdgesAdded += p.addMissingImplements(g, pkgs, objToNode, absRoot)
 
-	// Phase 4: Enrich node metadata with type info.
-	// EnrichNodeMeta mutates Node.Meta in place; on disk backends the
-	// node is a per-call GetNode reconstruction, so collect every stamped
-	// node and round-trip it through the store at the end (one AddBatch)
-	// or the semantic_type / return_type stamps are silently discarded on
-	// the disk backend. See semantic.EnrichNodeMeta.
-	var stampedNodes []*graph.Node
+	// Phase 4: node-driven type stamping. go/types has a Def — hence an exact
+	// type — for every function, method, field, parameter and local variable.
+	// The bottleneck is attaching each Def to its graph node. Phase 1 maps a
+	// Def with MatchNodeByFileLine, which returns the innermost node whose
+	// RANGE contains the ident line, so a function's params and locals collapse
+	// onto the enclosing function node and never receive their own type — that
+	// is why the old Defs→node stamping reached only ~20% of locals and ~24% of
+	// params. Here we index every named Def by (file, name) and, for each graph
+	// node, pick the same-named Def whose ident sits closest to the node's own
+	// declaration line (within its range). That attaches a local/param to ITS
+	// node rather than its enclosing function, lifting coverage to what go/types
+	// actually knows (every named symbol).
+	//
+	// EnrichNodeMeta mutates Node.Meta in place; on disk backends the node is a
+	// per-call GetNode reconstruction, so collect every stamped node and
+	// round-trip it through the store at the end (one AddBatch) or the
+	// semantic_type / return_type stamps are silently discarded. See
+	// semantic.EnrichNodeMeta.
+	type defEntry struct {
+		line int
+		obj  types.Object
+	}
+	defsByName := make(map[string][]defEntry) // key: rel \x00 name
+	relSet := make(map[string]struct{})
 	for _, pkg := range pkgs {
 		if pkg.TypesInfo == nil {
 			continue
 		}
 		for ident, obj := range pkg.TypesInfo.Defs {
-			if obj == nil {
+			if obj == nil || ident.Pos() == token.NoPos || ident.Name == "" || ident.Name == "_" {
 				continue
 			}
-			nodeID, ok := objToNode[obj]
-			if !ok {
+			pos := fset.Position(ident.Pos())
+			rel := relativePath(pos.Filename, absRoot)
+			if rel == "" {
 				continue
 			}
-			node := g.GetNode(nodeID)
-			if node == nil {
+			defsByName[rel+"\x00"+ident.Name] = append(defsByName[rel+"\x00"+ident.Name], defEntry{pos.Line, obj})
+			relSet[rel] = struct{}{}
+		}
+	}
+	var stampedNodes []*graph.Node
+	for rel := range relSet {
+		for _, node := range g.GetFileNodes(rel) {
+			if node.Kind == graph.KindFile || node.Kind == graph.KindImport || node.Name == "" {
+				continue
+			}
+			// Among same-named Defs in this file, pick the one whose ident line
+			// is closest to the node's start line and falls within its range —
+			// this distinguishes two locals of the same name in one function.
+			best := types.Object(nil)
+			bestDist := 1 << 30
+			for _, e := range defsByName[rel+"\x00"+node.Name] {
+				if e.line < node.StartLine-1 || e.line > node.EndLine+1 {
+					continue
+				}
+				d := e.line - node.StartLine
+				if d < 0 {
+					d = -d
+				}
+				if d < bestDist {
+					bestDist = d
+					best = e.obj
+				}
+			}
+			if best == nil {
 				continue
 			}
 
 			didStamp := false
-			typeStr := types.TypeString(obj.Type(), nil)
-			if typeStr != "" && typeStr != "invalid type" {
+			if typeStr := types.TypeString(best.Type(), nil); typeStr != "" && typeStr != "invalid type" {
 				semantic.EnrichNodeMeta(node, "semantic_type", typeStr, p.Name())
 				result.NodesEnriched++
 				didStamp = true
 			}
-
 			// Add return type for functions.
-			if fn, ok := obj.(*types.Func); ok {
-				sig, ok := fn.Type().(*types.Signature)
-				if ok && sig.Results().Len() > 0 {
-					retType := types.TypeString(sig.Results(), nil)
-					semantic.EnrichNodeMeta(node, "return_type", retType, p.Name())
+			if fn, ok := best.(*types.Func); ok {
+				if sig, ok := fn.Type().(*types.Signature); ok && sig.Results().Len() > 0 {
+					semantic.EnrichNodeMeta(node, "return_type", types.TypeString(sig.Results(), nil), p.Name())
 					didStamp = true
 				}
 			}
 			if didStamp {
 				stampedNodes = append(stampedNodes, node)
 			}
-
-			_ = ident // used in range
 		}
 	}
 	if len(stampedNodes) > 0 {
