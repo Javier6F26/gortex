@@ -121,7 +121,7 @@ jobs:
 
       - name: Bump version and push tag
         id: tag
-        uses: mathieudutour/github-tag-action@9ad30392a41f6f15e99e20f469f3f8d7e4dbc90d # v6
+        uses: mathieudutour/github-tag-action@v6.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: patch
