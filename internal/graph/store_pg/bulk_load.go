@@ -118,16 +118,22 @@ func (s *Store) BeginBulkLoad(repoPrefix string) {
 //   - !tableEmpty (repos 2+, warm restart): non-destructive merge
 //     (UNLOGGED staging → COPY FROM → INSERT INTO SELECT → drop staging)
 func (s *Store) FlushBulk(repoPrefix string) error {
+	s.writeMu.Lock()
+
 	bs := s.bulk[repoPrefix]
 	if bs == nil {
+		s.writeMu.Unlock()
 		return fmt.Errorf("store_pg: FlushBulk without BeginBulkLoad for %q", repoPrefix)
 	}
-	defer func() { delete(s.bulk, repoPrefix) }()
+	delete(s.bulk, repoPrefix)
+	s.writeMu.Unlock()
 
 	if len(bs.nodes) == 0 && len(bs.edges) == 0 {
 		return nil
 	}
 
+	// Re-acquire writeMu for the actual PostgreSQL work (schema swaps,
+	// COPY FROM, etc.).
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

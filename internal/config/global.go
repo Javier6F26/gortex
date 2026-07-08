@@ -2,12 +2,14 @@ package config
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 
@@ -257,7 +259,10 @@ func (gc *GlobalConfig) ConfigPath() string {
 }
 
 // Save writes the GlobalConfig to disk, creating the directory if needed.
-// Uses a file-level mutex to prevent concurrent writes.
+// Uses a file-level mutex + cross-process flock to prevent concurrent
+// writes. Writes atomically (unique temp + rename) so a crash mid-write
+// never leaves a truncated config.yaml, and a unique temp name per call
+// ensures concurrent processes never race on the same .tmp file.
 func (gc *GlobalConfig) Save() error {
 	globalConfigMu.Lock()
 	defer globalConfigMu.Unlock()
@@ -269,16 +274,118 @@ func (gc *GlobalConfig) Save() error {
 		return fmt.Errorf("creating config directory %s: %w", dir, err)
 	}
 
+	lockF, err := lockGlobalConfig(path)
+	if err != nil {
+		return fmt.Errorf("acquiring config lock: %w", err)
+	}
+	defer unlockGlobalConfig(lockF)
+
 	data, err := yaml.Marshal(gc)
 	if err != nil {
 		return fmt.Errorf("marshaling global config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("writing global config to %s: %w", path, err)
+	tmp := fmt.Sprintf("%s.%d.tmp", path, rand.Int63())
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("writing global config to %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming global config into %s: %w", path, err)
 	}
 
 	return nil
+}
+
+// GlobalUpdate safely reads, mutates, and persists the global config
+// under a cross-process flock.  This eliminates the read-modify-write
+// race between concurrent gortex track/untrack processes:
+//
+//	LOCK → READ latest from disk → MODIFY → WRITE atomically → UNLOCK
+//
+// Every writer sees the most recent on-disk state, so no process
+// can overwrite another's changes.
+//
+// Usage:
+//
+//	if err := config.GlobalUpdate(func(gc *config.GlobalConfig) error {
+//	    return gc.AddRepo(entry)
+//	}); err != nil { ... }
+func GlobalUpdate(mutate func(*GlobalConfig) error, configPath ...string) error {
+	path := DefaultGlobalConfigPath()
+	if len(configPath) > 0 && configPath[0] != "" {
+		path = configPath[0]
+	}
+
+	globalConfigMu.Lock()
+	defer globalConfigMu.Unlock()
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("creating config directory %s: %w", dir, err)
+	}
+
+	lockF, err := lockGlobalConfig(path)
+	if err != nil {
+		return fmt.Errorf("acquiring config lock: %w", err)
+	}
+	defer unlockGlobalConfig(lockF)
+
+	gc, err := LoadGlobal(path)
+	if err != nil {
+		return fmt.Errorf("reading global config: %w", err)
+	}
+
+	if err := mutate(gc); err != nil {
+		return err
+	}
+
+	data, err := yaml.Marshal(gc)
+	if err != nil {
+		return fmt.Errorf("marshaling global config: %w", err)
+	}
+
+	tmp := fmt.Sprintf("%s.%d.tmp", path, rand.Int63())
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("writing global config to %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming global config into %s: %w", path, err)
+	}
+
+	return nil
+}
+
+// lockGlobalConfig opens or creates a .lock file alongside path and
+// acquires an exclusive, blocking flock.  The caller must call
+// unlockGlobalConfig when done, even on error paths.
+//
+// A blocking flock is used so concurrent processes wait their turn
+// instead of busy-looping or failing.
+func lockGlobalConfig(path string) (*os.File, error) {
+	lockPath := path + ".lock"
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		_ = os.Remove(lockPath)
+		return nil, fmt.Errorf("flock %s: %w", lockPath, err)
+	}
+	return f, nil
+}
+
+// unlockGlobalConfig releases the flock and cleans up the lock file.
+func unlockGlobalConfig(f *os.File) {
+	if f == nil {
+		return
+	}
+	path := f.Name()
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+	_ = os.Remove(path)
 }
 
 // Validate checks the GlobalConfig for:

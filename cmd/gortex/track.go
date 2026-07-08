@@ -102,30 +102,27 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	//    that always succeeds with no daemon, so `gortex track` is
 	//    offline-safe — the durable source of truth is written before any
 	//    daemon contact.
-	gc, err := config.LoadGlobal()
-	if err != nil {
-		return fmt.Errorf("loading global config: %w", err)
-	}
-	already := false
-	for _, existing := range gc.Repos {
-		if existingAbs, _ := filepath.Abs(existing.Path); existingAbs == absPath {
-			already = true
-			break
-		}
-	}
+	//
+	//    GlobalUpdate runs the whole read-modify-write cycle under a
+	//    cross-process flock so concurrent gortex track processes never
+	//    corrupt config.yaml or lose each other's entries.
+	var already bool
 	var prefix string
-	if already {
-		prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
-	} else {
+	var repoCount int
+	if err := config.GlobalUpdate(func(gc *config.GlobalConfig) error {
+		repoCount = len(gc.Repos)
+		for _, existing := range gc.Repos {
+			if existingAbs, _ := filepath.Abs(existing.Path); existingAbs == absPath {
+				already = true
+				prefix = config.ResolvePrefix(config.RepoEntry{Path: absPath, Name: trackName})
+				return nil
+			}
+		}
 		entry := config.RepoEntry{Path: absPath}
 		switch {
 		case trackName != "":
 			entry.Name = trackName
 		case trackAsWorktree:
-			// The AsWorktree flag is not persisted, so pin the derived
-			// instance prefix as the entry Name now. The daemon reproduces
-			// it intrinsically for a declared-workspace worktree, but a
-			// forced (branch-tagged) instance must be recorded here.
 			base := config.ResolvePrefix(entry)
 			if name, sep := indexer.WorktreeInstanceName(absPath, base, declaredWorkspace(absPath), true); sep {
 				entry.Name = name
@@ -134,10 +131,10 @@ func runTrack(cmd *cobra.Command, args []string) error {
 		if err := gc.AddRepo(entry); err != nil {
 			return err
 		}
-		if err := gc.Save(); err != nil {
-			return fmt.Errorf("saving global config: %w", err)
-		}
 		prefix = config.ResolvePrefix(entry)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("saving global config: %w", err)
 	}
 
 	// 2. Best-effort daemon: bring it up (single-flight) and hand it the
@@ -167,7 +164,7 @@ func runTrack(cmd *cobra.Command, args []string) error {
 	// 3. Daemon unavailable (autostart off, spawn failed/timed out, or
 	//    the control hop failed). The repo is tracked on disk; tell the
 	//    user the daemon will pick it up later — success, not error.
-	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: len(gc.Repos), prefix: prefix, alreadyTracked: already})
+	emitTrackSummary(w, absPath, trackResult{configOnly: true, repoCount: repoCount, prefix: prefix, alreadyTracked: already})
 	return nil
 }
 
