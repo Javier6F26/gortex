@@ -105,6 +105,31 @@ jobs:
       - name: Build with GoMLX tag only (compat — some docs/scripts still pass it alone)
         run: go build -tags embeddings_gomlx -o gortex-gomlx-noxla ./cmd/gortex/
 
+  auto-tag:
+    # Only on push to main, after tests + lint pass.
+    # Computes the next semver tag from conventional commits and pushes it.
+    # The tag triggers release.yml (GoReleaser) which builds and publishes.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [test, lint]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag
+        uses: mathieudutour/github-tag-action@9ad30392a41f6f15e99e20f469f3f8d7e4dbc90d # v6
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+          release_branches: main
+
+    outputs:
+      tag: ${{ steps.tag.outputs.new_tag }}
+
   benchmark:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
