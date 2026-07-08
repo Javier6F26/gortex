@@ -2521,6 +2521,24 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		}
 	}
 
+	// When the shadow-swap is not taken but the store supports BulkLoader,
+	// wrap the entire parse phase in BeginBulkLoad/FlushBulk so that per-file
+	// AddBatch calls are buffered and flushed via COPY FROM instead of
+	// individual INSERTs. The shadow-swap path handles its own bulk bracket
+	// inside the deferred drain above.
+	if !shadowTaken {
+		if bl, ok := idx.graph.(graph.BulkLoader); ok {
+			bl.BeginBulkLoad()
+			defer func() {
+				if retErr == nil {
+					if ferr := bl.FlushBulk(); ferr != nil {
+						retErr = fmt.Errorf("indexer: flush bulk: %w", ferr)
+					}
+				}
+			}()
+		}
+	}
+
 	// Clear this repo's prior content rows before the per-file streaming
 	// appends below, so a full reindex (cold or warm) rebuilds the content
 	// index from a clean slate instead of accumulating stale sections.

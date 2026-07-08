@@ -205,6 +205,13 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
+
+	// In bulk mode, buffer rows in memory for later FlushBulk via COPY FROM.
+	if s.bulk != nil {
+		s.bufferBatchLocked(nodes, edges)
+		return
+	}
+
 	ctx := s.ctx
 	tx, err := s.pool.Begin(ctx)
 	if err != nil { panicOnFatal(err); return }
