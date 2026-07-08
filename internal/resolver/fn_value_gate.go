@@ -48,7 +48,27 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 		return 0
 	}
 	var landed []*graph.Edge
-	for _, e := range g.AllEdges() {
+	// Candidates sharing a file each want the same GetFileNodes(filePath)
+	// result. Fetching it fresh per candidate is a per-candidate SQL
+	// round-trip regardless of how few nodes the file has — a generated file
+	// with a large candidate count (a tree-sitter parser.c, an ORM-generated
+	// Go file) turns into hundreds of thousands of redundant queries against
+	// a handful of nodes. Cache per file for the life of this pass.
+	fileNodes := map[string][]*graph.Node{}
+	getFileNodes := func(filePath string) []*graph.Node {
+		if ns, ok := fileNodes[filePath]; ok {
+			return ns
+		}
+		ns := g.GetFileNodes(filePath)
+		fileNodes[filePath] = ns
+		return ns
+	}
+	// Every callback-candidate placeholder EmitFnValueCandidates emits is a
+	// graph.EdgeReferences edge (see languages.EmitFnValueCandidates), so a
+	// kind-scoped scan sees the same candidates as AllEdges() without paying
+	// to decode the graph's other edge kinds (calls, arg_of, member_of, ...) —
+	// several times the size of references alone on a large multi-repo graph.
+	for e := range g.EdgesByKind(graph.EdgeReferences) {
 		if e == nil || e.Meta == nil {
 			continue
 		}
@@ -86,7 +106,7 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 			if target = resolveFnValueSelfMember(g, e.From, name); target != "" {
 				conf, origin = 0.85, graph.OriginASTResolved
 			} else {
-				target = resolveFnValueName(g, e.FilePath, name)
+				target = resolveFnValueName(getFileNodes(e.FilePath), name)
 			}
 		case recvHint != "":
 			if target = resolveMemberByType(g, recvHint, name); target != "" {
@@ -96,7 +116,7 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 				conf = 0.45
 			}
 		default:
-			target = resolveFnValueName(g, e.FilePath, name)
+			target = resolveFnValueName(getFileNodes(e.FilePath), name)
 			if target == "" && ungated {
 				target = resolveFnValueCrossModule(g, name)
 				conf = 0.45
@@ -135,15 +155,16 @@ func ResolveFnValueCallbacks(g graph.Store) int {
 	return len(landed)
 }
 
-// resolveFnValueName returns the ID of a same-file function or method named
-// name, or "" when none exists. Same-file scope is the conservative default;
-// per-language capture extends the gate with imported-symbol and C-family
-// file-scope rules on top of this skeleton.
-func resolveFnValueName(g graph.Store, filePath, name string) string {
-	if filePath == "" || name == "" {
+// resolveFnValueName returns the ID of a function or method named name among
+// fileNodes (the caller's already-fetched same-file node list), or "" when
+// none exists. Same-file scope is the conservative default; per-language
+// capture extends the gate with imported-symbol and C-family file-scope
+// rules on top of this skeleton.
+func resolveFnValueName(fileNodes []*graph.Node, name string) string {
+	if name == "" {
 		return ""
 	}
-	for _, n := range g.GetFileNodes(filePath) {
+	for _, n := range fileNodes {
 		if n == nil {
 			continue
 		}

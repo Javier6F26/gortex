@@ -953,6 +953,9 @@ func (mi *MultiIndexer) RunGlobalGraphPasses(ctx context.Context) {
 	mi.logger.Info("global pass: framework dispatch synthesis",
 		zap.Int("edges", fwRep.Total),
 		zap.Any("per_synthesizer", fwRep.Per),
+		zap.Int64("gate_ms", fwRep.GateMillis),
+		zap.Int64("claim_ms", fwRep.ClaimMillis),
+		zap.Int64("demote_ms", fwRep.DemoteMillis),
 		zap.Duration("elapsed", time.Since(fwStart)))
 	// External-call placeholder synthesis (opt-in). Runs after the
 	// stub passes so only genuinely un-indexed external targets are
