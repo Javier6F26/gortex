@@ -76,8 +76,8 @@ func createTestSchema(t *testing.T) (string, string) {
 		t.Fatalf("create schema %s: %v", schemaName, err)
 	}
 	// Drop global extensions so we can re-create them in the test schema.
-	testRootPool.Exec(ctx, `DROP EXTENSION IF EXISTS pg_trgm CASCADE`)
-	testRootPool.Exec(ctx, `DROP EXTENSION IF EXISTS vector CASCADE`)
+	_, _ = testRootPool.Exec(ctx, `DROP EXTENSION IF EXISTS pg_trgm CASCADE`)
+	_, _ = testRootPool.Exec(ctx, `DROP EXTENSION IF EXISTS vector CASCADE`)
 	if _, err := testRootPool.Exec(ctx, fmt.Sprintf(`CREATE EXTENSION pg_trgm WITH SCHEMA %s`, schemaName)); err != nil {
 		t.Fatalf("create pg_trgm in %s: %v", schemaName, err)
 	}

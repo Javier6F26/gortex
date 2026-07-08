@@ -76,16 +76,6 @@ func OpenBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger, all
 	}
 }
 
-// isSqliteBackend reports whether name selects the on-disk sqlite store.
-func isSqliteBackend(name string) bool {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "sqlite", "sqlite3":
-		return true
-	default:
-		return false
-	}
-}
-
 // isOnDiskFileBackend reports whether name selects a backend backed by a
 // local file (sqlite, bbolt, etc.) that requires a cross-process flock.
 // Network backends like postgres manage concurrency internally.

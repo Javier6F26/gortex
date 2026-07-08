@@ -221,7 +221,7 @@ func restorePromotedMeta(n *graph.Node, p promotedNodeMeta) {
 type jsonbScanner map[string]any
 
 func (m *jsonbScanner) ScanBytes(data []byte) error {
-	if data == nil || len(data) == 0 {
+	if len(data) == 0 {
 		*m = nil
 		return nil
 	}

@@ -48,7 +48,7 @@ var errExtensionHint = errors.New(`store_pg: one or more required PostgreSQL ext
     CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
     CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-  For platform-specific install guides see docs/pg-setup.md.`)
+  For platform-specific install guides see docs/pg-setup.md`)
 
 func isExtensionError(err error) bool {
 	msg := err.Error()
