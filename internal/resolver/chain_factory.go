@@ -28,11 +28,11 @@ func ResolveFactoryChains(g graph.Store) int {
 	}
 	resolved := 0
 	var batch []graph.EdgeReindex
-	for _, e := range g.AllEdges() {
+	// Scoped to the two kinds this pass ever acts on (below), instead of
+	// AllEdges() decoding every kind in the graph — calls+references is a
+	// fraction of the total edge count on a large multi-repo graph.
+	for e := range edgesByKinds(g, []graph.EdgeKind{graph.EdgeCalls, graph.EdgeReferences}) {
 		if e == nil || e.Meta == nil {
-			continue
-		}
-		if e.Kind != graph.EdgeCalls && e.Kind != graph.EdgeReferences {
 			continue
 		}
 		if !graph.IsUnresolvedTarget(e.To) {

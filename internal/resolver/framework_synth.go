@@ -1,6 +1,10 @@
 package resolver
 
-import "github.com/zzet/gortex/internal/graph"
+import (
+	"time"
+
+	"github.com/zzet/gortex/internal/graph"
+)
 
 // Framework-dispatch synthesizer engine.
 //
@@ -317,6 +321,11 @@ func defaultFrameworkSynthesizers() []FrameworkSynthesizer {
 type SynthCount struct {
 	Name  string `json:"name"`
 	Edges int    `json:"edges"`
+	// Millis is how long this synthesizer's Synthesize call took. Named
+	// passes that land 0 edges are not free — many scan a shared edge/node
+	// kind across the whole graph before concluding there is nothing to
+	// bind — so this rides on every row, not just the ones with edges.
+	Millis int64 `json:"ms,omitempty"`
 }
 
 // FrameworkSynthReport is the aggregate result of one
@@ -332,6 +341,12 @@ type FrameworkSynthReport struct {
 	// tier because they attach to a same-named member of a type unrelated to
 	// the edge's receiver_type.
 	ReceiverGated int `json:"receiver_type_gated,omitempty"`
+	// GateMillis/ClaimMillis/DemoteMillis time the three tail passes that
+	// run once (not per-synthesizer) after the main loop, so a slow one
+	// doesn't hide behind the loop's aggregate elapsed.
+	GateMillis   int64 `json:"gate_ms,omitempty"`
+	ClaimMillis  int64 `json:"claim_ms,omitempty"`
+	DemoteMillis int64 `json:"demote_ms,omitempty"`
 }
 
 // RunFrameworkSynthesizers runs every registered framework synthesizer
@@ -343,19 +358,24 @@ func RunFrameworkSynthesizers(g graph.Store) FrameworkSynthReport {
 		return rep
 	}
 	for _, s := range defaultFrameworkSynthesizers() {
+		start := time.Now()
 		n := s.Synthesize(g)
-		rep.Per = append(rep.Per, SynthCount{Name: s.Name(), Edges: n})
+		rep.Per = append(rep.Per, SynthCount{Name: s.Name(), Edges: n, Millis: time.Since(start).Milliseconds()})
 		rep.Total += n
 	}
 	// Drop coincidental cross-language-family reference/import results before
 	// the claiming resolvers run, so a gated edge cannot be mistaken for a
 	// resolved placeholder downstream. Bridge synthesizers are exempt.
+	gateStart := time.Now()
 	rep.Gated = applyFrameworkFamilyGate(g)
+	rep.GateMillis = time.Since(gateStart).Milliseconds()
 	// Claiming resolvers run last — after every framework synthesizer has
 	// had its chance to consume a pre-stamped placeholder, but before
 	// external-call synthesis classifies the residual unresolved refs as
 	// external. Reported in registration order for determinism.
+	claimStart := time.Now()
 	claimed := RunClaimingResolvers(g)
+	rep.ClaimMillis = time.Since(claimStart).Milliseconds()
 	for _, r := range defaultClaimingResolvers() {
 		n := claimed[r.Name()]
 		rep.Per = append(rep.Per, SynthCount{Name: r.Name(), Edges: n})
@@ -363,7 +383,9 @@ func RunFrameworkSynthesizers(g graph.Store) FrameworkSynthReport {
 	}
 	// Receiver-type gate runs last: it corrects (demotes) already-bound C#
 	// member calls, so it must see the settled call graph.
+	demoteStart := time.Now()
 	rep.ReceiverGated = demoteCSharpMisattributedMemberCalls(g)
+	rep.DemoteMillis = time.Since(demoteStart).Milliseconds()
 	return rep
 }
 
