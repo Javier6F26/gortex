@@ -684,22 +684,27 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// Relative-import resolution for Python and Dart files. Runs
 	// before module attribution so internal-target stems never get
 	// mis-mapped to a phantom pypi/pub package.
+	ldStart := time.Now()
 	r.resolveRelativeImports()
+	ld1 := time.Now()
 
 	// Lua / Luau `require(...)` binding. Same settle window as the relative
 	// imports above; resolveRelativeImports never touches Lua, so this lands
 	// the Lua module/instance requires onto their indexed file nodes.
 	r.resolveLuaRequires()
+	ld2 := time.Now()
 
 	// Razor / Blazor `@using` namespace-cascade binding. Same settle window;
 	// binds simple-type references reachable only via an imported namespace.
 	r.resolveRazorUsings()
+	ld3 := time.Now()
 
 	// Module attribution for ecosystems without a CGO type-checker
 	// path (Python, Dart, …). Runs serially on the post-resolution
 	// graph so it sees the final `external::*` set after the
 	// dep-module bridge has had its chance.
 	r.attributeNonGoModuleImports()
+	ld4 := time.Now()
 
 	// Java override-dispatch fan-out. An ambiguous member call on a
 	// supertype-typed receiver (`x.toString()` with two candidate
@@ -708,12 +713,26 @@ func (r *Resolver) ResolveAll() *ResolveStats {
 	// hierarchy, the call-hierarchy semantics the language server presents.
 	// Runs after the guard so its ast_inferred edges are never reverted.
 	r.resolveJavaOverrideDispatch()
+	ld5 := time.Now()
 
 	// PHP dispatch resolution: bind ambiguous member/scoped calls the guard
 	// left unresolved via the class hierarchy — parent::/self:: up the extends
 	// chain, and interface/abstract/trait override families fanned out to
 	// every implementation. Same post-guard placement as the Java pass.
 	r.resolvePHPOverrideDispatch()
+	ld6 := time.Now()
+	// Diagnostic sub-phase breakdown of lang_dispatch_reconcile. Several of
+	// these passes independently EdgesByKind-scan the SAME kind (EdgeImports:
+	// relative_imports, lua_imports, razor_using, module_attribution all scan
+	// it) — this line exists to catch a future regression there, the same
+	// blind spot go_attribution's breakdown covers for its own six passes.
+	r.logger.Info("resolver: lang-dispatch sub-passes",
+		zap.Duration("relative_imports", ld1.Sub(ldStart)),
+		zap.Duration("lua_requires", ld2.Sub(ld1)),
+		zap.Duration("razor_usings", ld3.Sub(ld2)),
+		zap.Duration("nongo_module_imports", ld4.Sub(ld3)),
+		zap.Duration("java_override_dispatch", ld5.Sub(ld4)),
+		zap.Duration("php_override_dispatch", ld6.Sub(ld5)))
 
 	// Terminal-edge reconciliation: only a FULL (unscoped) pass has the global
 	// evidence to conclude an edge is permanently unbindable, so it durably
