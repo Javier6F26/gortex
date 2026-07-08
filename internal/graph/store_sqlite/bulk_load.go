@@ -50,6 +50,14 @@ var bulkDroppableIndexes = []bulkDroppableIndex{
 	{"edges_by_from", `CREATE INDEX IF NOT EXISTS edges_by_from ON edges(from_id, kind)`},
 	{"edges_by_to", `CREATE INDEX IF NOT EXISTS edges_by_to ON edges(to_id, kind)`},
 	{"edges_by_kind", `CREATE INDEX IF NOT EXISTS edges_by_kind ON edges(kind)`},
+	// Backs EdgesWithUnresolvedTarget — the resolver's main pending-edge
+	// collector, called on every full resolve. is_unresolved is a VIRTUAL
+	// generated column (see isUnresolvedColumnDDL); indexing it turns a
+	// full-table scan (the prior to_id-based OR query forced SQLite to
+	// abandon its index) into an index search whose bookmark lookups land
+	// in ascending rowid order (see isUnresolvedColumnDDL's doc comment for
+	// why that beats an equivalent-looking to_id-based index).
+	{"edges_by_unresolved", `CREATE INDEX IF NOT EXISTS edges_by_unresolved ON edges(is_unresolved)`},
 	// Partial index over exactly the not-yet-semantically-stamped nodes per
 	// repo. Stays small in steady state (most nodes end up stamped), so a
 	// future "unstamped nodes in this repo" query is an index scan over the

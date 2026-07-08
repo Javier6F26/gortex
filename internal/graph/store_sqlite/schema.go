@@ -1,5 +1,83 @@
 package store_sqlite
 
+import "database/sql"
+
+// isUnresolvedColumnDDL is the edges.is_unresolved generated column: a
+// VIRTUAL, indexed boolean mirroring graph.IsUnresolvedTarget's two shapes
+// (the bare `unresolved::Name` prefix and the multi-repo COPY-rewrite
+// `<repoPrefix>::unresolved::Name` infix), computed by SQLite itself from
+// to_id — no Go call site has to remember to keep it in sync. VIRTUAL, not
+// STORED: SQLite refuses `ALTER TABLE ADD COLUMN ... STORED` on a non-empty
+// table ("cannot add a STORED column"), which every real installed store is.
+// VIRTUAL has no such restriction and is just as fast here — the read path
+// always goes through the index below, and an index always stores its own
+// materialised key values regardless of whether the underlying column is
+// virtual or stored. Added via ensureEdgeColumns (ALTER TABLE) rather than
+// baked into schemaSQL's CREATE TABLE so one code path handles both a fresh
+// DB (column missing right after CREATE TABLE) and an existing one (column
+// missing from before this was introduced) identically — see
+// ensureNodeColumns for the same pattern on the nodes table.
+//
+// Measured on a real 26-repo store (2.57M edges, 847,684 unresolved, ~33%
+// selectivity): replacing the OR'd `to_id` range/LIKE query with
+// `is_unresolved = 1` cut EdgesWithUnresolvedTarget from 7.96s to 2.95s
+// (2.7x). The prior approach of splitting the OR into two to_id-based
+// queries (one indexed range, one LIKE) was WORSE (13.49s) despite a
+// better-looking EXPLAIN QUERY PLAN: at ~33% selectivity the to_id index's
+// matching rows are ordered by string value, so the mandatory per-row
+// bookmark lookup back into the main table is effectively random I/O. The
+// boolean column's matching rows are all rowid-tie-broken (identical index
+// key), so its bookmark lookups land in ascending rowid order — sequential,
+// not random. Same "SEARCH ... USING INDEX" in EXPLAIN QUERY PLAN either way;
+// only real measurement told them apart.
+const isUnresolvedColumnDDL = `is_unresolved INTEGER GENERATED ALWAYS AS (
+    CASE WHEN (to_id >= 'unresolved::' AND to_id < 'unresolved:;') OR to_id LIKE '%::unresolved::%' THEN 1 ELSE 0 END
+) VIRTUAL`
+
+// ensureEdgeColumns adds the is_unresolved generated column (and its index)
+// to an edges table created before it existed — which, since the column is
+// deliberately not in schemaSQL's CREATE TABLE (see isUnresolvedColumnDDL),
+// includes a freshly created table too. Mirrors ensureNodeColumns' PRAGMA +
+// conditional ALTER pattern, but queries table_xinfo rather than table_info:
+// table_info silently OMITS generated columns from its result set (verified
+// against the pinned modernc.org/sqlite driver — a reopened store's
+// is_unresolved column is invisible to table_info, so the existence check
+// always came back false and every reopen re-ran the ALTER, failing with
+// "duplicate column name"). table_xinfo lists every column, generated ones
+// included, with an extra hidden column (3 == generated) table_info doesn't
+// have.
+func ensureEdgeColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_xinfo(edges)`)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var (
+			cid, notnull, pk, hidden int
+			name, ctype              string
+			dflt                     sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk, &hidden); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if existing["is_unresolved"] {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE edges ADD COLUMN ` + isUnresolvedColumnDDL); err != nil {
+		return err
+	}
+	return nil
+}
+
 // schemaSQL is the canonical DDL applied on Open. Statements are
 // idempotent (IF NOT EXISTS) so they run cleanly against a fresh DB
 // and against an existing one.

@@ -300,6 +300,13 @@ func openWith(path string, current int, migrations []schemaMigration, allowRebui
 		_ = db.Close()
 		return nil, fmt.Errorf("sqlite node columns: %w", err)
 	}
+	// Same treatment for the edges table's is_unresolved generated column —
+	// must run before the droppable-index loop below, which creates an index
+	// over it.
+	if err := ensureEdgeColumns(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("sqlite edge columns: %w", err)
+	}
 	// Create the droppable secondary indexes from the shared set so their
 	// initial-creation DDL is byte-identical to the DDL the bulk-load fast
 	// path rebuilds them with (BeginBulkLoad drops these, FlushBulk
@@ -1806,17 +1813,18 @@ func (s *Store) NodesByKind(kind graph.NodeKind) iter.Seq[*graph.Node] {
 	}
 }
 
-// EdgesWithUnresolvedTarget yields edges whose target is an unresolved
-// stub in EITHER form: the bare `unresolved::X` (a half-open range scan
-// that seeks directly to the contiguous slice via the to_id b-tree) or
-// the multi-repo `<repo>::unresolved::X` rewrite (an infix LIKE — the
-// unresolved set is small, so the scan is cheap). Mirrors
-// graph.IsUnresolvedTarget over both shapes.
+// EdgesWithUnresolvedTarget yields edges whose target is an unresolved stub
+// in either form graph.IsUnresolvedTarget recognises. Filters on the
+// is_unresolved generated column (see isUnresolvedColumnDDL) rather than
+// re-deriving the to_id pattern match in SQL: measured 2.7x faster than the
+// equivalent to_id-based OR query on a real 26-repo store (7.96s -> 2.95s for
+// the same 847,684-row result) because the boolean index's bookmark lookups
+// land in ascending rowid order, unlike a to_id-ordered index's.
 func (s *Store) EdgesWithUnresolvedTarget() iter.Seq[*graph.Edge] {
 	return func(yield func(*graph.Edge) bool) {
 		out := s.queryEdgesSQL(`
 SELECT from_id, to_id, kind, file_path, line, confidence, confidence_label, origin, tier, cross_repo, meta
-FROM edges WHERE (to_id >= 'unresolved::' AND to_id < 'unresolved:;') OR to_id LIKE '%::unresolved::%'`)
+FROM edges WHERE is_unresolved = 1`)
 		for _, e := range out {
 			if !yield(e) {
 				return
