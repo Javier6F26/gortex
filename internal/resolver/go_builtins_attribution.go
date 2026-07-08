@@ -58,39 +58,55 @@ var goBuiltinConsts = map[string]struct{}{
 // biggest and the shorter ID is what most downstream `find_usages`
 // queries will type.
 func (r *Resolver) attributeGoBuiltins() {
-	// Go-only pass: skip the multi-kind edge scan entirely when the graph
-	// has no Go nodes (e.g. a TS/Python repo).
+	// Go-only pass: skip the scan entirely when the graph has no Go nodes
+	// (e.g. a TS/Python repo).
 	if !r.graphHasLanguage("go") {
 		return
 	}
 	materialised := map[string]struct{}{}
 	var batch []graph.EdgeReindex
 
-	// Every edge kind a builtin can be the target of. Type-system
-	// edges (typed_as / returns) carry type references; call /
-	// arg-of / value-flow carry function or const references.
-	for _, k := range []graph.EdgeKind{
-		graph.EdgeCalls,
-		graph.EdgeReferences,
-		graph.EdgeReads,
-		graph.EdgeArgOf,
-		graph.EdgeValueFlow,
-		graph.EdgeReturnsTo,
-		graph.EdgeTypedAs,
-		graph.EdgeReturns,
-		graph.EdgeInstantiates,
-		graph.EdgeCaptures,
-		graph.EdgeThrows,
-	} {
-		for e := range r.graph.EdgesByKind(k) {
-			if old := r.tryAttributeGoBuiltin(e, materialised); old != "" {
-				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
-			}
+	// tryAttributeGoBuiltin only ever acts on an edge whose To has the bare
+	// `unresolved::` prefix — every other edge is a guaranteed no-op. This
+	// used to scan every edge of each of the 11 candidate kinds below
+	// (resolved and unresolved alike) via 11 separate EdgesByKind calls;
+	// EdgesWithUnresolvedTarget's is_unresolved index (see isUnresolvedColumnDDL)
+	// already collects the exact superset in one indexed scan, so filtering
+	// to these kinds in Go is equivalent but skips every resolved edge and
+	// every kind this pass never inspects. IsUnresolvedTarget covers both
+	// the bare and repo-qualified forms; tryAttributeGoBuiltin's own prefix
+	// check still rejects the repo-qualified ones exactly as it always did.
+	for e := range r.graph.EdgesWithUnresolvedTarget() {
+		if e == nil {
+			continue
+		}
+		if _, ok := attributeGoBuiltinCandidateKinds[e.Kind]; !ok {
+			continue
+		}
+		if old := r.tryAttributeGoBuiltin(e, materialised); old != "" {
+			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
 		}
 	}
 	if len(batch) > 0 {
 		r.graph.ReindexEdges(batch)
 	}
+}
+
+// attributeGoBuiltinCandidateKinds is every edge kind a builtin can be the
+// target of. Type-system edges (typed_as / returns) carry type references;
+// call / arg-of / value-flow carry function or const references.
+var attributeGoBuiltinCandidateKinds = map[graph.EdgeKind]struct{}{
+	graph.EdgeCalls:        {},
+	graph.EdgeReferences:   {},
+	graph.EdgeReads:        {},
+	graph.EdgeArgOf:        {},
+	graph.EdgeValueFlow:    {},
+	graph.EdgeReturnsTo:    {},
+	graph.EdgeTypedAs:      {},
+	graph.EdgeReturns:      {},
+	graph.EdgeInstantiates: {},
+	graph.EdgeCaptures:     {},
+	graph.EdgeThrows:       {},
 }
 
 // attributeGoBuiltinsForFile is the single-file scope of attributeGoBuiltins:
