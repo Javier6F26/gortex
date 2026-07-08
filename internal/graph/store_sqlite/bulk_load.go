@@ -86,7 +86,8 @@ func (s *Store) beginWrite() (*sql.Tx, error) {
 // disabling crash durability under live, concurrently-readable rows would be
 // unsafe. In-memory stores have no WAL / on-disk B-tree pressure, so it is a
 // no-op there too.
-func (s *Store) BeginBulkLoad() {
+func (s *Store) BeginBulkLoad(repoPrefix string) {
+	_ = repoPrefix // SQLite bulk is store-global, not per-repo.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -156,7 +157,8 @@ func (s *Store) BeginBulkLoad() {
 // The pragma restore + connection release run unconditionally (defer), so a
 // failure mid-rebuild can never leave a connection stuck at synchronous=OFF
 // in the pool.
-func (s *Store) FlushBulk() error {
+func (s *Store) FlushBulk(repoPrefix string) error {
+	_ = repoPrefix // SQLite bulk is store-global, not per-repo.
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 

@@ -341,8 +341,8 @@ type BackendResolver interface {
 // interface is intentionally opt-in so the indexer can probe with a
 // type assertion and fall through to today's per-batch path uniformly.
 type BulkLoader interface {
-	BeginBulkLoad()
-	FlushBulk() error
+	BeginBulkLoad(repoPrefix string)
+	FlushBulk(repoPrefix string) error
 }
 
 // SymbolHit is a single full-text-search result: the matched node ID

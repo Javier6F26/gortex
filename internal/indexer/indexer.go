@@ -2395,7 +2395,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				zap.Int("shadow_nodes", shadowNodeCount),
 				zap.Int("shadow_edges", shadowEdgeCount),
 			)
-			bl.BeginBulkLoad()
+			bl.BeginBulkLoad(idx.RepoPrefix())
 			// Drain the shadow shard-by-shard so the indexer's hold on
 			// the 11-GB Linux-scale graph is released progressively
 			// instead of pinned until persist returns. The drain
@@ -2470,7 +2470,7 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				zap.String("repo", idx.RepoPrefix()),
 				zap.Duration("drain_elapsed", flushStart.Sub(drainStart)),
 			)
-			if ferr := bl.FlushBulk(); ferr != nil {
+			if ferr := bl.FlushBulk(idx.RepoPrefix()); ferr != nil {
 				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
 			}
 			idx.logger.Info("indexer: FlushBulk complete",
@@ -2528,10 +2528,10 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 	// inside the deferred drain above.
 	if !shadowTaken {
 		if bl, ok := idx.graph.(graph.BulkLoader); ok {
-			bl.BeginBulkLoad()
+			bl.BeginBulkLoad(idx.RepoPrefix())
 			defer func() {
 				if retErr == nil {
-					if ferr := bl.FlushBulk(); ferr != nil {
+					if ferr := bl.FlushBulk(idx.RepoPrefix()); ferr != nil {
 						retErr = fmt.Errorf("indexer: flush bulk: %w", ferr)
 					}
 				}
@@ -2893,9 +2893,9 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			idx.graph = chunkShadow
 			parseChunk(files[chunkStart:chunkEnd])
 			// Flush chunk to disk.
-			bl.BeginBulkLoad()
+			bl.BeginBulkLoad(idx.RepoPrefix())
 			streamingDisk.AddBatch(chunkShadow.AllNodes(), chunkShadow.AllEdges())
-			if err := bl.FlushBulk(); err != nil {
+			if err := bl.FlushBulk(idx.RepoPrefix()); err != nil {
 				return nil, fmt.Errorf("indexer: streaming-flush chunk %d..%d: %w", chunkStart, chunkEnd, err)
 			}
 		}

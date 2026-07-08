@@ -3,6 +3,7 @@ package store_pg
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/zzet/gortex/internal/graph"
@@ -27,8 +28,8 @@ import (
 var _ graph.BulkLoader = (*Store)(nil)
 
 // bulkState holds buffers accumulated during the bulk-load bracket.
-// Stored per-Store (s.bulk) so multiple Store instances in the same
-// process do not share state.
+// Stored per-repo (s.bulk[repoPrefix]) so concurrent repo indices
+// never interleave their buffers.
 type bulkState struct {
 	nodes      []*pgNodeRow
 	edges      []*pgEdgeRow
@@ -83,12 +84,12 @@ type pgEdgeRow struct {
 // Always activates bulk mode (no empty-table gate). The table-empty flag
 // captured here tells FlushBulk whether a destructive table swap is safe
 // (true) or a non-destructive merge is required (false).
-func (s *Store) BeginBulkLoad() {
-	// Re-entrancy guard: a second BeginBulkLoad without an intervening
-	// FlushBulk is a no-op.
-	if s.bulk != nil {
-		return
-	}
+func (s *Store) BeginBulkLoad(repoPrefix string) {
+	// Always create a fresh bulk state for this repo. Overwriting a stale
+	// entry is intentional: two checkouts of the same repo may share a
+	// prefix, and a prior FlushBulk (or a failed indexing pass) may have
+	// left an entry behind. A fresh buffer per BeginBulkLoad/FlushBulk
+	// cycle is the safe default.
 
 	// Capture whether the nodes table is empty so FlushBulk can choose
 	// between the destructive swap (safe on empty) and the non-destructive
@@ -101,7 +102,7 @@ func (s *Store) BeginBulkLoad() {
 		empty = false
 	}
 
-	s.bulk = &bulkState{
+	s.bulk[repoPrefix] = &bulkState{
 		nodes:      make([]*pgNodeRow, 0, 100000),
 		edges:      make([]*pgEdgeRow, 0, 100000),
 		tableEmpty: empty,
@@ -116,13 +117,14 @@ func (s *Store) BeginBulkLoad() {
 //     (UNLOGGED staging → COPY FROM → build indexes → swap → drop old)
 //   - !tableEmpty (repos 2+, warm restart): non-destructive merge
 //     (UNLOGGED staging → COPY FROM → INSERT INTO SELECT → drop staging)
-func (s *Store) FlushBulk() error {
-	if s.bulk == nil {
-		return fmt.Errorf("store_pg: FlushBulk without BeginBulkLoad")
+func (s *Store) FlushBulk(repoPrefix string) error {
+	bs := s.bulk[repoPrefix]
+	if bs == nil {
+		return fmt.Errorf("store_pg: FlushBulk without BeginBulkLoad for %q", repoPrefix)
 	}
-	defer func() { s.bulk = nil }()
+	defer func() { delete(s.bulk, repoPrefix) }()
 
-	if len(s.bulk.nodes) == 0 && len(s.bulk.edges) == 0 {
+	if len(bs.nodes) == 0 && len(bs.edges) == 0 {
 		return nil
 	}
 
@@ -147,7 +149,7 @@ func (s *Store) FlushBulk() error {
 		return fmt.Errorf("store_pg: bulk set maintenance_work_mem: %w", err)
 	}
 
-	if s.bulk.tableEmpty {
+	if bs.tableEmpty {
 		// ============================================================
 		// FAST PATH: destructive table swap (first repo, empty store).
 		// ============================================================
@@ -163,12 +165,12 @@ func (s *Store) FlushBulk() error {
 		}
 
 		// COPY FROM nodes.
-		if err := s.copyNodesBulk(ctx, tx); err != nil {
+		if err := s.copyNodesBulk(ctx, tx, bs); err != nil {
 			return err
 		}
 
 		// COPY FROM edges.
-		if err := s.copyEdgesBulk(ctx, tx); err != nil {
+		if err := s.copyEdgesBulk(ctx, tx, bs); err != nil {
 			return err
 		}
 
@@ -257,11 +259,25 @@ func (s *Store) FlushBulk() error {
 		}
 
 		// COPY FROM into staging (same fast protocol as the swap path).
-		if err := s.copyNodesBulk(ctx, tx); err != nil {
+		if err := s.copyNodesBulk(ctx, tx, bs); err != nil {
 			return err
 		}
-		if err := s.copyEdgesBulk(ctx, tx); err != nil {
+		if err := s.copyEdgesBulk(ctx, tx, bs); err != nil {
 			return err
+		}
+
+		// Deduplicate nodes in staging: keep the row with the smallest
+		// ctid per id group. COPY FROM has no ON CONFLICT support, and
+		// the INSERT below would fail with "ON CONFLICT DO UPDATE command
+		// cannot affect row a second time" when the same id appears more
+		// than once in the staging table.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM nodes_bulk a
+			USING nodes_bulk b
+			WHERE a.id = b.id
+			  AND a.ctid > b.ctid
+		`); err != nil {
+			return fmt.Errorf("store_pg: deduplicate nodes in staging: %w", err)
 		}
 
 		// Merge nodes from staging into the live table.
@@ -303,12 +319,12 @@ func (s *Store) FlushBulk() error {
 }
 
 // copyNodesBulk streams buffered node rows into the staging table via COPY FROM.
-func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx) error {
+func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx, bs *bulkState) error {
 	_, err := tx.CopyFrom(ctx,
 		pgx.Identifier{"nodes_bulk"},
 		parseCopyCols(nodeInsertCols),
-		pgx.CopyFromSlice(len(s.bulk.nodes), func(i int) ([]any, error) {
-			n := s.bulk.nodes[i]
+		pgx.CopyFromSlice(len(bs.nodes), func(i int) ([]any, error) {
+			n := bs.nodes[i]
 			return []any{
 				n.id, n.kind, n.name, n.qualName, n.filePath,
 				n.startLine, n.endLine, n.startCol, n.endCol, n.language,
@@ -326,12 +342,12 @@ func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx) error {
 }
 
 // copyEdgesBulk streams buffered edge rows into the staging table via COPY FROM.
-func (s *Store) copyEdgesBulk(ctx context.Context, tx pgx.Tx) error {
+func (s *Store) copyEdgesBulk(ctx context.Context, tx pgx.Tx, bs *bulkState) error {
 	_, err := tx.CopyFrom(ctx,
 		pgx.Identifier{"edges_bulk"},
 		parseCopyCols(edgeInsertCols),
-		pgx.CopyFromSlice(len(s.bulk.edges), func(i int) ([]any, error) {
-			e := s.bulk.edges[i]
+		pgx.CopyFromSlice(len(bs.edges), func(i int) ([]any, error) {
+			e := bs.edges[i]
 			return []any{
 				e.fromID, e.toID, e.kind, e.filePath, e.line,
 				e.confidence, e.confidenceLabel, e.origin, e.tier,
@@ -354,14 +370,14 @@ func (s *Store) AddBatchBulk(nodes []*graph.Node, edges []*graph.Edge) {
 
 // bufferBatchLocked appends nodes and edges to the bulk buffer.
 // The caller must hold s.writeMu.
-func (s *Store) bufferBatchLocked(nodes []*graph.Node, edges []*graph.Edge) {
+func (s *Store) bufferBatchLocked(bs *bulkState, nodes []*graph.Node, edges []*graph.Edge) {
 	for _, n := range nodes {
 		if n == nil || n.ID == "" || graph.IsProxyNode(n) {
 			continue
 		}
 		p, blobMeta := extractPromotedMeta(n.Meta)
 		metaBlob, _ := encodeMeta(blobMeta)
-		s.bulk.nodes = append(s.bulk.nodes, &pgNodeRow{
+		bs.nodes = append(bs.nodes, &pgNodeRow{
 			id: n.ID, kind: string(n.Kind), name: n.Name,
 			qualName: n.QualName, filePath: n.FilePath,
 			startLine: n.StartLine, endLine: n.EndLine,
@@ -381,7 +397,7 @@ func (s *Store) bufferBatchLocked(nodes []*graph.Node, edges []*graph.Edge) {
 		}
 		metaBlob, _ := encodeMeta(e.Meta)
 		crossRepo := e.CrossRepo
-		s.bulk.edges = append(s.bulk.edges, &pgEdgeRow{
+		bs.edges = append(bs.edges, &pgEdgeRow{
 			fromID: e.From, toID: e.To, kind: string(e.Kind),
 			filePath: e.FilePath, line: e.Line,
 			confidence: e.Confidence, confidenceLabel: e.ConfidenceLabel,
@@ -389,6 +405,31 @@ func (s *Store) bufferBatchLocked(nodes []*graph.Node, edges []*graph.Edge) {
 			crossRepo: crossRepo, metaJSON: metaBlob,
 		})
 	}
+}
+
+// bulkForBatch returns the bulkState for the repo that the given batch
+// belongs to, or nil when no bulk session is active for that repo.
+// The caller must hold s.writeMu.
+func (s *Store) bulkForBatch(nodes []*graph.Node, edges []*graph.Edge) *bulkState {
+	// Extract repo prefix from the first available source.
+	for _, n := range nodes {
+		if n != nil && n.RepoPrefix != "" {
+			return s.bulk[n.RepoPrefix]
+		}
+	}
+	for _, e := range edges {
+		if e == nil {
+			continue
+		}
+		// Edge From has the repo prefix baked in as the first segment.
+		// Format: "prefix/rest/of/id::Symbol"
+		if idx := strings.IndexByte(e.From, '/'); idx >= 0 {
+			if bs := s.bulk[e.From[:idx]]; bs != nil {
+				return bs
+			}
+		}
+	}
+	return nil
 }
 
 func parseCopyCols(cols string) []string {

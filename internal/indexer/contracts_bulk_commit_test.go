@@ -33,11 +33,11 @@ func newRecordingBulkGraph() *recordingBulkGraph {
 	return &recordingBulkGraph{Graph: graph.New()}
 }
 
-func (r *recordingBulkGraph) BeginBulkLoad() {
+func (r *recordingBulkGraph) BeginBulkLoad(repoPrefix string) {
 	r.calls = append(r.calls, "BeginBulkLoad")
 }
 
-func (r *recordingBulkGraph) FlushBulk() error {
+func (r *recordingBulkGraph) FlushBulk(repoPrefix string) error {
 	r.calls = append(r.calls, "FlushBulk")
 	return nil
 }

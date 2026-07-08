@@ -32,9 +32,11 @@ type Store struct {
 	memEstVal map[string]graph.RepoMemoryEstimate
 	memEstAt  time.Time
 	bundles *bundleCache
-	// bulk is non-nil only between BeginBulkLoad and FlushBulk.
-	// Per-instance so multiple Store instances coexist safely.
-	bulk *bulkState
+	// bulk holds per-repo bulk-load state, keyed by repo prefix.
+	// Each entry is non-nil only between BeginBulkLoad and FlushBulk
+	// for that repo. The map itself is safe for concurrent access
+	// because all reads/writes happen under writeMu.
+	bulk map[string]*bulkState
 }
 
 var _ graph.Store = (*Store)(nil)
@@ -54,6 +56,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			fingerprints: map[string]uint64{},
 			entries:      map[string]*bundleCacheEntry{},
 		},
+		bulk: make(map[string]*bulkState),
 	}
 	if err := s.ensureSchema(storeCtx); err != nil {
 		pool.Close()
@@ -207,8 +210,8 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	defer s.writeMu.Unlock()
 
 	// In bulk mode, buffer rows in memory for later FlushBulk via COPY FROM.
-	if s.bulk != nil {
-		s.bufferBatchLocked(nodes, edges)
+	if bs := s.bulkForBatch(nodes, edges); bs != nil {
+		s.bufferBatchLocked(bs, nodes, edges)
 		return
 	}
 

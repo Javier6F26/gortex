@@ -120,7 +120,7 @@ func TestBulkLoadDropsAndRebuildsIndexes(t *testing.T) {
 	}
 
 	// Engage the fast path on the empty store.
-	s.BeginBulkLoad()
+	s.BeginBulkLoad("")
 	if s.bulkConn == nil {
 		t.Fatal("fast path did not engage on empty store")
 	}
@@ -155,7 +155,7 @@ func TestBulkLoadDropsAndRebuildsIndexes(t *testing.T) {
 	nodes, edges := bulkFixture(2000, 4000)
 	s.AddBatch(nodes, edges)
 
-	if err := s.FlushBulk(); err != nil {
+	if err := s.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk: %v", err)
 	}
 	if s.bulkConn != nil {
@@ -196,7 +196,7 @@ func TestBulkLoadMatchesNonBulkCounts(t *testing.T) {
 	wantNodes, wantEdges := plain.NodeCount(), plain.EdgeCount()
 
 	bulk, _ := openTempStore(t)
-	bulk.BeginBulkLoad()
+	bulk.BeginBulkLoad("")
 	if bulk.bulkConn == nil {
 		t.Fatal("fast path did not engage on empty store")
 	}
@@ -205,7 +205,7 @@ func TestBulkLoadMatchesNonBulkCounts(t *testing.T) {
 	bulk.AddBatch(nodes[1500:], nil)
 	bulk.AddBatch(nil, edges[:3000])
 	bulk.AddBatch(nil, edges[3000:])
-	if err := bulk.FlushBulk(); err != nil {
+	if err := bulk.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk: %v", err)
 	}
 
@@ -223,7 +223,7 @@ func TestBulkLoadGatedToPopulatedStore(t *testing.T) {
 	nodes, edges := bulkFixture(50, 100)
 	s.AddBatch(nodes, edges)
 
-	s.BeginBulkLoad()
+	s.BeginBulkLoad("")
 	if s.bulkConn != nil {
 		t.Fatal("fast path engaged on a populated store; must be a no-op")
 	}
@@ -237,7 +237,7 @@ func TestBulkLoadGatedToPopulatedStore(t *testing.T) {
 	if got := pragmaIntDB(t, s.db, "synchronous"); got != 1 {
 		t.Fatalf("synchronous = %d on populated store, want 1 (NORMAL)", got)
 	}
-	if err := s.FlushBulk(); err != nil {
+	if err := s.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk no-op returned error: %v", err)
 	}
 }
@@ -250,11 +250,11 @@ func TestBulkLoadInMemoryIsNoOp(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	s.BeginBulkLoad()
+	s.BeginBulkLoad("")
 	if s.bulkConn != nil {
 		t.Fatal("fast path engaged on an in-memory store")
 	}
-	if err := s.FlushBulk(); err != nil {
+	if err := s.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk: %v", err)
 	}
 }
@@ -270,12 +270,12 @@ func TestBulkLoadWarmRestartLoadsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	s.BeginBulkLoad()
+	s.BeginBulkLoad("")
 	if s.bulkConn == nil {
 		t.Fatal("fast path did not engage on empty store")
 	}
 	s.AddBatch(nodes, edges)
-	if err := s.FlushBulk(); err != nil {
+	if err := s.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk: %v", err)
 	}
 	wantNodes, wantEdges := s.NodeCount(), s.EdgeCount()
@@ -300,11 +300,11 @@ func TestBulkLoadWarmRestartLoadsClean(t *testing.T) {
 	}
 	integrityOK(t, reopened.db)
 	// A populated store on reopen must NOT engage the fast path.
-	reopened.BeginBulkLoad()
+	reopened.BeginBulkLoad("")
 	if reopened.bulkConn != nil {
 		t.Fatal("fast path engaged on warm restart (populated store)")
 	}
-	_ = reopened.FlushBulk()
+	_ = reopened.FlushBulk("")
 }
 
 // TestBulkLoadPersistSpeed is the persist-speed evidence: it times the plain
@@ -326,9 +326,9 @@ func TestBulkLoadPersistSpeed(t *testing.T) {
 
 	bulk, _ := openTempStore(t)
 	t1 := time.Now()
-	bulk.BeginBulkLoad()
+	bulk.BeginBulkLoad("")
 	bulk.AddBatch(nodes, edges)
-	if err := bulk.FlushBulk(); err != nil {
+	if err := bulk.FlushBulk(""); err != nil {
 		t.Fatalf("FlushBulk: %v", err)
 	}
 	bulkDur := time.Since(t1)
@@ -370,9 +370,9 @@ func BenchmarkPersistFixture(b *testing.B) {
 			}
 			b.StartTimer()
 			if bulk {
-				s.BeginBulkLoad()
+				s.BeginBulkLoad("")
 				s.AddBatch(nodes, edges)
-				if err := s.FlushBulk(); err != nil {
+				if err := s.FlushBulk(""); err != nil {
 					b.Fatalf("FlushBulk: %v", err)
 				}
 			} else {
