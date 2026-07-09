@@ -143,7 +143,11 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 			}
 			total += w * classMult * raw
 		}
-		c.Score = total
+		// Multiplicative supporting-cast demotion, applied after the
+		// additive signal sum: a test file that out-scores the real
+		// implementation on shared vocabulary is pushed below it rather
+		// than merely nudged. 1.0 (no-op) for every non-test candidate.
+		c.Score = total * supportFileDemotion(c, ctx)
 	}
 
 	sort.SliceStable(cands, func(i, j int) bool {
