@@ -88,6 +88,23 @@ type Context struct {
 	// treated as 1.0 everywhere.
 	ComboBoostOf func(nodeID string) float64
 
+	// EmbedText returns a normalised embedding vector for arbitrary
+	// text, or nil when it cannot embed. It is the substrate for the
+	// on-the-fly SemanticCosineSignal: the signal assembles a compact
+	// text for each candidate (name + qualname + path + signature) and
+	// embeds it here, then cosines the result against QueryVec. Wired by
+	// the MCP server to the always-available in-process static provider;
+	// nil disables the semantic-cosine channel (it then sits at 0). The
+	// closure must be safe for concurrent use.
+	EmbedText func(text string) []float32
+
+	// QueryVec is the pre-computed embedding of the raw query, produced
+	// once per request with the same provider EmbedText wraps. Empty
+	// disables the semantic-cosine channel. Kept on the Context so the
+	// per-candidate signal pays only for one candidate embed + one dot
+	// product, never a second query embed.
+	QueryVec []float32
+
 	// Centrality runs a Random-Walk-with-Restart (Personalized
 	// PageRank) from the given seed node IDs and returns each reachable
 	// node's proximity score. It is the data source for ProximitySignal.
