@@ -25,31 +25,50 @@ type OverloadProminenceSignal struct{}
 
 func (OverloadProminenceSignal) Name() string { return SignalOverload }
 
-func (OverloadProminenceSignal) Contribute(_ string, c *Candidate, ctx *Context) float64 {
+func (OverloadProminenceSignal) Contribute(query string, c *Candidate, ctx *Context) float64 {
 	if c == nil || c.Node == nil || ctx == nil {
 		return 0
 	}
-	// Fire only on an identifier query — an exact-name lookup where
-	// overload disambiguation is the whole problem. On a concept query
-	// the batch's incidental same-name pairs are noise, and a blanket
-	// prominence boost there would fight the semantic channel that is
-	// doing the real work; scoping to the symbol class keeps the two
-	// out of each other's way.
-	if ctx.QueryClass != QueryClassSymbol {
-		return 0
-	}
 	nm := lowerName(c.Node.Name)
-	if nm == "" || ctx.nameGroupCount[nm] <= 1 {
+	if nm == "" {
 		return 0
 	}
+	// Identifier query: fire only on a genuine same-name collision —
+	// an exact-name lookup where overload disambiguation is the whole
+	// problem. On any other class the batch's incidental same-name
+	// pairs are noise, and a blanket prominence boost would fight the
+	// semantic channel that is doing the real work.
+	if ctx.QueryClass == QueryClassSymbol {
+		if ctx.nameGroupCount[nm] <= 1 {
+			return 0
+		}
+		return prominenceScore(c.Node)
+	}
+	// Degraded-identifier profile: a multi-word query whose tokens
+	// concatenate to exactly this candidate's name is a case-split
+	// identifier lookup ("should bind body with" → ShouldBindBodyWith),
+	// not a concept query, for THIS candidate. Longer same-stem
+	// variants (ShouldBindBodyWithJSON) share every query token and can
+	// out-BM25 the exact match; the exact-match floor puts the queried
+	// identifier back on top, with prominence breaking ties among
+	// several exact matches (the overload group).
+	if exactDegradedNameMatch(query, nm) {
+		return 0.55 + 0.45*prominenceScore(c.Node)
+	}
+	return 0
+}
+
+// prominenceScore rates a symbol's intrinsic answer-worthiness in
+// [0, 1] from AST-tier facts only.
+func prominenceScore(n *graph.Node) float64 {
 	var s float64
-	if isLikelyExported(c.Node) {
+	if isLikelyExported(n) {
 		s += 0.5
 	}
-	if !isTestPath(c.Node.FilePath) {
+	if !isTestPath(n.FilePath) {
 		s += 0.3
 	}
-	switch c.Node.Kind {
+	switch n.Kind {
 	case graph.KindFunction, graph.KindMethod, graph.KindType, graph.KindInterface:
 		s += 0.2
 	}
@@ -57,6 +76,50 @@ func (OverloadProminenceSignal) Contribute(_ string, c *Candidate, ctx *Context)
 		s = 1
 	}
 	return s
+}
+
+// exactDegradedNameMatch reports whether a multi-word query's tokens
+// concatenate to exactly the (already-lowercased) candidate name,
+// comparing alphanumeric runes only so snake_case names match their
+// space-split degraded form too. Single-token queries return false —
+// they are the symbol class's territory.
+func exactDegradedNameMatch(query, lowerNodeName string) bool {
+	qa := alnumFold(query, true)
+	if qa == "" {
+		return false
+	}
+	return qa == alnumFold(lowerNodeName, false)
+}
+
+// alnumFold lowercases and strips every non-alphanumeric rune. When
+// requireMultiToken is set it returns "" unless the input had 2+
+// whitespace-separated tokens (the degraded-identifier shape).
+func alnumFold(s string, requireMultiToken bool) string {
+	var b []rune
+	tokens := 0
+	inTok := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			inTok = false
+			continue
+		}
+		if !inTok {
+			tokens++
+			inTok = true
+		}
+		switch {
+		case r >= 'a' && r <= 'z' || r >= '0' && r <= '9':
+			b = append(b, r)
+		case r >= 'A' && r <= 'Z':
+			b = append(b, unicode.ToLower(r))
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b = append(b, unicode.ToLower(r))
+		}
+	}
+	if requireMultiToken && tokens < 2 {
+		return ""
+	}
+	return string(b)
 }
 
 // lowerName lowercases a symbol name without pulling in strings for a
