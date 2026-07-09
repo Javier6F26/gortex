@@ -167,7 +167,76 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 		}
 		return cands[i].Node.ID < cands[j].Node.ID
 	})
+	// Bounded file diversification, concept queries only: an intent
+	// query answered by one big file's symbols crowds every other file
+	// out of the head. Each file keeps its two best rows untouched;
+	// from the third on, a row is pushed down by a bounded positional
+	// penalty so a fresh file's best candidate can enter the head.
+	// Identifier / path queries are exempt — an exact-token query that
+	// legitimately resolves to many rows of one file (overloads in one
+	// implementation file) must keep its literal order.
+	if ctx.QueryClass == QueryClassConcept {
+		applyFileDiversity(cands)
+	}
 	return cands
+}
+
+// fileDiversityAllowed is how many rows one file keeps un-demoted at
+// the head of the ranking; fileDiversityStep is the positional penalty
+// each further same-file row accrues. Both tuned on the discovery
+// evaluation corpus with one tier per repo held out: allowed=2 with
+// step=3 lifted the held-out intent tier's file-hit without moving any
+// exact-identifier metric, while step>=4 began trading away symbol-level
+// hits for file coverage.
+const (
+	fileDiversityAllowed = 2
+	fileDiversityStep    = 3
+)
+
+// applyFileDiversity re-orders a score-sorted candidate slice by
+// effective rank: a candidate whose file already holds
+// fileDiversityAllowed higher-ranked candidates is demoted by
+// fileDiversityStep positions per extra same-file row above it
+// (xQuAD-lite — bounded, not a full round-robin, so the strongest
+// same-file rows keep their positions and symbol-level hits are
+// preserved). In-place, stable for untouched rows.
+func applyFileDiversity(cands []*Candidate) {
+	if len(cands) < 3 {
+		return
+	}
+	seen := make(map[string]int, len(cands))
+	eff := make([]int, len(cands))
+	demoted := false
+	for i, c := range cands {
+		eff[i] = i
+		if c == nil || c.Node == nil || c.Node.FilePath == "" {
+			continue
+		}
+		above := seen[c.Node.FilePath]
+		seen[c.Node.FilePath] = above + 1
+		if above >= fileDiversityAllowed {
+			eff[i] = i + fileDiversityStep*(above-fileDiversityAllowed+1)
+			demoted = true
+		}
+	}
+	if !demoted {
+		return
+	}
+	idx := make([]int, len(cands))
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		if eff[idx[a]] != eff[idx[b]] {
+			return eff[idx[a]] < eff[idx[b]]
+		}
+		return idx[a] < idx[b]
+	})
+	out := make([]*Candidate, len(cands))
+	for i, j := range idx {
+		out[i] = cands[j]
+	}
+	copy(cands, out)
 }
 
 // sameSliceHeader reports whether a and b alias the same underlying

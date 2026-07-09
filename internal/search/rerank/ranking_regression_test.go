@@ -123,6 +123,40 @@ func TestOverloadProminence_FiresOnlyOnCollision(t *testing.T) {
 	}
 }
 
+func TestApplyFileDiversity_BoundedDemotion(t *testing.T) {
+	mk := func(id, fp string) *Candidate {
+		return &Candidate{Node: &graph.Node{ID: id, FilePath: fp}}
+	}
+	// Five rows from big.go crowd the head; small.go sits at rank 5.
+	cands := []*Candidate{
+		mk("b1", "big.go"), mk("b2", "big.go"), mk("b3", "big.go"),
+		mk("b4", "big.go"), mk("b5", "big.go"), mk("s1", "small.go"),
+	}
+	applyFileDiversity(cands)
+	// The first two big.go rows are untouched; the third-and-later are
+	// demoted so small.go's best row enters the head.
+	if cands[0].Node.ID != "b1" || cands[1].Node.ID != "b2" {
+		t.Fatalf("top-2 of the crowding file must keep their rank, got %s,%s",
+			cands[0].Node.ID, cands[1].Node.ID)
+	}
+	pos := map[string]int{}
+	for i, c := range cands {
+		pos[c.Node.ID] = i
+	}
+	if pos["s1"] >= pos["b4"] {
+		t.Fatalf("fresh file's best row must outrank the 4th crowding row: %v", pos)
+	}
+	// A list with no file holding 3+ rows is untouched.
+	orig := []*Candidate{mk("a", "x.go"), mk("b", "y.go"), mk("c", "x.go"), mk("d", "y.go")}
+	want := []string{"a", "b", "c", "d"}
+	applyFileDiversity(orig)
+	for i, c := range orig {
+		if c.Node.ID != want[i] {
+			t.Fatalf("no-crowding list must be stable, got %v at %d", c.Node.ID, i)
+		}
+	}
+}
+
 // TestPipeline_SemanticLiftsConceptTarget locks in the end-to-end
 // behaviour: with the semantic channel wired, a concept query lifts the
 // semantically-related candidate above a lexically-adjacent but unrelated
