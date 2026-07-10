@@ -19,7 +19,7 @@ func minDocx(bodyXML string) []byte {
 	// [Content_Types].xml — declare all needed types.
 	_ = w.SetComment("")
 	ct, _ := w.Create("[Content_Types].xml")
-	ct.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	_, _ = ct.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
@@ -28,20 +28,20 @@ func minDocx(bodyXML string) []byte {
 
 	// _rels/.rels — root relationship to document.xml.
 	rels, _ := w.Create("_rels/.rels")
-	rels.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	_, _ = rels.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>`))
 
 	// word/_rels/document.xml.rels — empty for no images.
 	wcrels, _ := w.Create("word/_rels/document.xml.rels")
-	wcrels.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	_, _ = wcrels.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
 </Relationships>`))
 
 	// word/document.xml — the main content.
 	doc, _ := w.Create("word/document.xml")
-	doc.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+	_, _ = doc.Write([]byte(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
             xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
