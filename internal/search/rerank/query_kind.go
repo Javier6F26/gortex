@@ -414,7 +414,7 @@ func ClassWeightMultiplier(c QueryClass, signal string) float64 {
 	switch signal {
 	case SignalBM25:
 		return cw.bm25
-	case SignalSemantic:
+	case SignalSemantic, SignalSemanticCosine:
 		return cw.semantic
 	case SignalProximity:
 		if cw.proximity == 0 {
@@ -445,6 +445,7 @@ func ClassWeightMultiplier(c QueryClass, signal string) float64 {
 var proseWeightTable = map[string]float64{
 	SignalBM25:           1.25,
 	SignalSemantic:       1.30,
+	SignalSemanticCosine: 1.30,
 	SignalAPISignature:   0.0,
 	SignalTypeSignature:  0.0,
 	SignalDefinitionBias: 0.0,
@@ -489,7 +490,7 @@ func continuousClassMultiplier(alpha float64, signal string) float64 {
 	switch signal {
 	case SignalBM25:
 		return 1.0 + frac*(maxBM25-1.0)
-	case SignalSemantic:
+	case SignalSemantic, SignalSemanticCosine:
 		return 1.0 - frac*(1.0-minSem)
 	case SignalProximity:
 		// Interpolate proximity from the concept (NL) anchor down to

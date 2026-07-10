@@ -1502,6 +1502,18 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		// in/out edge pair through the bundle phase. Tighten to
 		// +5 so the post-filter slack still leaves a full page.
 		fetchLimit = offset + limit + 5
+	} else {
+		// Concept / degraded-identifier query with no LLM assist: the
+		// always-on semantic-cosine rerank still runs, so widen the BM25
+		// head to a full rerank pool. A natural-language intent query
+		// ("decode bson request body") often has its target sitting past
+		// the default +10 over-fetch; the semantic channel can only lift
+		// a candidate it actually sees, so this pool is what turns a
+		// BM25-rank-15 file hit into a top-5 result. Cheap: ~40 extra
+		// FTS rows and their edge pairs, well inside the latency budget.
+		if want := offset + limit + semanticRerankPool; want > fetchLimit {
+			fetchLimit = want
+		}
 	}
 
 	// Expansion terms feeding the BM25 OR-merge: LLM-derived synonyms
