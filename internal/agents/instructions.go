@@ -71,6 +71,8 @@ A Gortex daemon is configured machine-wide via the ` + "`" + `gortex` + "`" + ` 
 | Multiple reads to explore a task    | ` + "`" + `smart_context` + "`" + ` (one call)               |
 | ` + "`" + `Edit` + "`" + ` / ` + "`" + `Write` + "`" + ` source             | ` + "`" + `edit_file` + "`" + ` / ` + "`" + `write_file` + "`" + ` / ` + "`" + `edit_symbol` + "`" + ` / ` + "`" + `rename_symbol` + "`" + ` / ` + "`" + `batch_edit` + "`" + ` |
 
+**CLI fallback (no MCP):** every tool above is reachable from a shell as ` + "`" + `gortex call <tool> --arg k=v` + "`" + ` (e.g. ` + "`" + `gortex call read_file --arg path=<file>` + "`" + `) — there is no bare ` + "`" + `gortex <tool>` + "`" + ` verb.
+
 Graph queries *narrow scope*; they do not replace reading the implementation. For the symbol you are about to change or depend on — especially behavior-critical code (migrations, retry / fallback / error-recovery paths, concurrency, compatibility shims) — read the real body with ` + "`" + `get_symbol_source` + "`" + ` and do NOT pass ` + "`" + `compress_bodies:true` + "`" + `, which elides the branches that carry the risk. ` + "`" + `format:"gcx"` + "`" + ` (compact wire, ~27% fewer tokens) and ` + "`" + `compress_bodies:true` + "`" + ` (body-eliding) exist on the read / list tools; the parameter legend is in the MCP server instructions.
 
 ## MANDATORY: Session + development memory
@@ -111,6 +113,8 @@ Gortex runs as an MCP server for this repository. You MUST prefer graph queries 
 | ` + "`" + `Read` + "`" + ` a non-indexed / raw file     | ` + "`" + `read_file` + "`" + `                              |
 | 5-10 reads to explore a task        | ` + "`" + `smart_context` + "`" + ` (one call)               |
 | ` + "`" + `Edit` + "`" + ` / ` + "`" + `Write` + "`" + ` source             | ` + "`" + `edit_file` + "`" + ` / ` + "`" + `write_file` + "`" + ` / ` + "`" + `edit_symbol` + "`" + ` / ` + "`" + `rename_symbol` + "`" + ` / ` + "`" + `batch_edit` + "`" + ` |
+
+**CLI fallback (no MCP):** every tool above is reachable from a shell as ` + "`" + `gortex call <tool> --arg k=v` + "`" + ` (e.g. ` + "`" + `gortex call read_file --arg path=<file>` + "`" + `) — there is no bare ` + "`" + `gortex <tool>` + "`" + ` verb.
 
 The graph narrows scope; read the real body with ` + "`" + `get_symbol_source` + "`" + ` before you change or depend on a symbol — especially behavior-critical code (migrations, retry / fallback, concurrency), where ` + "`" + `compress_bodies:true` + "`" + ` would elide the risky branches. ` + "`" + `format:"gcx"` + "`" + ` and ` + "`" + `compress_bodies:true` + "`" + ` exist on the read / list tools — the parameter legend is in the MCP server instructions.
 

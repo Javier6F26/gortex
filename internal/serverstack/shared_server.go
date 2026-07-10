@@ -303,6 +303,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 			RefuteUnconfirmed: conf.Semantic.RefuteUnconfirmed,
 			ExcludeGlobs:      conf.Semantic.ExcludeGlobs,
 			LSPSweep:          conf.Semantic.LSPSweep,
+			EagerLSP:          eagerLSPEnabled(conf.Semantic),
 		}
 		for _, pc := range conf.Semantic.Providers {
 			out := semantic.ProviderConfig{
@@ -331,14 +332,17 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		if cfg.SemanticMode == "callgraph" {
 			goMode = goanalysis.ModeCallGraph
 		}
-		goProvider := goanalysis.NewProvider(goMode, false, logger)
-		// The go/packages "go-types" provider is a full `go list ./...` +
-		// go/types pass over the module on every index — tens of seconds per
-		// Go module per warmup, and on an already-resolved graph it routinely
-		// confirms zero new edges (the always-on go-ast-types tree-sitter
-		// floor already covers Go). Keep it as the contracts binding resolver,
-		// but only register it for enrichment when explicitly opted in.
-		if goTypesEnrichEnabled(conf.Semantic) {
+		goProvider := goanalysis.NewProvider(goMode, goTypesIncludeTests(), logger)
+		// The go/packages "go-types" provider owns Go enrichment when the
+		// toolchain is present: it type-checks the module once in-process and
+		// stamps every symbol's exact type plus resolves stdlib/dep calls to
+		// real nodes, in a fraction of the time the per-request gopls LSP pass
+		// takes (which additionally leaves external calls as dead stubs). As an
+		// eager provider it claims the "go" language slot, so the LSP router's
+		// gopls spec is skipped as a gap-filler and never spawns. Registration
+		// is gated on Available() (a `go` toolchain on PATH): without it the
+		// slot stays open and gopls / the tree-sitter floor serve Go instead.
+		if goTypesEnrichEnabled(conf.Semantic) && goProvider.Available() {
 			semMgr.RegisterProvider(goProvider)
 		}
 		contracts.SetBindingResolver(goProvider)
@@ -665,13 +669,42 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	return s, nil
 }
 
-// goTypesEnrichEnabled reports whether the heavyweight go/packages
-// "go-types" enrichment provider should be registered. Default OFF — the
-// always-on go-ast-types tree-sitter floor serves Go resolution at a
-// fraction of the cost. GORTEX_GO_TYPES=1/0 overrides the config key.
+// goTypesEnrichEnabled reports whether the in-process go/packages "go-types"
+// enrichment provider should be registered for Go. Default ON: it is both
+// faster and more complete than driving gopls over LSP (see the registration
+// site), and registration is separately gated on the toolchain being present.
+// Precedence: GORTEX_GO_TYPES=1/0 wins, then an explicit semantic.go_types
+// config value, then the on-by-default.
 func goTypesEnrichEnabled(sem config.SemanticConfig) bool {
 	if v := os.Getenv("GORTEX_GO_TYPES"); v != "" {
 		return v == "1" || strings.EqualFold(v, "true")
 	}
-	return sem.GoTypesEnabledOrDefault()
+	if sem.GoTypes != nil {
+		return *sem.GoTypes
+	}
+	return true
+}
+
+// goTypesIncludeTests reports whether the go-types provider should load
+// _test.go files (and each package's external test variant). Loading them
+// roughly doubles the go/packages work per module, so it is OFF by default;
+// GORTEX_GO_TYPES_TESTS=1 opts in to stamp test-file symbols too (LSP hover
+// covers them, so the opt-in closes that coverage gap when it matters).
+func goTypesIncludeTests() bool {
+	return os.Getenv("GORTEX_GO_TYPES_TESTS") == "1" ||
+		strings.EqualFold(os.Getenv("GORTEX_GO_TYPES_TESTS"), "true")
+}
+
+// eagerLSPEnabled reports whether the subprocess LSP servers run during the
+// synchronous enrichment pass. Default OFF — LSP is the slowest part of a cold
+// index and its net-new value over the in-process tiers (go-types for Go, the
+// tree-sitter floor for every language) is narrow, so it is kept off the
+// cold/warm-start path and the router lazy-spawns a server on demand instead.
+// GORTEX_LSP_EAGER=1 (or semantic.eager_lsp in config) restores the eager
+// behaviour.
+func eagerLSPEnabled(sem config.SemanticConfig) bool {
+	if v := os.Getenv("GORTEX_LSP_EAGER"); v != "" {
+		return v == "1" || strings.EqualFold(v, "true")
+	}
+	return sem.EagerLSP
 }

@@ -1329,6 +1329,12 @@ func (s *Server) handleGetSymbol(ctx context.Context, req mcp.CallToolRequest) (
 
 	s.sessionFor(ctx).recordSymbol(id)
 
+	// On-demand LSP: when the synchronous LSP sweep is off (the default), fault
+	// in this symbol's precise type now — one hover on the lazy-spawned server,
+	// cached in the graph. No-op when it already has a type or no server serves
+	// the language.
+	s.enrichNodeOnDemand(node)
+
 	detail := req.GetString("detail", "brief")
 	if detail == "brief" {
 		return s.respondScopedJSONOrTOON(ctx, req, s.withAbsPath(node).Brief(), resolved)
@@ -1496,6 +1502,18 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		// in/out edge pair through the bundle phase. Tighten to
 		// +5 so the post-filter slack still leaves a full page.
 		fetchLimit = offset + limit + 5
+	} else {
+		// Concept / degraded-identifier query with no LLM assist: the
+		// always-on semantic-cosine rerank still runs, so widen the BM25
+		// head to a full rerank pool. A natural-language intent query
+		// ("decode bson request body") often has its target sitting past
+		// the default +10 over-fetch; the semantic channel can only lift
+		// a candidate it actually sees, so this pool is what turns a
+		// BM25-rank-15 file hit into a top-5 result. Cheap: ~40 extra
+		// FTS rows and their edge pairs, well inside the latency budget.
+		if want := offset + limit + semanticRerankPool; want > fetchLimit {
+			fetchLimit = want
+		}
 	}
 
 	// Expansion terms feeding the BM25 OR-merge: LLM-derived synonyms
@@ -2272,6 +2290,10 @@ func (s *Server) handleGetCallers(ctx context.Context, req mcp.CallToolRequest) 
 		RepoAllow:    resolved.RepoAllow,
 		ExcludeTests: req.GetBool("exclude_tests", false),
 	}
+	// Lazy enrichment: confirm this symbol's callers on demand before
+	// answering, so a graph indexed without the eager LSP sweep still returns
+	// compiler-grade callers. No-op when already confirmed or eager ran.
+	s.confirmSymbolRefsOnDemand(eng.GetSymbol(id))
 	s.hydrateProxyTargets(ctx, id)
 	sg := eng.GetCallers(id, opts)
 	sg = filterSubGraphByResolvedScope(sg, resolved)
@@ -2499,6 +2521,11 @@ func (s *Server) handleFindUsages(ctx context.Context, req mcp.CallToolRequest) 
 	if node != nil && !resolvedScopeAllowsNode(resolved, node) {
 		return symbolNotFoundGuidance(id), nil
 	}
+	// Lazy enrichment: confirm this symbol's incoming references on demand
+	// before answering, so a graph indexed without the eager LSP sweep still
+	// converges to compiler-grade usages. No-op when already confirmed or eager
+	// ran.
+	s.confirmSymbolRefsOnDemand(node)
 	opts := query.QueryOptions{
 		WorkspaceID:  resolved.WorkspaceID,
 		ProjectID:    resolved.ProjectID,

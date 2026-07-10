@@ -773,7 +773,7 @@ Gortex indexes repositories into an in-memory knowledge graph and serves it over
 
 ## How to Run
 
-Call the gortex MCP tools directly. Translate the instinct to read or grep into the matching graph query:
+Call the gortex MCP tools directly. Translate the instinct to read or grep into the matching graph query. If you only have the terminal (no MCP tools), every tool below is reachable as `gortex call <tool> --arg k=v` (e.g. `gortex call read_file --arg path=<file>`) — there is no bare `gortex <tool>` verb.
 
 ### Search and navigation
 

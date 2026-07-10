@@ -58,39 +58,55 @@ var goBuiltinConsts = map[string]struct{}{
 // biggest and the shorter ID is what most downstream `find_usages`
 // queries will type.
 func (r *Resolver) attributeGoBuiltins() {
-	// Go-only pass: skip the multi-kind edge scan entirely when the graph
-	// has no Go nodes (e.g. a TS/Python repo).
+	// Go-only pass: skip the scan entirely when the graph has no Go nodes
+	// (e.g. a TS/Python repo).
 	if !r.graphHasLanguage("go") {
 		return
 	}
 	materialised := map[string]struct{}{}
 	var batch []graph.EdgeReindex
 
-	// Every edge kind a builtin can be the target of. Type-system
-	// edges (typed_as / returns) carry type references; call /
-	// arg-of / value-flow carry function or const references.
-	for _, k := range []graph.EdgeKind{
-		graph.EdgeCalls,
-		graph.EdgeReferences,
-		graph.EdgeReads,
-		graph.EdgeArgOf,
-		graph.EdgeValueFlow,
-		graph.EdgeReturnsTo,
-		graph.EdgeTypedAs,
-		graph.EdgeReturns,
-		graph.EdgeInstantiates,
-		graph.EdgeCaptures,
-		graph.EdgeThrows,
-	} {
-		for e := range r.graph.EdgesByKind(k) {
-			if old := r.tryAttributeGoBuiltin(e, materialised); old != "" {
-				batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
-			}
+	// tryAttributeGoBuiltin only ever acts on an edge whose To has the bare
+	// `unresolved::` prefix — every other edge is a guaranteed no-op. This
+	// used to scan every edge of each of the 11 candidate kinds below
+	// (resolved and unresolved alike) via 11 separate EdgesByKind calls;
+	// EdgesWithUnresolvedTarget's is_unresolved index (see isUnresolvedColumnDDL)
+	// already collects the exact superset in one indexed scan, so filtering
+	// to these kinds in Go is equivalent but skips every resolved edge and
+	// every kind this pass never inspects. IsUnresolvedTarget covers both
+	// the bare and repo-qualified forms; tryAttributeGoBuiltin's own prefix
+	// check still rejects the repo-qualified ones exactly as it always did.
+	for e := range r.graph.EdgesWithUnresolvedTarget() {
+		if e == nil {
+			continue
+		}
+		if _, ok := attributeGoBuiltinCandidateKinds[e.Kind]; !ok {
+			continue
+		}
+		if old := r.tryAttributeGoBuiltin(e, materialised); old != "" {
+			batch = append(batch, graph.EdgeReindex{Edge: e, OldTo: old})
 		}
 	}
 	if len(batch) > 0 {
 		r.graph.ReindexEdges(batch)
 	}
+}
+
+// attributeGoBuiltinCandidateKinds is every edge kind a builtin can be the
+// target of. Type-system edges (typed_as / returns) carry type references;
+// call / arg-of / value-flow carry function or const references.
+var attributeGoBuiltinCandidateKinds = map[graph.EdgeKind]struct{}{
+	graph.EdgeCalls:        {},
+	graph.EdgeReferences:   {},
+	graph.EdgeReads:        {},
+	graph.EdgeArgOf:        {},
+	graph.EdgeValueFlow:    {},
+	graph.EdgeReturnsTo:    {},
+	graph.EdgeTypedAs:      {},
+	graph.EdgeReturns:      {},
+	graph.EdgeInstantiates: {},
+	graph.EdgeCaptures:     {},
+	graph.EdgeThrows:       {},
 }
 
 // attributeGoBuiltinsForFile is the single-file scope of attributeGoBuiltins:
@@ -128,10 +144,28 @@ func (r *Resolver) tryAttributeGoBuiltin(e *graph.Edge, materialised map[string]
 	if name == "" || strings.ContainsAny(name, ".*:#") {
 		return ""
 	}
+	// Cheap membership check first: three small map lookups, no graph
+	// access. Only ~2% of candidate names are ever a Go builtin in
+	// practice, so rejecting the rest here — before the language-origin
+	// check and the repo-prefix lookup below, both of which can fall back
+	// to a graph node lookup — avoids paying for either on the ~98% that
+	// were always going to return "" anyway.
+	if !isGoBuiltinName(name) {
+		return ""
+	}
 	// Only attribute when the source is Go. Without this guard a
 	// Python reference to a local named `len` would get re-targeted
-	// at Go's builtin `len`, which would be obviously wrong.
-	if !r.fromIsGo(e.From) {
+	// at Go's builtin `len`, which would be obviously wrong. Dataflow
+	// edges (arg_of / value_flow) carry an `unresolved::` From placeholder
+	// that fromIsGo cannot classify, so fall back to the call-site file
+	// extension: a `.go` file's `append` / `make` / `len` argument is the Go
+	// builtin regardless of whether the argument side ever bound to a node.
+	// (langFromFilePath only classifies js/ts/py, so a `.go` suffix test is
+	// the right check here.) e.FilePath is a free struct-field read while
+	// fromIsGo's fallback path can hit a node lookup, so try FilePath
+	// first — De Morgan's / && being commutative means this is the exact
+	// same condition, just evaluated in the cheaper order.
+	if !strings.HasSuffix(e.FilePath, ".go") && !r.fromIsGo(e.From) {
 		return ""
 	}
 	newID, kind, builtinKind := goBuiltinTarget(r.callerRepoPrefix(e), name)
@@ -158,6 +192,24 @@ func (r *Resolver) tryAttributeGoBuiltin(e *graph.Edge, materialised map[string]
 	return oldTo
 }
 
+// isGoBuiltinName reports whether name is in any of the three builtin
+// namespaces, without needing a repo prefix — the cheap pre-check
+// tryAttributeGoBuiltin runs before the (potentially graph-lookup-backed)
+// language-origin check and repo-prefix resolution. Mirrors goBuiltinTarget's
+// own membership tests exactly; kept as a separate, repo-prefix-free
+// function so the common "not a builtin" case never has to compute
+// anything else first.
+func isGoBuiltinName(name string) bool {
+	if _, ok := goBuiltinFuncs[name]; ok {
+		return true
+	}
+	if _, ok := goBuiltinTypes[name]; ok {
+		return true
+	}
+	_, ok := goBuiltinConsts[name]
+	return ok
+}
+
 // goBuiltinTarget classifies a bare identifier as one of Go's
 // intrinsics. Returns the canonical builtin::go:: ID (per-repo
 // prefixed via graph.StubID — see internal/graph/stub.go for why
@@ -166,7 +218,9 @@ func (r *Resolver) tryAttributeGoBuiltin(e *graph.Edge, materialised map[string]
 // recording which subspace (func / type / const) it belongs to.
 // Returns ("", "", "") when the name is not a Go builtin.
 // repoPrefix is the owning repo's RepoPrefix (empty in
-// single-repo / legacy callers).
+// single-repo / legacy callers). Callers on the tryAttributeGoBuiltin path
+// have already confirmed isGoBuiltinName(name) before calling this, so the
+// repeated map lookups here run only on the small matching subset.
 func goBuiltinTarget(repoPrefix, name string) (id string, kind graph.NodeKind, builtinKind string) {
 	if _, ok := goBuiltinFuncs[name]; ok {
 		return graph.StubID(repoPrefix, graph.StubKindBuiltin, "go", name), graph.KindBuiltin, "func"

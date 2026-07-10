@@ -435,6 +435,14 @@ func graphReaderFromEngine(eng *query.Engine) (namesReader, bool) {
 // after the reranked head.
 const rerankCap = 20
 
+// semanticRerankPool is the BM25 over-fetch width for a concept /
+// degraded-identifier query that will be reranked by the always-on
+// in-process semantic-cosine channel (no LLM assist). Wide enough that
+// an intent query's target, which BM25 alone ranks past the default
+// over-fetch, still enters the candidate pool the semantic rerank can
+// reorder into the top-5.
+const semanticRerankPool = 40
+
 // prioritizeCallables stably re-orders nodes so functions and methods
 // come first, preserving BM25 order within each bucket. Everything
 // non-callable (fields, params, variables, constants, types, files,

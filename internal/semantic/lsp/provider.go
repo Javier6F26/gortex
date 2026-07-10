@@ -671,6 +671,15 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		if e.Confidence >= 1.0 {
 			continue
 		}
+		// Skip structural-containment edges (member_of, defines, contains,
+		// param_of, imports, captures): they anchor no use site a reference
+		// lookup can adjudicate, so confirming them wastes a round-trip and can
+		// feed a correct edge into the definition-rebind fallback and mutate its
+		// target. Use-site, type-position and dataflow edges stay confirmable.
+		// See confirmableEdgeKind.
+		if !confirmableEdgeKind(e.Kind) {
+			continue
+		}
 		if from, ok := langAllByID[e.From]; ok {
 			targets = append(targets, enrichTarget{node: from, edge: e})
 		}
@@ -691,6 +700,29 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 		}
 		result.DurationMs = time.Since(start).Milliseconds()
 		return result, nil
+	}
+
+	// Project-readiness preflight: a server whose workspace lacks the project
+	// setup it needs (node_modules for tsserver) resolves nothing — every
+	// import / cross-file request returns "no package metadata" — yet still
+	// pays a full index + per-file hover / call-hierarchy sweep for minutes.
+	// Skip the pass entirely; the tree-sitter floor still covers these files,
+	// and the resolver's static edges are untouched. This is the general form
+	// of the compile-database degrade below, for a missing dependency tree
+	// rather than a missing compilation database.
+	if p.spec != nil && p.spec.ProjectReady != nil {
+		if ready, remediation := p.spec.ProjectReady(absRoot); !ready {
+			if p.logger != nil {
+				p.logger.Warn("LSP enrich: skipped, project not analyzable",
+					zap.String("provider", p.Name()),
+					zap.String("repo_prefix", repoPrefix),
+					zap.String("remediation", remediation),
+				)
+			}
+			result.DegradedReason = remediation
+			result.DurationMs = time.Since(start).Milliseconds()
+			return result, nil
+		}
 	}
 
 	// Compile-database preflight: a server that needs a compilation database
@@ -904,6 +936,23 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 					return
 				}
 				defer release()
+				// findReferences is positioned on the TARGET declaration, not the
+				// call site, so every ambiguous edge in this group that points at
+				// the same referent asks the server for the identical reference
+				// list — measured ~9x fan-in for calls, ~8x for references, since
+				// an overloaded / hot declaration draws many candidate edges.
+				// confirmRefMatchesSite still filters that shared list per edge,
+				// so caching it by target node turns N identical round-trips into
+				// one with byte-identical confirm/refute decisions. A target's
+				// file is unique to one group, so every edge to it lands here —
+				// the per-group cache captures all of its redundancy. ok=false
+				// records a server error so repeat targets skip exactly as the
+				// un-cached path did (error → skip, no fallback).
+				type cachedRefs struct {
+					refs []Location
+					ok   bool
+				}
+				refsByTarget := make(map[string]cachedRefs, len(grp.targets))
 				for _, t := range grp.targets {
 					if targetedCtx.Err() != nil {
 						return
@@ -916,12 +965,17 @@ func (p *Provider) EnrichRepoContext(ctx context.Context, g graph.Store, repoPre
 					if !ok {
 						continue
 					}
-					col := identifierColumn(content, toNode.StartLine, toNode.Name)
-					refs, err := p.findReferences(absRoot, grp.rel, line, col)
-					if err != nil {
+					cr, seen := refsByTarget[t.edge.To]
+					if !seen {
+						col := identifierColumn(content, toNode.StartLine, toNode.Name)
+						refs, err := p.findReferences(absRoot, grp.rel, line, col)
+						cr = cachedRefs{refs: refs, ok: err == nil}
+						refsByTarget[t.edge.To] = cr
+					}
+					if !cr.ok {
 						continue
 					}
-					if p.confirmRefMatchesSite(refs, absRoot, repoPrefix, t) {
+					if p.confirmRefMatchesSite(cr.refs, absRoot, repoPrefix, t) {
 						rmu.Lock()
 						semantic.ConfirmEdge(t.edge, p.Name())
 						semantic.PersistEdge(g, t.edge)
@@ -2506,6 +2560,118 @@ func (p *Provider) EnsureFileOpen(repoRoot, relPath string) error {
 		return err
 	}
 	return p.openDocument(abs, relPath)
+}
+
+// EnrichNode lazily enriches a single symbol node with an LSP-grade
+// semantic_type (and return_type for callables), on demand. It is the
+// per-symbol counterpart to the whole-repo Enrich pass: when the synchronous
+// LSP sweep is off (the default), a query tool that needs a precise type for
+// one symbol calls this to fault in exactly that symbol's hover — one LSP
+// round-trip, not a repo sweep — and the stamp persists in the graph so a
+// second query is free.
+//
+// Returns (true, nil) when a type was stamped, (false, nil) when the server had
+// no type at the node's position (nothing is written), and (false, err) on a
+// transport failure. The file is opened on the server first (idempotent).
+// ConfirmSymbolRefs confirms the incoming references to ONE symbol on demand.
+// It prepares a call hierarchy at the symbol's definition and, for every
+// server-verified incoming call, mints or promotes an lsp_resolved edge —
+// the per-symbol unit of the whole-repo confirm + call-hierarchy sweep. A
+// find_usages / get_callers answer for symbol S needs S's callers confirmed,
+// not the whole repo's, so this lets lazy enrichment restore compiler-grade
+// usages accuracy at query time without paying a cold-path sweep. It reuses
+// recordHierarchyCall, so every hard-won correctness rule (callable-kind
+// matching, per-site promotion, declaration-identity) applies unchanged.
+//
+// Scoped to callable nodes (the call-hierarchy unit); returns (0, nil) for
+// other kinds or a server without call-hierarchy. LSP round-trips run
+// unlocked; the graph mutations are batched under the resolve mutex.
+func (p *Provider) ConfirmSymbolRefs(g graph.Store, repoRoot string, n *graph.Node) (int, error) {
+	if n == nil || (n.Kind != graph.KindFunction && n.Kind != graph.KindMethod) {
+		return 0, nil
+	}
+	if !p.Supports("textDocument/prepareCallHierarchy") {
+		return 0, nil
+	}
+	line, ok := lspLine(n)
+	if !ok {
+		return 0, nil
+	}
+	rel := nodeRelPath(n)
+	if err := p.EnsureFileOpen(repoRoot, rel); err != nil {
+		return 0, err
+	}
+	absRoot, err := filepath.Abs(repoRoot)
+	if err != nil {
+		return 0, err
+	}
+	col := 0
+	if src := p.getSource(repoRoot, rel); src != nil {
+		col = identifierColumn(src, n.StartLine, n.Name)
+	}
+	items, err := p.prepareCallHierarchy(repoRoot, rel, line, col)
+	if err != nil {
+		return 0, err
+	}
+	// LSP round-trips first, unlocked.
+	type hop struct {
+		other  CallHierarchyItem
+		ranges []Range
+	}
+	var hops []hop
+	for _, item := range items {
+		ins, ierr := p.incomingCalls(item)
+		if ierr != nil {
+			continue
+		}
+		for _, ic := range ins {
+			hops = append(hops, hop{other: ic.From, ranges: ic.FromRanges})
+		}
+	}
+	if len(hops) == 0 {
+		return 0, nil
+	}
+	// Graph mutations under the resolve lock, batched.
+	result := &semantic.EnrichResult{Provider: p.Name()}
+	rmu := g.ResolveMutex()
+	rmu.Lock()
+	for _, h := range hops {
+		p.recordHierarchyCall(g, n.RepoPrefix, absRoot, n, h.other, false, h.ranges, result)
+	}
+	rmu.Unlock()
+	return result.EdgesConfirmed + result.EdgesAdded, nil
+}
+
+func (p *Provider) EnrichNode(g graph.Store, repoRoot string, n *graph.Node) (bool, error) {
+	if n == nil {
+		return false, nil
+	}
+	line, ok := lspLine(n)
+	if !ok {
+		return false, nil
+	}
+	rel := nodeRelPath(n)
+	if err := p.EnsureFileOpen(repoRoot, rel); err != nil {
+		return false, err
+	}
+	col := 0
+	if src := p.getSource(repoRoot, rel); src != nil {
+		col = identifierColumn(src, n.StartLine, n.Name)
+	}
+	hr, err := p.hoverWith(p.client, repoRoot, rel, line, col)
+	if err != nil {
+		return false, err
+	}
+	if hr == nil {
+		return false, nil
+	}
+	typeInfo := extractTypeFromHover(hr.Contents.Value)
+	if typeInfo == "" {
+		return false, nil
+	}
+	semantic.EnrichNodeMeta(n, "semantic_type", typeInfo, p.Name())
+	g.AddBatch([]*graph.Node{n}, nil)
+	return true, nil
 }
 
 // getSource returns cached file content from the most recent
