@@ -1472,6 +1472,12 @@ func (mi *MultiIndexer) IncrementalReindexRepo(repoPrefix string, paths []string
 
 	mi.ReconcileContractEdges()
 
+	// Re-stamp the on-disk freshness row at the current HEAD so
+	// gortex repos reports the repo as fresh instead of stale.
+	// The git_watcher does this on every detected file change but
+	// the explicit reindex_repository tool path was missing it.
+	idx.reconcileRepoIndexState(meta.RootPath)
+
 	return result, nil
 }
 
@@ -1866,6 +1872,14 @@ func (mi *MultiIndexer) ReconcileRepoCtx(ctx context.Context, entry config.RepoE
 	if !mi.deferGlobalPasses {
 		mi.ReconcileContractEdges()
 	}
+
+	// Re-stamp the on-disk freshness row at the current HEAD so
+	// gortex repos reports the repo as fresh instead of stale.
+	// Without this, a repo whose HEAD moved between daemon runs
+	// (e.g. a git pull by the workspace SyncEngine) would be
+	// permanently stale — the warmup IncrementalReindex path
+	// does not write repo_index_state.
+	idx.reconcileRepoIndexState(absPath)
 
 	mi.logger.Info("daemon: reconciled repo from snapshot",
 		zap.String("prefix", prefix),

@@ -68,6 +68,7 @@ func RegisterAll(reg *parser.Registry) {
 	// before registerForestLanguages so they claim their extensions.
 	reg.Register(NewPptxExtractor())
 	reg.Register(NewXlsxExtractor())
+	reg.Register(NewDocxExtractor())
 	reg.Register(NewTextExtractor())
 	// Pure data / binary assets — recorded as metadata-only file nodes
 	// (size + sha) and never parsed.

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 type schemaMigration struct {
 	version int
@@ -16,6 +16,17 @@ type schemaMigration struct {
 
 var schemaMigrations = []schemaMigration{
 	{version: 1, ddl: schemaSQL},
+	{version: 2, ddl: `
+-- Migration V2: vectors table dimension 384 → 50 to match the default
+-- static (GloVe) embedder. Vectors are ephemeral (rebuilt each index
+-- run via BulkUpsertEmbeddings), so dropping and recreating is clean.
+DROP TABLE IF EXISTS vectors;
+CREATE TABLE vectors (
+    node_id TEXT PRIMARY KEY,
+    dims    INTEGER NOT NULL,
+    vec     vector(50) NOT NULL
+);
+`},
 }
 
 func (s *Store) readSchemaVersion(ctx context.Context) (int, error) {

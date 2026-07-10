@@ -170,7 +170,7 @@ CREATE TABLE ref_facts (
 CREATE TABLE vectors (
     node_id TEXT PRIMARY KEY,
     dims    INTEGER NOT NULL,
-    vec     vector(384) NOT NULL
+    vec     vector(50) NOT NULL
 );
 
 -- churn_enrichment stores git-churn data per node.

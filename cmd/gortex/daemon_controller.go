@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -623,13 +624,19 @@ func resolveSearchBackend(b search.Backend) searchBackendInfo {
 		out.DocCount = back.Count()
 		out.Bytes = back.SizeBytes()
 	case *search.SymbolSearcherBackend:
-		// The FTS5 index lives inside the graph store's own file, not a
-		// separate in-memory structure — there is no honest byte count
-		// to report here (Count() is only a since-construction delta,
-		// documented as non-authoritative on the adapter itself). Report
-		// the backend truthfully as disk-resident instead of printing a
-		// fabricated "heap=0 B".
-		out.Name = "sqlite-fts5"
+		// The FTS index lives inside the graph store. Detect which
+		// backend the wrapped SymbolSearcher is by reflecting on its
+		// concrete type.
+		out.Name = "sqlite-fts5" // default for store_sqlite
+		if searcher := reflect.ValueOf(back).Elem().FieldByName("s"); searcher.IsValid() {
+			// .Elem() unpacks the interface to get the concrete type
+			if concrete := searcher.Elem(); concrete.IsValid() {
+				typeName := concrete.Type().String()
+				if strings.Contains(typeName, "store_pg") {
+					out.Name = "pg-trgm"
+				}
+			}
+		}
 		out.DocCount = back.Count()
 		out.DiskResident = true
 	default:
