@@ -21,12 +21,14 @@ var _ graph.ContentSearcher = (*Store)(nil)
 
 // WipeContent removes a repo's content rows before a full rebuild.
 func (s *Store) WipeContent(repoPrefix string) error {
+	if s.refuseWrite("WipeContent") { return ErrReadOnlyStore }
 	_, err := s.pool.Exec(s.ctx, `DELETE FROM content_fts WHERE repo_prefix = $1`, repoPrefix)
 	return err
 }
 
 // WipeContentFile removes one file's content rows.
 func (s *Store) WipeContentFile(filePath string) error {
+	if s.refuseWrite("WipeContentFile") { return ErrReadOnlyStore }
 	if filePath == "" {
 		return nil
 	}
@@ -36,6 +38,7 @@ func (s *Store) WipeContentFile(filePath string) error {
 
 // AppendContent inserts content rows for repoPrefix without wiping.
 func (s *Store) AppendContent(repoPrefix string, items []graph.ContentFTSItem) error {
+	if s.refuseWrite("AppendContent") { return ErrReadOnlyStore }
 	if len(items) == 0 {
 		return nil
 	}
@@ -112,8 +115,51 @@ func (s *Store) SearchContent(query, repoPrefix string, limit int) ([]graph.Cont
 	return hits, rows.Err()
 }
 
+// ContentByFile returns every stored content body for (repoPrefix, filePath)
+// ordered by ordinal — the reconstruction source for a content-class
+// document read without disk. Routes through the retry/degrade read path.
+func (s *Store) ContentByFile(repoPrefix, filePath string) ([]graph.ContentFTSItem, error) {
+	if filePath == "" {
+		return nil, nil
+	}
+	var out []graph.ContentFTSItem
+	var qErr error
+	s.withReadRetry("ContentByFile", func() error {
+		out = nil
+		q := `SELECT node_id, file_path, ordinal, body FROM content_fts WHERE file_path = $1`
+		args := []any{filePath}
+		if repoPrefix != "" {
+			q += ` AND repo_prefix = $2`
+			args = append(args, repoPrefix)
+		}
+		q += ` ORDER BY ordinal`
+		rows, err := s.pool.Query(s.ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var acc []graph.ContentFTSItem
+		for rows.Next() {
+			var it graph.ContentFTSItem
+			if err := rows.Scan(&it.NodeID, &it.FilePath, &it.Ordinal, &it.Body); err != nil {
+				return err
+			}
+			acc = append(acc, it)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		out = acc
+		return nil
+	})
+	return out, qErr
+}
+
+var _ graph.ContentByFileReader = (*Store)(nil)
+
 // BuildContentIndex ensures the GIN index on the tsvector column exists.
 func (s *Store) BuildContentIndex() error {
+	if s.refuseWrite("BuildContentIndex") { return ErrReadOnlyStore }
 	_, err := s.pool.Exec(s.ctx, `CREATE INDEX IF NOT EXISTS idx_content_fts_gin ON content_fts USING GIN (search_body)`)
 	return err
 }

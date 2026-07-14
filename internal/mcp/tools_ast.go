@@ -119,6 +119,14 @@ func (s *Server) handleSearchAST(ctx context.Context, req mcp.CallToolRequest) (
 		Resolver:     astquery.DefaultLanguageResolver,
 		Limit:        limit,
 	}
+	// Diskless follower: parse from store blobs instead of disk.
+	if s.followMode {
+		src := s.followASTSource()
+		if src == nil {
+			return followNoDiskError("search_ast (no file blobs in the store)"), nil
+		}
+		opts.Source = src
+	}
 	// Honor explicit override; otherwise let the engine apply
 	// its per-mode default (true for detectors, false for raw
 	// patterns).
@@ -180,10 +188,15 @@ func (s *Server) buildASTTargets(language, pathPrefix string, allowedRepos map[s
 		}
 		abs, err := s.resolveNodePath(n)
 		if err != nil {
-			// Indexed file whose repo we can't currently
-			// resolve (rare; happens during an in-flight
-			// repo eviction). Skip rather than fail the run.
-			continue
+			// A diskless follower has no repo root, so resolution
+			// always fails — but the bytes live in file_blobs, read
+			// via opts.Source keyed on GraphPath. Emit the target
+			// with no AbsPath. On a normal daemon this is a rare
+			// in-flight eviction; skip rather than fail the run.
+			if !s.followMode {
+				continue
+			}
+			abs = ""
 		}
 		lang := strings.ToLower(n.Language)
 		out = append(out, astquery.Target{

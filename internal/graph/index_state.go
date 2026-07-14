@@ -44,3 +44,22 @@ type RepoIndexStateReader interface {
 type DBStatReporter interface {
 	DBStats() (dbBytes, walBytes int64)
 }
+
+// StoreHealth is a point-in-time view of a backend's degraded-operation
+// counters. The PostgreSQL backend increments DegradedReads when a read
+// exhausts its retry budget and returns a zero value, and WriteRefusals
+// when a mutating method is rejected by a read-only store. Surfaced in
+// daemon_health so operators can distinguish "no data" from "store
+// degraded".
+type StoreHealth struct {
+	DegradedReads int64  `json:"degraded_reads"`
+	WriteRefusals int64  `json:"write_refusals"`
+	LastError     string `json:"last_error,omitempty"`
+	LastErrorUnix int64  `json:"last_error_unix,omitempty"`
+}
+
+// StoreHealthReporter is an optional capability: report degraded-operation
+// health. In-memory and SQLite backends do not implement it.
+type StoreHealthReporter interface {
+	Health() StoreHealth
+}

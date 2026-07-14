@@ -101,6 +101,12 @@ func (s *Server) reconcileRationale(scope string) {
 	if s.graph == nil {
 		return
 	}
+	// Follow mode: the graph store is read-only and shared. Skip the
+	// rationale graph projection (virtual node writes); the machine-local
+	// memory sidecar write still happened in the caller.
+	if s.followMode {
+		return
+	}
 	var entries []persistence.MemoryEntry
 	for _, mgr := range s.resolveMemoryStores(scope) {
 		if mgr == nil {

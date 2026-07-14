@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetChurn(repoPrefix string, rows []graph.ChurnEnrichment) error {
+	if s.refuseWrite("BulkSetChurn") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -40,6 +41,7 @@ func (s *Store) BulkSetChurn(repoPrefix string, rows []graph.ChurnEnrichment) er
 }
 
 func (s *Store) DeleteChurn(nodeIDs []string) error {
+	if s.refuseWrite("DeleteChurn") { return ErrReadOnlyStore }
 	if len(nodeIDs) == 0 {
 		return nil
 	}

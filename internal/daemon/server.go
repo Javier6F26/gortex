@@ -40,6 +40,11 @@ type Server struct {
 	// Controller handles control-mode RPCs (track/untrack/reload/status/shutdown).
 	Controller Controller
 
+	// Follow marks this daemon as a read-only follower. Mutating control
+	// RPCs (track/untrack/reload/reload-servers) are refused with a typed
+	// follow_mode error; status and shutdown still work.
+	Follow bool
+
 	// Ready, when set, reports whether the daemon has finished warmup and the
 	// current warmup phase. The result is surfaced on every successful
 	// handshake ack (HandshakeAck.Warming / WarmupPhase) so a connecting proxy
@@ -555,6 +560,15 @@ func (s *Server) serveControl(conn net.Conn, reader *bufio.Reader, sess *Session
 
 func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 	ctx := context.Background()
+	// Follow mode: refuse every mutating control RPC before it reaches the
+	// controller, with a typed follow_mode error and no store write.
+	if s.Follow {
+		switch req.Kind {
+		case ControlTrack, ControlUntrack, ControlReload, ControlProxy:
+			return controlErr(ErrFollowMode,
+				"daemon is in read-only follow mode; run track/untrack/reload against the writer daemon")
+		}
+	}
 	switch req.Kind {
 	case ControlTrack:
 		var p TrackParams
@@ -603,6 +617,9 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 		st.UptimeSeconds = int64(time.Since(s.started).Seconds())
 		st.SocketPath = s.SocketPath
 		st.Sessions = s.sessions.Count()
+		if s.Follow {
+			st.Mode = "follow"
+		}
 		// Per-session detail (cwd, client name, connect time) for the
 		// status command's "sessions" block. The controller can't see
 		// these — sessions live on the daemon server, not the

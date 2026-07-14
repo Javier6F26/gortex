@@ -2,6 +2,7 @@ package trigram
 
 import (
 	"bufio"
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,11 +17,30 @@ type Match struct {
 	Text string `json:"text"` // the matching line
 }
 
+// FileSource yields the bytes of a file by its forward-slash repo-relative
+// path. Build and Grep read exclusively through it, so the origin of the
+// bytes is transparent: DirSource reads from a working tree (the default
+// disk behaviour), and a diskless follower supplies a blob-backed source
+// (code-source-blobs D7) so search_text/search_ast work without a checkout.
+type FileSource interface {
+	// ReadFile returns the bytes of rel. A non-nil error leaves the file
+	// unindexed (it never matches) and unscanned.
+	ReadFile(rel string) ([]byte, error)
+}
+
+// DirSource reads files from a root directory — the disk-backed FileSource.
+type DirSource struct{ Root string }
+
+// ReadFile reads root/rel from disk.
+func (d DirSource) ReadFile(rel string) ([]byte, error) {
+	return os.ReadFile(filepath.Join(d.Root, filepath.FromSlash(rel)))
+}
+
 // Searcher is a trigram-accelerated literal code search over a fixed
 // set of files. Build it once against a repo's file list, then Grep it
 // repeatedly. It is safe for concurrent Grep calls.
 type Searcher struct {
-	root  string
+	src   FileSource
 	ix    *Index
 	paths []string // docID -> forward-slash repo-relative path
 }
@@ -30,15 +50,22 @@ type Searcher struct {
 // unindexed (it never matches) but keeps its docID slot so the rest
 // stay aligned.
 func Build(root string, relPaths []string) *Searcher {
+	return BuildFromSource(DirSource{Root: root}, relPaths)
+}
+
+// BuildFromSource indexes relPaths reading their bytes through src. This is
+// the origin-agnostic constructor: a disk-backed DirSource reproduces the
+// legacy behaviour, a blob-backed source builds the same index diskless.
+func BuildFromSource(src FileSource, relPaths []string) *Searcher {
 	s := &Searcher{
-		root:  root,
+		src:   src,
 		ix:    New(),
 		paths: make([]string, len(relPaths)),
 	}
 	for i, rel := range relPaths {
 		rel = filepath.ToSlash(rel)
 		s.paths[i] = rel
-		content, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		content, err := src.ReadFile(rel)
 		if err != nil {
 			continue
 		}
@@ -62,11 +89,11 @@ func (s *Searcher) Grep(query string, limit int) []Match {
 			continue
 		}
 		rel := s.paths[docID]
-		f, err := os.Open(filepath.Join(s.root, filepath.FromSlash(rel)))
+		content, err := s.src.ReadFile(rel)
 		if err != nil {
 			continue
 		}
-		scanner := bufio.NewScanner(f)
+		scanner := bufio.NewScanner(bytes.NewReader(content))
 		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 		line := 0
 		for scanner.Scan() {
@@ -75,12 +102,10 @@ func (s *Searcher) Grep(query string, limit int) []Match {
 			if strings.Contains(text, query) {
 				matches = append(matches, Match{Path: rel, Line: line, Text: text})
 				if limit > 0 && len(matches) >= limit {
-					_ = f.Close()
 					return matches
 				}
 			}
 		}
-		_ = f.Close()
 	}
 	return matches
 }
@@ -152,11 +177,11 @@ func (s *Searcher) GrepRegexp(re *regexp.Regexp, requiredLiterals []string, path
 		if pathPrefix != "" && !strings.HasPrefix(rel, pathPrefix) {
 			continue
 		}
-		f, err := os.Open(filepath.Join(s.root, filepath.FromSlash(rel)))
+		content, err := s.src.ReadFile(rel)
 		if err != nil {
 			continue
 		}
-		scanner := bufio.NewScanner(f)
+		scanner := bufio.NewScanner(bytes.NewReader(content))
 		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 		line := 0
 		for scanner.Scan() {
@@ -165,12 +190,10 @@ func (s *Searcher) GrepRegexp(re *regexp.Regexp, requiredLiterals []string, path
 			if re.MatchString(text) {
 				matches = append(matches, Match{Path: rel, Line: line, Text: text})
 				if limit > 0 && len(matches) >= limit {
-					_ = f.Close()
 					return matches
 				}
 			}
 		}
-		_ = f.Close()
 	}
 	return matches
 }

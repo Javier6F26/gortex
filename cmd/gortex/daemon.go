@@ -57,6 +57,7 @@ var (
 	daemonPBPoolSize            int
 	daemonTools                 string
 	daemonToolsMode             string
+	daemonFollow                bool
 )
 
 var daemonCmd = &cobra.Command{
@@ -137,6 +138,8 @@ func init() {
 		"restrict the published MCP tool surface to a preset: core (default)|full|readonly|edit|nav (optionally with ,+tool / ,-tool deltas). GORTEX_TOOLS overrides this")
 	daemonStartCmd.Flags().StringVar(&daemonToolsMode, "tools-mode", "",
 		"how a --tools preset hides tools: hide (remove from tools/list + block calls) or defer (keep reachable via tools_search). Default hide")
+	daemonStartCmd.Flags().BoolVar(&daemonFollow, "follow", false,
+		"read-only follower mode: boot diskless against a shared PostgreSQL schema (requires --backend postgres), serve reads only, no indexing/warmup/watchers. See docs/pg-setup.md")
 	daemonLogsCmd.Flags().IntVarP(&daemonTail, "tail", "n", 50,
 		"show only the last N log lines")
 	daemonStatusCmd.Flags().BoolVarP(&daemonStatusWatch, "watch", "w", false,
@@ -179,6 +182,12 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	if pid, ok := daemon.RunningPID(); ok {
 		return fmt.Errorf("daemon already running (pid %d) — stop it with `gortex daemon stop`, or use `gortex daemon restart`", pid)
 	}
+	// Follow mode requires the PostgreSQL backend: the design premise (live
+	// SQL reads from a shared source of truth, no re-hydration) only holds
+	// for postgres. sqlite/memory have no shared schema to follow.
+	if daemonFollow && !isPostgresBackend(daemonBackend) {
+		return fmt.Errorf("--follow requires --backend postgres (read-only followers serve live reads from a shared PostgreSQL schema; the %q backend has no shared source of truth)", daemonBackend)
+	}
 	if daemonDetach && os.Getenv("GORTEX_DAEMON_CHILD") != "1" {
 		return spawnDetachedDaemon()
 	}
@@ -198,6 +207,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	}
 
 	srv := daemon.New(daemon.SocketPath(), canonicalVersion(), logger)
+	srv.Follow = daemonFollow
 
 	// Record whether `--embeddings` was set explicitly so
 	// buildDaemonState can let it override the `embedding:` config
@@ -313,7 +323,9 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		// install the evidence prober on the indexer's resolver (so
 		// cross-repo resolution mints proxy edges) and keep the hydrator
 		// for the read path. No-op when the flag is off.
-		if hyd := daemon.WireRemoteStitch(router, state.multiIndexer, state.graph, resolveFederationEdgesConfig(), logger); hyd != nil {
+		// Follow mode does not wire the proxy hydrator: it writes proxy-edge
+		// nodes on traversal reads, which a read-only follower must not do.
+		if hyd := daemon.WireRemoteStitch(router, state.multiIndexer, state.graph, resolveFederationEdgesConfig(), logger); hyd != nil && !daemonFollow {
 			state.proxyHydrator = hyd
 			if state.mcpServer != nil {
 				state.mcpServer.SetProxyHydrator(hyd.Hydrate)
@@ -377,7 +389,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 		if r := disp.Router(); r != nil {
 			router = r
 		}
-		streamH := buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, tokenFn)
+		streamH := buildDaemonStreamableHandler(disp, srv.Sessions(), router, logger, tokenFn, state.graph, daemonFollow)
 
 		// Mount the /v1 REST surface (the former `gortex server`) on the
 		// same listener so a single daemon process serves both the MCP
@@ -471,6 +483,15 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 						}
 					}
 				}
+				if r, ok := stateCapture.graph.(graph.StoreHealthReporter); ok {
+					h := r.Health()
+					out["store_degraded_reads"] = h.DegradedReads
+					out["store_write_refusals"] = h.WriteRefusals
+					if h.LastError != "" {
+						out["store_last_error"] = h.LastError
+						out["store_last_error_unix"] = h.LastErrorUnix
+					}
+				}
 			}
 			return out
 		})
@@ -486,6 +507,38 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 	publishReadinessPhase(state, "snapshot_loaded", false, map[string]any{
 		"snapshot_repos": len(state.snapshotRepos),
 	})
+
+	// Follow mode: a diskless read-only follower has no warmup, watchers,
+	// janitor, snapshotter, enrichment, or LSP — reads are served live from
+	// the shared PostgreSQL schema. Publish ready immediately, run the
+	// in-memory analysis pass so community/process tools work off the loaded
+	// graph, and serve. No MultiIndexer exists, so none of the warmup
+	// writers below can fire.
+	if daemonFollow {
+		if err := srv.Listen(); err != nil {
+			return err
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"[gortex daemon] listening on %s (pid %d) [follow mode]\n",
+			daemon.SocketPath(), os.Getpid())
+		controller.MarkReady(0)
+		publishReadinessPhase(state, "ready", true, map[string]any{
+			"queryable": true,
+			"mode":      "follow",
+		})
+		if state.mcpServer != nil {
+			// In-memory community/process detection over the loaded graph;
+			// writes nothing to the store.
+			state.mcpServer.RunAnalysis()
+		}
+		controller.MarkEnriched(0)
+		publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
+			"enriched": true,
+			"mode":     "follow",
+		})
+		logger.Info("daemon: follow mode ready (read-only, diskless)")
+		return srv.Serve()
+	}
 
 	// Periodic snapshots — 10 minute interval, gated on warmup-complete.
 	// On a crash we lose at most one interval's worth of work, which is
@@ -1130,6 +1183,9 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 	t.AppendRow(table.Row{"pid", st.PID})
 	t.AppendRow(table.Row{"socket", st.SocketPath})
 	t.AppendRow(table.Row{"uptime", formatDuration(time.Duration(st.UptimeSeconds) * time.Second)})
+	if st.Mode == "follow" {
+		t.AppendRow(table.Row{"mode", "follow (read-only, diskless — serves reads from the shared schema)"})
+	}
 	switch {
 	case st.Ready && st.EnrichmentComplete:
 		t.AppendRow(table.Row{
@@ -1145,6 +1201,13 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 		})
 	default:
 		t.AppendRow(table.Row{"state", "warming up (socket reachable, resolving references)"})
+	}
+	if st.Mode == "follow" {
+		lag := "unknown (schema not yet indexed)"
+		if st.FreshnessLagSeconds != nil {
+			lag = formatDuration((time.Duration(*st.FreshnessLagSeconds) * time.Second).Truncate(time.Second))
+		}
+		t.AppendRow(table.Row{"freshness", lag})
 	}
 	t.AppendRow(table.Row{"sessions", st.Sessions})
 	if st.MemoryBytes > 0 {
@@ -1510,10 +1573,26 @@ func resolveDaemonBufferPoolMB() uint64 {
 // When the backend is postgres, it returns daemonPGDSN;
 // otherwise it returns daemonBackendPath.
 func resolveBackendPathForDaemon() string {
-	if daemonBackend == "postgres" || daemonBackend == "pg" {
+	if isPostgresBackend(daemonBackend) {
 		return daemonPGDSN
 	}
 	return daemonBackendPath
+}
+
+// isPostgresBackend reports whether name selects the PostgreSQL backend.
+func isPostgresBackend(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "postgres", "pg":
+		return true
+	default:
+		return false
+	}
+}
+
+// writerLockAcquirer is satisfied by the PostgreSQL store: a non-follow
+// daemon acquires the exclusive schema writer lock at boot.
+type writerLockAcquirer interface {
+	AcquireWriterLock(ctx context.Context) error
 }
 
 // killByPID is the fallback stop path for stale daemons that have a PID

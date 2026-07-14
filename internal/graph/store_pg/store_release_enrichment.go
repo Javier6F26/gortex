@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetReleases(repoPrefix string, rows []graph.ReleaseEnrichment) error {
+	if s.refuseWrite("BulkSetReleases") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -35,6 +36,7 @@ func (s *Store) BulkSetReleases(repoPrefix string, rows []graph.ReleaseEnrichmen
 }
 
 func (s *Store) DeleteReleases(nodeIDs []string) error {
+	if s.refuseWrite("DeleteReleases") { return ErrReadOnlyStore }
 	if len(nodeIDs) == 0 {
 		return nil
 	}

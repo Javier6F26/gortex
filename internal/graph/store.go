@@ -479,6 +479,14 @@ type ContentSearcher interface {
 	ScanContent(repoPrefix string, fn func(nodeID, filePath, body string) bool) error
 }
 
+// ContentByFileReader returns every stored content body for one file,
+// ordered by ordinal — enough to reconstruct a content-class document
+// (pdf/text/pptx/xlsx) without disk access. An optional capability of the
+// content store, used by store-backed document reads (follow mode).
+type ContentByFileReader interface {
+	ContentByFile(repoPrefix, filePath string) ([]ContentFTSItem, error)
+}
+
 // SymbolBundle is the rerank-shaped result of one search call: the
 // matched node, its BM25 score, AND the in/out edges the rerank
 // pipeline reads from. Backends that can compose this in a single
@@ -1209,6 +1217,48 @@ type FileMetaWriter interface {
 // FileMetaReader is the read side: every recorded file row for a repo prefix.
 type FileMetaReader interface {
 	FileMetasForRepo(repoPrefix string) ([]FileMetaRow, error)
+}
+
+// FileBlob is one content-addressed file blob: the exact indexed bytes and
+// the content hash that keys them (the same hash the files table records).
+type FileBlob struct {
+	ContentHash string
+	Body        []byte
+	Size        int
+}
+
+// FileBlobWriter persists content-addressed file bytes. Implemented by the
+// PostgreSQL backend (see code-source-blobs); the writer enqueues a blob
+// alongside each file's metadata row. Writes deduplicate on content hash.
+type FileBlobWriter interface {
+	PutFileBlobs(blobs []FileBlob) error
+	// GCFileBlobs removes blobs whose content_hash is no longer referenced
+	// by any files row. Returns the number removed.
+	GCFileBlobs() (int, error)
+}
+
+// FileBlobReader serves indexed file bytes without disk access: by
+// (repo_prefix, file_path) via the files.content_hash join, or by hash.
+// The returned bytes are byte-identical to the file as indexed.
+type FileBlobReader interface {
+	GetFileBlobByPath(repoPrefix, filePath string) (FileBlob, bool)
+	GetFileBlobByHash(hash string) (FileBlob, bool)
+}
+
+// IndexedFileRef names one indexed file and the content hash of its stored
+// bytes. Returned by IndexedFileBlobLister so a diskless follower can build
+// its text / structural search over the exact file set it can serve.
+type IndexedFileRef struct {
+	RepoPrefix  string
+	FilePath    string // repo-prefixed graph path (e.g. "gortex/internal/x.go")
+	ContentHash string
+}
+
+// IndexedFileBlobLister enumerates every indexed file that has a stored blob
+// — the file set a follower's blob-backed trigram / AST search covers. Only
+// files with a resolvable blob are returned (a pre-blob schema yields none).
+type IndexedFileBlobLister interface {
+	IndexedFileBlobs() ([]IndexedFileRef, error)
 }
 
 // RefFact is one durable resolved-reference fact: a reference edge from

@@ -76,6 +76,13 @@ type SharedServerConfig struct {
 	HTTPAddr     string    // opts the lifecycle into the /mcp HTTP surface
 	Watch        bool      // filesystem watcher / incremental reindex
 
+	// Follow selects read-only follower mode (requires the postgres
+	// backend): the store opens read-only, no MultiIndexer / semantic
+	// enrichment is constructed, and the MCP server seals its write
+	// surface. The daemon entry point additionally skips warmup, watchers,
+	// the janitor, and co-change prewarm.
+	Follow bool
+
 	// Entry-point-resolved options (not part of the authoritative surface).
 	Config         *config.Config       // loaded .gortex.yaml (required)
 	Global         *config.GlobalConfig // loaded ~/.gortex/config.yaml
@@ -270,7 +277,8 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 
 	// allowRebuild is gated on actually holding the store lock: only then may
 	// the sqlite backend drop and recreate an incompatible-schema DB.
-	g, backendCleanup, err := OpenBackend(backendName, cfg.BackendPath, cfg.BufferPoolMB, logger, storeLockHeld)
+	// Follow mode opens the store read-only.
+	g, backendCleanup, err := OpenBackend(backendName, cfg.BackendPath, cfg.BufferPoolMB, logger, storeLockHeld, cfg.Follow)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +302,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// opt-out). All lifecycles get this (reconciles the prior mcp-only
 	// drift where the embedded path skipped auto-registration).
 	var semMgr *semantic.Manager
-	if conf.Semantic.Enabled {
+	if conf.Semantic.Enabled && !cfg.Follow {
 		semCfg := semantic.Config{
 			Enabled:           conf.Semantic.Enabled,
 			TimeoutSeconds:    conf.Semantic.TimeoutSeconds,
@@ -523,8 +531,12 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	}
 	s.ConfigMgr = cm
 
+	// Follow mode constructs no MultiIndexer: the follower never tracks,
+	// indexes, or reconciles — it serves live reads from the shared store.
+	// A nil MultiIndexer is the correct follower shape (the MCP server and
+	// dispatcher tolerate it; an empty-roster one actively breaks clients).
 	var mi *indexer.MultiIndexer
-	if cm != nil {
+	if cm != nil && !cfg.Follow {
 		mi = indexer.NewMultiIndexer(g, reg, idx.Search(), cm, logger)
 		if embedder != nil {
 			mi.SetEmbedder(embedder)
@@ -571,6 +583,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		ScopeProject:        cfg.ScopeProject,
 		ToolPolicy:          &toolPolicyCfg,
 		ScopeIntentDefaults: &scopeIntentDefaults,
+		Follow:              cfg.Follow,
 	}}
 
 	eng := query.NewEngine(g)

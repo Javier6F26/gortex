@@ -650,6 +650,12 @@ func resolveSearchBackend(b search.Backend) searchBackendInfo {
 // Status gathers per-repo stats and basic process metrics. Daemon-level
 // fields (PID, uptime, socket, session count) are filled in by the
 // daemon itself before the response goes out.
+// newestIndexedAtReader is the optional store capability that reports the
+// newest repo_index_state.indexed_at, used for follower freshness lag.
+type newestIndexedAtReader interface {
+	NewestRepoIndexedAt() (int64, bool)
+}
+
 func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error) {
 	// Compute the per-repo memory estimate BEFORE taking the coarse
 	// controller mutex. On the SQLite backend AllRepoMemoryEstimates is a
@@ -968,6 +974,19 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 	}
 	if c.toolSurface != nil {
 		resp.ToolPreset, resp.ToolPresetMode, resp.LearnedTools = c.toolSurface()
+	}
+	// Freshness lag: now minus the newest repo_index_state.indexed_at
+	// across the schema. Derivable without a roster (a plain MAX query),
+	// so a diskless follower can report it. Set whenever the backend
+	// supports it and at least one repo is indexed.
+	if r, ok := g.(newestIndexedAtReader); ok {
+		if at, has := r.NewestRepoIndexedAt(); has {
+			lag := time.Now().Unix() - at
+			if lag < 0 {
+				lag = 0
+			}
+			resp.FreshnessLagSeconds = &lag
+		}
 	}
 	return resp, nil
 	// MCPSessions is populated by the daemon Server (it owns the

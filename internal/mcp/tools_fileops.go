@@ -152,6 +152,16 @@ func (s *Server) resolveFilePath(rawPath string) (absPath, relPath string, err e
 		}
 	}
 
+	if s.followMode {
+		// Diskless follower: no working tree to resolve against. Return the
+		// raw path as the graph-relative key with an empty absolute path so
+		// the caller's disk read fails and falls back to the store (blob /
+		// doc reconstruction). The path is returned verbatim (not through
+		// graphRelPath — that re-enters resolveFilePath) and the symlink
+		// guard is a no-op here (no known roots).
+		return "", rawPath, nil
+	}
+
 	return "", "", fmt.Errorf("%w: no indexer is attached and path %q is not absolute", errPathUnresolved, rawPath)
 }
 
@@ -1057,28 +1067,43 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	if guardErr := s.guardSymlinkWithinRepo(absPath); guardErr != nil {
 		return mcp.NewToolResultError(guardErr.Error()), nil
 	}
-	info, statErr := os.Stat(absPath)
-	if statErr != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("could not stat file: %v", statErr)), nil
-	}
-	if info.IsDir() {
-		return mcp.NewToolResultError(fmt.Sprintf("path %q is a directory", rawPath)), nil
-	}
 	// Honour the editor-buffer overlay if one is active for this path. A
 	// drifted overlay is already rejected upstream by the overlay view
 	// guard; what reaches here is a live buffer, which we flag as such so
 	// the caller knows the bytes are an unsaved editor view, not disk.
+	// Source precedence: overlay → disk → store (blob / doc reconstruction).
 	var content []byte
 	servedFromOverlay := false
+	storeSourced := false
+	storeDocFidelity := false
 	if buf, ok := s.overlayContentFor(ctx, absPath); ok {
 		content = []byte(buf)
 		servedFromOverlay = true
-	} else {
+	} else if info, statErr := os.Stat(absPath); statErr == nil {
+		if info.IsDir() {
+			return mcp.NewToolResultError(fmt.Sprintf("path %q is a directory", rawPath)), nil
+		}
 		b, rerr := os.ReadFile(absPath)
 		if rerr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("could not read file: %v", rerr)), nil
 		}
 		content = b
+	} else {
+		// Disk unavailable (a diskless follower, or a file deleted after
+		// indexing on a normal daemon): reconstruct from the store — the
+		// byte-exact blob for code, section text for documents.
+		if repoPrefix, graphPath, ok := s.storeKeysForRead(ctx, relPath); ok {
+			if b, isDoc, sok := s.storeReconstructFile(repoPrefix, graphPath); sok {
+				content = b
+				storeSourced = true
+				storeDocFidelity = isDoc
+			}
+		}
+		if !storeSourced {
+			// Code file with no blob (pre-blob schema) — do not return a
+			// partial reconstruction; surface the typed, recoverable error.
+			return followNoDiskError(fmt.Sprintf("read_file %q", rawPath)), nil
+		}
 	}
 
 	originalBytes := len(content)
@@ -1165,6 +1190,17 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	if servedFromOverlay {
 		result["served_from"] = "overlay"
 	}
+	if storeSourced {
+		result["source"] = "store"
+		result["served_from"] = "store"
+		if repoPrefix, graphPath, ok := s.storeKeysForRead(ctx, relPath); ok {
+			if br, brok := s.graph.(graph.FileBlobReader); brok {
+				if blob, found := br.GetFileBlobByPath(repoPrefix, graphPath); found {
+					result["etag"] = blob.ContentHash
+				}
+			}
+		}
+	}
 	if bodiesElided {
 		result["bodies_elided"] = true
 		if len(keptSymbols) > 0 {
@@ -1188,6 +1224,10 @@ func (s *Server) handleReadFile(ctx context.Context, req mcp.CallToolRequest) (*
 	if servedFromOverlay {
 		omissions = append(omissions, omission("overlay",
 			"served from an active editor-buffer overlay, not the file currently on disk"))
+	}
+	if storeSourced && storeDocFidelity {
+		omissions = append(omissions, omission("store_doc",
+			"reconstructed from the graph store's document sections (section-level fidelity, not byte-exact); disk was unavailable"))
 	}
 	if isBinary {
 		omissions = append(omissions, omission("binary",

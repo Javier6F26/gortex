@@ -23,6 +23,7 @@ var _ graph.VectorSearcher = (*Store)(nil)
 // BuildVectorIndex ensures the pgvector extension exists and creates the
 // HNSW index for the given dimension. Idempotent.
 func (s *Store) BuildVectorIndex(dims int) error {
+	if s.refuseWrite("BuildVectorIndex") { return ErrReadOnlyStore }
 	if dims <= 0 {
 		return fmt.Errorf("store_pg: invalid vector dims: %d", dims)
 	}
@@ -36,6 +37,7 @@ func (s *Store) BuildVectorIndex(dims int) error {
 
 // UpsertEmbedding inserts or replaces a single embedding vector.
 func (s *Store) UpsertEmbedding(nodeID string, vec []float32) error {
+	if s.refuseWrite("UpsertEmbedding") { return ErrReadOnlyStore }
 	if nodeID == "" || len(vec) == 0 {
 		return nil
 	}
@@ -54,6 +56,7 @@ func (s *Store) UpsertEmbedding(nodeID string, vec []float32) error {
 // BulkUpsertEmbeddings bulk-upserts vectors. Chunked to stay within
 // parameter limits.
 func (s *Store) BulkUpsertEmbeddings(items []graph.VectorItem) error {
+	if s.refuseWrite("BulkUpsertEmbeddings") { return ErrReadOnlyStore }
 	if len(items) == 0 {
 		return nil
 	}

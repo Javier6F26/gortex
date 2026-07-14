@@ -14,6 +14,7 @@ var (
 )
 
 func (s *Store) BulkSetCloneShingles(repoPrefix string, rows map[string][]uint64) error {
+	if s.refuseWrite("BulkSetCloneShingles") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -38,6 +39,7 @@ func (s *Store) BulkSetCloneShingles(repoPrefix string, rows map[string][]uint64
 }
 
 func (s *Store) DeleteCloneShingles(nodeIDs []string) error {
+	if s.refuseWrite("DeleteCloneShingles") { return ErrReadOnlyStore }
 	if len(nodeIDs) == 0 {
 		return nil
 	}

@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) SetFileMetas(repoPrefix string, rows []graph.FileMetaRow) error {
+	if s.refuseWrite("SetFileMetas") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -38,6 +39,7 @@ func (s *Store) SetFileMetas(repoPrefix string, rows []graph.FileMetaRow) error 
 }
 
 func (s *Store) DeleteFileMetasByFiles(repoPrefix string, files []string) error {
+	if s.refuseWrite("DeleteFileMetasByFiles") { return ErrReadOnlyStore }
 	if len(files) == 0 {
 		return nil
 	}

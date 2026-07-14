@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetCoverage(repoPrefix string, rows []graph.CoverageEnrichment) error {
+	if s.refuseWrite("BulkSetCoverage") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -37,6 +38,7 @@ func (s *Store) BulkSetCoverage(repoPrefix string, rows []graph.CoverageEnrichme
 }
 
 func (s *Store) DeleteCoverage(nodeIDs []string) error {
+	if s.refuseWrite("DeleteCoverage") { return ErrReadOnlyStore }
 	if len(nodeIDs) == 0 {
 		return nil
 	}

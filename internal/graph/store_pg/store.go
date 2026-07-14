@@ -8,16 +8,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
+	"net"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/zzet/gortex/internal/graph"
+	"go.uber.org/zap"
 )
 
 type Store struct {
@@ -37,6 +42,27 @@ type Store struct {
 	// for that repo. The map itself is safe for concurrent access
 	// because all reads/writes happen under writeMu.
 	bulk map[string]*bulkState
+
+	// readOnly refuses every mutating method (see refuseWrite). Set from
+	// Config.ReadOnly at Open.
+	readOnly bool
+	// logger receives WARN logs for degraded reads and refused writes.
+	// Never nil after Open (defaults to zap.NewNop()).
+	logger *zap.Logger
+
+	// Health counters. degradedReads and writeRefusals are atomic;
+	// lastErr/lastErrAt are guarded by healthMu.
+	degradedReads atomic.Int64
+	writeRefusals atomic.Int64
+	healthMu      sync.Mutex
+	lastErr       string
+	lastErrAt     time.Time
+
+	// lockConn holds the dedicated pooled connection that owns the writer
+	// advisory lock (see writer_lock.go); nil unless AcquireWriterLock
+	// succeeded. lockKey is the advisory key held on it.
+	lockConn *pgxpool.Conn
+	lockKey  int64
 }
 
 var _ graph.Store = (*Store)(nil)
@@ -47,6 +73,10 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("store_pg: open pool: %w", err)
 	}
 	storeCtx, cancel := context.WithCancel(context.Background())
+	logger := cfg.Logger
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	s := &Store{
 		pool:   pool,
 		config: cfg,
@@ -56,7 +86,9 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 			fingerprints: map[string]uint64{},
 			entries:      map[string]*bundleCacheEntry{},
 		},
-		bulk: make(map[string]*bulkState),
+		bulk:     make(map[string]*bulkState),
+		readOnly: cfg.ReadOnly,
+		logger:   logger,
 	}
 	if err := s.ensureSchema(storeCtx); err != nil {
 		pool.Close()
@@ -67,6 +99,7 @@ func Open(ctx context.Context, cfg Config) (*Store, error) {
 }
 
 func (s *Store) Close() error {
+	s.releaseWriterLock()
 	s.cancel()
 	s.pool.Close()
 	return nil
@@ -75,11 +108,162 @@ func (s *Store) Close() error {
 func (s *Store) ResolveMutex() *sync.Mutex { return &s.resolveMu }
 func (s *Store) NeedsRebuild() bool         { return false }
 
+// panicOnFatal is a programming-error guard for WRITE paths only. Writes
+// stay fail-fast: a write error other than pgx.ErrNoRows crashes the
+// process rather than silently losing data. Read paths never call it —
+// they route through withReadRetry (retry → degrade), so a transient PG
+// error can never panic a reader. Any surviving call site is therefore a
+// deliberate fail-fast on a mutation.
 func panicOnFatal(err error) {
 	if err == nil { return }
 	if errors.Is(err, pgx.ErrNoRows) { return }
 	panic(fmt.Errorf("store_pg: %w", err))
 }
+
+// ErrReadOnlyStore is returned by mutating methods (those with an error
+// return) when the store was opened with Config.ReadOnly. Methods without
+// an error return log-and-drop and record the refusal in health state.
+var ErrReadOnlyStore = errors.New("store_pg: read-only store")
+
+// readRetryBackoff is the per-attempt sleep before retrying a transient
+// read failure. Its length is the attempt budget.
+var readRetryBackoff = []time.Duration{50 * time.Millisecond, 150 * time.Millisecond, 450 * time.Millisecond}
+
+// retryableSQLState reports whether err is a transient PostgreSQL failure
+// worth retrying on a read path: connection-exception class (08),
+// admin/crash shutdowns and cannot-connect-now (57P01/57P02/57P03),
+// serialization_failure (40001, the SQLSTATE of a standby recovery
+// conflict), deadlock_detected (40P01), query_canceled (57014, recovery
+// conflict cancellation), and lock_not_available (55P03, a lock_timeout
+// expiry). Broken/reset connections that surface as driver or network
+// errors (failover, a killed pool connection) are also retryable.
+// Caller cancellation (context.Canceled/DeadlineExceeded) is never
+// retried.
+func retryableSQLState(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		code := pgErr.Code
+		switch {
+		case strings.HasPrefix(code, "08"): // connection_exception class
+			return true
+		case code == "57P01", code == "57P02", code == "57P03": // shutdown / cannot_connect_now
+			return true
+		case code == "40001": // serialization_failure (standby recovery conflict)
+			return true
+		case code == "40P01": // deadlock_detected
+			return true
+		case code == "57014": // query_canceled (recovery conflict cancellation)
+			return true
+		case code == "55P03": // lock_not_available (lock_timeout)
+			return true
+		default:
+			return false
+		}
+	}
+	// Not a PgError: a broken/reset connection (failover, pool conn killed
+	// mid-iteration) surfaces as a driver or network error. These are
+	// transient and safe to retry for reads.
+	return pgconn.SafeToRetry(err) || isNetworkError(err)
+}
+
+func isNetworkError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	return false
+}
+
+// withReadRetry runs fn, retrying on transient PostgreSQL errors with
+// bounded exponential backoff. fn must be idempotent (it resets and
+// re-populates its output on every attempt). On success it returns
+// immediately. On a non-retryable error, or after the attempt budget is
+// exhausted, it records a degraded read (WARN log + health counter) and
+// returns — leaving the caller's output at its zero value. It never
+// panics: read paths degrade rather than crash the process.
+func (s *Store) withReadRetry(tag string, fn func() error) {
+	var err error
+	for attempt := 0; attempt < len(readRetryBackoff); attempt++ {
+		if err = fn(); err == nil {
+			return
+		}
+		if !retryableSQLState(err) {
+			break
+		}
+		if attempt == len(readRetryBackoff)-1 {
+			break
+		}
+		select {
+		case <-s.ctx.Done():
+			s.recordDegradedRead(tag, err)
+			return
+		case <-time.After(readRetryBackoff[attempt]):
+		}
+	}
+	s.recordDegradedRead(tag, err)
+}
+
+// recordDegradedRead increments the degraded-read counter, stores the
+// error as the last-error, and logs at WARN.
+func (s *Store) recordDegradedRead(tag string, err error) {
+	if err == nil {
+		return
+	}
+	s.degradedReads.Add(1)
+	s.healthMu.Lock()
+	s.lastErr = err.Error()
+	s.lastErrAt = time.Now()
+	s.healthMu.Unlock()
+	s.logger.Warn("store_pg: degraded read", zap.String("query", tag), zap.Error(err))
+}
+
+// refuseWrite reports whether the store is read-only. When true it records
+// the refusal in health state and logs at WARN. Every mutating method
+// calls it first and short-circuits on true (returning ErrReadOnlyStore
+// or the appropriate zero value).
+func (s *Store) refuseWrite(method string) bool {
+	if !s.readOnly {
+		return false
+	}
+	s.writeRefusals.Add(1)
+	s.healthMu.Lock()
+	s.lastErr = "read-only store: refused " + method
+	s.lastErrAt = time.Now()
+	s.healthMu.Unlock()
+	s.logger.Warn("store_pg: write refused on read-only store", zap.String("method", method))
+	return true
+}
+
+// Health reports the store's degraded-operation counters. Satisfies
+// graph.StoreHealthReporter and is surfaced in daemon_health.
+func (s *Store) Health() graph.StoreHealth {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	var unix int64
+	if !s.lastErrAt.IsZero() {
+		unix = s.lastErrAt.Unix()
+	}
+	return graph.StoreHealth{
+		DegradedReads: s.degradedReads.Load(),
+		WriteRefusals: s.writeRefusals.Load(),
+		LastError:     s.lastErr,
+		LastErrorUnix: unix,
+	}
+}
+
+var _ graph.StoreHealthReporter = (*Store)(nil)
 
 func minInt(a, b int) int {
 	if a < b { return a }
@@ -130,37 +314,62 @@ func scanEdge(row pgx.Row) (*graph.Edge, error) {
 	return &e, nil
 }
 
+// queryNodes runs q and materializes the result. Both failure points —
+// the pool.Query error and rows.Err() after iteration — route through the
+// same retry-then-degrade path, so a transient fault behaves identically
+// regardless of where it surfaces (ending the former silent-nil/panic
+// asymmetry). On retry exhaustion it returns nil.
 func (s *Store) queryNodes(ctx context.Context, q string, args ...any) []*graph.Node {
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil { return nil }
-	defer rows.Close()
 	var out []*graph.Node
-	for rows.Next() {
-		n, err := scanNode(rows)
-		if err != nil { return out }
-		out = append(out, n)
-	}
-	if err := rows.Err(); err != nil {
-		panicOnFatal(err)
+	s.withReadRetry("queryNodes", func() error {
+		out = nil
+		rows, err := s.pool.Query(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var acc []*graph.Node
+		for rows.Next() {
+			n, err := scanNode(rows)
+			if err != nil {
+				return err
+			}
+			acc = append(acc, n)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		out = acc
 		return nil
-	}
+	})
 	return out
 }
 
+// queryEdges is the edge analogue of queryNodes; see its doc for the
+// uniform retry-then-degrade behavior across both failure points.
 func (s *Store) queryEdges(ctx context.Context, q string, args ...any) []*graph.Edge {
-	rows, err := s.pool.Query(ctx, q, args...)
-	if err != nil { return nil }
-	defer rows.Close()
 	var out []*graph.Edge
-	for rows.Next() {
-		e, err := scanEdge(rows)
-		if err != nil { return out }
-		out = append(out, e)
-	}
-	if err := rows.Err(); err != nil {
-		panicOnFatal(err)
+	s.withReadRetry("queryEdges", func() error {
+		out = nil
+		rows, err := s.pool.Query(ctx, q, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var acc []*graph.Edge
+		for rows.Next() {
+			e, err := scanEdge(rows)
+			if err != nil {
+				return err
+			}
+			acc = append(acc, e)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		out = acc
 		return nil
-	}
+	})
 	return out
 }
 
@@ -199,6 +408,7 @@ func (s *Store) insertEdgeLocked(ctx context.Context, e *graph.Edge) error {
 }
 
 func (s *Store) AddNode(n *graph.Node) {
+	if s.refuseWrite("AddNode") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.insertNodeLocked(s.ctx, n); err != nil { panicOnFatal(err) }
@@ -206,6 +416,7 @@ func (s *Store) AddNode(n *graph.Node) {
 
 func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 	if len(nodes) == 0 && len(edges) == 0 { return }
+	if s.refuseWrite("AddBatch") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
@@ -250,22 +461,33 @@ func (s *Store) AddBatch(nodes []*graph.Node, edges []*graph.Edge) {
 
 func (s *Store) AddEdge(e *graph.Edge) {
 	if e == nil { return }
+	if s.refuseWrite("AddEdge") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.insertEdgeLocked(s.ctx, e); err != nil { panicOnFatal(err) }
 }
 
 func (s *Store) GetNode(id string) *graph.Node {
-	n, err := scanNode(s.pool.QueryRow(s.ctx, `SELECT `+nodeCols+` FROM nodes WHERE id = $1`, id))
-	if err != nil { panicOnFatal(err); return nil }
-	return n
+	var out *graph.Node
+	s.withReadRetry("GetNode", func() error {
+		n, err := scanNode(s.pool.QueryRow(s.ctx, `SELECT `+nodeCols+` FROM nodes WHERE id = $1`, id))
+		if err != nil { return err }
+		out = n
+		return nil
+	})
+	return out
 }
 
 func (s *Store) GetNodeByQualName(qualName string) *graph.Node {
 	if qualName == "" { return nil }
-	n, err := scanNode(s.pool.QueryRow(s.ctx, `SELECT `+nodeCols+` FROM nodes WHERE qual_name = $1 LIMIT 1`, qualName))
-	if err != nil { panicOnFatal(err); return nil }
-	return n
+	var out *graph.Node
+	s.withReadRetry("GetNodeByQualName", func() error {
+		n, err := scanNode(s.pool.QueryRow(s.ctx, `SELECT `+nodeCols+` FROM nodes WHERE qual_name = $1 LIMIT 1`, qualName))
+		if err != nil { return err }
+		out = n
+		return nil
+	})
+	return out
 }
 
 func (s *Store) FindNodesByName(name string) []*graph.Node {
@@ -314,6 +536,7 @@ func (s *Store) AllEdges() []*graph.Edge {
 
 func (s *Store) SetEdgeProvenance(e *graph.Edge, newOrigin string) bool {
 	if e == nil { return false }
+	if s.refuseWrite("SetEdgeProvenance") { return false }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	ctx := s.ctx
@@ -337,6 +560,7 @@ func (s *Store) SetEdgeProvenance(e *graph.Edge, newOrigin string) bool {
 
 func (s *Store) PersistEdgeAttributes(e *graph.Edge) {
 	if e == nil { return }
+	if s.refuseWrite("PersistEdgeAttributes") { return }
 	metaBlob, err := encodeMeta(e.Meta)
 	if err != nil { panicOnFatal(err); return }
 	s.writeMu.Lock()
@@ -350,6 +574,7 @@ var _ graph.EdgeMetaBatchPersister = (*Store)(nil)
 
 func (s *Store) PersistEdgeAttributesBatch(edges []*graph.Edge) {
 	if len(edges) == 0 { return }
+	if s.refuseWrite("PersistEdgeAttributesBatch") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	ctx := s.ctx
@@ -372,6 +597,7 @@ func (s *Store) PersistEdgeAttributesBatch(edges []*graph.Edge) {
 
 func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 	if e == nil || oldTo == e.To { return }
+	if s.refuseWrite("ReindexEdge") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	ctx := s.ctx
@@ -383,6 +609,7 @@ func (s *Store) ReindexEdge(e *graph.Edge, oldTo string) {
 
 func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 	if len(batch) == 0 { return }
+	if s.refuseWrite("ReindexEdges") { return }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	ctx := s.ctx
@@ -411,6 +638,7 @@ func (s *Store) ReindexEdges(batch []graph.EdgeReindex) {
 
 func (s *Store) SetEdgeProvenanceBatch(batch []graph.EdgeProvenanceUpdate) int {
 	if len(batch) == 0 { return 0 }
+	if s.refuseWrite("SetEdgeProvenanceBatch") { return 0 }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	ctx := s.ctx
@@ -447,6 +675,7 @@ func (s *Store) SetEdgeProvenanceBatch(batch []graph.EdgeProvenanceUpdate) int {
 }
 
 func (s *Store) RemoveEdge(from, to string, kind graph.EdgeKind) bool {
+	if s.refuseWrite("RemoveEdge") { return false }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	res, err := s.pool.Exec(s.ctx, `DELETE FROM edges WHERE from_id=$1 AND to_id=$2 AND kind=$3`, from, to, string(kind))
@@ -455,12 +684,14 @@ func (s *Store) RemoveEdge(from, to string, kind graph.EdgeKind) bool {
 }
 
 func (s *Store) EvictFile(filePath string) (int, int) {
+	if s.refuseWrite("EvictFile") { return 0, 0 }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE file_path = $1`, `DELETE FROM nodes WHERE file_path = $1`, filePath)
 }
 
 func (s *Store) EvictRepo(repoPrefix string) (int, int) {
+	if s.refuseWrite("EvictRepo") { return 0, 0 }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE repo_prefix = $1`, `DELETE FROM nodes WHERE repo_prefix = $1`, repoPrefix)
@@ -567,79 +798,112 @@ func (s *Store) edgesByNodeIDs(ctx context.Context, ids []string, col string, ke
 }
 
 func (s *Store) NodeCount() int {
-	var n int
-	if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n); err != nil { panicOnFatal(err); return 0 }
-	return n
+	var out int
+	s.withReadRetry("NodeCount", func() error {
+		var n int
+		if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM nodes`).Scan(&n); err != nil { return err }
+		out = n
+		return nil
+	})
+	return out
 }
 
 func (s *Store) EdgeCount() int {
-	var n int
-	if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM edges`).Scan(&n); err != nil { panicOnFatal(err); return 0 }
-	return n
+	var out int
+	s.withReadRetry("EdgeCount", func() error {
+		var n int
+		if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM edges`).Scan(&n); err != nil { return err }
+		out = n
+		return nil
+	})
+	return out
 }
 
 func (s *Store) Stats() graph.GraphStats {
 	st := graph.GraphStats{ByKind: map[string]int{}, ByLanguage: map[string]int{}}
 	st.TotalNodes = s.NodeCount()
 	st.TotalEdges = s.EdgeCount()
-	rows, err := s.pool.Query(s.ctx, `SELECT kind, COUNT(*) FROM nodes GROUP BY kind`)
-	if err != nil { panicOnFatal(err); return st }
-	for rows.Next() {
-		var kind string; var n int
-		if err := rows.Scan(&kind, &n); err != nil { rows.Close(); panicOnFatal(err); return st }
-		st.ByKind[kind] = n
-	}
-	rows.Close()
-	rows, err = s.pool.Query(s.ctx, `SELECT language, COUNT(*) FROM nodes GROUP BY language`)
-	if err != nil { panicOnFatal(err); return st }
-	for rows.Next() {
-		var lang string; var n int
-		if err := rows.Scan(&lang, &n); err != nil { rows.Close(); panicOnFatal(err); return st }
-		st.ByLanguage[lang] = n
-	}
-	rows.Close()
+	s.withReadRetry("Stats", func() error {
+		byKind := map[string]int{}
+		byLang := map[string]int{}
+		rows, err := s.pool.Query(s.ctx, `SELECT kind, COUNT(*) FROM nodes GROUP BY kind`)
+		if err != nil { return err }
+		for rows.Next() {
+			var kind string; var n int
+			if err := rows.Scan(&kind, &n); err != nil { rows.Close(); return err }
+			byKind[kind] = n
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		rows, err = s.pool.Query(s.ctx, `SELECT language, COUNT(*) FROM nodes GROUP BY language`)
+		if err != nil { return err }
+		for rows.Next() {
+			var lang string; var n int
+			if err := rows.Scan(&lang, &n); err != nil { rows.Close(); return err }
+			byLang[lang] = n
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		st.ByKind = byKind
+		st.ByLanguage = byLang
+		return nil
+	})
 	return st
 }
 
 func (s *Store) RepoStats() map[string]graph.GraphStats {
 	out := map[string]graph.GraphStats{}
-	rows, err := s.pool.Query(s.ctx, `SELECT repo_prefix, kind, language, COUNT(*) FROM nodes WHERE repo_prefix<>'' GROUP BY repo_prefix, kind, language`)
-	if err != nil { panicOnFatal(err); return out }
-	for rows.Next() {
-		var repo, kind, lang string; var n int
-		if err := rows.Scan(&repo, &kind, &lang, &n); err != nil { rows.Close(); panicOnFatal(err); return out }
-		st, ok := out[repo]
-		if !ok { st = graph.GraphStats{ByKind: map[string]int{}, ByLanguage: map[string]int{}} }
-		st.TotalNodes += n
-		st.ByKind[kind] += n
-		st.ByLanguage[lang] += n
-		out[repo] = st
-	}
-	rows.Close()
-	rows, err = s.pool.Query(s.ctx, `SELECT n.repo_prefix, COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix<>'' GROUP BY n.repo_prefix`)
-	if err != nil { panicOnFatal(err); return out }
-	for rows.Next() {
-		var repo string; var n int
-		if err := rows.Scan(&repo, &n); err != nil { rows.Close(); panicOnFatal(err); return out }
-		st, ok := out[repo]
-		if !ok { st = graph.GraphStats{ByKind: map[string]int{}, ByLanguage: map[string]int{}} }
-		st.TotalEdges = n
-		out[repo] = st
-	}
-	rows.Close()
+	s.withReadRetry("RepoStats", func() error {
+		acc := map[string]graph.GraphStats{}
+		rows, err := s.pool.Query(s.ctx, `SELECT repo_prefix, kind, language, COUNT(*) FROM nodes WHERE repo_prefix<>'' GROUP BY repo_prefix, kind, language`)
+		if err != nil { return err }
+		for rows.Next() {
+			var repo, kind, lang string; var n int
+			if err := rows.Scan(&repo, &kind, &lang, &n); err != nil { rows.Close(); return err }
+			st, ok := acc[repo]
+			if !ok { st = graph.GraphStats{ByKind: map[string]int{}, ByLanguage: map[string]int{}} }
+			st.TotalNodes += n
+			st.ByKind[kind] += n
+			st.ByLanguage[lang] += n
+			acc[repo] = st
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		rows, err = s.pool.Query(s.ctx, `SELECT n.repo_prefix, COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix<>'' GROUP BY n.repo_prefix`)
+		if err != nil { return err }
+		for rows.Next() {
+			var repo string; var n int
+			if err := rows.Scan(&repo, &n); err != nil { rows.Close(); return err }
+			st, ok := acc[repo]
+			if !ok { st = graph.GraphStats{ByKind: map[string]int{}, ByLanguage: map[string]int{}} }
+			st.TotalEdges = n
+			acc[repo] = st
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		out = acc
+		return nil
+	})
 	return out
 }
 
 func (s *Store) RepoPrefixes() []string {
-	rows, err := s.pool.Query(s.ctx, `SELECT DISTINCT repo_prefix FROM nodes WHERE repo_prefix<>''`)
-	if err != nil { panicOnFatal(err); return nil }
-	defer rows.Close()
 	var out []string
-	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil { panicOnFatal(err); return out }
-		out = append(out, p)
-	}
+	s.withReadRetry("RepoPrefixes", func() error {
+		out = nil
+		rows, err := s.pool.Query(s.ctx, `SELECT DISTINCT repo_prefix FROM nodes WHERE repo_prefix<>''`)
+		if err != nil { return err }
+		defer rows.Close()
+		var acc []string
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil { return err }
+			acc = append(acc, p)
+		}
+		if err := rows.Err(); err != nil { return err }
+		out = acc
+		return nil
+	})
 	return out
 }
 
@@ -651,12 +915,15 @@ const perEdgeByteEstimate = 128
 
 func (s *Store) RepoMemoryEstimate(repoPrefix string) graph.RepoMemoryEstimate {
 	var est graph.RepoMemoryEstimate
-	var n, e int
-	if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM nodes WHERE repo_prefix=$1`, repoPrefix).Scan(&n); err != nil { panicOnFatal(err); return est }
-	if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix=$1`, repoPrefix).Scan(&e); err != nil { panicOnFatal(err); return est }
-	est.NodeCount = n; est.EdgeCount = e
-	est.NodeBytes = uint64(n) * perNodeByteEstimate
-	est.EdgeBytes = uint64(e) * perEdgeByteEstimate
+	s.withReadRetry("RepoMemoryEstimate", func() error {
+		var n, e int
+		if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM nodes WHERE repo_prefix=$1`, repoPrefix).Scan(&n); err != nil { return err }
+		if err := s.pool.QueryRow(s.ctx, `SELECT COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix=$1`, repoPrefix).Scan(&e); err != nil { return err }
+		est.NodeCount = n; est.EdgeCount = e
+		est.NodeBytes = uint64(n) * perNodeByteEstimate
+		est.EdgeBytes = uint64(e) * perEdgeByteEstimate
+		return nil
+	})
 	return est
 }
 
@@ -671,22 +938,29 @@ func (s *Store) AllRepoMemoryEstimates() map[string]graph.RepoMemoryEstimate {
 		return out
 	}
 	out := map[string]graph.RepoMemoryEstimate{}
-	rows, err := s.pool.Query(s.ctx, `SELECT repo_prefix, COUNT(*) FROM nodes WHERE repo_prefix<>'' GROUP BY repo_prefix`)
-	if err != nil { panicOnFatal(err); return out }
-	for rows.Next() {
-		var repo string; var n int
-		if err := rows.Scan(&repo, &n); err != nil { rows.Close(); panicOnFatal(err); return out }
-		est := out[repo]; est.NodeCount = n; est.NodeBytes = uint64(n) * perNodeByteEstimate; out[repo] = est
-	}
-	rows.Close()
-	rows, err = s.pool.Query(s.ctx, `SELECT n.repo_prefix, COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix<>'' GROUP BY n.repo_prefix`)
-	if err != nil { panicOnFatal(err); return out }
-	for rows.Next() {
-		var repo string; var n int
-		if err := rows.Scan(&repo, &n); err != nil { rows.Close(); panicOnFatal(err); return out }
-		est := out[repo]; est.EdgeCount = n; est.EdgeBytes = uint64(n) * perEdgeByteEstimate; out[repo] = est
-	}
-	rows.Close()
+	s.withReadRetry("AllRepoMemoryEstimates", func() error {
+		acc := map[string]graph.RepoMemoryEstimate{}
+		rows, err := s.pool.Query(s.ctx, `SELECT repo_prefix, COUNT(*) FROM nodes WHERE repo_prefix<>'' GROUP BY repo_prefix`)
+		if err != nil { return err }
+		for rows.Next() {
+			var repo string; var n int
+			if err := rows.Scan(&repo, &n); err != nil { rows.Close(); return err }
+			est := acc[repo]; est.NodeCount = n; est.NodeBytes = uint64(n) * perNodeByteEstimate; acc[repo] = est
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		rows, err = s.pool.Query(s.ctx, `SELECT n.repo_prefix, COUNT(*) FROM edges e JOIN nodes n ON n.id=e.from_id WHERE n.repo_prefix<>'' GROUP BY n.repo_prefix`)
+		if err != nil { return err }
+		for rows.Next() {
+			var repo string; var n int
+			if err := rows.Scan(&repo, &n); err != nil { rows.Close(); return err }
+			est := acc[repo]; est.EdgeCount = n; est.EdgeBytes = uint64(n) * perEdgeByteEstimate; acc[repo] = est
+		}
+		if err := rows.Err(); err != nil { rows.Close(); return err }
+		rows.Close()
+		out = acc
+		return nil
+	})
 	s.memEstVal = out; s.memEstAt = time.Now()
 	result := make(map[string]graph.RepoMemoryEstimate, len(out))
 	for k, v := range out { result[k] = v }

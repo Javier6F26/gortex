@@ -132,6 +132,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		Backend:      daemonBackend,
 		BackendPath:  resolveBackendPathForDaemon(),
 		BufferPoolMB: resolveDaemonBufferPoolMB(),
+		Follow:       daemonFollow,
 		Config:       cfg,
 		Global:       gc,
 		Logger:       logger,
@@ -173,6 +174,23 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 				ss.MultiIndexer.SetSkipVectorBuild(true)
 				logger.Info("daemon: snapshot carries vector index — warmup will restore it instead of re-embedding",
 					zap.Int("vectors", vec.Count), zap.Int("dims", vec.Dims))
+			}
+		}
+	}
+
+	// Writer advisory lock: a non-follow daemon on the PostgreSQL backend
+	// takes an exclusive schema writer lock before any warmup write, so two
+	// indexing daemons (or an accidental second daemon on the shared DSN)
+	// cannot interleave writes. Session-scoped: it releases on process exit
+	// or crash. Followers never reach here (see the follow boot branch).
+	if isPostgresBackend(daemonBackend) && !daemonFollow {
+		if wl, ok := ss.Graph.(writerLockAcquirer); ok {
+			lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := wl.AcquireWriterLock(lockCtx)
+			cancel()
+			if err != nil {
+				_ = ss.Close()
+				return nil, fmt.Errorf("acquire writer lock: %w", err)
 			}
 		}
 	}

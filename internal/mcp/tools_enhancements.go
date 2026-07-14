@@ -43,6 +43,11 @@ import (
 // Routing each path to its owning per-repo indexer keeps the check accurate and
 // the work bounded to the file the caller is about to read.
 func (s *Server) ensureFresh(filePaths []string) []string {
+	// Follow mode: no disk, no MultiIndexer, read-only store — the
+	// read-path self-heal (re-index stale files) cannot and must not run.
+	if s.followMode {
+		return nil
+	}
 	var refreshed []string
 	const limit = 5
 	for _, fp := range filePaths {
@@ -2742,6 +2747,7 @@ type diffSymbolInfo struct {
 }
 
 func (s *Server) handleDiffContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.followMode { return followNoDiskError("diff_context (needs a git working tree)"), nil }
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 

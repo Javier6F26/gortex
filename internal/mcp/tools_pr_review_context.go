@@ -159,6 +159,7 @@ func changedSymbolsToSignatureChanges(g graph.Store, changed []analysis.ChangedS
 // handlePRReviewContext runs the deterministic review gates for the
 // changeset and returns the composite envelope.
 func (s *Server) handlePRReviewContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.followMode { return followNoDiskError("pr_review_context (needs a git working tree)"), nil }
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph available — index a repo first"), nil
 	}

@@ -886,17 +886,25 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	// paths must never reach readLines: os.Open would resolve them
 	// against the daemon process cwd, which is unrelated to any repo
 	// and silently produces wrong results.
-	absPath, resolveErr := s.resolveNodePath(node)
-	if resolveErr != nil {
-		return mcp.NewToolResultError(resolveErr.Error()), nil
+	// Store-backed source fallback: on a follower (no disk) — or when the
+	// on-disk read fails on a normal daemon (file deleted after indexing) —
+	// serve the node's source from the store. Doc nodes serve their stored
+	// section text; code nodes are sliced byte-exact from the file blob.
+	// Symlink guard on the resolvable disk path — a symlink escaping the
+	// repo must not be served even if the store could satisfy the read.
+	if absPath, resolveErr := s.resolveNodePath(node); resolveErr == nil {
+		if guardErr := s.guardSymlinkWithinRepo(absPath); guardErr != nil {
+			return mcp.NewToolResultError(guardErr.Error()), nil
+		}
 	}
-	if guardErr := s.guardSymlinkWithinRepo(absPath); guardErr != nil {
-		return mcp.NewToolResultError(guardErr.Error()), nil
-	}
-
-	source, startLine, totalFileChars, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, contextLines)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("could not read source: %v", err)), nil
+	// Unified source seam: overlay → disk → store (byte-exact blob for code,
+	// section text for docs).
+	source, startLine, totalFileChars, storeSourced, srcErr := s.sourceLinesForNode(ctx, node, contextLines)
+	if srcErr != nil {
+		if s.followMode {
+			return followNoDiskError("source for " + id), nil
+		}
+		return mcp.NewToolResultError(fmt.Sprintf("could not read source: %v", srcErr)), nil
 	}
 
 	compressBodies := req.GetBool("compress_bodies", false)
@@ -947,6 +955,19 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 	if sig, ok := node.Meta["signature"]; ok {
 		result["signature"] = sig
 	}
+	// storeEtag, when set, is the content-hash etag for a byte-exact
+	// blob-served read — it supersedes the derived etag below (D7: store
+	// responses use the content hash, stable across identical reconstructions).
+	storeEtag := ""
+	if storeSourced {
+		// Served from the graph store, not disk. Doc nodes are section-level
+		// (exact for the node's range); code nodes are byte-exact from the
+		// file blob keyed by content hash.
+		result["served_from"] = "store"
+		if hash, ok := s.storeEtagForNode(node); ok {
+			storeEtag = hash
+		}
+	}
 	if bodiesElided {
 		result["bodies_elided"] = true
 	}
@@ -976,8 +997,12 @@ func (s *Server) handleGetSymbolSource(ctx context.Context, req mcp.CallToolRequ
 		result["omissions"] = omissions
 	}
 
-	// ETag conditional fetch.
-	etag := computeETag(result)
+	// ETag conditional fetch. A byte-exact blob-served read uses its
+	// content-hash etag; otherwise the etag is derived from the payload.
+	etag := storeEtag
+	if etag == "" {
+		etag = computeETag(result)
+	}
 	if ifNoneMatch := req.GetString("if_none_match", ""); ifNoneMatch != "" && ifNoneMatch == etag {
 		return notModifiedResult(etag), nil
 	}
@@ -1151,16 +1176,18 @@ func (s *Server) handleBatchSymbols(ctx context.Context, req mcp.CallToolRequest
 			}
 		}
 
-		// Source code (optional).
+		// Source code (optional). Routed through the source seam so a
+		// diskless follower serves it byte-exact from the file blob.
 		if includeSource && node.StartLine > 0 && node.EndLine > 0 {
-			if absPath, err := s.resolveNodePath(node); err == nil {
-				if source, fromLine, totalFileChars, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, contextLines); err == nil {
-					entry["source"] = source
-					entry["from_line"] = fromLine
-					returned := tokens.CachedCountInt64(source)
-					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
-					s.tokenStatsFor(ctx).record(s.savingsAttributionNode(node), "batch_symbols", returned, fullFile)
+			if source, fromLine, totalFileChars, fromStore, err := s.sourceLinesForNode(ctx, node, contextLines); err == nil {
+				entry["source"] = source
+				entry["from_line"] = fromLine
+				if fromStore {
+					entry["served_from"] = "store"
 				}
+				returned := tokens.CachedCountInt64(source)
+				fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
+				s.tokenStatsFor(ctx).record(s.savingsAttributionNode(node), "batch_symbols", returned, fullFile)
 			}
 		}
 
@@ -1479,10 +1506,8 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 
 	// 1. Get the example source.
 	if node.StartLine > 0 && node.EndLine > 0 {
-		if absPath, err := s.resolveNodePath(node); err == nil {
-			if source, _, _, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, 0); err == nil {
-				result["example_source"] = elideSourceForPattern(source, maxSourceLines)
-			}
+		if source, _, _, _, err := s.sourceLinesForNode(ctx, node, 0); err == nil {
+			result["example_source"] = elideSourceForPattern(source, maxSourceLines)
 		}
 	}
 	if sig, ok := node.Meta["signature"]; ok {
@@ -1527,10 +1552,8 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 		}
 		// Get the registration source (the caller function that wires this symbol).
 		if cn.StartLine > 0 && cn.EndLine > 0 {
-			if absPath, err := s.resolveNodePath(cn); err == nil {
-				if source, _, _, err := s.readLinesForCtx(ctx, absPath, cn.StartLine, cn.EndLine, 0); err == nil {
-					entry["source"] = elideSourceForPattern(source, maxSourceLines)
-				}
+			if source, _, _, _, err := s.sourceLinesForNode(ctx, cn, 0); err == nil {
+				entry["source"] = elideSourceForPattern(source, maxSourceLines)
 			}
 		}
 		registration = append(registration, entry)
@@ -1557,10 +1580,8 @@ func (s *Server) handleSuggestPattern(ctx context.Context, req mcp.CallToolReque
 			}
 			// Get test source.
 			if tn.StartLine > 0 && tn.EndLine > 0 {
-				if absPath, err := s.resolveNodePath(tn); err == nil {
-					if source, _, _, err := s.readLinesForCtx(ctx, absPath, tn.StartLine, tn.EndLine, 0); err == nil {
-						entry["source"] = elideSourceForPattern(source, maxSourceLines)
-					}
+				if source, _, _, _, err := s.sourceLinesForNode(ctx, tn, 0); err == nil {
+					entry["source"] = elideSourceForPattern(source, maxSourceLines)
 				}
 			}
 			testPatterns = append(testPatterns, entry)
@@ -2017,17 +2038,18 @@ func (s *Server) handleSmartContext(ctx context.Context, req mcp.CallToolRequest
 		if !graded && sourcesEmbedded < smartCtxMaxSource &&
 			(sym.Kind == graph.KindFunction || sym.Kind == graph.KindMethod) &&
 			sym.StartLine > 0 && sym.EndLine > 0 {
-			if absPath, err := s.resolveNodePath(sym); err == nil {
-				if source, _, totalFileChars, err := s.readLinesForCtx(ctx, absPath, sym.StartLine, sym.EndLine, 0); err == nil {
-					if red, did := s.maybeRedactConfigLeaf(sym.Language, sym.FilePath, false, source); did {
-						source = red
-					}
-					entry["source"] = source
-					sourcesEmbedded++
-					returned := tokens.CachedCountInt64(source)
-					fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
-					s.tokenStatsFor(ctx).record(s.savingsAttributionNode(sym), "smart_context", returned, fullFile)
+			if source, _, totalFileChars, fromStore, err := s.sourceLinesForNode(ctx, sym, 0); err == nil {
+				if red, did := s.maybeRedactConfigLeaf(sym.Language, sym.FilePath, false, source); did {
+					source = red
 				}
+				entry["source"] = source
+				if fromStore {
+					entry["served_from"] = "store"
+				}
+				sourcesEmbedded++
+				returned := tokens.CachedCountInt64(source)
+				fullFile := int64(tokens.EstimateFromSample(totalFileChars, source))
+				s.tokenStatsFor(ctx).record(s.savingsAttributionNode(sym), "smart_context", returned, fullFile)
 			}
 		}
 		symbolContexts = append(symbolContexts, entry)

@@ -44,7 +44,7 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 -- queryability via PostgreSQL JSON operators. The id column is the
 -- primary key; INSERT with ON CONFLICT DO UPDATE provides idempotent
 -- upsert semantics matching the in-memory store.
-CREATE TABLE nodes (
+CREATE TABLE IF NOT EXISTS nodes (
     id            TEXT PRIMARY KEY,
     kind          TEXT NOT NULL,
     name          TEXT NOT NULL,
@@ -75,7 +75,7 @@ CREATE TABLE nodes (
 -- edges stores directed relationships between nodes. The UNIQUE constraint
 -- on (from_id, to_id, kind, file_path, line) provides the same dedup
 -- semantics as the SQLite version (INSERT OR IGNORE / ON CONFLICT DO NOTHING).
-CREATE TABLE edges (
+CREATE TABLE IF NOT EXISTS edges (
     id               BIGSERIAL,
     from_id          TEXT NOT NULL,
     to_id            TEXT NOT NULL,
@@ -95,7 +95,7 @@ CREATE TABLE edges (
 -- ==============
 
 -- file_mtimes records per-file modification times for incremental reindex.
-CREATE TABLE file_mtimes (
+CREATE TABLE IF NOT EXISTS file_mtimes (
     repo_prefix TEXT NOT NULL,
     file_path   TEXT NOT NULL,
     mtime_ns    BIGINT NOT NULL,
@@ -103,7 +103,7 @@ CREATE TABLE file_mtimes (
 );
 
 -- repo_index_state records per-repo freshness provenance.
-CREATE TABLE repo_index_state (
+CREATE TABLE IF NOT EXISTS repo_index_state (
     repo_prefix        TEXT PRIMARY KEY,
     indexed_sha        TEXT NOT NULL DEFAULT '',
     dirty              INTEGER NOT NULL DEFAULT 0,
@@ -115,7 +115,7 @@ CREATE TABLE repo_index_state (
 );
 
 -- enrichment_state records per-(repo, provider) enrichment completion.
-CREATE TABLE enrichment_state (
+CREATE TABLE IF NOT EXISTS enrichment_state (
     repo_prefix  TEXT NOT NULL,
     provider     TEXT NOT NULL,
     indexed_sha  TEXT NOT NULL DEFAULT '',
@@ -125,14 +125,14 @@ CREATE TABLE enrichment_state (
 );
 
 -- clone_shingles stores per-symbol MinHash shingle sets as BYTEA.
-CREATE TABLE clone_shingles (
+CREATE TABLE IF NOT EXISTS clone_shingles (
     node_id     TEXT PRIMARY KEY,
     repo_prefix TEXT NOT NULL DEFAULT '',
     shingles    BYTEA
 );
 
 -- constant_values stores per-KindConstant literal values.
-CREATE TABLE constant_values (
+CREATE TABLE IF NOT EXISTS constant_values (
     node_id     TEXT PRIMARY KEY,
     repo_prefix TEXT NOT NULL DEFAULT '',
     file_path   TEXT NOT NULL DEFAULT '',
@@ -140,7 +140,7 @@ CREATE TABLE constant_values (
 );
 
 -- files stores per-file metadata (content hash, size, node count, errors).
-CREATE TABLE files (
+CREATE TABLE IF NOT EXISTS files (
     repo_prefix  TEXT NOT NULL DEFAULT '',
     file_path    TEXT NOT NULL,
     content_hash TEXT NOT NULL DEFAULT '',
@@ -151,7 +151,7 @@ CREATE TABLE files (
 );
 
 -- ref_facts stores per-file resolved-reference facts.
-CREATE TABLE ref_facts (
+CREATE TABLE IF NOT EXISTS ref_facts (
     repo_prefix TEXT NOT NULL DEFAULT '',
     from_id     TEXT NOT NULL,
     to_id       TEXT NOT NULL,
@@ -167,14 +167,14 @@ CREATE TABLE ref_facts (
 );
 
 -- vectors stores symbol embedding vectors using pgvector's vector type.
-CREATE TABLE vectors (
+CREATE TABLE IF NOT EXISTS vectors (
     node_id TEXT PRIMARY KEY,
     dims    INTEGER NOT NULL,
     vec     vector(50) NOT NULL
 );
 
 -- churn_enrichment stores git-churn data per node.
-CREATE TABLE churn_enrichment (
+CREATE TABLE IF NOT EXISTS churn_enrichment (
     node_id        TEXT PRIMARY KEY,
     repo_prefix    TEXT NOT NULL DEFAULT '',
     commit_count   INTEGER NOT NULL DEFAULT 0,
@@ -188,7 +188,7 @@ CREATE TABLE churn_enrichment (
 );
 
 -- coverage_enrichment stores code coverage data per node.
-CREATE TABLE coverage_enrichment (
+CREATE TABLE IF NOT EXISTS coverage_enrichment (
     node_id      TEXT PRIMARY KEY,
     repo_prefix  TEXT NOT NULL DEFAULT '',
     coverage_pct REAL NOT NULL DEFAULT 0,
@@ -197,14 +197,14 @@ CREATE TABLE coverage_enrichment (
 );
 
 -- release_enrichment stores per-file "added_in <tag>" data.
-CREATE TABLE release_enrichment (
+CREATE TABLE IF NOT EXISTS release_enrichment (
     node_id     TEXT PRIMARY KEY,
     repo_prefix TEXT NOT NULL DEFAULT '',
     added_in    TEXT NOT NULL DEFAULT ''
 );
 
 -- blame_enrichment stores per-symbol latest-author data.
-CREATE TABLE blame_enrichment (
+CREATE TABLE IF NOT EXISTS blame_enrichment (
     node_id     TEXT PRIMARY KEY,
     repo_prefix TEXT NOT NULL DEFAULT '',
     commit_sha  TEXT NOT NULL DEFAULT '',
@@ -216,29 +216,29 @@ CREATE TABLE blame_enrichment (
 -- =======
 
 -- Node indexes (mirroring SQLite secondary indexes)
-CREATE INDEX idx_nodes_name ON nodes(name);
-CREATE INDEX idx_nodes_kind ON nodes(kind);
-CREATE INDEX idx_nodes_file ON nodes(file_path);
-CREATE INDEX idx_nodes_repo_prefix ON nodes(repo_prefix) WHERE repo_prefix <> '';
-CREATE UNIQUE INDEX idx_nodes_qual_name ON nodes(qual_name) WHERE qual_name <> '';
+CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
+CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
+CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
+CREATE INDEX IF NOT EXISTS idx_nodes_repo_prefix ON nodes(repo_prefix) WHERE repo_prefix <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_qual_name ON nodes(qual_name) WHERE qual_name <> '';
 
 -- Edge indexes
-CREATE INDEX idx_edges_from_id ON edges(from_id, kind);
-CREATE INDEX idx_edges_to_id ON edges(to_id);
-CREATE INDEX idx_edges_kind ON edges(kind);
-CREATE INDEX idx_edges_repo_prefix ON edges(from_id) WHERE from_id LIKE '%::%';
+CREATE INDEX IF NOT EXISTS idx_edges_from_id ON edges(from_id, kind);
+CREATE INDEX IF NOT EXISTS idx_edges_to_id ON edges(to_id);
+CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
+CREATE INDEX IF NOT EXISTS idx_edges_repo_prefix ON edges(from_id) WHERE from_id LIKE '%::%';
 
 -- Sidecar indexes
-CREATE INDEX idx_constant_values_by_file ON constant_values(repo_prefix, file_path);
-CREATE INDEX idx_ref_facts_by_file ON ref_facts(repo_prefix, file_path);
-CREATE INDEX idx_ref_facts_by_target ON ref_facts(repo_prefix, to_id);
-CREATE INDEX idx_files_with_errors ON files(repo_prefix) WHERE errors <> '';
+CREATE INDEX IF NOT EXISTS idx_constant_values_by_file ON constant_values(repo_prefix, file_path);
+CREATE INDEX IF NOT EXISTS idx_ref_facts_by_file ON ref_facts(repo_prefix, file_path);
+CREATE INDEX IF NOT EXISTS idx_ref_facts_by_target ON ref_facts(repo_prefix, to_id);
+CREATE INDEX IF NOT EXISTS idx_files_with_errors ON files(repo_prefix) WHERE errors <> '';
 
 -- Enrichment sidecar indexes
-CREATE INDEX idx_churn_by_repo ON churn_enrichment(repo_prefix) WHERE repo_prefix <> '';
-CREATE INDEX idx_coverage_by_repo ON coverage_enrichment(repo_prefix) WHERE repo_prefix <> '';
-CREATE INDEX idx_release_by_repo ON release_enrichment(repo_prefix) WHERE repo_prefix <> '';
-CREATE INDEX idx_blame_by_repo ON blame_enrichment(repo_prefix) WHERE repo_prefix <> '';
+CREATE INDEX IF NOT EXISTS idx_churn_by_repo ON churn_enrichment(repo_prefix) WHERE repo_prefix <> '';
+CREATE INDEX IF NOT EXISTS idx_coverage_by_repo ON coverage_enrichment(repo_prefix) WHERE repo_prefix <> '';
+CREATE INDEX IF NOT EXISTS idx_release_by_repo ON release_enrichment(repo_prefix) WHERE repo_prefix <> '';
+CREATE INDEX IF NOT EXISTS idx_blame_by_repo ON blame_enrichment(repo_prefix) WHERE repo_prefix <> '';
 
 -- Full-text search indexes
 -- ========================
@@ -248,12 +248,12 @@ CREATE INDEX idx_blame_by_repo ON blame_enrichment(repo_prefix) WHERE repo_prefi
 -- The index supports:
 --   WHERE name % 'query'      (trigram similarity)
 --   WHERE name ILIKE '%q%'    (case-insensitive substring, fallback)
-CREATE INDEX idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops);
 
 -- Content FTS: generated tsvector column with GIN index.
 -- This replaces SQLite's content_fts FTS5 virtual table for content bodies.
 -- search_body is a generated tsvector column for full-text search.
-CREATE TABLE content_fts (
+CREATE TABLE IF NOT EXISTS content_fts (
     node_id     TEXT NOT NULL,
     repo_prefix TEXT NOT NULL DEFAULT '',
     file_path   TEXT NOT NULL DEFAULT '',
@@ -262,12 +262,24 @@ CREATE TABLE content_fts (
     search_body tsvector GENERATED ALWAYS AS (to_tsvector('english', body)) STORED
 );
 
-CREATE INDEX idx_content_fts_gin ON content_fts USING GIN (search_body);
-CREATE INDEX idx_content_fts_repo ON content_fts(repo_prefix);
-CREATE INDEX idx_content_fts_file ON content_fts(file_path);
+CREATE INDEX IF NOT EXISTS idx_content_fts_gin ON content_fts USING GIN (search_body);
+CREATE INDEX IF NOT EXISTS idx_content_fts_repo ON content_fts(repo_prefix);
+CREATE INDEX IF NOT EXISTS idx_content_fts_file ON content_fts(file_path);
+
+-- file_blobs stores the exact bytes of every indexed file, keyed by the
+-- content hash the files table already records. Content addressing
+-- deduplicates identical files across repos and re-indexes. body is BYTEA;
+-- PostgreSQL TOAST transparently compresses and out-of-lines large values,
+-- so source text (highly compressible) costs far less than its raw size.
+-- Diskless followers slice source out of here (see code-source-blobs).
+CREATE TABLE IF NOT EXISTS file_blobs (
+    content_hash TEXT PRIMARY KEY,
+    body         BYTEA NOT NULL,
+    size         INTEGER NOT NULL
+);
 
 -- Schema version tracking table.
-CREATE TABLE schema_version (
+CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

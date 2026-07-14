@@ -32,6 +32,7 @@ func (s *Server) registerPRRiskTool() {
 // derived from a `base`-ref diff, and projects the result to the pr_risk wire
 // shape.
 func (s *Server) handlePRRisk(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.followMode { return followNoDiskError("pr_risk (needs a git working tree)"), nil }
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph available — index a repo first"), nil
 	}

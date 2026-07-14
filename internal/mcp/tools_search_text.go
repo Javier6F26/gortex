@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"regexp"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -35,6 +36,13 @@ func (s *Server) handleSearchText(ctx context.Context, req mcp.CallToolRequest) 
 	query := req.GetString("query", "")
 	if query == "" {
 		return mcp.NewToolResultError("search_text: query is required"), nil
+	}
+	// Diskless follower: the disk-backed indexer has no working tree, so
+	// serve the search from a blob-backed trigram searcher built over the
+	// store's file_blobs. (A follower still carries a non-nil idle Indexer
+	// for the search provider, so gate on followMode, not the nil check.)
+	if s.followMode {
+		return s.handleSearchTextFollower(ctx, req, query)
 	}
 	if s.indexer == nil && s.multiIndexer == nil {
 		return mcp.NewToolResultError("search_text: no indexer available"), nil
@@ -199,6 +207,55 @@ func (s *Server) filterTextMatchesByResolvedScope(matches []trigram.Match, resol
 		out = append(out, m)
 	}
 	return out
+}
+
+// handleSearchTextFollower serves search_text on a diskless follower, where
+// no indexer exists. It scans the blob-backed trigram searcher (built over
+// the store's file_blobs) so literal and regex searches work without a
+// working tree. Matches carry source: "store" — the bytes come from the
+// indexed blobs, not disk. Returns a typed follow_no_disk error when the
+// schema has no blobs (a pre-blob writer): text search cannot be served
+// diskless in that state.
+func (s *Server) handleSearchTextFollower(ctx context.Context, req mcp.CallToolRequest, query string) (*mcp.CallToolResult, error) {
+	searcher := s.followTrigramSearcher()
+	if searcher == nil {
+		return followNoDiskError("search_text (no file blobs in the store)"), nil
+	}
+
+	limit := req.GetInt("limit", 100)
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	var matches []trigram.Match
+	if req.GetBool("regexp", false) {
+		re, err := regexp.Compile(query)
+		if err != nil {
+			return mcp.NewToolResultError("search_text: invalid regexp: " + err.Error()), nil
+		}
+		matches = searcher.GrepRegexp(re, extractRegexLiterals(query), "", limit)
+	} else {
+		matches = searcher.Grep(query, limit)
+	}
+
+	// Sub-path scoping (no repo prefixes to expand — a follower serves an
+	// unscoped, single-workspace schema).
+	if pathFilter := s.resolvePathFilter(req, fieldQuery{}); len(pathFilter) > 0 {
+		matches = filterTextMatchesByPath(matches, pathFilter, nil)
+	}
+	matches = limitTextMatches(matches, limit)
+
+	enriched := s.enrichTextMatches(matches)
+	resp := map[string]any{
+		"query":       query,
+		"matches":     enriched,
+		"count":       len(enriched),
+		"served_from": "store",
+	}
+	return s.respondJSONOrTOON(ctx, req, resp)
 }
 
 // enrichTextMatches decorates every trigram match with its enclosing

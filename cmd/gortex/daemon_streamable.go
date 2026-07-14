@@ -2,15 +2,70 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/zzet/gortex/internal/daemon"
+	"github.com/zzet/gortex/internal/graph"
 	gortexmcp "github.com/zzet/gortex/internal/mcp"
 	"github.com/zzet/gortex/internal/mcp/streamable"
 	"github.com/zzet/gortex/internal/server"
 	"go.uber.org/zap"
 )
+
+// healthzDegradedWindow bounds how recent a degraded read must be for
+// /healthz to report unhealthy — so a single transient blip long ago does
+// not keep a recovered daemon marked down.
+const healthzDegradedWindow = 60 * time.Second
+
+// evaluateHealthz computes the /healthz body and HTTP status. It returns
+// non-200 when the store reports a *recent* degraded read, or (follow mode
+// only, when GORTEX_FOLLOW_MAX_LAG is set) when the freshness lag exceeds
+// the configured threshold. Otherwise 200.
+func evaluateHealthz(store graph.Store, follow bool) (string, int) {
+	// Store health: a recent degraded read means reads are currently failing.
+	if hr, ok := store.(graph.StoreHealthReporter); ok {
+		h := hr.Health()
+		if h.DegradedReads > 0 && h.LastErrorUnix > 0 &&
+			time.Since(time.Unix(h.LastErrorUnix, 0)) < healthzDegradedWindow {
+			return fmt.Sprintf(`{"status":"degraded","cause":"store_degraded_reads","degraded_reads":%d,"last_error":%q}`,
+				h.DegradedReads, h.LastError), http.StatusServiceUnavailable
+		}
+	}
+	// Freshness lag threshold (opt-in, follow mode only).
+	if follow {
+		if maxLag, ok := followMaxLag(); ok {
+			if r, has := store.(newestIndexedAtReader); has {
+				if at, ok := r.NewestRepoIndexedAt(); ok {
+					lag := time.Since(time.Unix(at, 0))
+					if lag > maxLag {
+						return fmt.Sprintf(`{"status":"stale","cause":"freshness_lag","lag_seconds":%d,"max_lag_seconds":%d}`,
+							int64(lag.Seconds()), int64(maxLag.Seconds())), http.StatusServiceUnavailable
+					}
+				}
+			}
+		}
+	}
+	return `{"status":"ok","transport":"streamable-http","spec":"mcp-2026-03-26"}`, http.StatusOK
+}
+
+// followMaxLag parses GORTEX_FOLLOW_MAX_LAG (a Go duration). Returns
+// (0,false) when unset or unparseable — lag reporting stays non-fatal by
+// default.
+func followMaxLag() (time.Duration, bool) {
+	v := os.Getenv("GORTEX_FOLLOW_MAX_LAG")
+	if v == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
 
 // composeDaemonHTTPHandler combines the daemon's two HTTP surfaces onto a
 // single listener: the MCP Streamable transport (streamH, serving /mcp
@@ -184,7 +239,7 @@ func (s *observingStore) Len() int { return s.inner.Len() }
 // session bridge into a single http.Handler the daemon can mount on
 // /mcp. Pulled out so cmd/gortex/daemon.go stays terse: one call
 // returns the handler ready to assign to daemon.Server.HTTPHandler.
-func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.SessionRegistry, router *daemon.Router, logger *zap.Logger, tokenFn func() string) http.Handler {
+func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.SessionRegistry, router *daemon.Router, logger *zap.Logger, tokenFn func() string, graphStore graph.Store, follow bool) http.Handler {
 	bridge := newDaemonStreamableDispatcher(disp, reg, logger)
 	store := streamable.NewMemoryStore(daemon.DefaultOverlayIdleTTL)
 	wrapped := wrapStreamableStoreWithCleanup(store, bridge.onSessionEnded)
@@ -209,9 +264,10 @@ func buildDaemonStreamableHandler(disp daemon.MCPDispatcher, reg *daemon.Session
 	// scripts) can verify the listener is up without dispatching an
 	// MCP frame.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		status, code := evaluateHealthz(graphStore, follow)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","transport":"streamable-http","spec":"mcp-2026-03-26"}`))
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(status))
 	})
 	// Always wrap: the middleware resolves the token per request, so a
 	// request with no configured token is served unauthenticated and the

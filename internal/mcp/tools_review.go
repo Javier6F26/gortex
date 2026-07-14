@@ -529,6 +529,7 @@ func siblingDiffPayload(focus []string, siblings []siblingDiffRow) map[string]an
 // resulting ReviewReport projected onto line-anchored inline comments plus the
 // verdict envelope.
 func (s *Server) handleReview(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.followMode { return followNoDiskError("review (needs a git working tree)"), nil }
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph available — index a repo first"), nil
 	}
@@ -1021,6 +1022,7 @@ const highRiskD1Threshold = 5
 // breaks or any guard/architecture rule is violated (mirroring the contract-risk
 // upgrade the enhanced change-impact handler applies).
 func (s *Server) handleReviewPack(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if s.followMode { return followNoDiskError("review_pack (needs a git working tree)"), nil }
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph available — index a repo first"), nil
 	}

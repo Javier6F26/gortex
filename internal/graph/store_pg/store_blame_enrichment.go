@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetBlame(repoPrefix string, rows []graph.BlameEnrichment) error {
+	if s.refuseWrite("BulkSetBlame") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -35,6 +36,7 @@ func (s *Store) BulkSetBlame(repoPrefix string, rows []graph.BlameEnrichment) er
 }
 
 func (s *Store) DeleteBlame(nodeIDs []string) error {
+	if s.refuseWrite("DeleteBlame") { return ErrReadOnlyStore }
 	if len(nodeIDs) == 0 {
 		return nil
 	}

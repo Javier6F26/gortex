@@ -14,6 +14,7 @@ var (
 )
 
 func (s *Store) BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) error {
+	if s.refuseWrite("BulkSetFileMtimes") { return ErrReadOnlyStore }
 	if len(mtimes) == 0 {
 		return nil
 	}
@@ -37,6 +38,7 @@ func (s *Store) BulkSetFileMtimes(repoPrefix string, mtimes map[string]int64) er
 }
 
 func (s *Store) ReplaceFileMtimes(repoPrefix string, mtimes map[string]int64) error {
+	if s.refuseWrite("ReplaceFileMtimes") { return ErrReadOnlyStore }
 	if len(mtimes) == 0 {
 		return nil
 	}
@@ -64,6 +66,7 @@ func (s *Store) ReplaceFileMtimes(repoPrefix string, mtimes map[string]int64) er
 }
 
 func (s *Store) DeleteFileMtimes(repoPrefix string, paths []string) error {
+	if s.refuseWrite("DeleteFileMtimes") { return ErrReadOnlyStore }
 	if len(paths) == 0 {
 		return nil
 	}

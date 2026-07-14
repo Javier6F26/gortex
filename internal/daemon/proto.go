@@ -85,6 +85,9 @@ const (
 	ErrUnsupportedMode  = "unsupported_mode"
 	ErrRepoNotTracked   = "repo_not_tracked"
 	ErrInternal         = "internal"
+	// ErrFollowMode is returned by mutating control RPCs (track/untrack/
+	// reload/reload-servers) on a read-only follower daemon.
+	ErrFollowMode = "follow_mode"
 )
 
 // ControlRequest is the envelope for every message sent in ModeControl.
@@ -183,6 +186,13 @@ type StatusResponse struct {
 	// when Backend is "postgres".
 	Backend string `json:"backend"`
 	PGDSN  string `json:"pg_dsn,omitempty"`
+	// Mode is "follow" for a read-only follower daemon, empty otherwise
+	// (normal writer/serving daemon).
+	Mode string `json:"mode,omitempty"`
+	// FreshnessLagSeconds is how stale the follower's view is: now minus
+	// the newest repo_index_state.indexed_at across the schema. Set only
+	// in follow mode (or when otherwise derivable); nil when unknown.
+	FreshnessLagSeconds *int64 `json:"freshness_lag_seconds,omitempty"`
 	// Ready is false while the daemon is still loading the snapshot and
 	// resolving references in the background. It flips true once references
 	// are resolved and the graph is queryable — which can be well before

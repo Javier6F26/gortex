@@ -3,11 +3,29 @@ package store_pg
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/zzet/gortex/internal/graph"
 )
+
+// bulkNonce provides a per-process-monotonic suffix for staging table
+// names so concurrent flushes (and re-flushes) never collide on a fixed
+// name. Combined with the process id it yields globally-unique staging
+// table names.
+var bulkNonce atomic.Int64
+
+// stagingNames returns the per-process-unique staging table names for one
+// flush: nodes_bulk_<pid>_<nonce> and edges_bulk_<pid>_<nonce>. The pid
+// and nonce are integers we control, so the names are always safe SQL
+// identifiers (no injection surface).
+func stagingNames() (nodesStaging, edgesStaging string) {
+	pid := os.Getpid()
+	n := bulkNonce.Add(1)
+	return fmt.Sprintf("nodes_bulk_%d_%d", pid, n), fmt.Sprintf("edges_bulk_%d_%d", pid, n)
+}
 
 // This file implements graph.BulkLoader on the PostgreSQL backend using
 // COPY FROM into staging tables.
@@ -85,6 +103,18 @@ type pgEdgeRow struct {
 // captured here tells FlushBulk whether a destructive table swap is safe
 // (true) or a non-destructive merge is required (false).
 func (s *Store) BeginBulkLoad(repoPrefix string) {
+	if s.refuseWrite("BeginBulkLoad") {
+		return
+	}
+
+	// Best-effort leftover sweep: garbage-collect committed staging tables
+	// matching the staging name pattern (e.g. from a writer that crashed
+	// after a partial swap). Uncommitted staging tables from a concurrent
+	// in-flight flush are invisible to this query (their CREATE is not yet
+	// committed), and an in-use committed table is protected by its lock,
+	// so this can never poison a live flush. All errors are ignored.
+	s.sweepLeftoverStaging(s.ctx)
+
 	// Always create a fresh bulk state for this repo. Overwriting a stale
 	// entry is intentional: two checkouts of the same repo may share a
 	// prefix, and a prior FlushBulk (or a failed indexing pass) may have
@@ -109,6 +139,38 @@ func (s *Store) BeginBulkLoad(repoPrefix string) {
 	}
 }
 
+// sweepLeftoverStaging drops any committed staging tables in the current
+// schema matching the nodes_bulk_% / edges_bulk_% pattern. Best-effort:
+// every error (including a lock_timeout on a table another process is
+// actively using) is ignored.
+func (s *Store) sweepLeftoverStaging(ctx context.Context) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.relname
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = current_schema()
+		  AND c.relkind = 'r'
+		  AND (c.relname LIKE 'nodes_bulk_%' OR c.relname LIKE 'edges_bulk_%')`)
+	if err != nil {
+		return
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return
+		}
+		names = append(names, name)
+	}
+	rows.Close()
+	for _, name := range names {
+		// name comes from pg_class in our own schema and matches a fixed
+		// prefix pattern; quote it defensively all the same.
+		_, _ = s.pool.Exec(ctx, `DROP TABLE IF EXISTS `+pgx.Identifier{name}.Sanitize())
+	}
+}
+
 // FlushBulk commits all buffered rows via COPY FROM into UNLOGGED staging
 // tables and restores normal write mode.
 //
@@ -118,6 +180,10 @@ func (s *Store) BeginBulkLoad(repoPrefix string) {
 //   - !tableEmpty (repos 2+, warm restart): non-destructive merge
 //     (UNLOGGED staging → COPY FROM → INSERT INTO SELECT → drop staging)
 func (s *Store) FlushBulk(repoPrefix string) error {
+	if s.refuseWrite("FlushBulk") {
+		return ErrReadOnlyStore
+	}
+
 	s.writeMu.Lock()
 
 	bs := s.bulk[repoPrefix]
@@ -131,6 +197,10 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 	if len(bs.nodes) == 0 && len(bs.edges) == 0 {
 		return nil
 	}
+
+	// Per-process-unique staging names so concurrent/crashed writers can
+	// never collide on a fixed name (42P07) or poison a future flush.
+	nodesStaging, edgesStaging := stagingNames()
 
 	// Re-acquire writeMu for the actual PostgreSQL work (schema swaps,
 	// COPY FROM, etc.).
@@ -161,22 +231,22 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// ============================================================
 
 		// Create UNLOGGED staging tables that will become the live tables.
-		// INCLUDING ALL copies defaults, constraints, and indexes so the
-		// swapped-in tables are fully formed.
-		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE nodes_bulk (LIKE nodes INCLUDING DEFAULTS)`); err != nil {
-			return fmt.Errorf("store_pg: bulk create nodes_bulk: %w", err)
+		// COPY into them UNLOGGED (no WAL), then SET LOGGED once before the
+		// swap so the resulting live tables are crash-safe and replicated.
+		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE `+nodesStaging+` (LIKE nodes INCLUDING DEFAULTS)`); err != nil {
+			return fmt.Errorf("store_pg: bulk create %s: %w", nodesStaging, err)
 		}
-		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE edges_bulk (LIKE edges INCLUDING DEFAULTS)`); err != nil {
-			return fmt.Errorf("store_pg: bulk create edges_bulk: %w", err)
+		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE `+edgesStaging+` (LIKE edges INCLUDING DEFAULTS)`); err != nil {
+			return fmt.Errorf("store_pg: bulk create %s: %w", edgesStaging, err)
 		}
 
 		// COPY FROM nodes.
-		if err := s.copyNodesBulk(ctx, tx, bs); err != nil {
+		if err := s.copyNodesBulk(ctx, tx, nodesStaging, bs); err != nil {
 			return err
 		}
 
 		// COPY FROM edges.
-		if err := s.copyEdgesBulk(ctx, tx, bs); err != nil {
+		if err := s.copyEdgesBulk(ctx, tx, edgesStaging, bs); err != nil {
 			return err
 		}
 
@@ -184,8 +254,8 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// so duplicate keys would violate the UNIQUE constraint below.
 		// Self-join keeps the row with the smallest ctid per group.
 		if _, err := tx.Exec(ctx, `
-			DELETE FROM edges_bulk a
-			USING edges_bulk b
+			DELETE FROM `+edgesStaging+` a
+			USING `+edgesStaging+` b
 			WHERE a.from_id = b.from_id
 			  AND a.to_id = b.to_id
 			  AND a.kind = b.kind
@@ -200,18 +270,18 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// These must match the schema in schema.go exactly.
 		indexDDL := []string{
 			// nodes: primary key and secondary indexes
-			`ALTER TABLE nodes_bulk ADD PRIMARY KEY (id)`,
-			`CREATE INDEX ON nodes_bulk(name)`,
-			`CREATE INDEX ON nodes_bulk(kind)`,
-			`CREATE INDEX ON nodes_bulk(file_path)`,
-			`CREATE INDEX ON nodes_bulk(repo_prefix) WHERE repo_prefix <> ''`,
-			`CREATE UNIQUE INDEX ON nodes_bulk(qual_name) WHERE qual_name <> ''`,
-			`CREATE INDEX ON nodes_bulk USING GIN (name gin_trgm_ops)`,
+			`ALTER TABLE ` + nodesStaging + ` ADD PRIMARY KEY (id)`,
+			`CREATE INDEX ON ` + nodesStaging + `(name)`,
+			`CREATE INDEX ON ` + nodesStaging + `(kind)`,
+			`CREATE INDEX ON ` + nodesStaging + `(file_path)`,
+			`CREATE INDEX ON ` + nodesStaging + `(repo_prefix) WHERE repo_prefix <> ''`,
+			`CREATE UNIQUE INDEX ON ` + nodesStaging + `(qual_name) WHERE qual_name <> ''`,
+			`CREATE INDEX ON ` + nodesStaging + ` USING GIN (name gin_trgm_ops)`,
 			// edges: unique constraint and secondary indexes
-			`ALTER TABLE edges_bulk ADD UNIQUE (from_id, to_id, kind, file_path, line)`,
-			`CREATE INDEX ON edges_bulk(from_id, kind)`,
-			`CREATE INDEX ON edges_bulk(to_id)`,
-			`CREATE INDEX ON edges_bulk(kind)`,
+			`ALTER TABLE ` + edgesStaging + ` ADD UNIQUE (from_id, to_id, kind, file_path, line)`,
+			`CREATE INDEX ON ` + edgesStaging + `(from_id, kind)`,
+			`CREATE INDEX ON ` + edgesStaging + `(to_id)`,
+			`CREATE INDEX ON ` + edgesStaging + `(kind)`,
 		}
 		for _, ddl := range indexDDL {
 			if _, err := tx.Exec(ctx, ddl); err != nil {
@@ -219,11 +289,23 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 			}
 		}
 
+		// Convert staging to LOGGED before the swap. This rewrites the
+		// table into the WAL in one pass, so the swapped-in live tables
+		// survive crash recovery and ship to physical read replicas. It
+		// runs after index build (indexes on an UNLOGGED table are cheap)
+		// and inside the swap transaction so the WAL cost is paid once.
+		if _, err := tx.Exec(ctx, `ALTER TABLE `+nodesStaging+` SET LOGGED`); err != nil {
+			return fmt.Errorf("store_pg: bulk set nodes logged: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `ALTER TABLE `+edgesStaging+` SET LOGGED`); err != nil {
+			return fmt.Errorf("store_pg: bulk set edges logged: %w", err)
+		}
+
 		// Atomic swap: rename live → old, rename staging → live, drop old.
 		if _, err := tx.Exec(ctx, `ALTER TABLE nodes RENAME TO nodes_old`); err != nil {
 			return fmt.Errorf("store_pg: bulk rename nodes old: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `ALTER TABLE nodes_bulk RENAME TO nodes`); err != nil {
+		if _, err := tx.Exec(ctx, `ALTER TABLE `+nodesStaging+` RENAME TO nodes`); err != nil {
 			return fmt.Errorf("store_pg: bulk rename nodes new: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `DROP TABLE nodes_old CASCADE`); err != nil {
@@ -233,13 +315,13 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		if _, err := tx.Exec(ctx, `ALTER TABLE edges RENAME TO edges_old`); err != nil {
 			return fmt.Errorf("store_pg: bulk rename edges old: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `ALTER TABLE edges_bulk RENAME TO edges`); err != nil {
+		if _, err := tx.Exec(ctx, `ALTER TABLE `+edgesStaging+` RENAME TO edges`); err != nil {
 			return fmt.Errorf("store_pg: bulk rename edges new: %w", err)
 		}
-		// The BIGSERIAL id column in edges_bulk (copied via INCLUDING
-		// DEFAULTS) references edges_id_seq — the same sequence as the
-		// original edges table. Detach the sequence from the old table
-		// before dropping it, then reattach to the new table.
+		// The BIGSERIAL id column in the edges staging table (copied via
+		// INCLUDING DEFAULTS) references edges_id_seq — the same sequence
+		// as the original edges table. Detach the sequence from the old
+		// table before dropping it, then reattach to the new table.
 		if _, err := tx.Exec(ctx, `ALTER SEQUENCE IF EXISTS edges_id_seq OWNED BY NONE`); err != nil {
 			return fmt.Errorf("store_pg: detach edges sequence: %w", err)
 		}
@@ -257,18 +339,18 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 
 		// Create bare UNLOGGED staging tables (no indexes, no constraints
 		// beyond column types — just fast COPY FROM targets).
-		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE nodes_bulk (LIKE nodes INCLUDING DEFAULTS)`); err != nil {
-			return fmt.Errorf("store_pg: bulk create nodes_bulk: %w", err)
+		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE `+nodesStaging+` (LIKE nodes INCLUDING DEFAULTS)`); err != nil {
+			return fmt.Errorf("store_pg: bulk create %s: %w", nodesStaging, err)
 		}
-		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE edges_bulk (LIKE edges INCLUDING DEFAULTS)`); err != nil {
-			return fmt.Errorf("store_pg: bulk create edges_bulk: %w", err)
+		if _, err := tx.Exec(ctx, `CREATE UNLOGGED TABLE `+edgesStaging+` (LIKE edges INCLUDING DEFAULTS)`); err != nil {
+			return fmt.Errorf("store_pg: bulk create %s: %w", edgesStaging, err)
 		}
 
 		// COPY FROM into staging (same fast protocol as the swap path).
-		if err := s.copyNodesBulk(ctx, tx, bs); err != nil {
+		if err := s.copyNodesBulk(ctx, tx, nodesStaging, bs); err != nil {
 			return err
 		}
-		if err := s.copyEdgesBulk(ctx, tx, bs); err != nil {
+		if err := s.copyEdgesBulk(ctx, tx, edgesStaging, bs); err != nil {
 			return err
 		}
 
@@ -278,8 +360,8 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// cannot affect row a second time" when the same id appears more
 		// than once in the staging table.
 		if _, err := tx.Exec(ctx, `
-			DELETE FROM nodes_bulk a
-			USING nodes_bulk b
+			DELETE FROM `+nodesStaging+` a
+			USING `+nodesStaging+` b
 			WHERE a.id = b.id
 			  AND a.ctid > b.ctid
 		`); err != nil {
@@ -290,7 +372,7 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// ON CONFLICT (id) DO UPDATE: same full-column upsert as AddBatch.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO nodes (`+nodeInsertCols+`)
-			SELECT `+nodeInsertCols+` FROM nodes_bulk
+			SELECT `+nodeInsertCols+` FROM `+nodesStaging+`
 			`+nodeInsertConflict); err != nil {
 			return fmt.Errorf("store_pg: merge nodes from staging: %w", err)
 		}
@@ -299,17 +381,46 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 		// ON CONFLICT DO NOTHING: same insert-or-ignore as AddBatch.
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO edges (`+edgeInsertCols+`)
-			SELECT `+edgeInsertCols+` FROM edges_bulk
+			SELECT `+edgeInsertCols+` FROM `+edgesStaging+`
 			ON CONFLICT (from_id, to_id, kind, file_path, line) DO NOTHING`); err != nil {
 			return fmt.Errorf("store_pg: merge edges from staging: %w", err)
 		}
 
-		// Drop staging tables (no longer needed).
-		if _, err := tx.Exec(ctx, `DROP TABLE nodes_bulk`); err != nil {
-			return fmt.Errorf("store_pg: drop nodes_bulk: %w", err)
+		// Delete stale rows: nodes for this repo prefix that are absent
+		// from staging no longer exist in the fresh index. Removing them
+		// in the same transaction makes a re-index fully REPLACE the repo
+		// (upsert live rows + drop vanished ones), atomically at commit.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM nodes
+			WHERE repo_prefix = $1
+			  AND NOT EXISTS (SELECT 1 FROM `+nodesStaging+` ns WHERE ns.id = nodes.id)`,
+			repoPrefix); err != nil {
+			return fmt.Errorf("store_pg: delete stale nodes: %w", err)
 		}
-		if _, err := tx.Exec(ctx, `DROP TABLE edges_bulk`); err != nil {
-			return fmt.Errorf("store_pg: drop edges_bulk: %w", err)
+
+		// Delete stale edges: edges OWNED by this repo (from_id under the
+		// repo prefix) that are absent from staging. starts_with avoids
+		// LIKE-wildcard escaping of the prefix.
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM edges
+			WHERE starts_with(from_id, $1)
+			  AND NOT EXISTS (
+			      SELECT 1 FROM `+edgesStaging+` es
+			      WHERE es.from_id = edges.from_id
+			        AND es.to_id = edges.to_id
+			        AND es.kind = edges.kind
+			        AND es.file_path = edges.file_path
+			        AND es.line = edges.line)`,
+			repoPrefix+"/"); err != nil {
+			return fmt.Errorf("store_pg: delete stale edges: %w", err)
+		}
+
+		// Drop staging tables (no longer needed).
+		if _, err := tx.Exec(ctx, `DROP TABLE `+nodesStaging); err != nil {
+			return fmt.Errorf("store_pg: drop %s: %w", nodesStaging, err)
+		}
+		if _, err := tx.Exec(ctx, `DROP TABLE `+edgesStaging); err != nil {
+			return fmt.Errorf("store_pg: drop %s: %w", edgesStaging, err)
 		}
 	}
 
@@ -324,10 +435,10 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 	return nil
 }
 
-// copyNodesBulk streams buffered node rows into the staging table via COPY FROM.
-func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx, bs *bulkState) error {
+// copyNodesBulk streams buffered node rows into the named staging table via COPY FROM.
+func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx, table string, bs *bulkState) error {
 	_, err := tx.CopyFrom(ctx,
-		pgx.Identifier{"nodes_bulk"},
+		pgx.Identifier{table},
 		parseCopyCols(nodeInsertCols),
 		pgx.CopyFromSlice(len(bs.nodes), func(i int) ([]any, error) {
 			n := bs.nodes[i]
@@ -347,10 +458,10 @@ func (s *Store) copyNodesBulk(ctx context.Context, tx pgx.Tx, bs *bulkState) err
 	return nil
 }
 
-// copyEdgesBulk streams buffered edge rows into the staging table via COPY FROM.
-func (s *Store) copyEdgesBulk(ctx context.Context, tx pgx.Tx, bs *bulkState) error {
+// copyEdgesBulk streams buffered edge rows into the named staging table via COPY FROM.
+func (s *Store) copyEdgesBulk(ctx context.Context, tx pgx.Tx, table string, bs *bulkState) error {
 	_, err := tx.CopyFrom(ctx,
-		pgx.Identifier{"edges_bulk"},
+		pgx.Identifier{table},
 		parseCopyCols(edgeInsertCols),
 		pgx.CopyFromSlice(len(bs.edges), func(i int) ([]any, error) {
 			e := bs.edges[i]

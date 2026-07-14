@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetConstantValues(repoPrefix string, rows []graph.ConstantValueRow) error {
+	if s.refuseWrite("BulkSetConstantValues") { return ErrReadOnlyStore }
 	if len(rows) == 0 {
 		return nil
 	}
@@ -38,6 +39,7 @@ func (s *Store) BulkSetConstantValues(repoPrefix string, rows []graph.ConstantVa
 }
 
 func (s *Store) DeleteConstantValuesByFiles(repoPrefix string, files []string) error {
+	if s.refuseWrite("DeleteConstantValuesByFiles") { return ErrReadOnlyStore }
 	if len(files) == 0 {
 		return nil
 	}

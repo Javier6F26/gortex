@@ -37,11 +37,13 @@ var (
 // handles via ON CONFLICT DO UPDATE. This method is a no-op because the node
 // table's name column IS the search index.
 func (s *Store) UpsertSymbolFTS(nodeID, tokens string) error {
+	if s.refuseWrite("UpsertSymbolFTS") { return ErrReadOnlyStore }
 	return nil
 }
 
 // BuildSymbolIndex ensures the pg_trgm GIN index exists. Idempotent.
 func (s *Store) BuildSymbolIndex() error {
+	if s.refuseWrite("BuildSymbolIndex") { return ErrReadOnlyStore }
 	_, err := s.pool.Exec(s.ctx, `CREATE INDEX IF NOT EXISTS idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops)`)
 	return err
 }

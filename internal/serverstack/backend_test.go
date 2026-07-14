@@ -14,7 +14,7 @@ import (
 // default) returns a usable in-process store.
 func TestOpenBackend_MemoryDefault(t *testing.T) {
 	for _, name := range []string{"", "memory", "mem", "in-memory"} {
-		store, cleanup, err := OpenBackend(name, "", 0, zap.NewNop(), false)
+		store, cleanup, err := OpenBackend(name, "", 0, zap.NewNop(), false, false)
 		if err != nil {
 			t.Fatalf("OpenBackend(%q): %v", name, err)
 		}
@@ -32,7 +32,7 @@ func TestOpenBackend_MemoryDefault(t *testing.T) {
 // creates) a store at the resolved path.
 func TestOpenBackend_SqliteOpensFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "store.sqlite")
-	store, cleanup, err := OpenBackend("sqlite", path, 0, zap.NewNop(), true)
+	store, cleanup, err := OpenBackend("sqlite", path, 0, zap.NewNop(), true, false)
 	if err != nil {
 		t.Fatalf("OpenBackend(sqlite): %v", err)
 	}
@@ -46,14 +46,14 @@ func TestOpenBackend_SqliteOpensFile(t *testing.T) {
 // — a stale backend name (e.g. the removed ladybug) errors rather than
 // silently falling back.
 func TestOpenBackend_Unknown(t *testing.T) {
-	if _, _, err := OpenBackend("ladybug", "", 0, zap.NewNop(), false); err == nil {
+	if _, _, err := OpenBackend("ladybug", "", 0, zap.NewNop(), false, false); err == nil {
 		t.Fatal("an unknown backend must error")
 	}
 }
 
 // TestOpenBackend_PostgresNoDSN asserts the postgres backend requires a DSN.
 func TestOpenBackend_PostgresNoDSN(t *testing.T) {
-	_, _, err := OpenBackend("postgres", "", 0, zap.NewNop(), false)
+	_, _, err := OpenBackend("postgres", "", 0, zap.NewNop(), false, false)
 	if err == nil {
 		t.Fatal("expected error for postgres backend without DSN")
 	}
@@ -67,7 +67,7 @@ func TestOpenBackend_PostgresNoDSN(t *testing.T) {
 // to the store config. Uses a known-bad address; the error should mention
 // the connection attempt, not a config-parse issue.
 func TestOpenBackend_PostgresDSNPropagation(t *testing.T) {
-	_, _, err := OpenBackend("postgres", "postgres://localhost:1/gortex_test?sslmode=disable&connect_timeout=3", 0, zap.NewNop(), false)
+	_, _, err := OpenBackend("postgres", "postgres://localhost:1/gortex_test?sslmode=disable&connect_timeout=3", 0, zap.NewNop(), false, false)
 	// This should fail because there's nothing on :1, but not with a
 	// "DSN required" error — the DSN was accepted, the connection failed.
 	if err == nil {
@@ -81,7 +81,7 @@ func TestOpenBackend_PostgresDSNPropagation(t *testing.T) {
 
 // TestOpenBackend_PostgresViaPGShortcut asserts the "pg" alias works.
 func TestOpenBackend_PostgresViaPGShortcut(t *testing.T) {
-	_, _, err := OpenBackend("pg", "", 0, zap.NewNop(), false)
+	_, _, err := OpenBackend("pg", "", 0, zap.NewNop(), false, false)
 	if err == nil {
 		t.Fatal("expected error for pg backend without DSN")
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.uber.org/zap"
 )
 
 // DefaultPoolMaxConns is the default maximum number of connections in the pool.
@@ -22,6 +23,15 @@ const DefaultPoolMaxConnLifetime = 30 * time.Minute
 
 // DefaultPoolHealthCheckPeriod is how often the pool checks connection health.
 const DefaultPoolHealthCheckPeriod = 30 * time.Second
+
+// DefaultStatementTimeout bounds any single query so a reader cannot
+// stall indefinitely (e.g. behind the bulk swap's ACCESS EXCLUSIVE lock).
+const DefaultStatementTimeout = 30 * time.Second
+
+// DefaultLockTimeout bounds how long a statement waits to acquire a lock
+// before failing, so a reader blocked behind an exclusive lock fails fast
+// (and is retried by the read-resilience path) instead of hanging.
+const DefaultLockTimeout = 5 * time.Second
 
 // Config holds the PostgreSQL connection configuration for the graph store.
 type Config struct {
@@ -48,6 +58,29 @@ type Config struct {
 	// entry in search_path for every connection. Used by tests for
 	// per-test schema isolation. Empty means use the database default.
 	Schema string
+
+	// StatementTimeout is the per-query timeout applied as the
+	// statement_timeout runtime parameter. 0 means use
+	// DefaultStatementTimeout. It is overridden by an explicit
+	// statement_timeout in the DSN only when this field is 0.
+	StatementTimeout time.Duration
+
+	// LockTimeout is the lock-acquisition timeout applied as the
+	// lock_timeout runtime parameter. 0 means use DefaultLockTimeout.
+	// It is overridden by an explicit lock_timeout in the DSN only when
+	// this field is 0.
+	LockTimeout time.Duration
+
+	// ReadOnly opens the store in read-only mode: Open never runs schema
+	// migrations (it fails with SchemaVersionMismatchError when the stored
+	// version differs from the expected one) and every mutating method
+	// refuses. This is the foundation for follower daemons pointed at a
+	// physical read replica.
+	ReadOnly bool
+
+	// Logger, when set, receives WARN logs for degraded reads and refused
+	// writes. nil means logging is disabled.
+	Logger *zap.Logger
 }
 
 // openPool creates a pgxpool from the configuration.
@@ -79,6 +112,18 @@ func (c *Config) openPool(ctx context.Context) (*pgxpool.Pool, error) {
 	poolCfg.MaxConnLifetime = maxLifetime
 	poolCfg.HealthCheckPeriod = healthPeriod
 
+	// Apply statement/lock timeouts as connect-time runtime parameters.
+	// Precedence: an explicit Config field wins; otherwise a value already
+	// present in the DSN (parsed into RuntimeParams) is honored; otherwise
+	// the default is applied. Values are sent to PostgreSQL as integer
+	// milliseconds.
+	if poolCfg.ConnConfig.RuntimeParams == nil {
+		poolCfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	rp := poolCfg.ConnConfig.RuntimeParams
+	setTimeoutParam(rp, "statement_timeout", c.StatementTimeout, DefaultStatementTimeout)
+	setTimeoutParam(rp, "lock_timeout", c.LockTimeout, DefaultLockTimeout)
+
 	schemaName := c.Schema
 	if schemaName != "" {
 		setCmd := fmt.Sprintf("SET search_path TO %s", schemaName)
@@ -108,4 +153,19 @@ func (c *Config) openPool(ctx context.Context) (*pgxpool.Pool, error) {
 	}
 
 	return pool, nil
+}
+
+// setTimeoutParam sets a millisecond timeout runtime parameter. An
+// explicit configured value (cfgVal > 0) always wins; otherwise a value
+// already present (from the DSN) is preserved; otherwise the default is
+// applied.
+func setTimeoutParam(rp map[string]string, key string, cfgVal, def time.Duration) {
+	if cfgVal > 0 {
+		rp[key] = fmt.Sprintf("%d", cfgVal.Milliseconds())
+		return
+	}
+	if _, ok := rp[key]; ok {
+		return
+	}
+	rp[key] = fmt.Sprintf("%d", def.Milliseconds())
 }

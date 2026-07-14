@@ -17,6 +17,15 @@ import (
 
 var statusIndex string
 
+// followLagString renders the follower freshness lag for the status output.
+func followLagString(lagSeconds *int64) string {
+	if lagSeconds == nil {
+		return "freshness lag unknown (schema not yet indexed)"
+	}
+	d := (time.Duration(*lagSeconds) * time.Second).Truncate(time.Second)
+	return fmt.Sprintf("freshness lag %s", d)
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show the daemon's index status: tracked repos, node/edge counts, workspaces",
@@ -77,8 +86,15 @@ func runStatusViaDaemon(cmd *cobra.Command) error {
 			}
 			fmt.Fprintf(w, "tools       %s\n", line)
 		}
+		if st.Mode == "follow" {
+			fmt.Fprintf(w, "mode        follow (read-only) — %s\n", followLagString(st.FreshnessLagSeconds))
+		}
 	}
 	if len(st.TrackedRepos) == 0 {
+		if st.Mode == "follow" {
+			fmt.Fprintf(w, "follower: serving reads from the shared schema — %s\n", followLagString(st.FreshnessLagSeconds))
+			return nil
+		}
 		fmt.Fprintln(w, "tracked repos: (none — run `gortex track <path>` to add one)")
 		return nil
 	}
@@ -160,6 +176,13 @@ func emitDaemonStatusCard(w io.Writer, st daemon.StatusResponse) {
 		stats = append(stats,
 			progress.Stat(fmt.Sprintf("%.1f MB", float64(st.MemoryBytes)/(1024*1024)),
 				"memory", progress.StatNeutral))
+	}
+	if st.Mode == "follow" {
+		stats = append(stats, progress.Stat("follow", "mode", progress.StatGood))
+		if st.FreshnessLagSeconds != nil {
+			lag := (time.Duration(*st.FreshnessLagSeconds) * time.Second).Truncate(time.Second)
+			stats = append(stats, progress.Stat(lag.String(), "lag", progress.StatNeutral))
+		}
 	}
 	fmt.Fprintln(w, "  "+progress.StyleOK.Render("●")+"  "+
 		progress.StyleStrong.Render("daemon up"))

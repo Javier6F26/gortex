@@ -20,7 +20,14 @@ go test -race ./...                 # all test packages must pass
   - `internal/graph/store_pg/` — PostgreSQL via pgx v5 (opt-in with `--backend postgres --pg-dsn <dsn>`)
     Implements all optional capability interfaces: SymbolSearcher (pg_trgm), ContentSearcher (tsvector),
     VectorSearcher (pgvector HNSW), SymbolBundleSearcher, BFSCapable (recursive CTE), aggregators,
-    sidecars, bulk load (COPY FROM + UNLOGGED), and backend resolver.
+    sidecars, bulk load (COPY FROM + LOGGED swap), content-addressed `file_blobs`, and backend resolver.
+- **Follow mode (read plane):** `gortex daemon start --follow` (requires `--backend postgres`) boots a
+  diskless, read-only follower that serves the full read surface from a shared schema — no repo tracking,
+  indexing, warmup, or watchers. The reference topology is **one writer** (indexes + holds a
+  `pg_advisory_lock` schema writer lock) **+ N followers** (behind a load balancer, optionally on PG read
+  replicas). Followers seal writes at three layers (forced `readonly`/`hide` preset, `follow_mode` control
+  RPC refusal, read-only store guard) and serve code source from `file_blobs` / documents from the graph.
+  See `docs/pg-setup.md` § "Follow mode".
 - **Setup guides:** `docs/pg-setup.md` for PostgreSQL backend setup
 
 ## MANDATORY: Use Gortex's graph tools instead of Read/Grep/Glob

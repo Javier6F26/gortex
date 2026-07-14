@@ -31,6 +31,7 @@ import (
 	"github.com/zzet/gortex/internal/review"
 	"github.com/zzet/gortex/internal/savings"
 	"github.com/zzet/gortex/internal/search"
+	"github.com/zzet/gortex/internal/search/trigram"
 	"github.com/zzet/gortex/internal/semantic"
 	"github.com/zzet/gortex/internal/server/hub"
 	"github.com/zzet/gortex/internal/telemetry"
@@ -428,6 +429,25 @@ type Server struct {
 	// toolSurfaceFilter + checkToolGate and in defer mode by the lazy
 	// registry's eager predicate.
 	toolPolicy *toolPolicy
+
+	// followMode marks this server as a read-only follower (diskless,
+	// shared-schema replica). It forces the readonly/hide tool preset,
+	// makes residual graph-writers (rationale projection, co-change
+	// prewarm, proxy hydration, ensureFresh self-heal) inert, denies
+	// post_review/feedback, and drives store-backed source reads. Set once
+	// at construction via SetFollowMode; read-only thereafter.
+	followMode bool
+
+	// followSearcher is the lazily-built, blob-backed trigram searcher a
+	// diskless follower uses for search_text (code-source-blobs D7). A
+	// follower has no MultiIndexer, so the disk-backed searchers are
+	// unavailable; this one reads bytes from the store's file_blobs instead.
+	// Built once on first text search and cached for the process life — a v0
+	// snapshot (cache invalidation on writer publish is out of scope; it
+	// self-corrects on follower restart).
+	followSearcherMu   sync.Mutex
+	followSearcher     *trigram.Searcher
+	followSearcherDone bool
 
 	// toolBudgetOnce / toolBudgetCached memoise the project-size-scaled
 	// exploration-call budget appended to navigation tools' descriptions
@@ -1092,6 +1112,10 @@ type MultiRepoOptions struct {
 	// ScopeIntentDefaults overrides the default-on intent scoping flag
 	// from `.gortex.yaml::scope.intent_defaults`.
 	ScopeIntentDefaults *bool
+	// Follow marks the server as a read-only follower: the tool preset is
+	// forced to readonly/hide (not widenable by GORTEX_TOOLS), residual
+	// graph-writers go inert, and source reads fall back to the store.
+	Follow bool
 }
 
 // serverInstructions is the server-level `instructions` field returned
@@ -1338,7 +1362,24 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 	// eager surface; hide mode is enforced later by toolSurfaceFilter /
 	// checkToolGate. Resolved before the register sweep so every
 	// addTool sees the policy.
-	s.toolPolicy = resolveToolPolicy(toolPolicyBaseFromOptions(opts), logger)
+	if len(opts) > 0 && opts[0].Follow {
+		// Follow mode forces readonly/hide, overriding config and
+		// GORTEX_TOOLS (built directly, bypassing the env merge). This is
+		// the first of the three-layer write seal.
+		s.followMode = true
+		s.toolPolicy = newToolPolicy(ToolPolicyConfig{
+			Preset: "readonly",
+			Mode:   "hide",
+			// Explicitly deny the read-preset tools that still have
+			// external / filesystem side effects on a serving replica.
+			Deny: []string{"post_review", "feedback"},
+		}, logger)
+		if logger != nil {
+			logger.Info("mcp: follow mode — tool surface forced to readonly/hide (GORTEX_TOOLS ignored)")
+		}
+	} else {
+		s.toolPolicy = resolveToolPolicy(toolPolicyBaseFromOptions(opts), logger)
+	}
 	s.lazy = newLazyToolRegistry(lazyEnabledFromEnv() || s.toolPolicy.deferMode())
 	if s.toolPolicy.deferMode() {
 		s.lazy.SetEagerPredicate(s.toolPolicy.allows)
@@ -2300,6 +2341,26 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 	s.analysisMu.RLock()
 	defer s.analysisMu.RUnlock()
 	return s.hotspots
+}
+
+// FollowMode reports whether this server is a read-only follower. Read by
+// the residual-writer point gates (rationale projection, co-change
+// prewarm, proxy hydration, ensureFresh) and the store-backed source-read
+// fallback.
+func (s *Server) FollowMode() bool { return s != nil && s.followMode }
+
+// SetFollowMode forces follow behavior after construction: read-only
+// tool preset (readonly/hide, bypassing GORTEX_TOOLS) and the inert
+// residual writers. Construction via MultiRepoOptions.Follow is the
+// normal path; this exists for tests and late wiring.
+func (s *Server) SetFollowMode(on bool) {
+	if s == nil {
+		return
+	}
+	s.followMode = on
+	if on {
+		s.toolPolicy = newToolPolicy(ToolPolicyConfig{Preset: "readonly", Mode: "hide"}, s.logger)
+	}
 }
 
 // SetArchitecture installs the declarative architecture-rules DSL so

@@ -105,6 +105,13 @@ type Options struct {
 
 	// Concurrency caps the worker pool. 0 → runtime.GOMAXPROCS(0).
 	Concurrency int
+
+	// Source, when set, supplies a target's bytes instead of reading
+	// t.AbsPath from disk — the FileSource seam that lets a diskless
+	// follower parse from store blobs (code-source-blobs D7). A non-nil
+	// error skips the target (recorded like any per-file read error).
+	// Nil = read from disk (the default behaviour).
+	Source func(t Target) ([]byte, error)
 }
 
 // Match is a single hit. The fields are deliberately flat so the MCP
@@ -338,7 +345,15 @@ func (p *plan) close() {
 }
 
 func (p *plan) runTarget(ctx context.Context, t Target, opts Options) ([]Match, error) {
-	src, err := readBoundedFile(t.AbsPath, defaultMaxFileSize)
+	var (
+		src []byte
+		err error
+	)
+	if opts.Source != nil {
+		src, err = opts.Source(t)
+	} else {
+		src, err = readBoundedFile(t.AbsPath, defaultMaxFileSize)
+	}
 	if err != nil {
 		return nil, err
 	}

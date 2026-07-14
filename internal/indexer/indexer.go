@@ -236,6 +236,18 @@ type Indexer struct {
 	// Set during the shadow swap, cleared when idx.graph is restored.
 	contentSink graph.ContentSearcher
 
+	// fileMetaSink / blobSink mirror bulkVectorSink for the per-file
+	// metadata (`files`) and content-addressed source blobs (`file_blobs`):
+	// the disk store captured at the shadow swap, so persistFileMeta writes
+	// them to disk even while idx.graph points at the in-memory shadow (which
+	// the drain persists node/edge-only, dropping any files/file_blobs the
+	// shadow accumulated). Without these a cold index leaves `file_blobs`
+	// empty and a diskless follower cannot serve code (code-source-blobs).
+	// FlushBulk swaps only nodes/edges, so writing these to disk during the
+	// parse phase is safe. Set during the shadow swap, cleared on restore.
+	fileMetaSink graph.FileMetaWriter
+	blobSink     graph.FileBlobWriter
+
 	// embedChunkOpts tunes the AST sub-chunking buildSearchIndex applies
 	// to large symbols before embedding. The zero value makes the
 	// chunker fall back to its package defaults.
@@ -2367,6 +2379,12 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 		// Same capture for the content index: the per-file content stream
 		// must reach content_fts on disk while idx.graph is the shadow.
 		idx.contentSink, _ = diskTarget.(graph.ContentSearcher)
+		// Same capture for per-file metadata + source blobs: the shadow drain
+		// persists nodes/edges only, so files/file_blobs written to the shadow
+		// would be lost. Route them straight to disk (FlushBulk swaps only
+		// nodes/edges, so these survive).
+		idx.fileMetaSink, _ = diskTarget.(graph.FileMetaWriter)
+		idx.blobSink, _ = diskTarget.(graph.FileBlobWriter)
 		// The resolver was constructed at indexer.New with the disk
 		// Store. Redirect it at the shadow too, otherwise ResolveAll
 		// reads from the empty disk Store, finds no pending edges,
@@ -2381,6 +2399,8 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 				idx.graph = diskTarget
 				idx.bulkVectorSink = nil
 				idx.contentSink = nil
+				idx.fileMetaSink = nil
+				idx.blobSink = nil
 				if idx.resolver != nil {
 					idx.resolver.SetGraph(diskTarget)
 				}
@@ -2473,6 +2493,14 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			if ferr := bl.FlushBulk(idx.RepoPrefix()); ferr != nil {
 				retErr = fmt.Errorf("indexer: persist bulk graph: %w", ferr)
 			}
+			// GC source blobs no longer referenced by any files row
+			// (re-indexed / deleted files leave orphan hashes). No-op on
+			// backends without blob support.
+			if gc, ok := idx.graph.(graph.FileBlobWriter); ok {
+				if removed, gerr := gc.GCFileBlobs(); gerr == nil && removed > 0 {
+					idx.logger.Info("indexer: file-blob GC", zap.Int("removed", removed))
+				}
+			}
 			idx.logger.Info("indexer: FlushBulk complete",
 				zap.String("repo", idx.RepoPrefix()),
 				zap.Duration("flush_elapsed", time.Since(flushStart)),
@@ -2500,6 +2528,8 @@ func (idx *Indexer) IndexCtx(ctx context.Context, root string) (result *IndexRes
 			idx.graph = diskTarget
 			idx.bulkVectorSink = nil
 			idx.contentSink = nil
+			idx.fileMetaSink = nil
+			idx.blobSink = nil
 			// Mirror of the SetGraph(inMemShadow) above: the resolver
 			// must follow the graph pointer back to the disk store, or
 			// every post-index per-file resolve (the watcher save path,

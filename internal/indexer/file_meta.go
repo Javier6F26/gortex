@@ -25,7 +25,14 @@ func (idx *Indexer) persistFileMeta(relPath string, src []byte, result *parser.E
 	if result == nil || relPath == "" {
 		return
 	}
-	fw, ok := idx.graph.(graph.FileMetaWriter)
+	// Under the bulk-load shadow swap idx.graph is the in-memory shadow,
+	// whose files/file_blobs the drain does not persist. fileMetaSink /
+	// blobSink (captured from the disk store at the swap) route these to disk
+	// instead; outside the shadow path they are nil and we write idx.graph.
+	fw, ok := idx.fileMetaSink, idx.fileMetaSink != nil
+	if !ok {
+		fw, ok = idx.graph.(graph.FileMetaWriter)
+	}
 	if !ok {
 		return
 	}
@@ -54,6 +61,20 @@ func (idx *Indexer) persistFileMeta(relPath string, src []byte, result *parser.E
 	}
 	_ = fw.DeleteFileMetasByFiles(idx.repoPrefix, []string{filePath})
 	_ = fw.SetFileMetas(idx.repoPrefix, []graph.FileMetaRow{row})
+
+	// Content-addressed source blob (code-source-blobs): persist the exact
+	// indexed bytes so a diskless follower can serve byte-exact source. Only
+	// files that produced graph nodes get a blob (respecting the indexer's
+	// existing exclusion rules); the write dedups on content hash, so
+	// identical files across repos / re-indexes cost nothing extra. Backends
+	// without the capability (sqlite / memory) simply skip it.
+	bw, bok := idx.blobSink, idx.blobSink != nil
+	if !bok {
+		bw, bok = idx.graph.(graph.FileBlobWriter)
+	}
+	if bok && len(result.Nodes) > 0 {
+		_ = bw.PutFileBlobs([]graph.FileBlob{{ContentHash: contentHash, Body: src, Size: len(src)}})
+	}
 }
 
 // setReparsePendingEnrichment sets or clears

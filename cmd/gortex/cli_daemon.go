@@ -154,6 +154,12 @@ func daemonOwnsRepo(abs string) bool {
 	if err := json.Unmarshal(resp.Result, &st); err != nil {
 		return false
 	}
+	// A follower serves unscoped reads from the shared schema and tracks no
+	// repos, so any cwd is answerable — the CLI must not gate on repo
+	// ownership (there is nothing to own). Route every call to it.
+	if st.Mode == "follow" {
+		return true
+	}
 	for _, repo := range st.TrackedRepos {
 		if repo.Path == "" {
 			continue

@@ -14,6 +14,27 @@ var (
 	_ graph.RepoIndexStateReader = (*Store)(nil)
 )
 
+// NewestRepoIndexedAt returns the maximum indexed_at (unix seconds) across
+// every repo in the schema and whether any row exists. Followers use it to
+// report freshness lag without needing a repo roster. It is a read and
+// routes through the retry/degrade path.
+func (s *Store) NewestRepoIndexedAt() (int64, bool) {
+	var newest int64
+	var has bool
+	s.withReadRetry("NewestRepoIndexedAt", func() error {
+		var maxAt *int64
+		if err := s.pool.QueryRow(s.ctx, `SELECT MAX(indexed_at) FROM repo_index_state`).Scan(&maxAt); err != nil {
+			return err
+		}
+		if maxAt != nil {
+			newest = *maxAt
+			has = true
+		}
+		return nil
+	})
+	return newest, has
+}
+
 // GetRepoIndexState reads the index state for a repo prefix.
 func (s *Store) GetRepoIndexState(repoPrefix string) (graph.RepoIndexState, bool, error) {
 	if repoPrefix == "" {
@@ -38,6 +59,7 @@ func (s *Store) GetRepoIndexState(repoPrefix string) (graph.RepoIndexState, bool
 
 // SetRepoIndexState upserts the index state for a repo prefix.
 func (s *Store) SetRepoIndexState(st graph.RepoIndexState) error {
+	if s.refuseWrite("SetRepoIndexState") { return ErrReadOnlyStore }
 	dirty := int64(0)
 	if st.Dirty {
 		dirty = 1

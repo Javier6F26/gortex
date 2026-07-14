@@ -12,6 +12,7 @@ var (
 )
 
 func (s *Store) BulkSetRefFacts(repoPrefix string, facts []graph.RefFact) error {
+	if s.refuseWrite("BulkSetRefFacts") { return ErrReadOnlyStore }
 	if len(facts) == 0 {
 		return nil
 	}
@@ -40,6 +41,7 @@ func (s *Store) BulkSetRefFacts(repoPrefix string, facts []graph.RefFact) error 
 }
 
 func (s *Store) DeleteRefFactsByFiles(repoPrefix string, files []string) error {
+	if s.refuseWrite("DeleteRefFactsByFiles") { return ErrReadOnlyStore }
 	if len(files) == 0 {
 		return nil
 	}

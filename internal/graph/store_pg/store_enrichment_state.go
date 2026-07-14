@@ -27,6 +27,7 @@ func (s *Store) GetEnrichmentState(repoPrefix, provider string) (graph.Enrichmen
 }
 
 func (s *Store) SetEnrichmentState(state graph.EnrichmentState) error {
+	if s.refuseWrite("SetEnrichmentState") { return ErrReadOnlyStore }
 	_, err := s.pool.Exec(s.ctx,
 		`INSERT INTO enrichment_state (repo_prefix, provider, indexed_sha, completed_at, coverage)
 		 VALUES ($1, $2, $3, $4, $5)
