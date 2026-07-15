@@ -67,3 +67,40 @@ func TestFileMetas_RoundTrip(t *testing.T) {
 		t.Errorf("after delete, rows = %+v, want only a/x.go", got)
 	}
 }
+
+// Evictions must clear the census (`files`) rows too — a stale hash row
+// makes a later reindex/track skip the file and serve old content forever.
+func TestEvict_CleansFileMetas(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "e.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	s.AddNode(&graph.Node{ID: "repoA/a.go::Foo", Kind: graph.KindFunction, FilePath: "repoA/a.go", RepoPrefix: "repoA"})
+	s.AddNode(&graph.Node{ID: "repoA/b.go::Bar", Kind: graph.KindFunction, FilePath: "repoA/b.go", RepoPrefix: "repoA"})
+	if err := s.SetFileMetas("repoA", []graph.FileMetaRow{
+		{FilePath: "repoA/a.go", ContentHash: "ha", Size: 1, NodeCount: 1},
+		{FilePath: "repoA/b.go", ContentHash: "hb", Size: 1, NodeCount: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.EvictFile("repoA/a.go")
+	metas, err := s.FileMetasForRepo("repoA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 1 || metas[0].FilePath != "repoA/b.go" {
+		t.Fatalf("EvictFile must drop exactly repoA/a.go's census row, got %+v", metas)
+	}
+
+	s.EvictRepo("repoA")
+	metas, err = s.FileMetasForRepo("repoA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("EvictRepo must drop every census row of the repo, got %+v", metas)
+	}
+}

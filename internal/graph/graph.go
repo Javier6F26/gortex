@@ -789,6 +789,24 @@ func (g *Graph) ConstantValuesByNodeIDs(nodeIDs []string) (map[string]string, er
 // SetFileMetas is the in-memory FileMetaWriter. It records each per-file row
 // for one repo prefix, replacing any prior row in place. Empty input is a
 // no-op.
+// evictFileMetasLocked drops file-meta census rows for a whole repo
+// (repoPrefix set) or a single graph path across every repo (filePath
+// set). It takes only fileMetasMu — callers must NOT hold it.
+func (g *Graph) evictFileMetasLocked(repoPrefix, filePath string) {
+	g.fileMetasMu.Lock()
+	defer g.fileMetasMu.Unlock()
+	if g.fileMetas == nil {
+		return
+	}
+	if repoPrefix != "" {
+		delete(g.fileMetas, repoPrefix)
+		return
+	}
+	for _, byFile := range g.fileMetas {
+		delete(byFile, filePath)
+	}
+}
+
 func (g *Graph) SetFileMetas(repoPrefix string, rows []FileMetaRow) error {
 	if len(rows) == 0 {
 		return nil
@@ -2495,6 +2513,10 @@ func (g *Graph) GetInEdgesByNodeIDs(ids []string) map[string][]*Edge {
 // path. Nodes for one file can span many shards (different IDs hash
 // differently), so we lock all shards for this multi-shard operation.
 func (g *Graph) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
+	// Census hygiene first (own mutex, never nested with shard locks): a
+	// stale file-meta row makes a later reindex skip the file and serve
+	// old content forever.
+	g.evictFileMetasLocked("", filePath)
 	g.lockAllWrite()
 	defer g.unlockAllWrite()
 
@@ -2894,6 +2916,8 @@ func (g *Graph) GetRepoEdges(repoPrefix string) []*Edge {
 // EvictRepo removes all nodes with matching RepoPrefix and all edges
 // referencing those nodes. Returns counts of removed nodes and edges.
 func (g *Graph) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
+	// Same census hygiene as EvictFile, repo-wide.
+	g.evictFileMetasLocked(repoPrefix, "")
 	g.lockAllWrite()
 	defer g.unlockAllWrite()
 

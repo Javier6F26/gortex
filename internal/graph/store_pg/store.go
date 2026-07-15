@@ -687,14 +687,28 @@ func (s *Store) EvictFile(filePath string) (int, int) {
 	if s.refuseWrite("EvictFile") { return 0, 0 }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE file_path = $1`, `DELETE FROM nodes WHERE file_path = $1`, filePath)
+	n, e := s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE file_path = $1`, `DELETE FROM nodes WHERE file_path = $1`, filePath)
+	// The census (`files`) row must die with the file's nodes: a stale
+	// hash row makes a later reindex/track skip the file (its recorded
+	// hash still matches disk) and the graph serves old content forever.
+	if _, err := s.pool.Exec(s.ctx, `DELETE FROM files WHERE file_path = $1`, filePath); err != nil {
+		panicOnFatal(err)
+	}
+	return n, e
 }
 
 func (s *Store) EvictRepo(repoPrefix string) (int, int) {
 	if s.refuseWrite("EvictRepo") { return 0, 0 }
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE repo_prefix = $1`, `DELETE FROM nodes WHERE repo_prefix = $1`, repoPrefix)
+	n, e := s.evictByScopeLocked(s.ctx, `SELECT id FROM nodes WHERE repo_prefix = $1`, `DELETE FROM nodes WHERE repo_prefix = $1`, repoPrefix)
+	// Same census hygiene as EvictFile, repo-wide: without this an
+	// untracked repo's `files` rows outlive it and poison the census of
+	// any later re-track of the same path.
+	if _, err := s.pool.Exec(s.ctx, `DELETE FROM files WHERE repo_prefix = $1`, repoPrefix); err != nil {
+		panicOnFatal(err)
+	}
+	return n, e
 }
 
 func (s *Store) evictByScopeLocked(ctx context.Context, selectIDsSQL, deleteNodesSQL, scope string) (int, int) {
