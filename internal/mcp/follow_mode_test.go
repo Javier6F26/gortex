@@ -38,6 +38,33 @@ func TestFollowMode_ForcesReadonlyPreset(t *testing.T) {
 	// Explicitly denied read-preset tools with external/FS side effects.
 	require.False(t, p.allows("post_review"), "post_review must be denied in follow mode")
 	require.False(t, p.allows("feedback"), "feedback must be denied in follow mode")
+	// Sidecar / persistence writers: a follower's surface is read-only,
+	// nothing more — every followDenyTools entry must be blocked.
+	for _, tool := range followDenyTools {
+		require.False(t, p.allows(tool), "%s must be denied in follow mode", tool)
+	}
+	// Disk-writing LSP appliers ride the MutatingTools set.
+	require.False(t, p.allows("apply_code_action"), "apply_code_action writes to disk")
+	require.False(t, p.allows("fix_all_in_file"), "fix_all_in_file writes to disk")
+}
+
+// SetFollowMode (the late-wiring path) must enforce the SAME seal as
+// construction-time follow — including the deny list, which it
+// previously dropped.
+func TestSetFollowMode_DenyListParity(t *testing.T) {
+	srv := newTestServer(t)
+	srv.SetFollowMode(true)
+
+	p := srv.toolPolicy
+	require.NotNil(t, p)
+	require.Equal(t, "readonly", p.preset)
+	require.True(t, p.hideMode())
+	for _, tool := range followDenyTools {
+		require.False(t, p.allows(tool), "%s must be denied via SetFollowMode too", tool)
+	}
+	require.False(t, p.allows("apply_code_action"))
+	require.False(t, p.allows("fix_all_in_file"))
+	require.True(t, p.allows("search_symbols"), "read tools stay allowed")
 }
 
 // The residual graph-writer point gates go inert under follow mode.

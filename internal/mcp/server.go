@@ -1370,9 +1370,7 @@ func NewServer(engine *query.Engine, g graph.Store, idx *indexer.Indexer, watche
 		s.toolPolicy = newToolPolicy(ToolPolicyConfig{
 			Preset: "readonly",
 			Mode:   "hide",
-			// Explicitly deny the read-preset tools that still have
-			// external / filesystem side effects on a serving replica.
-			Deny: []string{"post_review", "feedback"},
+			Deny:   followDenyTools,
 		}, logger)
 		if logger != nil {
 			logger.Info("mcp: follow mode — tool surface forced to readonly/hide (GORTEX_TOOLS ignored)")
@@ -2347,6 +2345,32 @@ func (s *Server) getHotspots() []analysis.HotspotEntry {
 // the residual-writer point gates (rationale projection, co-change
 // prewarm, proxy hydration, ensureFresh) and the store-backed source-read
 // fallback.
+// followDenyTools are the read-preset tools a follower must additionally
+// deny: they persist state beyond the session (memory / note / notebook
+// sidecars, review suppressions, enrichment writes), write to disk
+// (overlay_merge), reconfigure the daemon (federation proxy control), or
+// have external side effects (post_review). On a diskless serving replica
+// such writes are either lost on pod recreation (per-replica phantom
+// state) or must be refused outright — a follower's surface is read-only,
+// nothing more. Shared by the construction-time policy and SetFollowMode
+// so both wiring paths enforce the same seal.
+var followDenyTools = []string{
+	"post_review",
+	"feedback",
+	"suppress_finding",
+	"store_memory",
+	"edit_memory",
+	"rename_memory",
+	"distill_session",
+	"save_note",
+	"notebook_save",
+	"overlay_merge",
+	"enrich_churn",
+	"enrich_releases",
+	"proxy_enable",
+	"proxy_disable",
+}
+
 func (s *Server) FollowMode() bool { return s != nil && s.followMode }
 
 // SetFollowMode forces follow behavior after construction: read-only
@@ -2359,7 +2383,7 @@ func (s *Server) SetFollowMode(on bool) {
 	}
 	s.followMode = on
 	if on {
-		s.toolPolicy = newToolPolicy(ToolPolicyConfig{Preset: "readonly", Mode: "hide"}, s.logger)
+		s.toolPolicy = newToolPolicy(ToolPolicyConfig{Preset: "readonly", Mode: "hide", Deny: followDenyTools}, s.logger)
 	}
 }
 

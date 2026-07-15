@@ -27,6 +27,8 @@ var MutatingTools = map[string]bool{
 	"inline_symbol":      true,
 	"safe_delete_symbol": true,
 	"scaffold":           true,
+	"apply_code_action":  true,
+	"fix_all_in_file":    true,
 	// Repo / project / scope mutators.
 	"index_repository":   true,
 	"reindex_repository": true,
