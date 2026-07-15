@@ -1148,7 +1148,14 @@ func (s *Store) RemoveEdge(from, to string, kind graph.EdgeKind) bool {
 func (s *Store) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked(s.stmtSelectFileNodeIDs, s.stmtDeleteNodeByFile, filePath)
+	n, e := s.evictByScopeLocked(s.stmtSelectFileNodeIDs, s.stmtDeleteNodeByFile, filePath)
+	// The census (`files`) row must die with the file's nodes: a stale
+	// hash row makes a later reindex/track skip the file and serve old
+	// content forever.
+	if _, err := s.db.Exec(`DELETE FROM files WHERE file_path = ?`, filePath); err != nil {
+		panicOnFatal(err)
+	}
+	return n, e
 }
 
 // EvictRepo removes every node in repoPrefix and every edge that
@@ -1156,7 +1163,12 @@ func (s *Store) EvictFile(filePath string) (nodesRemoved, edgesRemoved int) {
 func (s *Store) EvictRepo(repoPrefix string) (nodesRemoved, edgesRemoved int) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.evictByScopeLocked(s.stmtSelectRepoNodeIDs, s.stmtDeleteNodeByRepo, repoPrefix)
+	n, e := s.evictByScopeLocked(s.stmtSelectRepoNodeIDs, s.stmtDeleteNodeByRepo, repoPrefix)
+	// Same census hygiene as EvictFile, repo-wide.
+	if _, err := s.db.Exec(`DELETE FROM files WHERE repo_prefix = ?`, repoPrefix); err != nil {
+		panicOnFatal(err)
+	}
+	return n, e
 }
 
 // evictByScopeLocked is the shared body of EvictFile / EvictRepo --
