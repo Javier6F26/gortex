@@ -37,6 +37,22 @@ func (s *Server) storeKeysForRead(ctx context.Context, relPath string) (repoPref
 // source read cannot be satisfied without disk (no blob, no doc nodes) or
 // a git-dependent tool runs on a follower. The `follow_no_disk:` prefix is
 // the machine-readable condition; the prose names the remedy.
+//
+// Git-dependent-tool audit (fix-follower-correctness-and-docs-search 1.3):
+// tools that UNCONDITIONALLY need a git working tree carry this guard so a
+// diskless follower errors instead of fabricating an empty-but-plausible
+// answer — read_file, get_symbol_source, search_text, search_ast,
+// diff_context, detect_changes, review, review_pack, pr_risk,
+// pr_review_context. Tools whose git path is OPT-IN (change_contract
+// source:diff, critique_review, post_review, suggest_reviewers,
+// suggested_review_questions — all reachable via a pasted diff, an explicit
+// symbol set, a PR number, or a graph-only mode) are left unguarded: on a
+// follower their MapGitDiff call surfaces its error honestly, and their
+// non-git paths stay usable (design non-goal: keep the pasted-diff path).
+// Tools that look git-dependent but are not — get_churn_rate (graph/sidecar
+// enrichment), get_recent_changes (watcher history, errors "watch mode is
+// not active" with no watcher), get_symbol_history (in-session tracker),
+// compare_branches (overlay shadow views) — already degrade honestly.
 func followNoDiskError(what string) *mcp.CallToolResult {
 	return mcp.NewToolResultError(fmt.Sprintf(
 		"follow_no_disk: %s is unavailable without a working tree. "+

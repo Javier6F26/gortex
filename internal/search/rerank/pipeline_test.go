@@ -54,6 +54,47 @@ func TestPipelineBM25OrderPreservedWhenOnlyTextSignalActive(t *testing.T) {
 	}
 }
 
+// A concept query that lexically matches both a param node and real
+// method symbols must return the methods in the head and sink the param
+// (and lockfile-module) noise to the tail — even when the noise wins on
+// raw BM25.
+func TestPipelineConceptDemotesParamAndLockfileNoise(t *testing.T) {
+	g := newTestGraph()
+	// param out-ranks everything on BM25 (rank 0).
+	p1 := &graph.Node{ID: "f.go::Fn#param:token", Name: "token", Kind: graph.KindParam, FilePath: "f.go"}
+	g.AddNode(p1)
+	// lockfile module also high on BM25 (rank 1).
+	m1 := &graph.Node{ID: "module::npm:token@1.0.0", Name: "token", Kind: graph.KindModule, FilePath: "package-lock.json"}
+	g.AddNode(m1)
+	// real symbols rank lower on BM25 (ranks 2, 3).
+	meth := &graph.Node{ID: "f.go::TokenService.Refresh", Name: "Refresh", Kind: graph.KindMethod, FilePath: "f.go"}
+	g.AddNode(meth)
+	fn := &graph.Node{ID: "f.go::MintToken", Name: "MintToken", Kind: graph.KindFunction, FilePath: "f.go"}
+	g.AddNode(fn)
+
+	weights := map[string]float64{SignalBM25: 1.0}
+	p := New(DefaultSignals(), weights)
+	cands := []*Candidate{
+		candidateFor(p1, 0, -1),
+		candidateFor(m1, 1, -1),
+		candidateFor(meth, 2, -1),
+		candidateFor(fn, 3, -1),
+	}
+	out := p.Rerank("token refresh", cands, &Context{Graph: g, QueryClass: QueryClassConcept})
+
+	// Head must be the substantive symbols; noise trails.
+	if out[0].Node.Kind == graph.KindParam || out[0].Node.Kind == graph.KindModule {
+		t.Fatalf("expected a substantive symbol at the head, got %s (%s)", out[0].Node.ID, out[0].Node.Kind)
+	}
+	if out[1].Node.Kind == graph.KindParam || out[1].Node.Kind == graph.KindModule {
+		t.Fatalf("expected a substantive symbol at position 1, got %s (%s)", out[1].Node.ID, out[1].Node.Kind)
+	}
+	// The two tail rows are the noise, in stable relative order.
+	if out[2].Node.ID != p1.ID || out[3].Node.ID != m1.ID {
+		t.Fatalf("expected param then lockfile-module at the tail, got %s, %s", out[2].Node.ID, out[3].Node.ID)
+	}
+}
+
 func TestPipelineSemanticPromotesTopVectorHit(t *testing.T) {
 	g := newTestGraph()
 	a := mustNode(g, "f.go::A", "A", graph.KindFunction)

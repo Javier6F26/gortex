@@ -344,7 +344,15 @@ func FindDeadCode(g graph.Store, processes *ProcessResult, excludePatterns []str
 		if n.Name == "init" && n.Language == "go" {
 			continue
 		}
-		if n.Name == "__init__" && n.Language == "python" {
+
+		// Skip Python dunder methods (__call__, __aenter__, __aexit__,
+		// __post_init__, __init__, __*__ generally). They are invoked
+		// implicitly by the runtime or by protocols (context managers,
+		// dataclasses, ASGI, operator overloads) that the graph doesn't
+		// model, so they carry zero incoming references yet are never
+		// dead. Constrained to methods/functions so a non-dunder symbol
+		// with the same zero-reference shape is still reported.
+		if (n.Kind == graph.KindMethod || n.Kind == graph.KindFunction) && isDunderName(n.Name) {
 			continue
 		}
 
@@ -941,6 +949,18 @@ func isExportedNode(n *graph.Node) bool {
 		}
 	}
 	return isExportedSymbol(n.Name, n.Language)
+}
+
+// isDunderName reports whether name is a Python dunder — a "magic"
+// name wrapped in double underscores (`__call__`, `__aenter__`,
+// `__post_init__`). Such methods are invoked implicitly by the runtime
+// or by protocols the graph does not model, so a zero-reference dunder
+// is not dead code. Requires at least one character between the
+// underscore pairs so bare `____` does not qualify.
+func isDunderName(name string) bool {
+	return len(name) > 4 &&
+		strings.HasPrefix(name, "__") &&
+		strings.HasSuffix(name, "__")
 }
 
 // isExportedSymbol checks if a symbol name is exported (public API).

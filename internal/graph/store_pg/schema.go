@@ -250,6 +250,16 @@ CREATE INDEX IF NOT EXISTS idx_blame_by_repo ON blame_enrichment(repo_prefix) WH
 --   WHERE name ILIKE '%q%'    (case-insensitive substring, fallback)
 CREATE INDEX IF NOT EXISTS idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops);
 
+-- Doc-section body FTS: a partial GIN expression index over the section_text
+-- stored in each KindDoc prose-section node's meta, so a docs-corpus query
+-- matches section BODY text (not only the heading in nodes.name). Serves
+-- searchDocBodies' tsvector @@ plainto_tsquery lookup. No separate body
+-- column / backfill is needed — the markdown extractor already writes
+-- section_text into meta at index time.
+CREATE INDEX IF NOT EXISTS idx_nodes_doc_body_fts ON nodes
+    USING GIN (to_tsvector('english', meta->>'section_text'))
+    WHERE kind = 'doc';
+
 -- Content FTS: generated tsvector column with GIN index.
 -- This replaces SQLite's content_fts FTS5 virtual table for content bodies.
 -- search_body is a generated tsvector column for full-text search.

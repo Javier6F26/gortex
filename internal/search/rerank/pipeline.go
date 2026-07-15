@@ -177,6 +177,12 @@ func (p *Pipeline) Rerank(query string, cands []*Candidate, ctx *Context) []*Can
 	// implementation file) must keep its literal order.
 	if ctx.QueryClass == QueryClassConcept {
 		applyFileDiversity(cands)
+		// Concept queries want symbols, not function-shape (param /
+		// generic_param) or dependency-lockfile module noise. Sink those
+		// below every substantive hit so they never crowd the head. An
+		// explicit kind: request bypasses this — the caller pins the
+		// class away from concept before reaching here.
+		demoteConceptNoise(cands)
 	}
 	return cands
 }

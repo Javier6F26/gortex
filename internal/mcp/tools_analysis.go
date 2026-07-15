@@ -238,6 +238,13 @@ func uniqueRepoPrefixesFromSteps(steps []analysis.Step) []string {
 }
 
 func (s *Server) handleDetectChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A diskless follower has no working tree, so a git diff would find no
+	// changes and report a false "risk NONE". Fail with the same
+	// follow_no_disk error as review / review_pack instead of fabricating an
+	// empty changeset.
+	if s.followMode {
+		return followNoDiskError("detect_changes (needs a git working tree)"), nil
+	}
 	scope := req.GetString("scope", "unstaged")
 	baseRef := req.GetString("base_ref", "main")
 

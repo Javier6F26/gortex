@@ -291,6 +291,51 @@ func TestFollower_SmartContext_Diskless(t *testing.T) {
 	}
 }
 
+// detect_changes on a diskless follower has no working tree to diff, so it
+// must error with follow_no_disk (like review / review_pack) instead of
+// reporting a false "risk NONE" empty changeset.
+func TestFollower_DetectChanges_TypedError(t *testing.T) {
+	srv := newFollowerServer(t, seedFollowerSchema(t))
+	res := call(t, srv.handleDetectChanges, map[string]any{})
+	require.True(t, res.IsError, "detect_changes on a follower must error, not report no changes")
+	tc := res.Content[0].(mcp.TextContent)
+	require.Contains(t, tc.Text, "follow_no_disk")
+	require.Contains(t, tc.Text, "detect_changes")
+}
+
+// Index provenance the writer stamps into repo_index_state is served
+// unchanged through a follower's list_repos — the follower reads it, never
+// computes it (it has no working tree).
+func TestFollower_ProvenanceVisibleThroughFollower(t *testing.T) {
+	follower, dsn, schema := seedFollower(t)
+
+	// Writer stamps per-repo provenance after boot.
+	w, err := store_pg.Open(context.Background(), store_pg.Config{DSN: dsn, Schema: schema})
+	require.NoError(t, err)
+	require.NoError(t, w.SetRepoIndexState(graph.RepoIndexState{
+		RepoPrefix: "repoA",
+		IndexedSHA: "deadbeefcafe",
+		IndexedAt:  1_700_000_000,
+	}))
+	_ = w.Close()
+
+	srv := newFollowerServer(t, follower)
+	payload := srv.buildListReposPayload(context.Background())
+	repos, ok := payload["repos"].([]map[string]any)
+	require.True(t, ok, "repos must be entry objects, got %T", payload["repos"])
+
+	var got map[string]any
+	for _, r := range repos {
+		if r["name"] == "repoA" {
+			got = r
+			break
+		}
+	}
+	require.NotNil(t, got, "repoA must be listed; got %+v", repos)
+	require.Equal(t, "deadbeefcafe", got["last_synced_sha"])
+	require.Equal(t, "2023-11-14T22:13:20Z", got["last_synced_at"])
+}
+
 // A store-served doc read's etag is stable across identical reconstructions
 // (task 4.6: etag derives from content, not wall clock / disk).
 func TestFollower_DocEtagStable(t *testing.T) {

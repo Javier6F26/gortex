@@ -887,7 +887,7 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 				wsProj = prefix
 			}
 
-			tracked = append(tracked, daemon.TrackedRepoStatus{
+			row := daemon.TrackedRepoStatus{
 				Prefix:           prefix,
 				Path:             meta.RootPath,
 				Workspace:        ws,
@@ -897,7 +897,19 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 				Edges:            edges,
 				LastIndex:        meta.LastIndexTime.Unix(),
 				Memory:           mem,
-			})
+			}
+			// Index provenance: the commit SHA + timestamp the writer
+			// stamped into repo_index_state. Read straight from the store
+			// (never recomputed) so a follower serves exactly what the
+			// writer wrote.
+			if r, ok := g.(graph.RepoIndexStateReader); ok {
+				if st, found, _ := r.GetRepoIndexState(prefix); found {
+					row.LastSyncedSHA = st.IndexedSHA
+					row.LastSyncedAt = st.IndexedAt
+					row.Dirty = st.Dirty
+				}
+			}
+			tracked = append(tracked, row)
 		}
 		searchBackendForResponse = backendStats.SearchBackendStats
 	}
@@ -971,6 +983,12 @@ func (c *realController) Status(_ context.Context) (daemon.StatusResponse, error
 		LocalServerSlug:    c.localServerSlug(),
 		LSPRouter:          c.collectLSPRouterStatus(),
 		Enrichment:         c.collectEnrichmentProgress(),
+		// This build's search path matches docs-corpus queries against
+		// section body text on every backend (SQLite carries the body in
+		// symbol_fts tokens; Postgres matches meta.section_text via a
+		// tsvector index). Advertise the capability so clients can drop
+		// their heading-only workarounds.
+		DocsBodiesIndexed: true,
 	}
 	if c.toolSurface != nil {
 		resp.ToolPreset, resp.ToolPresetMode, resp.LearnedTools = c.toolSurface()

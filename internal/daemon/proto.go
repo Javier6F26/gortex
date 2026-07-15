@@ -185,7 +185,7 @@ type StatusResponse struct {
 	// to know where to read index freshness from. PGDSN is set only
 	// when Backend is "postgres".
 	Backend string `json:"backend"`
-	PGDSN  string `json:"pg_dsn,omitempty"`
+	PGDSN   string `json:"pg_dsn,omitempty"`
 	// Mode is "follow" for a read-only follower daemon, empty otherwise
 	// (normal writer/serving daemon).
 	Mode string `json:"mode,omitempty"`
@@ -232,6 +232,14 @@ type StatusResponse struct {
 	// when matching against ConfiguredServers — set from servers.toml
 	// `default` or the first entry. Empty when no servers.toml.
 	LocalServerSlug string `json:"local_server_slug,omitempty"`
+
+	// DocsBodiesIndexed reports whether the daemon's search path matches
+	// docs-corpus queries against prose-section BODY text (not only the
+	// heading). True on any daemon running a build with the doc-body search
+	// channel; a client (e.g. kmcp vault_search) reads it to decide whether
+	// corpus=docs is safe to use instead of a kind=doc workaround. On the
+	// pre-fix binary the field is absent (older clients see it as false).
+	DocsBodiesIndexed bool `json:"docs_bodies_indexed"`
 
 	// ToolPreset / ToolPresetMode report the active MCP tool-surface preset
 	// and mode; LearnedTools is the per-workspace learned-promotion count
@@ -492,13 +500,23 @@ type TrackedRepoStatus struct {
 	// WorkspaceProject is the project slug — the soft sub-boundary
 	// inside Workspace. Falls back to Prefix when no
 	// `.gortex.yaml::project` is declared.
-	WorkspaceProject string          `json:"workspace_project,omitempty"`
-	Ref              string          `json:"ref,omitempty"`
-	Files            int             `json:"files"`
-	Nodes            int             `json:"nodes"`
-	Edges            int             `json:"edges"`
-	LastIndex        int64           `json:"last_index_unix"`
-	Memory           MemoryBreakdown `json:"memory"`
+	WorkspaceProject string `json:"workspace_project,omitempty"`
+	Ref              string `json:"ref,omitempty"`
+	Files            int    `json:"files"`
+	Nodes            int    `json:"nodes"`
+	Edges            int    `json:"edges"`
+	LastIndex        int64  `json:"last_index_unix"`
+	// LastSyncedSHA / LastSyncedAt are the index provenance the writer
+	// stamped into repo_index_state at sync completion: the commit SHA
+	// the current graph reflects and when it was indexed (unix seconds).
+	// A client compares LastSyncedSHA against its local HEAD to detect
+	// that it is ahead of the index. Dirty is true when the working tree
+	// had uncommitted changes at index time. Empty/zero on backends
+	// without durable index state (the in-memory graph).
+	LastSyncedSHA string          `json:"last_synced_sha,omitempty"`
+	LastSyncedAt  int64           `json:"last_synced_at_unix,omitempty"`
+	Dirty         bool            `json:"dirty,omitempty"`
+	Memory        MemoryBreakdown `json:"memory"`
 }
 
 // WorkspaceSummary aggregates per-workspace stats so `gortex daemon

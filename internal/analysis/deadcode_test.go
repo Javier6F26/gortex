@@ -746,6 +746,46 @@ func TestDeadCode_MainMethodNotExcluded(t *testing.T) {
 	assert.Len(t, result, 1, "a method named main should still be reported as dead")
 }
 
+// TestDeadCode_DundersExcluded verifies that Python dunder methods with
+// zero incoming references are not reported as dead — they are invoked
+// implicitly by the runtime / protocols the graph doesn't model.
+func TestDeadCode_DundersExcluded(t *testing.T) {
+	g := graph.New()
+
+	dunders := []string{"__call__", "__aenter__", "__aexit__", "__post_init__"}
+	for _, name := range dunders {
+		g.AddNode(&graph.Node{
+			ID: "pkg/app.py::Handler." + name, Kind: graph.KindMethod,
+			Name: name, FilePath: "pkg/app.py", StartLine: 1, EndLine: 5, Language: "python",
+		})
+	}
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Empty(t, result, "dunder methods should not be flagged as dead code")
+}
+
+// TestDeadCode_DundersDoNotSuppressPlainMethods verifies that an ordinary
+// (non-dunder) unreferenced method is still reported even when dunders are
+// present.
+func TestDeadCode_DundersDoNotSuppressPlainMethods(t *testing.T) {
+	g := graph.New()
+
+	g.AddNode(&graph.Node{
+		ID: "pkg/app.py::Handler.__call__", Kind: graph.KindMethod,
+		Name: "__call__", FilePath: "pkg/app.py", StartLine: 1, EndLine: 5, Language: "python",
+	})
+	// Leading underscore keeps it a non-exported candidate (Python's
+	// visibility convention) without making it a dunder.
+	g.AddNode(&graph.Node{
+		ID: "pkg/app.py::Handler._helper", Kind: graph.KindMethod,
+		Name: "_helper", FilePath: "pkg/app.py", StartLine: 7, EndLine: 10, Language: "python",
+	})
+
+	result := FindDeadCode(g, nil, nil)
+	assert.Len(t, result, 1, "the plain unreferenced method should still be reported")
+	assert.Equal(t, "pkg/app.py::Handler._helper", result[0].ID)
+}
+
 // TestDeadCode_WellKnownMethodsExcluded verifies that methods matching
 // well-known stdlib interface names are excluded even without implements edges.
 func TestDeadCode_WellKnownMethodsExcluded(t *testing.T) {

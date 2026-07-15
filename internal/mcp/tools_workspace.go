@@ -2,8 +2,12 @@ package mcp
 
 import (
 	"context"
+	"sort"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/zzet/gortex/internal/graph"
 )
 
 // These are unconditionally registered (single-project mode degrades
@@ -74,9 +78,64 @@ func (s *Server) buildListReposPayload(ctx context.Context) map[string]any {
 			"repos":     names,
 		}
 	}
-	// No session workspace (embedded single-repo server, or a control
-	// client): there is no workspace boundary to report.
-	return map[string]any{"mode": "unbound", "repos": []string{}}
+	// No bound workspace: a follower or unbound daemon serving a
+	// multi-repo store still knows which repositories the graph holds.
+	// Enumerate the repo prefixes from the store (the same set scope
+	// resolution uses) instead of claiming an empty workspace, so a
+	// client can discover the served repos. Keep mode "unbound" for
+	// observability of the serving mode.
+	return map[string]any{"mode": "unbound", "repos": s.graphRepoEntries()}
+}
+
+// graphRepoEntries lists the repositories present in the store as
+// list_repos entries, sorted by name. Each entry carries the repo
+// prefix name; index provenance (last-synced SHA + timestamp) is added
+// per entry by enrichRepoProvenance when the writer stamped it.
+func (s *Server) graphRepoEntries() []map[string]any {
+	if s.graph == nil {
+		return []map[string]any{}
+	}
+	prefixes := s.graph.RepoPrefixes()
+	sort.Strings(prefixes)
+	out := make([]map[string]any, 0, len(prefixes))
+	for _, p := range prefixes {
+		// An empty prefix is a single-repo / unprefixed store, not a
+		// member of a multi-repo workspace — skip it so an unprefixed
+		// daemon still reports an empty unbound list.
+		if p == "" {
+			continue
+		}
+		entry := map[string]any{"name": p}
+		s.enrichRepoProvenance(entry, p)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// enrichRepoProvenance attaches the writer-stamped last-synced SHA and
+// timestamp for repoPrefix onto a list_repos entry, when the backend
+// records index provenance. Followers serve exactly what the writer
+// stamped into repo_index_state — they never compute it (they have no
+// working tree). A no-op on backends without RepoIndexStateReader (the
+// in-memory graph) or when no row exists yet.
+func (s *Server) enrichRepoProvenance(entry map[string]any, repoPrefix string) {
+	reader, ok := s.graph.(graph.RepoIndexStateReader)
+	if !ok {
+		return
+	}
+	st, found, err := reader.GetRepoIndexState(repoPrefix)
+	if err != nil || !found {
+		return
+	}
+	if st.IndexedSHA != "" {
+		entry["last_synced_sha"] = st.IndexedSHA
+	}
+	if st.IndexedAt > 0 {
+		entry["last_synced_at"] = time.Unix(st.IndexedAt, 0).UTC().Format(time.RFC3339)
+	}
+	if st.Dirty {
+		entry["dirty"] = true
+	}
 }
 
 // handleWorkspaceInfo implements `workspace_info`. Returns enough

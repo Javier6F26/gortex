@@ -925,7 +925,7 @@ func (s *Server) registerCoreTools() {
 			mcp.WithBoolean("debug", mcp.Description("When true, attach a `rerank` block to the response carrying per-candidate scores and per-signal contributions from the 11-signal rerank pipeline (bm25, semantic, fan_in, hits, fan_out, churn, community, minhash, api_signature, type_signature, recency, feedback) plus the active per-signal weight map. Off by default; enable to inspect ranking decisions or tune `.gortex.yaml::search::weights`.")),
 			mcp.WithString("query_class", mcp.Description("Advisory hint that tunes the bm25-vs-semantic balance of the rerank: \"auto\" (default — detect from query shape), \"symbol\" (identifier / API lookup — BM25-heavy), \"concept\" (natural-language description — balanced), \"path\" (file-path query — most BM25-heavy), \"signature\" (type/function-signature fragment — BM25-leaning), \"keyword_soup\" (a degenerate boolean OR-list \u2014 suppresses LLM expansion and splits the soup into per-disjunct BM25 fetches; a `query_advice` nudge rides on the response). The class actually used is echoed back as `query_class` in the response.")),
 			mcp.WithString("expand", mcp.Description("Query-expansion channels: \"both\" (default \u2014 LLM expansion when the assist gate engages, plus the deterministic equivalence-class table), \"equivalence\" (only the LLM-free curated synonym table + per-repo auto-mined concepts), \"llm\" (only LLM expansion), \"off\" (pure BM25, no expansion). Equivalence expansion bridges query vocabulary to the words a symbol uses (auth->login, delete->remove) and runs even with no LLM provider configured. For identifier queries (query_class symbol / path / signature) the server auto-disables expansion + vector even when expand is set \u2014 these classes match best on BM25 + exact-name alone.")),
-			mcp.WithString("corpus", mcp.Description("Which corpus to search: \"code\" (default \u2014 code symbols only), \"docs\" (only Markdown prose-section nodes), \"content\" (only the pdf / office / text content chunks, data_class=content), \"all\" (code + all prose). With docs / content / all a prose query matches by body text.")),
+			mcp.WithString("corpus", mcp.Description("Which corpus to search: \"code\" (default \u2014 code symbols only), \"docs\" (only Markdown prose-section nodes), \"content\" (only the pdf / office / text content chunks, data_class=content), \"all\" (code + all prose). With docs / content / all a prose query matches both the section heading and its body text.")),
 			mcp.WithBoolean("vocab_anchored", mcp.Description("When true, the LLM query-expander's returned synonyms are post-filtered to the words that actually appear in this repo's symbol names before they feed the BM25 OR-merge -- so a hallucinated-but-plausible term can't dilute the candidate pool. Robust and model-agnostic. Degrades to unconstrained expansion when the repo's mined vocabulary is empty (e.g. a cold index). Default false; the server may set a different default via search.vocab_anchored_expansion. No effect when the LLM expansion channel is off.")),
 			mcp.WithNumber("max_per_file", mcp.Description("Cap how many results a single source file may contribute to the diverse head of the result set (default 3). Hits beyond the cap are demoted below not-yet-capped results — never dropped — so the top of the list spans more files. Set 0 to disable diversification.")),
 		),
@@ -1629,8 +1629,13 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 	// identical filtering to its re-fetched candidates — a fallback
 	// that skipped any of these would surface results the caller's
 	// scope was supposed to exclude.
-	applyAllPostFilters := func(cands []*graph.Node) []*graph.Node {
-		cands = filterNodes(cands, allowed)
+	// applyNonScopeFilters runs every filter that is NOT the repo/scope
+	// narrowing: kind, lang/path/repo field clauses, flavor, sub-path
+	// scope, and corpus. Split out from the repo-allow filter so the
+	// scope_note can count only the candidates that would survive these
+	// filters if the scope were widened — a candidate the corpus/kind
+	// filter would drop anyway is not a reason to suggest widening.
+	applyNonScopeFilters := func(cands []*graph.Node) []*graph.Node {
 		if kindArg != "" {
 			cands = filterNodesByKind(cands, kindArg)
 		}
@@ -1649,6 +1654,9 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		}
 		cands = filterNodesByCorpus(cands, corpus)
 		return cands
+	}
+	applyAllPostFilters := func(cands []*graph.Node) []*graph.Node {
+		return applyNonScopeFilters(filterNodes(cands, allowed))
 	}
 	nodes = applyAllPostFilters(nodes)
 
@@ -1875,6 +1883,20 @@ func (s *Server) handleSearchSymbols(ctx context.Context, req mcp.CallToolReques
 		wide := scope
 		wide.RepoAllow = nil
 		wideNodes, _ := fetchAndMergeBM25Timed(s.engineFor(ctx), q, expandedTerms, offset+limit, wide, timings)
+		// Mirror the primary path's retrieval channels and filters so the
+		// count reflects candidates that would ACTUALLY survive if the
+		// scope were widened. Without the doc/content channels a docs
+		// query's out-of-scope matches would be invisible; without the
+		// non-scope filters the note would claim candidates the corpus /
+		// kind / flavor filter drops anyway (docs-corpus-search: scope_note
+		// computed after all filters).
+		if corpus.includesDocs() {
+			wideNodes = s.mergeDocChannel(ctx, q, wideNodes, fetchLimit, wide, timings)
+		}
+		if corpus.includesContent() {
+			wideNodes = s.mergeContentChannel(ctx, q, wideNodes, fetchLimit)
+		}
+		wideNodes = applyNonScopeFilters(wideNodes)
 		resp["scope_note"] = scopeZeroNote(resolved, len(wideNodes))
 	}
 	if filtersRelaxed {

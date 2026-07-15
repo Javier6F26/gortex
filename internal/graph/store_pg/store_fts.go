@@ -37,38 +37,139 @@ var (
 // handles via ON CONFLICT DO UPDATE. This method is a no-op because the node
 // table's name column IS the search index.
 func (s *Store) UpsertSymbolFTS(nodeID, tokens string) error {
-	if s.refuseWrite("UpsertSymbolFTS") { return ErrReadOnlyStore }
+	if s.refuseWrite("UpsertSymbolFTS") {
+		return ErrReadOnlyStore
+	}
 	return nil
 }
 
-// BuildSymbolIndex ensures the pg_trgm GIN index exists. Idempotent.
+// BuildSymbolIndex ensures the pg_trgm GIN index on names and the
+// doc-body tsvector GIN index both exist. Idempotent.
 func (s *Store) BuildSymbolIndex() error {
-	if s.refuseWrite("BuildSymbolIndex") { return ErrReadOnlyStore }
-	_, err := s.pool.Exec(s.ctx, `CREATE INDEX IF NOT EXISTS idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops)`)
+	if s.refuseWrite("BuildSymbolIndex") {
+		return ErrReadOnlyStore
+	}
+	if _, err := s.pool.Exec(s.ctx, `CREATE INDEX IF NOT EXISTS idx_nodes_name_trgm ON nodes USING GIN (name gin_trgm_ops)`); err != nil {
+		return err
+	}
+	// Doc-section body full-text index: a partial GIN expression index over
+	// the section_text stored in each KindDoc node's meta, so searchDocBodies'
+	// `@@` lookup is served from the index rather than a sequential scan.
+	_, err := s.pool.Exec(s.ctx,
+		`CREATE INDEX IF NOT EXISTS idx_nodes_doc_body_fts ON nodes
+		 USING GIN (to_tsvector('english', meta->>'section_text'))
+		 WHERE kind = 'doc'`)
 	return err
 }
 
 // SearchSymbols runs a pg_trgm similarity query and returns hits ordered
 // by score descending. Tier 0: exact name matches short-circuit for simple
-// identifier queries.
+// identifier queries. In every tier the KindDoc prose-section body channel
+// (searchDocBodies) is merged in AFTER the name hits so a query whose terms
+// appear only in a section's body still returns that section — heading/name
+// matches keep their lead (docs-corpus-search: match section body text).
 func (s *Store) SearchSymbols(query string, limit int) ([]graph.SymbolHit, error) {
 	if query == "" || limit <= 0 {
 		return nil, nil
 	}
 
+	var nameHits []graph.SymbolHit
 	// Tier 0: exact name match for identifier queries (no spaces/slashes).
 	if !hasWhitespaceOrSlash(query) {
 		exactHits, err := s.exactNameSearch(query, limit)
 		if err != nil {
 			return nil, err
 		}
-		if len(exactHits) > 0 {
-			return exactHits, nil
+		nameHits = exactHits
+	}
+	// pg_trgm similarity search when no exact tier hit.
+	if len(nameHits) == 0 {
+		trgm, err := s.trgmSearch(query, limit)
+		if err != nil {
+			return nil, err
 		}
+		nameHits = trgm
 	}
 
-	// pg_trgm similarity search.
-	return s.trgmSearch(query, limit)
+	// Doc-section body channel. The pre-tokenised symbol text (which on
+	// SQLite carries the body into symbol_fts) is a no-op on pg — the
+	// name column IS the trigram index — so body text is otherwise
+	// invisible. Match it directly against the section_text stored in
+	// meta so body-only queries resolve. Merged name-first so a code /
+	// name query never has its hits crowded out by prose.
+	docHits, err := s.searchDocBodies(query, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeSymbolHitsNameFirst(nameHits, docHits, limit), nil
+}
+
+// searchDocBodies matches a query against the body text of KindDoc
+// prose-section nodes, using a tsvector over the section_text stored in
+// each node's meta. The GIN expression index built by BuildSymbolIndex
+// keeps the `@@` lookup fast; scores are ts_rank, which the downstream
+// rerank re-weighs. No backfill is needed — section_text is written by
+// the markdown extractor into meta at index time, so existing stores are
+// searchable as soon as the index exists.
+func (s *Store) searchDocBodies(query string, limit int) ([]graph.SymbolHit, error) {
+	rows, err := s.pool.Query(s.ctx,
+		`SELECT id, ts_rank(to_tsvector('english', meta->>'section_text'), plainto_tsquery('english', $1)) AS score
+		 FROM nodes
+		 WHERE kind = 'doc'
+		   AND meta->>'section_text' IS NOT NULL
+		   AND to_tsvector('english', meta->>'section_text') @@ plainto_tsquery('english', $1)
+		 ORDER BY score DESC
+		 LIMIT $2`, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store_pg: doc body search: %w", err)
+	}
+	defer rows.Close()
+
+	var hits []graph.SymbolHit
+	for rows.Next() {
+		var h graph.SymbolHit
+		if err := rows.Scan(&h.NodeID, &h.Score); err != nil {
+			return hits, err
+		}
+		hits = append(hits, h)
+	}
+	return hits, rows.Err()
+}
+
+// mergeSymbolHitsNameFirst concatenates name-channel hits (in their
+// score order) with body-channel hits, deduped by node ID, capped at
+// limit. Name hits lead unconditionally so a heading / name match ranks
+// at least as high as any body-only match and a code query's results are
+// never displaced by prose — the two channels have incomparable raw
+// scores (trigram similarity vs ts_rank), so ordering, not score, is the
+// contract here.
+func mergeSymbolHitsNameFirst(nameHits, docHits []graph.SymbolHit, limit int) []graph.SymbolHit {
+	if len(docHits) == 0 {
+		return nameHits
+	}
+	seen := make(map[string]struct{}, len(nameHits)+len(docHits))
+	out := make([]graph.SymbolHit, 0, len(nameHits)+len(docHits))
+	for _, h := range nameHits {
+		if _, dup := seen[h.NodeID]; dup {
+			continue
+		}
+		seen[h.NodeID] = struct{}{}
+		out = append(out, h)
+	}
+	for _, h := range docHits {
+		if len(out) >= limit {
+			break
+		}
+		if _, dup := seen[h.NodeID]; dup {
+			continue
+		}
+		seen[h.NodeID] = struct{}{}
+		out = append(out, h)
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // exactNameSearch returns exact name matches with a dominant score.
@@ -256,4 +357,3 @@ func (s *Store) SetBundleFingerprints(fps map[string]uint64) {
 func (s *Store) BulkUpsertSymbolFTS(repoPrefix string, items []graph.SymbolFTSItem) error {
 	return nil
 }
-

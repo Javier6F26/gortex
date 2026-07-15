@@ -246,6 +246,67 @@ func TestContentSearch_ProseMatch(t *testing.T) {
 	}
 }
 
+// A docs-corpus query whose terms appear only in a prose section's body
+// (not its heading) must still return that section on the pg backend —
+// the regression the fix-follower-correctness change targets. Heading
+// matches keep working and, via the name-first merge, rank at least as
+// high as body-only matches.
+func TestSearchSymbols_DocBodyMatch(t *testing.T) {
+	skipIfNoPG(t)
+	dsn, schemaName := createTestSchema(t)
+	ctx := context.Background()
+	st, err := store_pg.Open(ctx, store_pg.Config{DSN: dsn, Schema: schemaName})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.BuildSymbolIndex(); err != nil {
+		t.Fatalf("BuildSymbolIndex: %v", err)
+	}
+
+	// Section whose heading has none of the body terms.
+	st.AddNode(&graph.Node{
+		ID: "constitution.md::doc:constitution-md-branches", Kind: graph.KindDoc,
+		Name: "constitution.md > Branches", FilePath: "constitution.md", RepoPrefix: "repo1",
+		Language: "markdown", StartLine: 1, EndLine: 5,
+		Meta: map[string]any{"section_text": "Every push updates the branch_track repository_url mapping automatically."},
+	})
+	// Section whose heading carries a distinctive phrase.
+	st.AddNode(&graph.Node{
+		ID: "constitution.md::doc:constitution-md-ramas-agrupadoras", Kind: graph.KindDoc,
+		Name: "constitution.md > Ramas agrupadoras", FilePath: "constitution.md", RepoPrefix: "repo1",
+		Language: "markdown", StartLine: 10, EndLine: 15,
+		Meta: map[string]any{"section_text": "Las ramas agrupadoras consolidan varios cambios."},
+	})
+
+	// Body-only phrase resolves to the Branches section.
+	hits, err := st.SearchSymbols("branch_track repository_url", 10)
+	if err != nil {
+		t.Fatalf("SearchSymbols (body): %v", err)
+	}
+	if !containsHit(hits, "constitution.md::doc:constitution-md-branches") {
+		t.Fatalf("body-only query did not return the Branches section; got %+v", hits)
+	}
+
+	// Heading phrase still resolves to its section.
+	hits, err = st.SearchSymbols("ramas agrupadoras", 10)
+	if err != nil {
+		t.Fatalf("SearchSymbols (heading): %v", err)
+	}
+	if !containsHit(hits, "constitution.md::doc:constitution-md-ramas-agrupadoras") {
+		t.Fatalf("heading query did not return the Ramas section; got %+v", hits)
+	}
+}
+
+func containsHit(hits []graph.SymbolHit, id string) bool {
+	for _, h := range hits {
+		if h.NodeID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func TestContentSearch_PerReposScope(t *testing.T) {
 	skipIfNoPG(t)
 	dsn, schemaName := createTestSchema(t)
