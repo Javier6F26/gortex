@@ -73,6 +73,14 @@ func (s *Server) handleGenerateWiki(ctx context.Context, req mcp.CallToolRequest
 	if g == nil {
 		return mcp.NewToolResultError("wiki: graph is not initialised"), nil
 	}
+	// generate_wiki writes the rendered pages to OutputDir on the local
+	// filesystem. A diskless follower has no writable working tree, so the
+	// write seal must reject it up front with the typed follow_no_disk
+	// marker — the OS "mkdir wiki: permission denied" must never be the
+	// backstop that stops the write (4.6).
+	if s.followMode {
+		return followNoDiskError("generate_wiki (writes wiki pages to disk)"), nil
+	}
 	communities := analysis.DetectCommunities(g)
 	processes := analysis.DiscoverProcesses(g)
 	hotspots := analysis.FindHotspots(g, communities, 0)

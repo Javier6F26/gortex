@@ -449,6 +449,19 @@ type Server struct {
 	followSearcher     *trigram.Searcher
 	followSearcherDone bool
 
+	// storeContractReg is the lazily-built contract registry rehydrated
+	// from persisted kind=contract nodes, used as the fallback in
+	// effectiveContractRegistry when no indexer-held registry is
+	// populated (follow mode / a daemon serving a store it did not
+	// index). Built at most once and cached; invalidateStoreContractReg
+	// drops it so a re-analysis (writer) rebuilds it. On a follower,
+	// which never re-analyses in-process, it is a v0 snapshot that
+	// self-corrects on restart — the same freshness model as
+	// followSearcher.
+	storeContractRegMu   sync.Mutex
+	storeContractReg     *contracts.Registry
+	storeContractRegDone bool
+
 	// toolBudgetOnce / toolBudgetCached memoise the project-size-scaled
 	// exploration-call budget appended to navigation tools' descriptions
 	// (see tool_budget.go). Computed once from the graph node count.
@@ -2220,6 +2233,11 @@ func (s *Server) RunAnalysis() {
 	if s.graphInvalidatedBroadcaster != nil && s.graph != nil {
 		s.graphInvalidatedBroadcaster.broadcast(s.graph.NodeCount(), s.graph.EdgeCount(), "reanalysis")
 	}
+
+	// The store-backed contract registry is derived from the graph's
+	// kind=contract nodes; a rebuild may have added or removed some, so
+	// drop the cache and let the next lookup rehydrate.
+	s.invalidateStoreContractRegistry()
 }
 
 func (s *Server) getCommunities() *analysis.CommunityResult {
@@ -2535,14 +2553,56 @@ func (s *Server) SetContractRegistry(r *contracts.Registry) {
 // then to the explicit override.
 func (s *Server) effectiveContractRegistry() *contracts.Registry {
 	if s.multiIndexer != nil {
-		return s.multiIndexer.MergedContractRegistry()
+		if reg := s.multiIndexer.MergedContractRegistry(); reg != nil && len(reg.All()) > 0 {
+			return reg
+		}
 	}
 	if s.indexer != nil {
-		if cr := s.indexer.ContractRegistry(); cr != nil {
+		if cr := s.indexer.ContractRegistry(); cr != nil && len(cr.All()) > 0 {
 			return cr
 		}
 	}
-	return s.contractRegistry
+	if s.contractRegistry != nil && len(s.contractRegistry.All()) > 0 {
+		return s.contractRegistry
+	}
+	// No indexer-held registry is populated. On a follower (or any daemon
+	// serving a store it did not index) the contracts are still persisted
+	// as kind=contract nodes — rehydrate a registry from them so
+	// contracts / api_impact / change_contract answer from the shared
+	// graph instead of falsely reporting "index a repository first".
+	return s.storeContractRegistry()
+}
+
+// storeContractRegistry lazily rebuilds the contract registry from the
+// store's persisted kind=contract nodes and caches it. Returns nil when
+// the store holds no contract nodes, so the caller's nil check still
+// distinguishes "genuinely no contracts indexed" from "registry not
+// built". See the storeContractReg field for the freshness model.
+func (s *Server) storeContractRegistry() *contracts.Registry {
+	s.storeContractRegMu.Lock()
+	defer s.storeContractRegMu.Unlock()
+	if s.storeContractRegDone {
+		return s.storeContractReg
+	}
+	s.storeContractRegDone = true // build at most once until invalidated
+	if s.graph == nil {
+		return nil
+	}
+	s.storeContractReg = contracts.LoadRegistryFromGraphAll(s.graph)
+	return s.storeContractReg
+}
+
+// invalidateStoreContractRegistry drops the cached store-backed registry
+// so the next effectiveContractRegistry call rebuilds it from the current
+// graph. Called from the re-analysis path (graph_invalidated), so a
+// daemon that re-indexes picks up new / removed contract nodes. A pure
+// follower never re-analyses in-process, so its snapshot persists until
+// restart — matching followSearcher.
+func (s *Server) invalidateStoreContractRegistry() {
+	s.storeContractRegMu.Lock()
+	s.storeContractReg = nil
+	s.storeContractRegDone = false
+	s.storeContractRegMu.Unlock()
 }
 
 // SetSemanticManager sets the semantic enrichment manager for the MCP server.

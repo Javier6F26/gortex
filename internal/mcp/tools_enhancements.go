@@ -4505,6 +4505,14 @@ func renderContextMarkdown(data map[string]any, tokenBudget int) string {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleAuditAgentConfig(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// audit_agent_config discovers and scans agent config files on the
+	// local working tree. A diskless follower has none, so scanning would
+	// return files_scanned: 0 with a clean-looking "no agent config files
+	// found" — indistinguishable from a real clean scan. Return the typed
+	// follow_no_disk marker instead (4.4).
+	if s.followMode {
+		return followNoDiskError("audit_agent_config (needs a working tree to scan)"), nil
+	}
 	root := req.GetString("root", "")
 	if root == "" {
 		if s.indexer != nil {

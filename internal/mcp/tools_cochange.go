@@ -117,15 +117,23 @@ func (s *Server) handleFindCoChangingSymbols(ctx context.Context, req mcp.CallTo
 	if symbolID != "" {
 		result["symbol_id"] = symbolID
 	}
-	// When the cache is empty AND the background mine has not finished
-	// yet, surface an in-progress marker so the caller can distinguish
-	// "this file has no co-change data" from "the daemon hasn't built
-	// the data yet". The mine is fired at daemon-ready by RunAnalysis;
-	// a fresh daemon on a disk backend takes tens of seconds before the cache is
-	// populated.
-	if len(rows) == 0 && !s.coChangeReady() {
-		result["mining_in_progress"] = true
-		result["note"] = "co-change graph is still being mined; retry shortly"
+	// When the cache is empty, be honest about WHY — and consistently so
+	// (4.5). A follower never mines co-change from git history (it has no
+	// working tree and its prewarm is inert); it only serves EdgeCoChange
+	// edges the writer persisted. So on a follower an empty result means
+	// those edges don't cover this target — NOT that a mine is running.
+	// Promising "retry shortly" there is a false, and inconsistent (only
+	// the first call saw it), signal. On a normal daemon the async mine
+	// really is still populating the cache, so the in-progress marker holds.
+	if len(rows) == 0 {
+		switch {
+		case s.followMode:
+			result["co_change_source"] = "persisted_edges_only"
+			result["note"] = "co-change mining does not run on this daemon; results come only from writer-persisted edges, which don't cover this target. Run `gortex enrich cochange` on the writer to populate it."
+		case !s.coChangeReady():
+			result["mining_in_progress"] = true
+			result["note"] = "co-change graph is still being mined; retry shortly"
+		}
 	}
 	return s.respondJSONOrTOON(ctx, req, result)
 }

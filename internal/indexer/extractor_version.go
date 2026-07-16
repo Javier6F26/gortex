@@ -26,6 +26,15 @@ var extractorVersions = map[string]int{
 	// Languages default to version 1 (no salt). Raise an entry here in
 	// the same change that alters a language's extraction logic, e.g.
 	//   "go": 2,
+	//
+	// markdown / quarto @ 2: the prose extractor stopped stripping
+	// identifier underscores from stored section_text (branch_track was
+	// mangled to branchtrack). Bumping forces already-indexed .md/.qmd
+	// files to re-extract on the next reconcile — without this, deployed
+	// stores keep the mangled bodies until their content changes
+	// (docs-corpus-search: stored section text preserves identifier tokens).
+	"markdown": 2,
+	"quarto":   2,
 }
 
 // extractorSaltExtLang maps a lower-case file extension to the language
@@ -69,6 +78,12 @@ var extractorSaltExtLang = map[string]string{
 	".exs":   "elixir",
 	".sh":    "bash",
 	".bash":  "bash",
+	// Prose extractors (markdown_prose.go / quarto.go) — tracked so the
+	// underscore-preservation fix re-extracts already-indexed docs. Both
+	// reuse stripMarkdownInline, so both bump together.
+	".md":       "markdown",
+	".markdown": "markdown",
+	".qmd":      "quarto",
 }
 
 // ExtractorLangForFile returns the extractor-staleness language key for a

@@ -60,12 +60,17 @@ func (s *Server) buildSymbolCFG(ctx context.Context, id string) (*symbolCFG, err
 	if node.StartLine == 0 || node.EndLine == 0 {
 		return nil, fmt.Errorf("symbol has no line range: %s", id)
 	}
-	absPath, err := s.resolveNodePath(node)
+	// Read through the node-anchored source seam (overlay → disk → store)
+	// so a diskless follower builds the CFG from the byte-exact file blob
+	// instead of failing to anchor the node's path on a missing working
+	// tree (4.2). Only when neither disk nor store can serve the source do
+	// we error — with the typed follow_no_disk marker on a follower, rather
+	// than a raw "no indexed repo could anchor it" for a node id we resolved.
+	source, fromLine, _, _, err := s.sourceLinesForNode(ctx, node, 0)
 	if err != nil {
-		return nil, err
-	}
-	source, fromLine, _, err := s.readLinesForCtx(ctx, absPath, node.StartLine, node.EndLine, 0)
-	if err != nil {
+		if s.followMode {
+			return nil, fmt.Errorf("follow_no_disk: get_cfg source for %s is unavailable without a working tree or a stored file blob. Re-run the writer to populate file_blobs, or run this against a local checkout of the repo", id)
+		}
 		return nil, fmt.Errorf("could not read source: %v", err)
 	}
 	c, err := cfg.Build([]byte(source), node.Language, cfg.Options{

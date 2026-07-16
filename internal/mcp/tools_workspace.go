@@ -165,9 +165,13 @@ func (s *Server) buildWorkspaceInfoPayload(ctx context.Context) map[string]any {
 			"isolation_bounds": sessWS,
 		}
 	}
-	// No session workspace: embedded single-repo / control client.
+	// No bound workspace: a follower or unbound daemon serving a
+	// multi-repo store still knows which repositories the graph holds.
+	// Enumerate them from the store — the SAME source list_repos uses
+	// (graphRepoEntries) — so workspace_info and list_repos agree instead
+	// of workspace_info claiming an empty repo set (4.1).
 	return map[string]any{
 		"mode":  "unbound",
-		"repos": []map[string]string{},
+		"repos": s.graphRepoEntries(),
 	}
 }

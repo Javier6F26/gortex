@@ -55,3 +55,29 @@ func TestStaleLangsDetection(t *testing.T) {
 		}
 	})
 }
+
+// TestMarkdownExtractorReextraction proves the underscore-preservation fix is
+// deployable: markdown / quarto are registered in the extractor-version salt
+// registry at version 2, so already-indexed docs re-extract on the next
+// reconcile even though their content is unchanged. Without the salt, a
+// deployed store would keep the mangled (underscore-stripped) section_text
+// until the file content itself changed.
+func TestMarkdownExtractorReextraction(t *testing.T) {
+	// A prose file now carries a non-empty Merkle salt — the leaf differs
+	// from the pre-fix (no-salt) leaf, so the reconcile flags it stale.
+	for _, f := range []string{"docs/notes.md", "README.markdown", "report.qmd"} {
+		if got := merkleSaltFor(f); got == "" {
+			t.Errorf("merkleSaltFor(%q) = %q, want non-empty salt so the file re-extracts", f, got)
+		}
+	}
+	if got := ExtractorLangForFile("constitution.md"); got != "markdown" {
+		t.Errorf("ExtractorLangForFile(.md) = %q, want markdown", got)
+	}
+
+	// A store last indexed by a binary that recorded markdown@1 (or the
+	// baseline) is flagged stale against the current markdown@2 — the
+	// freshness rider names markdown for a scoped reindex.
+	if got := ExtractorVersionStaleLangs(`{"markdown":1,"go":1}`); !reflect.DeepEqual(got, []string{"markdown"}) {
+		t.Errorf("stale langs = %v, want [markdown]", got)
+	}
+}

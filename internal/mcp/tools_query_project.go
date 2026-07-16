@@ -49,6 +49,18 @@ func (s *Server) handleQueryProject(ctx context.Context, req mcp.CallToolRequest
 		for name := range gc.Projects {
 			available = append(available, name)
 		}
+		// On a follower there are no config-defined projects, but the
+		// store still holds tracked repo prefixes — and a bare prefix is a
+		// valid `project` target (resolveRepoPrefix above). Surface them so
+		// available_projects is never falsely empty while list_repos serves
+		// repos (4.7: unbound-mode surfaces must agree).
+		if len(available) == 0 {
+			for _, e := range s.graphRepoEntries() {
+				if name, _ := e["name"].(string); name != "" {
+					available = append(available, name)
+				}
+			}
+		}
 		sort.Strings(available)
 		return NewStructuredErrorResult(StructuredError{
 			ErrorCode: ErrCodeProjectUnknown,

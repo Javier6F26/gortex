@@ -195,6 +195,38 @@ func TestFollower_GetSymbolSource_BlobAbsentTypedError(t *testing.T) {
 	require.Contains(t, tc.Text, "follow_no_disk")
 }
 
+// get_cfg on a follower builds the control-flow graph from the byte-exact
+// file blob in the store — no working tree — instead of failing to anchor
+// the node's path ("no indexed repo could anchor it") (4.2).
+func TestFollower_GetCFG_FromBlob(t *testing.T) {
+	srv := newFollowerServer(t, seedFollowerSchema(t))
+	out := mustJSON(t, call(t, srv.handleGetCFG, map[string]any{"id": "repoA/calc.go::Add"}))
+	require.Equal(t, "repoA/calc.go", out["file_path"])
+	require.Equal(t, "Add", out["name"])
+	require.Greater(t, out["total_blocks"].(float64), 0.0, "CFG must have at least an entry block")
+}
+
+// get_cfg for a resolvable function whose file has no stored blob returns
+// the typed follow_no_disk marker — never a path-anchoring error (4.2).
+func TestFollower_GetCFG_NoBlobTypedError(t *testing.T) {
+	follower, dsn, schema := seedFollower(t)
+	w, err := store_pg.Open(context.Background(), store_pg.Config{DSN: dsn, Schema: schema})
+	require.NoError(t, err)
+	w.AddNode(&graph.Node{
+		ID: "repoA/noblob.go::Ghost", Kind: graph.KindFunction, Name: "Ghost",
+		FilePath: "repoA/noblob.go", RepoPrefix: "repoA", Language: "go",
+		StartLine: 1, EndLine: 3,
+	})
+	_ = w.Close()
+
+	srv := newFollowerServer(t, follower)
+	res := call(t, srv.handleGetCFG, map[string]any{"id": "repoA/noblob.go::Ghost"})
+	require.True(t, res.IsError)
+	tc := res.Content[0].(mcp.TextContent)
+	require.Contains(t, tc.Text, "follow_no_disk")
+	require.NotContains(t, tc.Text, "anchor", "must not leak the path-anchoring error for a resolvable node")
+}
+
 // read_file on a follower reconstructs a markdown doc from stored section text
 // in line order, marked served_from: store (store-backed-doc-reads / task 4.3).
 func TestFollower_ReadFile_MarkdownFromStore(t *testing.T) {
@@ -403,6 +435,54 @@ func TestFollower_SearchSymbols_DocBodyMatch(t *testing.T) {
 	}))
 	require.Contains(t, resultIDs(out), docID,
 		"heading/name matches must keep working")
+}
+
+// contracts on a diskless follower answers from the store's persisted
+// kind=contract nodes — the writer never re-runs indexing on the follower,
+// so without the store-backed effectiveContractRegistry fallback this
+// would falsely report "no contract registry available — index a
+// repository first" (fix-follower-contract-registry 1.3).
+func TestFollower_Contracts_FromStore(t *testing.T) {
+	follower, dsn, schema := seedFollower(t)
+
+	// Writer persists contract nodes the way the indexer / wrapper-inline
+	// path does (see commitInlinedContractToGraph): full record on Meta.
+	w, err := store_pg.Open(context.Background(), store_pg.Config{DSN: dsn, Schema: schema})
+	require.NoError(t, err)
+	w.AddNode(&graph.Node{
+		ID: "http::GET::/v1/users", Kind: graph.KindContract, Name: "http::GET::/v1/users",
+		FilePath: "repoA/api.go", RepoPrefix: "repoA", Language: "contract",
+		Meta: map[string]any{
+			"type": "http", "role": "provider", "symbol_id": "repoA/api.go::ListUsers",
+			"line": 10, "confidence": 0.9,
+			"contract_meta": map[string]any{"path": "/v1/users", "method": "GET"},
+		},
+	})
+	w.AddNode(&graph.Node{
+		ID: "grpc::UserService/Get", Kind: graph.KindContract, Name: "grpc::UserService/Get",
+		FilePath: "repoA/client.go", RepoPrefix: "repoA", Language: "contract",
+		Meta: map[string]any{
+			"type": "grpc", "role": "consumer", "symbol_id": "repoA/client.go::getUser",
+			"line": 20, "confidence": 0.8,
+		},
+	})
+	_ = w.Close()
+
+	srv := newFollowerServer(t, follower)
+	out := mustJSON(t, call(t, srv.handleContracts, map[string]any{"action": "list", "all_repos": true}))
+	require.EqualValues(t, 2, out["total"], "both persisted contracts must be listed through the follower")
+}
+
+// contracts on a follower whose store genuinely holds no contract nodes
+// still errors honestly — the store-backed fallback must not manufacture
+// an empty registry that hides the real state (fix-follower-contract-registry 1.3).
+func TestFollower_Contracts_EmptyStoreErrors(t *testing.T) {
+	// seedFollowerSchema seeds code + doc nodes but no contracts.
+	srv := newFollowerServer(t, seedFollowerSchema(t))
+	res := call(t, srv.handleContracts, map[string]any{"action": "list", "all_repos": true})
+	require.True(t, res.IsError, "an empty store must still error, not report zero contracts as success")
+	tc := res.Content[0].(mcp.TextContent)
+	require.Contains(t, tc.Text, "index a repository first")
 }
 
 // A store-served doc read's etag is stable across identical reconstructions

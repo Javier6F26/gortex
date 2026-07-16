@@ -42,6 +42,36 @@ func LoadRegistryFromGraph(g graph.Store, repoPrefix string) *Registry {
 	return reg
 }
 
+// LoadRegistryFromGraphAll rebuilds a Registry from every KindContract
+// node in the store, across all repo prefixes. Unlike
+// LoadRegistryFromGraph — which scopes to one prefix via GetRepoNodes,
+// and on a multi-repo pg store an empty prefix matches only
+// empty-prefix rows, not every node — this scans by node kind so a
+// diskless follower serving many repos rehydrates every persisted
+// contract in one pass. Returns nil when the store holds no contract
+// nodes (so callers can distinguish "no contracts indexed" from "a
+// registry that happens to be empty").
+func LoadRegistryFromGraphAll(g graph.Store) *Registry {
+	if g == nil {
+		return nil
+	}
+	reg := NewRegistry()
+	for n := range g.NodesByKind(graph.KindContract) {
+		if n == nil {
+			continue
+		}
+		c := contractFromNode(n)
+		if c.ID == "" {
+			continue
+		}
+		reg.Add(c)
+	}
+	if len(reg.All()) == 0 {
+		return nil
+	}
+	return reg
+}
+
 // contractFromNode decodes a Contract from a KindContract graph node's
 // Meta payload. Inverse of the AddNode stamping the indexer does.
 // Missing fields are left at their zero value — preserves forward

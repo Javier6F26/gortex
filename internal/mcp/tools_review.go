@@ -243,6 +243,12 @@ func (s *Server) handleSiblingDiffContext(ctx context.Context, req mcp.CallToolR
 	if s.graph == nil {
 		return mcp.NewToolResultError("no graph available — index a repo first"), nil
 	}
+	// A diskless follower has no working tree to diff — guard it the same
+	// way diff_context does, so callers get the typed follow_no_disk marker
+	// instead of a raw "could not resolve a repository root" (4.3).
+	if s.followMode {
+		return followNoDiskError("sibling_diff_context (needs a git working tree)"), nil
+	}
 
 	scope, baseRef := siblingDiffScope(req)
 

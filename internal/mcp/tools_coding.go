@@ -669,30 +669,47 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	// Find the best match (prefer different directory from target;
-	// when a package qualifier was supplied, bias toward candidates
-	// whose home directory's leaf matches it).
-	targetDir := filepath.Dir(targetFile)
+	// Resolve the target file's repo so proximity ranking can tell a
+	// same-repo candidate from a cross-service one. GetFileSymbols also
+	// gives us the import edges for the already-imported check below.
+	fileSymbols := s.engineFor(ctx).GetFileSymbols(targetFile)
+	if fileSymbols != nil && len(fileSymbols.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileSymbols.Nodes[0]) {
+		fileSymbols = nil
+	}
+	targetRepo, targetRepoKnown := "", false
+	if fileSymbols != nil && len(fileSymbols.Nodes) > 0 {
+		targetRepo = fileSymbols.Nodes[0].RepoPrefix
+		targetRepoKnown = true
+	}
+	targetRel := trimRepoPrefix(targetFile, targetRepo)
+
+	// Pick the candidate CLOSEST to the requesting file: same package,
+	// then same service/root, then same repo, before any cross-service
+	// candidate (4.8). The old logic did the opposite — it actively
+	// preferred a DIFFERENT directory, so a same-package symbol lost to a
+	// same-named one in an unrelated service.
 	var best *graph.Node
+	bestScore := -1
 	for _, c := range candidates {
 		if c.Kind == graph.KindFile || c.Kind == graph.KindImport {
 			continue
 		}
-		if best == nil {
-			best = c
-		}
-		candDir := filepath.Dir(c.FilePath)
+		candRel := trimRepoPrefix(c.FilePath, c.RepoPrefix)
+		// When the target's repo is unknown we can't disprove same-repo, so
+		// assume it and let the path-segment tiers decide.
+		sameRepo := !targetRepoKnown || c.RepoPrefix == targetRepo
+		score := importProximityTier(targetRel, candRel, sameRepo) * 10
 		// Package-qualifier bias: when the caller wrote `graph.Node`,
-		// prefer a candidate whose directory leaf is `graph`. Matches
-		// the Go convention that the import alias defaults to the
-		// last path segment.
-		if packageHint != "" && filepath.Base(candDir) == packageHint && candDir != targetDir {
-			best = c
-			break
+		// prefer a candidate whose directory leaf is `graph` (the Go
+		// convention that the import alias defaults to the last segment).
+		if packageHint != "" && filepath.Base(filepath.Dir(c.FilePath)) == packageHint {
+			score += 5
 		}
-		// Prefer symbols NOT in the same directory (actual imports).
-		if candDir != targetDir {
+		// Deterministic tiebreak: on equal score prefer the lexically
+		// smaller path so the result is stable across graph iteration order.
+		if score > bestScore || (score == bestScore && best != nil && c.FilePath < best.FilePath) {
 			best = c
+			bestScore = score
 		}
 	}
 
@@ -700,13 +717,18 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		return mcp.NewToolResultError("no importable symbol found: " + symbolName), nil
 	}
 
-	// Check if already imported.
+	// Check if already imported. Two signals: an explicit import edge from
+	// the target file that lands in the resolved symbol's package, or the
+	// resolved symbol living in the target's own package (same repo-relative
+	// directory) — a nearer symbol the file can already reach without a new
+	// cross-package import.
 	alreadyImported := false
-	fileSymbols := s.engineFor(ctx).GetFileSymbols(targetFile)
-	if len(fileSymbols.Nodes) > 0 && !s.nodeInSessionScope(ctx, fileSymbols.Nodes[0]) {
-		fileSymbols = nil
+	bestRel := trimRepoPrefix(best.FilePath, best.RepoPrefix)
+	sameBestRepo := !targetRepoKnown || best.RepoPrefix == targetRepo
+	if sameBestRepo && filepath.Dir(bestRel) == filepath.Dir(targetRel) {
+		alreadyImported = true
 	}
-	if fileSymbols != nil {
+	if !alreadyImported && fileSymbols != nil {
 		for _, e := range fileSymbols.Edges {
 			if e.Kind == graph.EdgeImports && strings.Contains(e.To, filepath.Dir(best.FilePath)) {
 				alreadyImported = true
@@ -730,6 +752,57 @@ func (s *Server) handleFindImportPath(ctx context.Context, req mcp.CallToolReque
 		"import_path":      importDir,
 		"already_imported": alreadyImported,
 	})
+}
+
+// trimRepoPrefix returns path relative to repoPrefix (the leading
+// repo-prefix segment the graph stamps onto file paths). An empty prefix,
+// or a path that doesn't carry the prefix, is returned unchanged — so a
+// caller-supplied repo-relative path and a prefixed graph path compare on
+// the same footing.
+func trimRepoPrefix(path, repoPrefix string) string {
+	if repoPrefix == "" {
+		return path
+	}
+	repoPrefix = strings.TrimSuffix(repoPrefix, "/")
+	switch {
+	case path == repoPrefix:
+		return ""
+	case strings.HasPrefix(path, repoPrefix+"/"):
+		return path[len(repoPrefix)+1:]
+	default:
+		return path
+	}
+}
+
+// firstPathSegment returns the first path component of a slash path
+// ("knowledge/core/x.py" -> "knowledge"), the top-level package/service
+// dir used to tell same-service candidates from cross-service ones.
+func firstPathSegment(p string) string {
+	p = strings.TrimPrefix(filepath.ToSlash(p), "./")
+	if i := strings.Index(p, "/"); i >= 0 {
+		return p[:i]
+	}
+	return p
+}
+
+// importProximityTier ranks a candidate's closeness to the requesting file
+// by its repo-relative path: same package (4) > same service/top-level dir
+// (3) > same repo (2) > cross repo (1). Higher is nearer. targetRel and
+// candRel are repo-relative; sameRepo is whether they belong to the same
+// repo prefix.
+func importProximityTier(targetRel, candRel string, sameRepo bool) int {
+	tDir := filepath.ToSlash(filepath.Dir(targetRel))
+	cDir := filepath.ToSlash(filepath.Dir(candRel))
+	if sameRepo && cDir == tDir {
+		return 4
+	}
+	if sameRepo {
+		if seg := firstPathSegment(candRel); seg != "" && seg == firstPathSegment(targetRel) {
+			return 3
+		}
+		return 2
+	}
+	return 1
 }
 
 func (s *Server) handleGetRecentChanges(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

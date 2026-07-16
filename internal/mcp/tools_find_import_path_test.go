@@ -96,3 +96,46 @@ func TestFindImportPath_AcceptsQualifiedName(t *testing.T) {
 	require.Contains(t, got.SymbolID, "graph/node.go::Node")
 	require.Equal(t, "graph", got.ImportPath)
 }
+
+// TestFindImportPath_PrefersNearestCandidate pins the proximity rule
+// (import-path-resolution 4.8): when a name exists in the caller's own
+// package AND in an unrelated service, the same-package candidate wins,
+// and already_imported is true. The live bug resolved to the far service
+// and reported already_imported:false on both counts.
+func TestFindImportPath_PrefersNearestCandidate(t *testing.T) {
+	g := graph.New()
+	// Requesting file in knowledge/core.
+	g.AddNode(&graph.Node{
+		ID: "knowledge/core/kernel.py::Kernel", Name: "Kernel", Kind: graph.KindType,
+		FilePath: "knowledge/core/kernel.py", Language: "python", StartLine: 1, EndLine: 2,
+	})
+	// Same-package candidate (the nearest — should win).
+	g.AddNode(&graph.Node{
+		ID: "knowledge/core/gortex_manager.py::GortexManager", Name: "GortexManager", Kind: graph.KindType,
+		FilePath: "knowledge/core/gortex_manager.py", Language: "python", StartLine: 1, EndLine: 2,
+	})
+	// Cross-service same-named candidate (must NOT win).
+	g.AddNode(&graph.Node{
+		ID: "workspace/core/gortex_manager.py::GortexManager", Name: "GortexManager", Kind: graph.KindType,
+		FilePath: "workspace/core/gortex_manager.py", Language: "python", StartLine: 1, EndLine: 2,
+	})
+
+	eng := query.NewEngine(g)
+	srv := NewServer(eng, g, nil, nil, zap.NewNop(), nil)
+
+	res := callTool(t, srv, "find_import_path", map[string]any{
+		"name": "GortexManager",
+		"path": "knowledge/core/kernel.py",
+	})
+	require.False(t, res.IsError, "find_import_path should not error: %+v", res.Content)
+	var got struct {
+		SymbolID        string `json:"symbol_id"`
+		ImportPath      string `json:"import_path"`
+		AlreadyImported bool   `json:"already_imported"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(res.Content[0].(mcplib.TextContent).Text), &got))
+	require.Equal(t, "knowledge/core/gortex_manager.py::GortexManager", got.SymbolID,
+		"must resolve to the same-package candidate, not the cross-service one")
+	require.Equal(t, "knowledge/core", got.ImportPath)
+	require.True(t, got.AlreadyImported, "a same-package symbol is already reachable")
+}

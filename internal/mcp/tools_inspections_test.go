@@ -262,6 +262,28 @@ func TestRunInspections_ContractOrphansFire(t *testing.T) {
 	assert.Contains(t, v["message"].(string), "orphan contract")
 }
 
+// When the contract registry is unavailable (no contracts indexed and
+// none persisted in the store — the follower-with-empty-store case), the
+// inspection is reported skipped with a reason, NOT a silent
+// zero-violation clean that reads as a real pass
+// (fix-follower-contract-registry 2.1).
+func TestRunInspections_ContractOrphansSkippedWhenRegistryAbsent(t *testing.T) {
+	s := newInspectionsTestServer(t) // no contractRegistry, no contract nodes
+	out := callRunInspections(t, s, map[string]any{"inspections": "contracts_orphans"})
+	results, _ := out["results"].([]any)
+	require.Len(t, results, 1)
+	block := results[0].(map[string]any)
+	assert.Equal(t, true, block["skipped"], "unavailable registry must mark the inspection skipped")
+	assert.EqualValues(t, 0, block["total"])
+	assert.Contains(t, block["reason"].(string), "registry unavailable")
+
+	// It must not be counted as clean in the summary either.
+	summary, _ := out["summary"].(map[string]any)
+	byInspection, _ := summary["by_inspection"].(map[string]any)
+	_, counted := byInspection["contracts_orphans"]
+	assert.False(t, counted, "a skipped inspection must not appear in by_inspection as 0 violations")
+}
+
 func TestRunInspections_RejectsMissingInspectionsArg(t *testing.T) {
 	s := newInspectionsTestServer(t)
 	out := callRunInspections(t, s, map[string]any{})

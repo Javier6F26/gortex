@@ -243,7 +243,7 @@ func (s *Server) buildActiveProjectPayload(ctx context.Context) map[string]any {
 	if s.configManager == nil {
 		return map[string]any{
 			"project": "",
-			"repos":   []any{},
+			"repos":   s.unboundRepoList(nil),
 		}
 	}
 
@@ -258,7 +258,7 @@ func (s *Server) buildActiveProjectPayload(ctx context.Context) map[string]any {
 	}
 
 	if project == "" {
-		result["repos"] = buildRepoList(gc.Repos)
+		result["repos"] = s.unboundRepoList(gc.Repos)
 		return result
 	}
 
@@ -269,13 +269,29 @@ func (s *Server) buildActiveProjectPayload(ctx context.Context) map[string]any {
 		// the workspace no longer discovers. Fall back to the
 		// workspace-level repo list and record the drift in `note`.
 		result["project"] = ""
-		result["repos"] = buildRepoList(gc.Repos)
+		result["repos"] = s.unboundRepoList(gc.Repos)
 		result["note"] = fmt.Sprintf("active_project %q not found in current workspace; returning top-level repos", project)
 		return result
 	}
 
 	result["repos"] = buildRepoList(repos)
 	return result
+}
+
+// unboundRepoList returns the config-defined repo entries when any are
+// present, otherwise falls back to the repositories the graph store holds
+// (graphRepoEntries — the same source list_repos and workspace_info use).
+// This keeps every unbound-mode surface — list_repos, workspace_info,
+// get_active_project — enumerating the same repo set on a follower that
+// serves a store it never configured (4.7).
+func (s *Server) unboundRepoList(configRepos []config.RepoEntry) any {
+	if len(configRepos) > 0 {
+		return buildRepoList(configRepos)
+	}
+	if entries := s.graphRepoEntries(); len(entries) > 0 {
+		return entries
+	}
+	return []map[string]any{}
 }
 
 // resolveRepoPrefix resolves a path-or-prefix string to a repo prefix by

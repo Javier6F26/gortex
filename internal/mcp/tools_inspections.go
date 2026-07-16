@@ -72,6 +72,13 @@ type inspectionSpec struct {
 	Description string
 	Severity    string
 	Run         func(s *Server, scope inspectionScope) []inspectionViolation
+	// Available, when non-nil, gates the inspection: it reports whether
+	// the inspector's data source is present and, if not, a human reason.
+	// An unavailable inspection is reported as skipped rather than run —
+	// so a registry-dependent inspector on a follower with no contracts
+	// surfaces "skipped: registry unavailable" instead of a silent
+	// zero-violation clean that is indistinguishable from a real pass.
+	Available func(s *Server) (ok bool, reason string)
 }
 
 // inspectionScope is the call-side filter passed to every inspector.
@@ -127,6 +134,12 @@ func inspectionRegistry() []inspectionSpec {
 			ID: "contracts_orphans", Category: "contracts", Severity: "warning",
 			Description: "Provider/consumer contracts with no matching counterpart in the active workspace.",
 			Run:         runContractOrphansInspection,
+			Available: func(s *Server) (bool, string) {
+				if s.effectiveContractRegistry() == nil {
+					return false, "contract registry unavailable — no contracts indexed or persisted in this store"
+				}
+				return true, ""
+			},
 		},
 	}
 }
@@ -183,6 +196,23 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 	for _, sp := range all {
 		if !want[sp.ID] {
 			continue
+		}
+		// An inspection whose data source is absent is reported skipped —
+		// never a silent zero-violation clean that reads as a real pass.
+		if sp.Available != nil {
+			if ok, reason := sp.Available(s); !ok {
+				results = append(results, map[string]any{
+					"inspection": sp.ID,
+					"category":   sp.Category,
+					"severity":   sp.Severity,
+					"violations": []inspectionViolation{},
+					"total":      0,
+					"truncated":  false,
+					"skipped":    true,
+					"reason":     reason,
+				})
+				continue
+			}
 		}
 		raw := sp.Run(s, scope)
 		// Apply per-call filters: severity + cap.
@@ -416,11 +446,16 @@ func runGuardsInspection(s *Server, scope inspectionScope) []inspectionViolation
 }
 
 func runContractOrphansInspection(s *Server, scope inspectionScope) []inspectionViolation {
-	if s.contractRegistry == nil {
+	// Resolve through effectiveContractRegistry so the inspection sees the
+	// multi-repo merged registry and the store-backed fallback (follow
+	// mode), not just the raw single-indexer override field. The Available
+	// predicate has already gated a nil registry to a skipped result.
+	registry := s.effectiveContractRegistry()
+	if registry == nil {
 		return nil
 	}
 	out := make([]inspectionViolation, 0)
-	all := s.contractRegistry.All()
+	all := registry.All()
 	byID := map[string]int{}
 	roleByID := map[string]map[string]int{}
 	for _, c := range all {
