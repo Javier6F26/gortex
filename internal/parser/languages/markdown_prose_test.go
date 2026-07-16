@@ -142,3 +142,35 @@ func TestMarkdownProse_InlineSyntaxStripped(t *testing.T) {
 	assert.NotContains(t, body, "**")
 	assert.Contains(t, body, "make build")
 }
+
+func TestMarkdownProse_IdentifierUnderscoresPreserved(t *testing.T) {
+	e := NewMarkdownExtractor()
+	// A prose section whose body references an underscored identifier
+	// phrase — inline-code, plain, and inside emphasis — plus a genuine
+	// underscore-emphasis run that must still be stripped.
+	doc := "# API\n\n" +
+		"Call `branch_track(repository_url, branch)` to start syncing. " +
+		"The snake_case field vault_url is _required_ and __load_bearing__.\n"
+	result, err := e.Extract("api.md", []byte(doc))
+	require.NoError(t, err)
+	docs := docNodes(result.Nodes)
+	require.Len(t, docs, 1)
+	body, _ := docs[0].Meta["section_text"].(string)
+
+	// Identifier-significant underscores survive extraction verbatim.
+	assert.Contains(t, body, "branch_track", "identifier underscore must not be stripped")
+	assert.Contains(t, body, "repository_url")
+	assert.Contains(t, body, "snake_case")
+	assert.Contains(t, body, "vault_url")
+	// The mangled forms must NOT appear.
+	assert.NotContains(t, body, "branchtrack")
+	assert.NotContains(t, body, "repositoryurl")
+
+	// Underscore EMPHASIS delimiters at word boundaries are still
+	// dropped: _required_ -> required, __load_bearing__ -> load_bearing
+	// (the inner intra-word underscore survives, the delimiters go).
+	assert.Contains(t, body, "required")
+	assert.Contains(t, body, "load_bearing")
+	assert.NotContains(t, body, "_required_")
+	assert.NotContains(t, body, "__load")
+}

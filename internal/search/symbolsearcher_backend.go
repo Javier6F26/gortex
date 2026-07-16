@@ -158,3 +158,12 @@ func (b *SymbolSearcherBackend) Count() int {
 // graph.Store; closing it from the search adapter would race the
 // indexer's own lifecycle.
 func (b *SymbolSearcherBackend) Close() {}
+
+// StoreRouted reports that this backend's index lives in the wrapped
+// store's FTS tables, not an in-process structure the indexer fills
+// via Add. Count() therefore tracks only deltas-since-construction and
+// reads 0 on a read-only follower that never indexes — the engine's
+// `Count() > 0` readiness gate keys off this marker to keep the
+// store-native (body-aware) search path live regardless. See
+// search.StoreRouted.
+func (b *SymbolSearcherBackend) StoreRouted() bool { return b != nil && b.s != nil }

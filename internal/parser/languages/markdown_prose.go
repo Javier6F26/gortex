@@ -3,6 +3,7 @@ package languages
 import (
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/parser"
@@ -170,15 +171,73 @@ func headingLevelText(node *sitter.Node, src []byte) (int, string) {
 // stripMarkdownInline removes the common inline markdown constructs
 // (images, links, inline code, emphasis markers) so the indexed
 // section body is plain prose. Link/image text is kept; the URL is
-// dropped.
+// dropped. Underscores are handled specially so identifier tokens
+// (branch_track, repository_url) survive — see stripUnderscoreEmphasis.
 func stripMarkdownInline(s string) string {
 	s = mdImage.ReplaceAllString(s, "$1")
 	s = mdInlineLink.ReplaceAllString(s, "$1")
 	s = mdInlineCode.ReplaceAllString(s, "$1")
-	// Drop emphasis / strong markers and stray heading hashes.
-	s = strings.NewReplacer("**", "", "__", "", "*", "", "_", "", "`", "").Replace(s)
+	// Drop asterisk emphasis / strong markers and stray inline-code
+	// backticks. Underscores are NOT stripped here — a blanket removal
+	// would collapse identifier tokens (branch_track -> branchtrack),
+	// so intra-word underscores are preserved below.
+	s = strings.NewReplacer("**", "", "*", "", "`", "").Replace(s)
+	s = stripUnderscoreEmphasis(s)
 	// Collapse internal whitespace runs.
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// stripUnderscoreEmphasis removes underscore emphasis delimiters
+// (_italic_, __bold__) while preserving identifier-significant
+// underscores. It mirrors CommonMark's intra-word rule: an underscore
+// run flanked by alphanumeric characters on BOTH sides is not emphasis
+// (branch_track keeps its underscore), whereas a run at a word boundary
+// is a delimiter and is dropped. Preserving these underscores keeps
+// documentation identifier phrases matchable at both the SQL and search
+// layers (docs-corpus-search: stored section text preserves identifier
+// tokens).
+func stripUnderscoreEmphasis(s string) string {
+	if !strings.Contains(s, "_") {
+		return s
+	}
+	rs := []rune(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(rs); {
+		if rs[i] != '_' {
+			b.WriteRune(rs[i])
+			i++
+			continue
+		}
+		// Collect the maximal underscore run [i, j).
+		j := i
+		for j < len(rs) && rs[j] == '_' {
+			j++
+		}
+		var before, after rune
+		if i > 0 {
+			before = rs[i-1]
+		}
+		if j < len(rs) {
+			after = rs[j]
+		}
+		if isAlnum(before) && isAlnum(after) {
+			// Intra-word underscore(s) — part of an identifier, keep.
+			for k := i; k < j; k++ {
+				b.WriteByte('_')
+			}
+		}
+		// Otherwise a boundary run — an emphasis delimiter — is dropped.
+		i = j
+	}
+	return b.String()
+}
+
+// isAlnum reports whether r is a letter or digit (Unicode-aware, so
+// accented prose counts). The zero rune (used at string boundaries)
+// is not alphanumeric, so boundary underscores read as emphasis.
+func isAlnum(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // proseFileBase returns the file's base name -- the breadcrumb root

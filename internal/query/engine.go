@@ -501,7 +501,12 @@ func (e *Engine) SearchSymbolsRanked(query string, limit int, opts QueryOptions,
 	}
 
 	var cands []*rerank.Candidate
-	if s := e.getSearch(); s != nil && s.Count() > 0 {
+	// A store-routed backend (pg / sqlite FTS) is always ready: its
+	// Count() reports only the indexer's Add-delta, which is 0 on a
+	// read-only follower that never indexes. Gate on the marker OR the
+	// count so the follower reaches the store-native, body-aware search
+	// path instead of falling back to the name-only substring scan.
+	if s := e.getSearch(); s != nil && (s.Count() > 0 || search.IsStoreRouted(s)) {
 		cands = e.gatherBackendCandidates(query, fetchLimit, opts, gatherCtx)
 	} else {
 		start := time.Now()

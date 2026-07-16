@@ -50,6 +50,30 @@ type Sizer interface {
 	SizeBytes() uint64
 }
 
+// StoreRouted is an optional interface a Backend implements when its
+// index lives in an external persistent store (the pg / sqlite FTS
+// tables) rather than an in-process structure the indexer fills via
+// Add. Such a backend's Count() reports only the indexer's
+// delta-since-construction — which is 0 on a read-only follower that
+// never indexes — so the query engine's `Count() > 0` readiness gate
+// must NOT gate it out. Callers type-assert and treat a missing
+// implementation (or a false return) as "in-process, gate on Count()".
+type StoreRouted interface {
+	StoreRouted() bool
+}
+
+// IsStoreRouted reports whether b is backed by an external persistent
+// store (see StoreRouted). Safe to call on a nil Backend. The engine
+// uses it to keep the store-native search path live on a follower whose
+// backend Count() reads 0.
+func IsStoreRouted(b Backend) bool {
+	if b == nil {
+		return false
+	}
+	sr, ok := b.(StoreRouted)
+	return ok && sr.StoreRouted()
+}
+
 // BackendSize returns the estimated byte size of b if it implements
 // Sizer, or zero otherwise. Safe to call on a nil Backend.
 func BackendSize(b Backend) uint64 {

@@ -218,6 +218,12 @@ func (h *HybridBackend) dechunkVectorIDs(rawIDs []string, want int) []string {
 // Count returns the text backend document count.
 func (h *HybridBackend) Count() int { return h.text.Count() }
 
+// StoreRouted forwards the text backend's store-routed marker: a Hybrid
+// whose text channel is a SymbolSearcherBackend is itself store-routed,
+// so the engine keeps its search path live even when Count() reads 0.
+// See search.StoreRouted.
+func (h *HybridBackend) StoreRouted() bool { return IsStoreRouted(h.text) }
+
 // Close releases resources.
 func (h *HybridBackend) Close() {
 	h.text.Close()

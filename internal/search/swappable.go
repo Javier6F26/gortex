@@ -140,6 +140,16 @@ func (s *Swappable) Count() int {
 	return s.inner.Count()
 }
 
+// StoreRouted forwards the inner backend's store-routed marker so a
+// SymbolSearcherBackend (or a HybridBackend whose text backend is one)
+// wrapped in a Swappable still tells the engine its index is external
+// and its Count() must not gate the search path. See search.StoreRouted.
+func (s *Swappable) StoreRouted() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return IsStoreRouted(s.inner)
+}
+
 func (s *Swappable) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -15,7 +15,9 @@ import (
 
 	"github.com/zzet/gortex/internal/graph"
 	"github.com/zzet/gortex/internal/graph/store_pg"
+	"github.com/zzet/gortex/internal/parser/languages"
 	"github.com/zzet/gortex/internal/query"
+	"github.com/zzet/gortex/internal/search"
 )
 
 // calcGo is the byte-exact source the writer indexes and stores as a blob.
@@ -334,6 +336,73 @@ func TestFollower_ProvenanceVisibleThroughFollower(t *testing.T) {
 	require.NotNil(t, got, "repoA must be listed; got %+v", repos)
 	require.Equal(t, "deadbeefcafe", got["last_synced_sha"])
 	require.Equal(t, "2023-11-14T22:13:20Z", got["last_synced_at"])
+}
+
+// A body-only underscored phrase must return its Markdown section through a
+// postgres follower's live search_symbols corpus=docs path — the end-to-end
+// acceptance check for docs-corpus-search body matching. The follower's
+// engine is wired exactly as production (initialSearchBackend ->
+// SymbolSearcherBackend); the store-routed backend's Count() is 0 on a
+// follower that never indexes, so this exercises the readiness-gate fix that
+// keeps the body-aware store path live (search.IsStoreRouted).
+func TestFollower_SearchSymbols_DocBodyMatch(t *testing.T) {
+	follower, dsn, schema := seedFollower(t)
+
+	// Index a real Markdown doc through the production extractor so the whole
+	// chain — prose extraction (underscore preservation) → stored section_text
+	// → follower search — is exercised, not a hand-written section_text. The
+	// heading carries NONE of the query terms; the underscored phrase lives
+	// only in the section body.
+	const apiMD = "# API Reference\n\n" +
+		"Call `branch_track(repository_url, branch)` to start syncing the vault.\n"
+	ext := languages.NewMarkdownExtractor()
+	res, err := ext.Extract("repoA/api.md", []byte(apiMD))
+	require.NoError(t, err)
+	var docID string
+	w, err := store_pg.Open(context.Background(), store_pg.Config{DSN: dsn, Schema: schema})
+	require.NoError(t, err)
+	for _, n := range res.Nodes {
+		if n.Kind != graph.KindDoc {
+			continue
+		}
+		n.RepoPrefix = "repoA"
+		body, _ := n.Meta["section_text"].(string)
+		require.Contains(t, body, "branch_track", "extractor must preserve identifier underscores")
+		w.AddNode(n)
+		docID = n.ID
+	}
+	require.NotEmpty(t, docID, "extractor must emit a KindDoc section")
+	require.NoError(t, w.BuildSymbolIndex()) // doc-body FTS index (idempotent)
+	_ = w.Close()
+
+	// Follower server with the store-routed search backend wired exactly as
+	// production does. Without the readiness-gate fix the backend's zero
+	// Count() would send this query to the name-only substring fallback and
+	// the body match would be lost.
+	eng := query.NewEngine(follower)
+	eng.SetSearch(search.NewSymbolSearcherBackend(follower))
+	srv := NewServer(eng, follower, nil, nil, zap.NewNop(), nil, MultiRepoOptions{Follow: true})
+	require.True(t, srv.FollowMode())
+
+	// Body-only underscored phrase → the section is returned.
+	out := mustJSON(t, call(t, srv.handleSearchSymbols, map[string]any{
+		"query":  "branch_track repository_url",
+		"corpus": "docs",
+		"repo":   "*",
+		"limit":  10,
+	}))
+	require.Contains(t, resultIDs(out), docID,
+		"body-only underscored phrase must return its section through the follower")
+
+	// The heading/name channel still works: a query on the section heading.
+	out = mustJSON(t, call(t, srv.handleSearchSymbols, map[string]any{
+		"query":  "API Reference",
+		"corpus": "docs",
+		"repo":   "*",
+		"limit":  10,
+	}))
+	require.Contains(t, resultIDs(out), docID,
+		"heading/name matches must keep working")
 }
 
 // A store-served doc read's etag is stable across identical reconstructions
