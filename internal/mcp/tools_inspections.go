@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -135,8 +136,16 @@ func inspectionRegistry() []inspectionSpec {
 			Description: "Provider/consumer contracts with no matching counterpart in the active workspace.",
 			Run:         runContractOrphansInspection,
 			Available: func(s *Server) (bool, string) {
-				if s.effectiveContractRegistry() == nil {
+				reg := s.effectiveContractRegistry()
+				if reg == nil {
 					return false, "contract registry unavailable — no contracts indexed or persisted in this store"
+				}
+				// Registry-health gate: a zero-entry registry while the store
+				// still holds kind=contract nodes means hydration failed. Report
+				// skipped rather than run — otherwise every contract falsely reads
+				// as "provider with no counterpart" (the 100%-orphan failure mode).
+				if len(reg.All()) == 0 && s.storeHasContractNodes() {
+					return false, "contract registry hydrated empty while the store holds contract nodes — orphan results would be untrustworthy"
 				}
 				return true, ""
 			},
@@ -191,8 +200,6 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 	}
 
 	results := []map[string]any{}
-	byInspection := map[string]int{}
-	totalViolations := 0
 	for _, sp := range all {
 		if !want[sp.ID] {
 			continue
@@ -207,6 +214,7 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 					"severity":   sp.Severity,
 					"violations": []inspectionViolation{},
 					"total":      0,
+					"returned":   0,
 					"truncated":  false,
 					"skipped":    true,
 					"reason":     reason,
@@ -215,7 +223,11 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 			}
 		}
 		raw := sp.Run(s, scope)
-		// Apply per-call filters: severity + cap.
+		// Apply the severity filter, then cap at max_per_inspection. `total`
+		// is the TRUE post-filter count; `returned` is how many rows the
+		// block actually carries. Keeping both means the summary (built
+		// from these blocks below) can never claim violations that aren't
+		// accounted for by a present, truncation-marked block.
 		filtered := make([]inspectionViolation, 0, len(raw))
 		for _, v := range raw {
 			if severity != "" && strings.ToLower(v.Severity) != severity {
@@ -223,36 +235,129 @@ func (s *Server) handleRunInspections(ctx context.Context, req mcp.CallToolReque
 			}
 			filtered = append(filtered, v)
 		}
+		total := len(filtered)
+		returned := filtered
 		truncated := false
-		if len(filtered) > maxPer {
-			filtered = filtered[:maxPer]
+		if len(returned) > maxPer {
+			returned = returned[:maxPer]
 			truncated = true
 		}
 		results = append(results, map[string]any{
 			"inspection": sp.ID,
 			"category":   sp.Category,
 			"severity":   sp.Severity,
-			"violations": filtered,
-			"total":      len(filtered),
+			"violations": returned,
+			"total":      total,
+			"returned":   len(returned),
 			"truncated":  truncated,
 		})
-		byInspection[sp.ID] = len(filtered)
-		totalViolations += len(filtered)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
 		return results[i]["inspection"].(string) < results[j]["inspection"].(string)
 	})
 
-	return s.respondJSONOrTOON(ctx, req, map[string]any{
-		"results": results,
-		"summary": map[string]any{
-			"by_inspection":    byInspection,
-			"total_violations": totalViolations,
-		},
+	// max_per_inspection is this tool's truncation control, so the default
+	// response-size budget MUST NOT silently drop whole result blocks (it
+	// would leave the summary counting violations no block carries — the
+	// cap=200 regression). Honour only an EXPLICIT max_bytes/max_tokens, and
+	// then by trimming violations WITHIN blocks so every counted inspection
+	// stays present and truncation-marked.
+	if budget, explicit := explicitInspectionBudget(req); explicit && budget > 0 {
+		trimInspectionResultsToBudget(results, budget)
+	}
+
+	// Build the summary from the emitted blocks — never from a running
+	// counter tallied before response assembly. This makes block/summary
+	// divergence structurally impossible at every cap and budget value.
+	return s.respondJSONOrTOONNoBudget(ctx, req, map[string]any{
+		"results":            results,
+		"summary":            summarizeInspectionResults(results),
 		"path_prefix":        scope.PathPrefix,
 		"max_per_inspection": maxPer,
 	})
+}
+
+// explicitInspectionBudget reports the caller-supplied response byte budget
+// and whether one was actually supplied. When neither max_bytes nor
+// max_tokens is present the default budget does not apply to
+// run_inspections (see handleRunInspections). A present-but-opted-out axis
+// resolves to budget 0, which callers treat as "no cap".
+func explicitInspectionBudget(req mcp.CallToolRequest) (int, bool) {
+	args := req.GetArguments()
+	_, hasBytes := numArgInt(args, "max_bytes")
+	_, hasTokens := numArgInt(args, "max_tokens")
+	if !hasBytes && !hasTokens {
+		return 0, false
+	}
+	return effectiveBudget(req), true
+}
+
+// trimInspectionResultsToBudget shrinks the per-block violation arrays until
+// the marshalled results fit maxBytes, always leaving every block present
+// (with its true `total`) and marking any block it trimmed `truncated`. It
+// never drops a whole inspection — that is what desynced the summary before.
+func trimInspectionResultsToBudget(results []map[string]any, maxBytes int) {
+	// Reserve headroom for the summary + scaffolding the payload wraps the
+	// results in, so the whole response (not just the results slice) fits.
+	budget := maxBytes - 1024
+	if budget < maxBytes/2 {
+		budget = maxBytes / 2
+	}
+	for {
+		b, err := json.Marshal(results)
+		if err != nil || len(b) <= budget {
+			return
+		}
+		// Halve the block currently carrying the most violations.
+		idx, most := -1, 0
+		for i, r := range results {
+			v, _ := r["violations"].([]inspectionViolation)
+			if len(v) > most {
+				most, idx = len(v), i
+			}
+		}
+		if idx < 0 || most == 0 {
+			return // nothing left to trim
+		}
+		r := results[idx]
+		v := r["violations"].([]inspectionViolation)
+		r["violations"] = v[:len(v)/2]
+		r["returned"] = len(v) / 2
+		r["truncated"] = true
+	}
+}
+
+// summarizeInspectionResults derives the summary from the emitted blocks.
+// `total_violations` / `by_inspection` report each inspection's TRUE count;
+// `returned_violations` reports how many rows the response actually carries.
+// Skipped inspections are excluded so a skipped block never reads as a clean
+// zero-violation pass.
+func summarizeInspectionResults(results []map[string]any) map[string]any {
+	byInspection := map[string]int{}
+	returnedTotal := 0
+	totalViolations := 0
+	anyTruncated := false
+	for _, r := range results {
+		if skipped, _ := r["skipped"].(bool); skipped {
+			continue
+		}
+		id, _ := r["inspection"].(string)
+		total, _ := r["total"].(int)
+		returned, _ := r["returned"].(int)
+		byInspection[id] = total
+		totalViolations += total
+		returnedTotal += returned
+		if tr, _ := r["truncated"].(bool); tr {
+			anyTruncated = true
+		}
+	}
+	return map[string]any{
+		"by_inspection":       byInspection,
+		"total_violations":    totalViolations,
+		"returned_violations": returnedTotal,
+		"truncated":           anyTruncated,
+	}
 }
 
 // --- Inspector implementations --------------------------------------

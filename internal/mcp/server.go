@@ -2605,6 +2605,22 @@ func (s *Server) invalidateStoreContractRegistry() {
 	s.storeContractRegMu.Unlock()
 }
 
+// storeHasContractNodes reports whether the graph holds at least one
+// kind=contract node. Cheap — stops at the first hit. Used to distinguish
+// "genuinely no contracts" from "contract nodes exist but the registry
+// hydrated empty", which gates contracts_orphans (see its Available check).
+func (s *Server) storeHasContractNodes() bool {
+	if s == nil || s.graph == nil {
+		return false
+	}
+	for n := range s.graph.NodesByKind(graph.KindContract) {
+		if n != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // SetSemanticManager sets the semantic enrichment manager for the MCP server.
 func (s *Server) SetSemanticManager(m *semantic.Manager) {
 	s.semanticMgr = m

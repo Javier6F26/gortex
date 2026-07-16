@@ -313,6 +313,21 @@ func (s *Server) respondJSONOrTOON(ctx context.Context, req mcp.CallToolRequest,
 	return mcp.NewToolResultJSON(payload)
 }
 
+// respondJSONOrTOONNoBudget mirrors respondJSONOrTOON's format negotiation
+// (fields filter + TOON/GCX/JSON) but skips the response-size budget. Use
+// it for tools that own their own truncation and must not have whole
+// blocks silently elided by applyBudget — e.g. run_inspections, whose
+// summary is built from the emitted blocks and would desync from a
+// budget-dropped result. Callers that want to honour an explicit
+// max_bytes/max_tokens must trim (and reconcile) before calling here.
+func (s *Server) respondJSONOrTOONNoBudget(ctx context.Context, req mcp.CallToolRequest, payload any) (*mcp.CallToolResult, error) {
+	payload = applyFieldsFilter(payload, parseFields(req.GetString("fields", "")))
+	if s.isTOON(ctx, req) || s.isGCX(ctx, req) {
+		return returnTOON(payload)
+	}
+	return mcp.NewToolResultJSON(payload)
+}
+
 // subGraphToTOON converts a SubGraph to a TOON-encoded text result.
 func subGraphToTOON(sg *query.SubGraph) (*mcp.CallToolResult, error) {
 	var edgeRows []toonEdgeRow

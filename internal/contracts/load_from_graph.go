@@ -95,9 +95,16 @@ func contractFromNode(n *graph.Node) Contract {
 	if v, ok := n.Meta["symbol_id"].(string); ok {
 		c.SymbolID = v
 	}
-	if v, ok := n.Meta["line"].(int); ok {
+	// `line` may arrive as int (in-memory graph), int64 (some codecs), or
+	// float64 (a JSONB round-trip on the pg backend decodes every number as
+	// float64). A follower serving a pg store hits the float64 case, so
+	// omitting it silently zeroed Line on every rehydrated contract.
+	switch v := n.Meta["line"].(type) {
+	case int:
 		c.Line = v
-	} else if v, ok := n.Meta["line"].(int64); ok {
+	case int64:
+		c.Line = int(v)
+	case float64:
 		c.Line = int(v)
 	}
 	if v, ok := n.Meta["confidence"].(float64); ok {

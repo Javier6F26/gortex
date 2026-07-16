@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -282,6 +283,147 @@ func TestRunInspections_ContractOrphansSkippedWhenRegistryAbsent(t *testing.T) {
 	byInspection, _ := summary["by_inspection"].(map[string]any)
 	_, counted := byInspection["contracts_orphans"]
 	assert.False(t, counted, "a skipped inspection must not appear in by_inspection as 0 violations")
+}
+
+// seedTodos adds n TODO nodes so an inspection can produce an arbitrary
+// violation count for cap / budget regression testing.
+func seedTodos(s *Server, n int) {
+	for i := range n {
+		s.graph.AddNode(&graph.Node{
+			ID:       "p/bulk.go::todo" + itoa(i),
+			Kind:     graph.KindTodo,
+			FilePath: "p/bulk.go", StartLine: i + 1,
+			Meta: map[string]any{"tag": "TODO", "text": "bulk todo with some padding text to grow the payload"},
+		})
+	}
+}
+
+// blockByID returns the result block for inspection id (nil if absent).
+func blockByID(out map[string]any, id string) map[string]any {
+	results, _ := out["results"].([]any)
+	for _, r := range results {
+		m, _ := r.(map[string]any)
+		if m["inspection"] == id {
+			return m
+		}
+	}
+	return nil
+}
+
+// TestRunInspections_SummaryMatchesBlocksAcrossCaps is the fix-contracts-
+// hydration-residuals 2.2 regression: the summary is built from the emitted
+// blocks, so `total_violations` always equals the sum of the present blocks'
+// `total` and the block is never silently dropped — at cap<total, cap==total,
+// and cap>total.
+func TestRunInspections_SummaryMatchesBlocksAcrossCaps(t *testing.T) {
+	const todoCount = 120
+	for _, cap := range []int{50, todoCount, 500} {
+		s := newInspectionsTestServer(t)
+		seedTodos(s, todoCount)
+		out := callRunInspections(t, s, map[string]any{
+			"inspections":        "todos",
+			"max_per_inspection": cap,
+		})
+
+		block := blockByID(out, "todos")
+		require.NotNil(t, block, "cap=%d: todos block must be present, never elided", cap)
+		total := int(block["total"].(float64))
+		returned := int(block["returned"].(float64))
+		violations, _ := block["violations"].([]any)
+		truncated := block["truncated"].(bool)
+
+		require.GreaterOrEqual(t, total, todoCount, "cap=%d: true total must count every todo", cap)
+		assert.Equal(t, returned, len(violations), "cap=%d: returned must equal rows carried", cap)
+
+		want := min(cap, total)
+		assert.Equal(t, want, returned, "cap=%d: returned must be min(cap,total)", cap)
+		assert.Equal(t, total > returned, truncated, "cap=%d: truncated iff rows were dropped", cap)
+
+		// Summary must reconcile with the block.
+		summary := out["summary"].(map[string]any)
+		by := summary["by_inspection"].(map[string]any)
+		assert.Equal(t, total, int(by["todos"].(float64)), "cap=%d: summary by_inspection == block total", cap)
+		assert.Equal(t, total, int(summary["total_violations"].(float64)),
+			"cap=%d: summary.total_violations must never count violations no block carries", cap)
+
+		if cap >= total {
+			assert.False(t, truncated, "cap>=total: block must carry all violations")
+			assert.Equal(t, total, returned, "cap>=total: all violations returned")
+		}
+	}
+}
+
+// TestRunInspections_ExplicitBudgetKeepsBlock is the other half of 2.2: an
+// explicit max_bytes small enough to force trimming must shrink the block's
+// violation array WITHOUT dropping the block, keep the true `total`, mark it
+// truncated, and leave the summary reconciled.
+func TestRunInspections_ExplicitBudgetKeepsBlock(t *testing.T) {
+	s := newInspectionsTestServer(t)
+	seedTodos(s, 300)
+	out := callRunInspections(t, s, map[string]any{
+		"inspections":        "todos",
+		"max_per_inspection": 300,
+		"max_bytes":          4000,
+	})
+
+	block := blockByID(out, "todos")
+	require.NotNil(t, block, "block must survive an explicit byte budget, never be elided")
+	total := int(block["total"].(float64))
+	returned := int(block["returned"].(float64))
+	violations, _ := block["violations"].([]any)
+
+	assert.GreaterOrEqual(t, total, 300, "true total preserved under budget")
+	assert.Less(t, returned, total, "an explicit budget must have trimmed rows")
+	assert.Equal(t, returned, len(violations))
+	assert.True(t, block["truncated"].(bool), "trimmed block must be marked truncated")
+
+	summary := out["summary"].(map[string]any)
+	assert.Equal(t, total, int(summary["total_violations"].(float64)),
+		"summary must count the true total, reconciled with the truncation-marked block")
+	assert.Equal(t, returned, int(summary["returned_violations"].(float64)))
+}
+
+// TestRunInspections_ContractOrphansMatchedPairNotFlagged is the 3.2
+// regression: when a provider and a consumer share a contract ID, the pair
+// is matched and neither is reported as an orphan; a lone provider still is.
+func TestRunInspections_ContractOrphansMatchedPairNotFlagged(t *testing.T) {
+	s := newInspectionsTestServer(t)
+	reg := contracts.NewRegistry()
+	// Matched pair — same contract ID, both roles present.
+	reg.Add(contracts.Contract{
+		ID: "http:GET:/paired", Type: contracts.ContractType("http"),
+		Role: contracts.RoleProvider, FilePath: "p/server.go", SymbolID: "p/server.go::Serve",
+	})
+	reg.Add(contracts.Contract{
+		ID: "http:GET:/paired", Type: contracts.ContractType("http"),
+		Role: contracts.RoleConsumer, FilePath: "p/client.go", SymbolID: "p/client.go::Call",
+	})
+	// Lone provider — genuine orphan.
+	reg.Add(contracts.Contract{
+		ID: "http:GET:/lonely", Type: contracts.ContractType("http"),
+		Role: contracts.RoleProvider, FilePath: "p/server.go", SymbolID: "p/server.go::Lonely",
+	})
+	s.contractRegistry = reg
+
+	out := callRunInspections(t, s, map[string]any{"inspections": "contracts_orphans"})
+	block := blockByID(out, "contracts_orphans")
+	require.NotNil(t, block)
+	violations, _ := block["violations"].([]any)
+
+	for _, v := range violations {
+		m := v.(map[string]any)
+		assert.NotContains(t, m["message"].(string), "/paired",
+			"a matched provider/consumer pair must not be flagged as an orphan")
+	}
+	// The lone provider must still be flagged.
+	var sawLonely bool
+	for _, v := range violations {
+		m := v.(map[string]any)
+		if strings.Contains(m["message"].(string), "/lonely") {
+			sawLonely = true
+		}
+	}
+	assert.True(t, sawLonely, "a provider with no consumer must still be flagged")
 }
 
 func TestRunInspections_RejectsMissingInspectionsArg(t *testing.T) {
