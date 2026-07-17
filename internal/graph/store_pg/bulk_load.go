@@ -275,7 +275,10 @@ func (s *Store) FlushBulk(repoPrefix string) error {
 			`CREATE INDEX ON ` + nodesStaging + `(kind)`,
 			`CREATE INDEX ON ` + nodesStaging + `(file_path)`,
 			`CREATE INDEX ON ` + nodesStaging + `(repo_prefix) WHERE repo_prefix <> ''`,
-			`CREATE UNIQUE INDEX ON ` + nodesStaging + `(qual_name) WHERE qual_name <> ''`,
+			// Non-unique: qual_name is not globally unique (branch copies,
+			// generated code). A unique index here fails the cold-swap build
+			// with 23505. Mirrors the live idx_nodes_qual_name (schema.go).
+			`CREATE INDEX ON ` + nodesStaging + `(qual_name) WHERE qual_name <> ''`,
 			`CREATE INDEX ON ` + nodesStaging + ` USING GIN (name gin_trgm_ops)`,
 			// edges: unique constraint and secondary indexes
 			`ALTER TABLE ` + edgesStaging + ` ADD UNIQUE (from_id, to_id, kind, file_path, line)`,

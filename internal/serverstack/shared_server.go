@@ -518,6 +518,18 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 		logger.Info("serverstack: embeddings disabled")
 	}
 	if embedder != nil {
+		// Bind the vector store to the active embedding space BEFORE wiring the
+		// embedder into indexing (adaptive-embedding-dimensions). The vector
+		// column dimension follows the probed provider; a genuine space
+		// mismatch disables the semantic channel (BM25/FTS still serve) rather
+		// than letting every upsert fail with SQLSTATE 22000 on the writer or a
+		// follower reject every query vector. Skips cleanly on backends without
+		// a fixed-width column (SQLite).
+		if !bindEmbeddingSpace(g, embedder, cfg.Follow, logger) {
+			embedder = nil
+		}
+	}
+	if embedder != nil {
 		idx.SetEmbedder(embedder)
 		idx.SetEmbeddingChunkOptions(EmbeddingChunkOptions(conf))
 		idx.SetEmbeddingMaxSymbols(conf.Embedding.MaxSymbols)

@@ -534,6 +534,17 @@ func TestContentSearch_AppendEmpty(t *testing.T) {
 // 13.5 — Vector search tests (pgvector HNSW)
 // ---------------------------------------------------------------------------
 
+// mustEnsureVectorSpace binds the vectors table at the given dimension, the
+// same step the daemon runs at startup after probing the provider. The vectors
+// table is no longer in the static schema (adaptive-embedding-dimensions) — its
+// column dimension follows the provider — so vector tests create it explicitly.
+func mustEnsureVectorSpace(t *testing.T, st *store_pg.Store, dims int) {
+	t.Helper()
+	if err := st.EnsureVectorSpace(graph.EmbeddingSpace{Dims: dims}); err != nil {
+		t.Fatalf("EnsureVectorSpace(%d): %v", dims, err)
+	}
+}
+
 func TestVectorSearch_EmptyQuery(t *testing.T) {
 	skipIfNoPG(t)
 	dsn, schemaName := createTestSchema(t)
@@ -565,6 +576,7 @@ func TestVectorSearch_SimilarTo(t *testing.T) {
 	defer st.Close()
 
 	// Build the HNSW index first.
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex: %v", err)
 	}
@@ -609,6 +621,7 @@ func TestVectorSearch_BulkUpsert(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer st.Close()
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex: %v", err)
 	}
@@ -661,6 +674,7 @@ func TestVectorSearch_GetEmbeddings(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer st.Close()
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex: %v", err)
 	}
@@ -719,6 +733,7 @@ func TestVectorSearch_DimensionMismatch(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer st.Close()
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex: %v", err)
 	}
@@ -782,6 +797,7 @@ func TestIntegration_FullLifecycle(t *testing.T) {
 	if err := st.BuildContentIndex(); err != nil {
 		t.Fatalf("BuildContentIndex: %v", err)
 	}
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex: %v", err)
 	}
@@ -897,12 +913,15 @@ func TestVectorSearch_BuildVectorIndexIdempotent(t *testing.T) {
 	defer st.Close()
 
 	// Calling BuildVectorIndex multiple times should be safe.
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex #1: %v", err)
 	}
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex #2: %v", err)
 	}
+	mustEnsureVectorSpace(t, st, 384)
 	if err := st.BuildVectorIndex(384); err != nil {
 		t.Fatalf("BuildVectorIndex #3: %v", err)
 	}

@@ -64,7 +64,14 @@ type APIProvider struct {
 	apiKey string
 	client *http.Client
 	dims   int
-	format apiFormat
+	// reqDims is the operator-requested output dimensionality (0 = unset).
+	// When >0 it is forwarded to OpenAI-compatible backends as the
+	// `dimensions` request parameter (reduced-dimension embeddings) AND
+	// asserted on every returned batch, so a backend that silently ignores
+	// the parameter fails loudly instead of persisting a wrong-width vector
+	// into a column sized for reqDims. Set via SetRequestedDimensions.
+	reqDims int
+	format  apiFormat
 
 	// tokensUsed accumulates the `usage.total_tokens` reported by the
 	// embedding backend across every request, so the indexer can log the
@@ -146,17 +153,49 @@ func (p *APIProvider) EmbedBatch(ctx context.Context, texts []string) ([][]float
 	if err != nil {
 		return nil, err
 	}
-	// Width is learned lazily from the response (dims 0), so validate the count,
-	// reject empty vectors, and check the batch is internally consistent without
-	// asserting an absolute width.
-	if err := validateBatch("api", texts, vecs, 0); err != nil {
+	// When an override is set, assert the returned width equals it: this is
+	// the defense against a backend that ignores the `dimensions` request
+	// parameter (D5) — better to fail the batch than to store a wrong-width
+	// vector the column will reject anyway (SQLSTATE 22000). Otherwise width
+	// is learned lazily from the response (dims 0): validate the count,
+	// reject empty vectors, and check internal consistency only.
+	if err := validateBatch("api", texts, vecs, p.reqDims); err != nil {
 		return nil, err
 	}
 	return vecs, nil
 }
 
+// SetRequestedDimensions pins the output dimensionality the operator asked
+// for (see GORTEX_EMBEDDINGS_DIMS / --embeddings-dims). A positive value is
+// forwarded to OpenAI-compatible backends as the `dimensions` parameter and
+// asserted on every batch. It also seeds Dimensions() so the width is known
+// before the first embed — the probe short-circuits and the vector column is
+// sized without a network round-trip (air-gapped migrations). A non-positive
+// value clears the override.
+func (p *APIProvider) SetRequestedDimensions(n int) {
+	if n <= 0 {
+		p.reqDims = 0
+		return
+	}
+	p.reqDims = n
+	if p.dims == 0 {
+		p.dims = n
+	}
+}
+
 func (p *APIProvider) Dimensions() int { return p.dims }
 func (p *APIProvider) Close() error    { return nil }
+
+// EmbeddingSpaceID reports the provider/model identity persisted in the
+// embedding-space contract so a provider or model switch is detected at
+// daemon startup. The format qualifier ("openai"/"ollama") plus the model
+// name are what distinguish one embedding space from another.
+func (p *APIProvider) EmbeddingSpaceID() (provider, model string) {
+	if p.format == formatOllama {
+		return "ollama", p.model
+	}
+	return "openai", p.model
+}
 
 // ProbeDimensions makes one tiny embedding call to discover and cache the
 // provider's vector width, so Dimensions() reports the true value *before*
@@ -314,6 +353,10 @@ func (p *APIProvider) embedOllama(ctx context.Context, texts []string) ([][]floa
 type openAIRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
+	// Dimensions requests a reduced output width from providers that support
+	// it (OpenAI text-embedding-3-*). Omitted when 0 so providers that reject
+	// an unknown field (or a fixed-width model) are unaffected.
+	Dimensions int `json:"dimensions,omitempty"`
 }
 
 type openAIResponse struct {
@@ -335,8 +378,9 @@ type openAIEmbedding struct {
 
 func (p *APIProvider) embedOpenAI(ctx context.Context, texts []string) ([][]float32, error) {
 	reqBody := openAIRequest{
-		Model: p.model,
-		Input: truncateEmbedInputs(texts),
+		Model:      p.model,
+		Input:      truncateEmbedInputs(texts),
+		Dimensions: p.reqDims,
 	}
 
 	body, err := json.Marshal(reqBody)

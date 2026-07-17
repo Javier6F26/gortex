@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"fmt"
 	"iter"
 	"sync"
 )
@@ -602,6 +603,91 @@ type VectorSearcher interface {
 	BuildVectorIndex(dims int) error
 	SimilarTo(vec []float32, limit int) ([]VectorHit, error)
 	GetEmbeddings(ids []string) map[string][]float32
+}
+
+// EmbeddingSpace identifies the embedding model a vector store's corpus is
+// bound to: the provider family (e.g. "openai"/"ollama"/"static"), the model
+// name, and the vector dimensionality. Two spaces are compatible only when
+// all three match — vectors from different spaces are not comparable, and a
+// column sized for one dimensionality rejects vectors of another (pgvector
+// SQLSTATE 22000). Provider/Model may be empty for backends that cannot name
+// their model; Dims is always load-bearing.
+type EmbeddingSpace struct {
+	Provider string
+	Model    string
+	Dims     int
+}
+
+// Compatible reports whether two embedding spaces may share a vector store.
+// Dimensionality must match exactly — a differently-sized column cannot hold
+// the vectors, and cross-dimension cosine distance is meaningless. Provider
+// and model must match only when BOTH sides name them: an empty identity (a
+// backend that cannot name its model, or a legacy record synthesized from a
+// column alone) never trips the check, so a healthy deployment is not forced
+// into a needless reset over a field it could not populate.
+func (a EmbeddingSpace) Compatible(b EmbeddingSpace) bool {
+	if a.Dims != b.Dims {
+		return false
+	}
+	if a.Provider != "" && b.Provider != "" && a.Provider != b.Provider {
+		return false
+	}
+	if a.Model != "" && b.Model != "" && a.Model != b.Model {
+		return false
+	}
+	return true
+}
+
+// VectorSpaceManager is the optional capability a vector store implements to
+// bind its physical storage to a discovered embedding space, so the column
+// dimensionality follows the active provider instead of a hardcoded default.
+// Backends without a fixed-width vector column (the SQLite blob store) do not
+// implement it — there is nothing to size — so callers MUST type-assert.
+//
+// Contract:
+//
+//   - EnsureVectorSpace is called once at writer startup after the embedding
+//     dimension is known (probe or override). On a virgin store it creates the
+//     vector column sized for want.Dims and records the space. On an existing
+//     store it validates the persisted space against want and returns an error
+//     (see EmbeddingSpaceMismatch) on any divergence — it never silently
+//     migrates or mixes spaces. A legacy store with a typed column but no
+//     recorded space synthesizes the record from the column and want. It is
+//     idempotent for a matching space.
+//
+//   - ReadEmbeddingSpace returns the persisted space (ok=false when none is
+//     recorded yet). Read-only followers use it to detect a foreign space and
+//     degrade semantic search to text search rather than failing queries.
+//
+//   - ResetVectorSpace drops the vector data and the recorded space and
+//     recreates the column for want. Structural graph data is untouched. It
+//     refuses while another writer holds the schema lock.
+type VectorSpaceManager interface {
+	EnsureVectorSpace(want EmbeddingSpace) error
+	ReadEmbeddingSpace() (EmbeddingSpace, bool, error)
+	ResetVectorSpace(want EmbeddingSpace) error
+}
+
+// EmbeddingSpaceMismatch is returned by EnsureVectorSpace when the probed or
+// overridden embedding space diverges from the one the store was initialized
+// with. It carries both spaces and a ready-to-run reset command so the
+// operator sees exactly what changed and how to deliberately re-bind the
+// store. Callers detect it with errors.As.
+type EmbeddingSpaceMismatch struct {
+	Stored   EmbeddingSpace
+	Probed   EmbeddingSpace
+	ResetCmd string
+}
+
+func (e *EmbeddingSpaceMismatch) Error() string {
+	return fmt.Sprintf(
+		"embedding space mismatch: store bound to {provider=%q model=%q dims=%d} but active provider is {provider=%q model=%q dims=%d}; "+
+			"vectors from different spaces are not comparable and the column dimension cannot change in place. "+
+			"To deliberately re-bind and re-embed, run: %s",
+		e.Stored.Provider, e.Stored.Model, e.Stored.Dims,
+		e.Probed.Provider, e.Probed.Model, e.Probed.Dims,
+		e.ResetCmd,
+	)
 }
 
 // PageRankOpts tunes the PageRank computation. Zero values request

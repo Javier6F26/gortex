@@ -155,6 +155,68 @@ does not exist) is still detected and bootstrapped.
 
 ---
 
+## Embedding space and provider dimensions
+
+The `vectors.vec` column is a pgvector `vector(N)` whose dimension **follows
+the active embedding provider** — it is not hardcoded. `N` is discovered by
+probing the provider once at daemon startup (embedding a sentinel string and
+measuring the returned width): in-process static = 50, Ollama `nomic-embed-text`
+/ `embeddinggemma` = 768, OpenAI `text-embedding-3-small` = 1536, or a
+reduced-dimension override. Because pgvector enforces the declared dimension on
+insert, a provider whose width differs from the column would make **every**
+vector upsert fail with `SQLSTATE 22000` — so the column is created to match the
+provider, and the binding is recorded and validated.
+
+**The contract.** On first initialization the store records the embedding space
+— provider, model, dimensions — in the `embedding_space` table (single row) and
+creates `vectors` sized to it. On every subsequent writer start the probed space
+is validated against the recorded one:
+
+- **Match** → vector operations proceed.
+- **Mismatch** (different provider, model, or dimension) → the writer refuses to
+  start vector operations and logs an actionable error naming both spaces and the
+  reset command. Structural indexing (nodes, edges, search) is unaffected —
+  only the semantic channel is gated. It never silently migrates or mixes spaces.
+
+**Switching providers** (a deliberate re-bind) requires an explicit reset:
+
+```bash
+gortex daemon stop                       # release the writer lock first
+gortex embeddings reset --pg-dsn "$DSN"  # drop vectors + space, re-bind to the configured provider
+gortex daemon start --backend postgres --pg-dsn "$DSN" --embeddings-url … --embeddings-model …
+```
+
+`embeddings reset` drops the vector data and the `embedding_space` record and
+recreates the column for the currently configured provider. **Structural graph
+data is untouched.** The next index pass re-embeds the corpus — for a large
+workspace this is a paid, time-consuming operation (every symbol is re-sent to
+the provider). Reset refuses while a writer daemon holds the schema lock.
+
+**Dimension override.** `--embeddings-dims N` (or `GORTEX_EMBEDDINGS_DIMS`)
+skips the probe and sizes the column to `N`. For OpenAI `text-embedding-3-*` it
+is also sent as the `dimensions` request parameter, so the requested and stored
+widths can never diverge; if a provider ignores it and returns a different
+width, the batch fails loudly rather than storing a truncated vector. Use it for
+air-gapped migrations or reduced-dimension OpenAI deployments.
+
+**Legacy stores.** A store created before this contract has a typed `vector`
+column but no `embedding_space` row. On first boot after upgrade the store
+synthesizes the record from the column's declared dimension and the configured
+provider — a healthy deployment keeps running with no operator action. If the
+live provider's width disagrees with the existing column (the pre-existing
+broken state), the writer fails fast with the reset instruction instead of
+silently losing vectors.
+
+**Followers.** A read-only follower embeds queries with its own configured
+provider. If that provider's space differs from the writer's recorded
+`embedding_space`, a mismatched-width query vector would be rejected by pgvector
+at query time — so the follower detects the divergence at boot, logs a warning
+naming both spaces, and **degrades semantic search to BM25** rather than failing
+queries. Point followers at the same provider/model as the writer to serve
+semantic search.
+
+---
+
 ## Read-only mode (follower daemons)
 
 Set `store_pg.Config.ReadOnly = true` to open the store against a schema

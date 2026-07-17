@@ -142,6 +142,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 			FlagEnabled: daemonEmbeddings,
 			FlagURL:     daemonEmbeddingsURL,
 			FlagModel:   daemonEmbeddingsModel,
+			FlagDims:    daemonEmbeddingsDims,
 		},
 		// Workspace-global side-store layout: notes/memories partition
 		// under the "daemon" key in the shared DataDir sidecar; the

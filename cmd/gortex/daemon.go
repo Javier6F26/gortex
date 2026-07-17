@@ -44,6 +44,10 @@ var (
 	// the api provider in ResolveEmbedder, overriding the embedding: config block.
 	daemonEmbeddingsURL         string
 	daemonEmbeddingsModel       string
+	// daemonEmbeddingsDims overrides the startup dimension probe
+	// (--embeddings-dims). A positive value sizes the vector column and is
+	// forwarded as the OpenAI `dimensions` request parameter. 0 = probe.
+	daemonEmbeddingsDims int
 	daemonStatusWatch           bool
 	daemonStatusInterval        time.Duration
 	daemonHTTPAddr              string
@@ -116,6 +120,8 @@ func init() {
 		"OpenAI-compatible (or Ollama) embedding API base URL (e.g. https://api.openai.com/v1). A non-empty URL forces the api provider, overriding the embedding: config. Key via $GORTEX_EMBEDDINGS_API_KEY or $OPENAI_API_KEY (openai.com only).")
 	daemonStartCmd.Flags().StringVar(&daemonEmbeddingsModel, "embeddings-model", "",
 		"embedding model for --embeddings-url (default: auto-detect — text-embedding-3-small for OpenAI, nomic-embed-text for Ollama)")
+	daemonStartCmd.Flags().IntVar(&daemonEmbeddingsDims, "embeddings-dims", 0,
+		"override the embedding dimension probe (also $GORTEX_EMBEDDINGS_DIMS): sizes the pgvector column and, for OpenAI text-embedding-3-*, is sent as the `dimensions` request parameter. 0 = probe the provider.")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAddr, "http-addr", "",
 		"also expose the MCP 2026 Streamable HTTP transport on this TCP address (e.g. 127.0.0.1:7411); empty disables")
 	daemonStartCmd.Flags().StringVar(&daemonHTTPAuthToken, "http-auth-token", "",

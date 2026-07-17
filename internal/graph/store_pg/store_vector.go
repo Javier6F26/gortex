@@ -12,24 +12,29 @@ import (
 // in-memory brute-force O(N) cosine similarity search with true ANN queries.
 //
 // Design:
-//   - Vectors are stored in the `vectors` table as pgvector's vector(384) type.
-//   - BuildVectorIndex creates an HNSW index for ANN search.
+//   - Vectors are stored in the `vectors` table as pgvector's vector(N) type,
+//     where N follows the active embedding provider. The table is created by
+//     EnsureVectorSpace (embedding_space.go) once the dimension is probed at
+//     startup — it is deliberately absent from the static schema.
+//   - BuildVectorIndex creates the HNSW index for ANN search.
 //   - SimilarTo uses the `<=>` (cosine distance) operator with ORDER BY + LIMIT.
 //   - GetEmbeddings returns raw vectors for post-rerank refinement.
 
 // Compile-time assertion: *Store satisfies vector-search capability.
 var _ graph.VectorSearcher = (*Store)(nil)
 
-// BuildVectorIndex ensures the pgvector extension exists and creates the
-// HNSW index for the given dimension. Idempotent.
+// BuildVectorIndex creates the HNSW index on the vectors table. Idempotent.
+// The vectors table itself (sized vector(dims)) is created by EnsureVectorSpace
+// at startup before any embedding is written, so this only finalizes the index.
+// dims is validated but not used to size anything here — the column type set by
+// EnsureVectorSpace is the dimension of record; callers pass the same value.
 func (s *Store) BuildVectorIndex(dims int) error {
 	if s.refuseWrite("BuildVectorIndex") { return ErrReadOnlyStore }
 	if dims <= 0 {
 		return fmt.Errorf("store_pg: invalid vector dims: %d", dims)
 	}
 
-	// The extension and HNSW index are created in schema DDL, but ensure
-	// index exists if not already present.
+	// Ensure the HNSW index exists (the extension is created by schema DDL).
 	_, err := s.pool.Exec(s.ctx,
 		`CREATE INDEX IF NOT EXISTS idx_vectors_hnsw ON vectors USING hnsw (vec vector_cosine_ops) WITH (m = 16, ef_construction = 200)`)
 	return err

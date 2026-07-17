@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-const currentSchemaVersion = 4
+const currentSchemaVersion = 6
 
 // schemaMigrationAdvisoryLockKey is the fixed key passed to
 // pg_advisory_xact_lock around the migration loop so that concurrent
@@ -28,15 +28,18 @@ type schemaMigration struct {
 var schemaMigrations = []schemaMigration{
 	{version: 1, ddl: schemaSQL},
 	{version: 2, ddl: `
--- Migration V2: vectors table dimension 384 → 50 to match the default
--- static (GloVe) embedder. Vectors are ephemeral (rebuilt each index
--- run via BulkUpsertEmbeddings), so dropping and recreating is clean.
-DROP TABLE IF EXISTS vectors;
-CREATE TABLE IF NOT EXISTS vectors (
-    node_id TEXT PRIMARY KEY,
-    dims    INTEGER NOT NULL,
-    vec     vector(50) NOT NULL
-);
+-- Migration V2 (neutralized as of the adaptive-embedding-dimensions change):
+-- historically this recreated vectors as vector(50) to match the static
+-- (GloVe) embedder. The vector column dimension now follows the active
+-- provider and is created dynamically by EnsureVectorSpace after the startup
+-- probe (see embedding_space.go), so this migration no longer touches the
+-- vectors table. Kept as a no-op to preserve version numbering: databases
+-- that already ran the original V2 keep their vector(50) column (a legacy
+-- store, reconciled by EnsureVectorSpace's metadata synthesis); virgin
+-- databases get no static vectors table so the provider's true dimension can
+-- size it. Vectors are ephemeral (rebuilt each index run via
+-- BulkUpsertEmbeddings), so no data is lost by not recreating them here.
+SELECT 1;
 `},
 	{version: 3, ddl: `
 -- Migration V3: convert the live nodes/edges tables to LOGGED. Earlier
@@ -72,6 +75,58 @@ CREATE TABLE IF NOT EXISTS file_blobs (
     body         BYTEA NOT NULL,
     size         INTEGER NOT NULL
 );
+`},
+	{version: 5, ddl: `
+-- Migration V5: embedding-space contract. Records the provider/model/dims the
+-- vector store's corpus is bound to, so a provider or dimension switch is
+-- detected at startup instead of silently failing every upsert (SQLSTATE
+-- 22000) or mixing incomparable spaces. Single logical row (id=1). The
+-- vectors table itself is created dynamically by EnsureVectorSpace once the
+-- provider dimension is probed — it is deliberately absent from the static
+-- schema. Existing deployments gain this table empty; EnsureVectorSpace
+-- synthesizes the row from the live vector column on first boot after upgrade.
+CREATE TABLE IF NOT EXISTS embedding_space (
+    id         INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    provider   TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    dims       INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`},
+	{version: 6, ddl: `
+-- Migration V6: demote the qual_name index from UNIQUE to a plain lookup index.
+-- qual_name is not globally unique — branch/worktree copies of the same tree and
+-- generated/repeated code legitimately share a qualified name on distinct node
+-- ids — so the unique index aborted the staging→live merge with SQLSTATE 23505
+-- (reproducible with power-sync-template, per branch copy). No write path
+-- conflicts on qual_name (upserts target id) and both qual_name reads tolerate
+-- duplicates, so uniqueness was never a correctness invariant.
+--
+-- Drop by DEFINITION, not by name: the destructive cold-swap path renames a
+-- staging table (with an auto-named index) in as the live "nodes", so on a
+-- deployment that has done a full index the unique qual_name index is NOT named
+-- idx_nodes_qual_name. Find and drop every unique single-column index on
+-- nodes(qual_name) in the current schema, then recreate the canonical
+-- non-unique one. Idempotent; no table rewrite.
+DO $$
+DECLARE idx_name text;
+BEGIN
+    FOR idx_name IN
+        SELECT i.relname
+        FROM pg_index x
+        JOIN pg_class i ON i.oid = x.indexrelid
+        JOIN pg_class t ON t.oid = x.indrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE t.relname = 'nodes'
+          AND n.nspname = current_schema()
+          AND x.indisunique
+          AND x.indnatts = 1
+          AND pg_get_indexdef(x.indexrelid) ILIKE '%(qual_name)%'
+    LOOP
+        EXECUTE format('DROP INDEX IF EXISTS %I.%I', current_schema(), idx_name);
+    END LOOP;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_nodes_qual_name ON nodes(qual_name) WHERE qual_name <> '';
 `},
 }
 

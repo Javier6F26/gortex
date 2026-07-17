@@ -166,12 +166,12 @@ CREATE TABLE IF NOT EXISTS ref_facts (
     PRIMARY KEY (repo_prefix, from_id, to_id, kind, line)
 );
 
--- vectors stores symbol embedding vectors using pgvector's vector type.
-CREATE TABLE IF NOT EXISTS vectors (
-    node_id TEXT PRIMARY KEY,
-    dims    INTEGER NOT NULL,
-    vec     vector(50) NOT NULL
-);
+-- The vectors table is intentionally NOT declared here. Its vec column
+-- dimension must follow the active embedding provider (in-process 50, Ollama
+-- 768, OpenAI 1536, or a reduced-dimension override), which is only known
+-- after the provider is probed at daemon startup. It is created dynamically by
+-- EnsureVectorSpace (see embedding_space.go) once the dimension is resolved.
+-- The embedding_space contract (provider/model/dims) is recorded alongside it.
 
 -- churn_enrichment stores git-churn data per node.
 CREATE TABLE IF NOT EXISTS churn_enrichment (
@@ -220,7 +220,12 @@ CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_repo_prefix ON nodes(repo_prefix) WHERE repo_prefix <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_qual_name ON nodes(qual_name) WHERE qual_name <> '';
+-- Non-unique: qual_name is NOT globally unique — branch/worktree copies of the
+-- same tree and generated/repeated code legitimately share a qualified name on
+-- distinct node ids. A unique index here aborts the staging→live merge with
+-- SQLSTATE 23505. This is a lookup accelerator only; no write path conflicts on
+-- qual_name and both reads tolerate duplicates.
+CREATE INDEX IF NOT EXISTS idx_nodes_qual_name ON nodes(qual_name) WHERE qual_name <> '';
 
 -- Edge indexes
 CREATE INDEX IF NOT EXISTS idx_edges_from_id ON edges(from_id, kind);
