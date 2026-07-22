@@ -272,6 +272,13 @@ func parseReviewQuestionCategories(raw string) map[string]bool {
 // betweenness centrality clears minBetweenness — the call graph routes
 // many shortest paths through them, so a change there ripples widely.
 func (s *Server) mineBridgeQuestions(candidates []*graph.Node, minBetweenness float64) []reviewQuestion {
+	// A follower never runs analysis (see follower-analysis-gate).
+	// ComputeBetweenness is a full-graph scan; skip this one miner rather
+	// than materialise the corpus per call. The other question miners
+	// (which read the graph directly) still run.
+	if s.followMode {
+		return nil
+	}
 	bc := analysis.ComputeBetweenness(s.graph)
 	if bc == nil || bc.Max <= 0 {
 		return nil

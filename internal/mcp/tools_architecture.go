@@ -127,7 +127,15 @@ func (s *Server) handleGetArchitecture(ctx context.Context, req mcp.CallToolRequ
 	// so the response carries the architecture at the requested
 	// granularity (file / package / service / system) with no
 	// function-leaf nodes. Computed on demand from the base graph.
-	if hierarchy, errMsg := architectureHierarchy(s.graph, s.getCommunities(), req.GetString("resolution", "")); errMsg != "" {
+	// A follower never runs analysis (see follower-analysis-gate). The
+	// resolution tiers call BuildHierarchy, a full-graph scan; skip it here
+	// and surface an honest note. The rest of get_architecture (scale,
+	// languages, contracts) reads cheaply and still serves.
+	if s.followMode {
+		if req.GetString("resolution", "") != "" {
+			out["hierarchy_note"] = followAnalysisMessage("hierarchical architecture resolution")
+		}
+	} else if hierarchy, errMsg := architectureHierarchy(s.graph, s.getCommunities(), req.GetString("resolution", "")); errMsg != "" {
 		return mcp.NewToolResultError(errMsg), nil
 	} else if hierarchy != nil {
 		out["hierarchy"] = hierarchy

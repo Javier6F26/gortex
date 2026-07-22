@@ -21,6 +21,18 @@ type bundleCache struct {
 	mu           sync.Mutex
 	fingerprints map[string]uint64
 	entries      map[string]*bundleCacheEntry
+	// armed is true only after SetBundleFingerprints has installed a
+	// non-empty fingerprint map. Until then the cache fails closed: lookup
+	// always misses and store is a no-op. This closes the fingerprint-0
+	// staleness hole — without arming, an entry stored at fingerprint 0
+	// (the zero value for a package with no reported fingerprint) would
+	// compare equal to the current 0 forever and serve stale bundles that
+	// outlive writer updates. A follower never installs fingerprints (it
+	// runs no analysis pass — see follower-analysis-gate), so its cache
+	// stays permanently un-armed and can never serve a stale bundle.
+	// store_sqlite already has this discipline via its per-entry
+	// "no fingerprint → don't cache" guard; this aligns store_pg with it.
+	armed bool
 }
 
 type bundleCacheEntry struct {
@@ -34,6 +46,12 @@ func (c *bundleCache) lookup(pkgKey string) ([]graph.SymbolBundle, bool) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Fail closed until fingerprints have been installed — an un-armed
+	// cache can never validate an entry, so it must never serve one.
+	if !c.armed {
+		return nil, false
+	}
 
 	entry, ok := c.entries[pkgKey]
 	if !ok {
@@ -58,6 +76,10 @@ func (c *bundleCache) refresh(fps map[string]uint64) {
 		fps = map[string]uint64{}
 	}
 	c.fingerprints = fps
+	// Arm only when a non-empty fingerprint map is installed. An empty map
+	// (or a nil that was normalised above) leaves the cache un-armed so it
+	// keeps failing closed.
+	c.armed = len(fps) > 0
 	for pkgKey, entry := range c.entries {
 		if c.fingerprints[pkgKey] != entry.fingerprint {
 			delete(c.entries, pkgKey)
@@ -71,6 +93,13 @@ func (c *bundleCache) store(pkgKey string, bundles []graph.SymbolBundle) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Fail closed until armed: an entry stored before any fingerprint is
+	// installed would be tagged fingerprint 0 and could never be
+	// distinguished from a stale one, so refuse to cache it.
+	if !c.armed {
+		return
+	}
 
 	c.entries[pkgKey] = &bundleCacheEntry{
 		fingerprint: c.fingerprints[pkgKey],

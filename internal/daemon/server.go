@@ -619,6 +619,7 @@ func (s *Server) handleControl(_ *Session, req ControlRequest) ControlResponse {
 		st.Sessions = s.sessions.Count()
 		if s.Follow {
 			st.Mode = "follow"
+			st.Analysis = "disabled"
 		}
 		// Per-session detail (cwd, client name, connect time) for the
 		// status command's "sessions" block. The controller can't see

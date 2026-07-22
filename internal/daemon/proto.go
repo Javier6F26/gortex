@@ -189,6 +189,12 @@ type StatusResponse struct {
 	// Mode is "follow" for a read-only follower daemon, empty otherwise
 	// (normal writer/serving daemon).
 	Mode string `json:"mode,omitempty"`
+	// Analysis reports the follower's analysis posture. Set to "disabled"
+	// on a follower — which never runs the analysis pass (see
+	// follower-analysis-gate), so community/process/centrality signals are
+	// permanently unavailable. Empty on a writer, where analysis runs and
+	// refreshes normally.
+	Analysis string `json:"analysis,omitempty"`
 	// FreshnessLagSeconds is how stale the follower's view is: now minus
 	// the newest repo_index_state.indexed_at across the schema. Set only
 	// in follow mode (or when otherwise derivable); nil when unknown.

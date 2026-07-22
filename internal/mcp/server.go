@@ -2263,6 +2263,14 @@ func (s *Server) getCommunities() *analysis.CommunityResult {
 // incremental run (no changed packages, no repartitioned nodes) so
 // callers see the cache hit on the wire.
 func (s *Server) incrementalCommunities() (*analysis.CommunityResult, analysis.IncrementalCommunityStats) {
+	// A follower never runs analysis (see follower-analysis-gate). This is
+	// the on-demand self-heal entry point (get_cluster / analyze clusters);
+	// short-circuit it so a query can't trigger the full-graph scan the
+	// boot pass was removed to avoid. Communities stay nil — every consumer
+	// nil-degrades.
+	if s.followMode {
+		return nil, analysis.IncrementalCommunityStats{}
+	}
 	s.analysisMu.Lock()
 	defer s.analysisMu.Unlock()
 	cur := s.currentCommunityToken()

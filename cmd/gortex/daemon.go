@@ -516,10 +516,17 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 
 	// Follow mode: a diskless read-only follower has no warmup, watchers,
 	// janitor, snapshotter, enrichment, or LSP — reads are served live from
-	// the shared PostgreSQL schema. Publish ready immediately, run the
-	// in-memory analysis pass so community/process tools work off the loaded
-	// graph, and serve. No MultiIndexer exists, so none of the warmup
-	// writers below can fire.
+	// the shared PostgreSQL schema. Publish ready immediately and serve. No
+	// MultiIndexer exists, so none of the warmup writers below can fire.
+	//
+	// A follower never runs the analysis pass (see follower-analysis-gate):
+	// its graph is served live from Postgres (there is no resident *Graph),
+	// so the only whole-corpus residency the pass would build is a decaying,
+	// never-refreshed snapshot of O(nodes+edges) analysis structures that
+	// blocks boot for minutes. Every analysis consumer nil-degrades, and the
+	// on-demand analysis paths short-circuit in follow mode so no query can
+	// reintroduce the full-graph scan. Analysis-backed ranking / PR-risk
+	// gating is a writer capability; route it there.
 	if daemonFollow {
 		if err := srv.Listen(); err != nil {
 			return err
@@ -532,11 +539,7 @@ func runDaemonStart(cmd *cobra.Command, _ []string) error {
 			"queryable": true,
 			"mode":      "follow",
 		})
-		if state.mcpServer != nil {
-			// In-memory community/process detection over the loaded graph;
-			// writes nothing to the store.
-			state.mcpServer.RunAnalysis()
-		}
+		logger.Info("daemon: follow mode — analysis disabled (analysis-derived signals unavailable on this follower)")
 		controller.MarkEnriched(0)
 		publishReadinessPhase(state, "enrichment_complete", true, map[string]any{
 			"enriched": true,
@@ -1191,6 +1194,9 @@ func renderDaemonHeader(w io.Writer, st daemon.StatusResponse) {
 	t.AppendRow(table.Row{"uptime", formatDuration(time.Duration(st.UptimeSeconds) * time.Second)})
 	if st.Mode == "follow" {
 		t.AppendRow(table.Row{"mode", "follow (read-only, diskless — serves reads from the shared schema)"})
+	}
+	if st.Analysis == "disabled" {
+		t.AppendRow(table.Row{"analysis", "disabled (analysis-derived signals — communities/processes/centrality — unavailable on this follower)"})
 	}
 	switch {
 	case st.Ready && st.EnrichmentComplete:

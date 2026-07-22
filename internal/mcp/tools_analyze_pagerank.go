@@ -44,6 +44,14 @@ type pageRankRow struct {
 }
 
 func (s *Server) handleAnalyzePageRank(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A follower never runs analysis (see follower-analysis-gate). The
+	// store_pg backend does not implement graph.PageRanker, so on a follower
+	// runPageRank always falls through to analysis.ComputePageRank, which
+	// materialises the whole corpus (AllNodes/AllEdges) in the follower's
+	// memory per call. Short-circuit instead.
+	if s.followMode {
+		return followAnalysisDisabled(ctx, s, req, "pagerank", "PageRank centrality")
+	}
 	args := req.GetArguments()
 
 	limit := 20
@@ -227,6 +235,12 @@ func parseKindFilter(in string) []graph.NodeKind {
 // exposes it as a first-class result for clients that want the
 // Louvain shape specifically.
 func (s *Server) handleAnalyzeLouvain(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A follower never runs analysis (see follower-analysis-gate). store_pg
+	// does not implement graph.CommunityDetector, so runLouvain falls
+	// through to the in-process scan of the whole corpus. Short-circuit.
+	if s.followMode {
+		return followAnalysisDisabled(ctx, s, req, "communities", "community detection")
+	}
 	limit := 50
 	if v, ok := req.GetArguments()["limit"].(float64); ok && v > 0 {
 		limit = int(v)

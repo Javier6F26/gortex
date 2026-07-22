@@ -60,6 +60,28 @@ func followNoDiskError(what string) *mcp.CallToolResult {
 		what))
 }
 
+// followAnalysisMessage is the honest, permanent explanation returned by
+// analysis-backed tools on a follower (see follower-analysis-gate). A
+// follower never runs the analysis pass — neither at boot nor on demand —
+// so community/process/centrality signals are permanently unavailable
+// here. It deliberately does NOT suggest index_repository (impossible on a
+// read-only follower) and does NOT say "try again shortly" (a follower will
+// never populate these).
+func followAnalysisMessage(what string) string {
+	return "analysis does not run on this follower (read-only replica): " + what +
+		" is unavailable here. Analysis-backed signals are a writer capability — query the writer for them."
+}
+
+// followAnalysisDisabled returns the empty-with-message result an
+// analysis-backed tool serves on a follower. key is the JSON field holding
+// the (empty) result list so the response shape matches the populated case.
+func followAnalysisDisabled(ctx context.Context, s *Server, req mcp.CallToolRequest, key, what string) (*mcp.CallToolResult, error) {
+	return s.respondJSONOrTOON(ctx, req, map[string]any{
+		key:       []any{},
+		"message": followAnalysisMessage(what),
+	})
+}
+
 // sliceLines returns the 1-based inclusive [start,end] line range of body.
 // Out-of-range bounds are clamped. A zero start/end returns the whole body.
 func sliceLines(body string, start, end int) string {

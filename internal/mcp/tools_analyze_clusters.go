@@ -31,6 +31,14 @@ import (
 // better with similarity edges where modularity's resolution limit
 // blurs boundaries). The wire response echoes the algorithm used.
 func (s *Server) handleAnalyzeClusters(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A follower never runs analysis (see follower-analysis-gate). Every
+	// clustering algorithm below (leiden/louvain/spectral) scans the whole
+	// graph, so short-circuit here instead of materializing the corpus per
+	// query. The incrementalCommunities() self-heal path is separately
+	// gated for callers that reach it directly.
+	if s.followMode {
+		return followAnalysisDisabled(ctx, s, req, "clusters", "community detection")
+	}
 	minSize := max(req.GetInt("min_size", 3), 1)
 	limit := max(req.GetInt("limit", 50), 1)
 	pathPrefix := strings.TrimSpace(req.GetString("path_prefix", ""))

@@ -2427,6 +2427,13 @@ func buildDeadCodeNote(opts analysis.FindDeadCodeOptions) string {
 }
 
 func (s *Server) handleFindHotspots(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	// A follower never runs analysis (see follower-analysis-gate). The
+	// cached hotspot ranking is never populated, and the threshold path
+	// calls analysis.FindHotspots → ComputeBetweenness, a full-graph scan.
+	// Short-circuit both.
+	if s.followMode {
+		return followAnalysisDisabled(ctx, s, req, "hotspots", "hotspot ranking")
+	}
 	// Check minimum graph size
 	if s.graph.NodeCount() < 10 {
 		return mcp.NewToolResultError("codebase too small for meaningful hotspot analysis (need at least 10 symbols)"), nil

@@ -75,6 +75,9 @@ func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolReque
 	// If id is provided, return the single community in detail.
 	if id := req.GetString("id", ""); id != "" {
 		if comms == nil {
+			if s.followMode {
+				return mcp.NewToolResultError(followAnalysisMessage("community detection")), nil
+			}
 			return mcp.NewToolResultError("no communities detected yet"), nil
 		}
 		for _, c := range comms.Communities {
@@ -87,9 +90,13 @@ func (s *Server) handleGetCommunities(ctx context.Context, req mcp.CallToolReque
 
 	// Otherwise return the list of summaries.
 	if comms == nil || len(comms.Communities) == 0 {
+		msg := "no communities detected yet — run index_repository first"
+		if s.followMode {
+			msg = followAnalysisMessage("community detection")
+		}
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"communities": []any{},
-			"message":     "no communities detected yet — run index_repository first",
+			"message":     msg,
 		})
 	}
 
@@ -133,6 +140,9 @@ func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest
 	// If id is provided, return the single process in detail.
 	if id := req.GetString("id", ""); id != "" {
 		if procs == nil {
+			if s.followMode {
+				return mcp.NewToolResultError(followAnalysisMessage("process discovery")), nil
+			}
 			return mcp.NewToolResultError("no processes discovered yet"), nil
 		}
 		for _, p := range procs.Processes {
@@ -145,9 +155,13 @@ func (s *Server) handleGetProcesses(ctx context.Context, req mcp.CallToolRequest
 
 	// Otherwise return the list of summaries.
 	if procs == nil || len(procs.Processes) == 0 {
+		msg := "no processes discovered yet — run index_repository first"
+		if s.followMode {
+			msg = followAnalysisMessage("process discovery")
+		}
 		return s.respondJSONOrTOON(ctx, req, map[string]any{
 			"processes": []any{},
-			"message":   "no processes discovered yet — run index_repository first",
+			"message":   msg,
 		})
 	}
 

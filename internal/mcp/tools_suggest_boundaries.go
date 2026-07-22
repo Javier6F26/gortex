@@ -32,6 +32,9 @@ func (s *Server) handleSuggestBoundaries(ctx context.Context, req mcp.CallToolRe
 	// leak a sibling workspace's layers.
 	comms = s.communitiesInSessionScope(ctx, comms)
 	if comms == nil || len(comms.Communities) == 0 {
+		if s.followMode {
+			return mcp.NewToolResultError(followAnalysisMessage("boundary suggestion (needs community detection)")), nil
+		}
 		return mcp.NewToolResultError("no communities detected — run `analyze kind=clusters` (or reindex) first so boundaries can be seeded"), nil
 	}
 	minSize := req.GetInt("min_size", 3)

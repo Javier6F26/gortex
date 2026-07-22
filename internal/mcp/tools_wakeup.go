@@ -284,6 +284,14 @@ func (s *Server) handleGortexWakeup(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	opts.PrecomputedHotspots = s.getHotspots()
+	// A follower never runs analysis (see follower-analysis-gate), so the
+	// cached hotspots are nil — which would make BuildWakeup fall back to a
+	// live FindHotspots full-graph scan. Pass an empty (non-nil) slice so it
+	// skips the scan; the wakeup doc drops its hotspots/communities sections
+	// but still serves scale/entry-point orientation.
+	if s.followMode && opts.PrecomputedHotspots == nil {
+		opts.PrecomputedHotspots = []analysis.HotspotEntry{}
+	}
 	md, est := BuildWakeup(s.graph, s.getCommunities(), opts)
 
 	format := strings.ToLower(strings.TrimSpace(req.GetString("format", "markdown")))
