@@ -59,6 +59,7 @@ var (
 	daemonBackendBufferPoolMB   uint64
 	daemonPGDSN                 string
 	daemonPBPoolSize            int
+	daemonPGSchema              string
 	daemonTools                 string
 	daemonToolsMode             string
 	daemonFollow                bool
@@ -137,7 +138,9 @@ func init() {
 	daemonStartCmd.Flags().StringVar(&daemonPGDSN, "pg-dsn", "",
 		"PostgreSQL connection DSN (e.g. postgres://user:pass@host:5432/gortex). Required when --backend is postgres")
 	daemonStartCmd.Flags().IntVar(&daemonPBPoolSize, "pg-pool-size", 0,
-		"max connections in the PostgreSQL pool (0 = NumCPU * 2)")
+		"max connections in the PostgreSQL pool (0 reads $GORTEX_PG_POOL_SIZE, then pool_max_conns in the DSN, then NumCPU * 2)")
+	daemonStartCmd.Flags().StringVar(&daemonPGSchema, "pg-schema", "",
+		"PostgreSQL search_path for every connection, e.g. tenant_a or tenant_a,ext — selects the schema of a shared database this daemon reads and writes (empty reads $GORTEX_PG_SCHEMA, then the database default)")
 	daemonStartCmd.Flags().Uint64Var(&daemonBackendBufferPoolMB, "backend-buffer-pool-mb", 0,
 		"advisory page-cache cap (MiB) for on-disk backends. 0 reads $GORTEX_DAEMON_BUFFER_POOL_MB or lets the backend choose its own default; backends that manage their own cache (e.g. sqlite) ignore it")
 	daemonStartCmd.Flags().StringVar(&daemonTools, "tools", "",

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -133,6 +134,7 @@ func buildDaemonState(logger *zap.Logger) (*daemonState, error) {
 		BackendPath:  resolveBackendPathForDaemon(),
 		BufferPoolMB: resolveDaemonBufferPoolMB(),
 		Follow:       daemonFollow,
+		Postgres:     resolveDaemonPostgresOptions(),
 		Config:       cfg,
 		Global:       gc,
 		Logger:       logger,
@@ -1045,4 +1047,26 @@ func collectSnapshotVector(mi *indexer.MultiIndexer) snapshotVector {
 	}
 	data, dims, count := mi.ExportVectorIndex()
 	return snapshotVector{Index: data, Dims: dims, Count: count}
+}
+
+// resolveDaemonPostgresOptions returns the postgres-only knobs for the
+// daemon: --pg-pool-size / $GORTEX_PG_POOL_SIZE and --pg-schema /
+// $GORTEX_PG_SCHEMA. Flags win over the environment; both empty leaves the
+// decision to the store (DSN parameters, then defaults).
+func resolveDaemonPostgresOptions() serverstack.PostgresOptions {
+	opts := serverstack.PostgresOptions{
+		PoolMaxConns: daemonPBPoolSize,
+		Schema:       strings.TrimSpace(daemonPGSchema),
+	}
+	if opts.PoolMaxConns <= 0 {
+		if env := strings.TrimSpace(os.Getenv("GORTEX_PG_POOL_SIZE")); env != "" {
+			if n, err := strconv.Atoi(env); err == nil && n > 0 {
+				opts.PoolMaxConns = n
+			}
+		}
+	}
+	if opts.Schema == "" {
+		opts.Schema = strings.TrimSpace(os.Getenv("GORTEX_PG_SCHEMA"))
+	}
+	return opts
 }

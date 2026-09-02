@@ -50,6 +50,26 @@ import (
 // store lock; NewSharedServer passes true only in the branch where it acquired
 // the exclusive flock.
 func OpenBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger, allowRebuild, readOnly bool) (graph.Store, func(), error) {
+	return OpenBackendWithPostgres(name, path, bufferPoolMB, logger, allowRebuild, readOnly, PostgresOptions{})
+}
+
+// PostgresOptions carries the postgres-only knobs an entry point may pass
+// to OpenBackendWithPostgres. Zero values mean "not set": the pool bound
+// then falls back to the DSN's pool_max_conns or the store default, and
+// the search_path is left to the database default.
+type PostgresOptions struct {
+	// PoolMaxConns caps the pgxpool size (0 = DSN pool_max_conns, else
+	// NumCPU*2).
+	PoolMaxConns int
+	// Schema is the search_path to set on every connection ("tenant_a" or
+	// "tenant_a,ext"). It selects which schema of a shared database this
+	// process reads and writes.
+	Schema string
+}
+
+// OpenBackendWithPostgres is OpenBackend plus postgres-only options; the
+// options are ignored by the memory and sqlite backends.
+func OpenBackendWithPostgres(name, path string, bufferPoolMB uint64, logger *zap.Logger, allowRebuild, readOnly bool, pg PostgresOptions) (graph.Store, func(), error) {
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "", "memory", "mem", "in-memory":
 		s := graph.New()
@@ -68,9 +88,13 @@ func OpenBackend(name, path string, bufferPoolMB uint64, logger *zap.Logger, all
 			return nil, nil, fmt.Errorf("postgres backend requires a DSN (--backend-path or --pg-dsn)")
 		}
 		if logger != nil {
-			logger.Info("opening postgres backend", zap.String("dsn", maskDSN(path)), zap.Bool("read_only", readOnly))
+			logger.Info("opening postgres backend",
+				zap.String("dsn", maskDSN(path)),
+				zap.Bool("read_only", readOnly),
+				zap.Int("pool_max_conns", pg.PoolMaxConns),
+				zap.String("schema", pg.Schema))
 		}
-		return openPostgresBackend(path, bufferPoolMB, readOnly, logger)
+		return openPostgresBackend(path, bufferPoolMB, readOnly, pg, logger)
 	default:
 		return nil, nil, fmt.Errorf("unknown backend %q (expected: memory, sqlite, postgres)", name)
 	}
@@ -138,15 +162,17 @@ func openSqliteBackend(path string, bufferPoolMB uint64, allowRebuild bool) (gra
 // openPostgresBackend opens the PostgreSQL store at the given DSN.
 // The pgxpool connection pool is configured with bufferPoolMB as an advisory
 // per-backend buffer hint (unused — PostgreSQL manages its own caches).
-func openPostgresBackend(dsn string, bufferPoolMB uint64, readOnly bool, logger *zap.Logger) (graph.Store, func(), error) {
+func openPostgresBackend(dsn string, bufferPoolMB uint64, readOnly bool, pg PostgresOptions, logger *zap.Logger) (graph.Store, func(), error) {
 	_ = bufferPoolMB
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	cfg := store_pg.Config{
-		DSN:      dsn,
-		ReadOnly: readOnly,
-		Logger:   logger,
+		DSN:          dsn,
+		PoolMaxConns: pg.PoolMaxConns,
+		Schema:       pg.Schema,
+		ReadOnly:     readOnly,
+		Logger:       logger,
 	}
 	s, err := store_pg.Open(ctx, cfg)
 	if err != nil {
