@@ -175,13 +175,23 @@ func (s *Store) readEmbeddingSpace(ctx context.Context) (graph.EmbeddingSpace, b
 // atttypmod IS the dimension (no varchar-style -4 offset); an untyped `vector`
 // column reports atttypmod -1, surfaced here as dims 0.
 func (s *Store) vectorColumnDims(ctx context.Context) (dims int, exists bool, err error) {
+	// Resolve the table in current_schema() only: to_regclass would walk
+	// the whole search_path and could report another schema's vectors
+	// table (see readSchemaVersion).
+	relOID, tableExists, err := currentSchemaRelation(ctx, s.pool, "vectors")
+	if err != nil {
+		return 0, false, err
+	}
+	if !tableExists {
+		return 0, false, nil
+	}
 	var typmod int
 	err = s.pool.QueryRow(ctx, `
 		SELECT a.atttypmod
 		FROM pg_attribute a
-		WHERE a.attrelid = to_regclass('vectors')
+		WHERE a.attrelid = $1::oid
 		  AND a.attname = 'vec'
-		  AND NOT a.attisdropped`).Scan(&typmod)
+		  AND NOT a.attisdropped`, relOID).Scan(&typmod)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, false, nil

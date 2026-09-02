@@ -83,6 +83,10 @@ type SharedServerConfig struct {
 	// the janitor, and co-change prewarm.
 	Follow bool
 
+	// Postgres carries the postgres-only knobs (pool cap, search_path /
+	// tenant schema). Ignored by the other backends.
+	Postgres PostgresOptions
+
 	// Entry-point-resolved options (not part of the authoritative surface).
 	Config         *config.Config       // loaded .gortex.yaml (required)
 	Global         *config.GlobalConfig // loaded ~/.gortex/config.yaml
@@ -278,7 +282,7 @@ func NewSharedServer(cfg SharedServerConfig) (*SharedServer, error) {
 	// allowRebuild is gated on actually holding the store lock: only then may
 	// the sqlite backend drop and recreate an incompatible-schema DB.
 	// Follow mode opens the store read-only.
-	g, backendCleanup, err := OpenBackend(backendName, cfg.BackendPath, cfg.BufferPoolMB, logger, storeLockHeld, cfg.Follow)
+	g, backendCleanup, err := OpenBackendWithPostgres(backendName, cfg.BackendPath, cfg.BufferPoolMB, logger, storeLockHeld, cfg.Follow, cfg.Postgres)
 	if err != nil {
 		return nil, err
 	}

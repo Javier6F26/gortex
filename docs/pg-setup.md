@@ -82,8 +82,22 @@ CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
 ## Connection pool tuning
 
-The pool is configured via `--pg-pool-size` (default: `NumCPU * 2`). Tune
-for your workload:
+The pool cap is resolved in this order:
+
+1. `--pg-pool-size N` (or `$GORTEX_PG_POOL_SIZE` when the flag is 0);
+2. otherwise `pool_max_conns=N` in the DSN (pgxpool's own parameter);
+3. otherwise `NumCPU * 2`.
+
+`pool_min_conns` in the DSN is honored the same way. Before v0.72 both the
+flag and the DSN parameter were parsed and then overwritten with
+`NumCPU * 2`, so every Gortex process opened `2 × visible CPUs` backends
+regardless of configuration; size `max_connections` (or put pgbouncer in
+front) for the sum over writers and followers. Connections are tagged
+`application_name=gortex` (writers) or `gortex-follower` unless the DSN
+sets `application_name` itself — with one schema per tenant, set it to the
+tenant name to attribute connections in `pg_stat_activity`.
+
+Tune for your workload:
 
 | Workload | Recommended pool size | Rationale |
 |---|---|---|
@@ -317,6 +331,58 @@ is the read plane of a writer-as-job topology:
   pooling).
 
 ---
+
+## One schema per tenant in a shared database
+
+Several independent graphs (one per team, project, or tenant) can share a
+single database, one schema each, without any table-name changes: all
+Gortex SQL is unqualified and every introspection query is scoped to
+`current_schema()`, so the schema a process reads and writes is decided by
+its `search_path`.
+
+Set it per process with `--pg-schema` (or `$GORTEX_PG_SCHEMA`), which
+applies `SET search_path TO …` on every pooled connection:
+
+```bash
+# once, as the DBA: extensions in a dedicated schema, one schema per tenant
+psql "$DSN" -c "CREATE SCHEMA ext;
+                CREATE EXTENSION IF NOT EXISTS vector  WITH SCHEMA ext;
+                CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA ext;
+                CREATE SCHEMA tenant_a;"
+
+# writer for tenant_a
+gortex daemon start --backend postgres --pg-dsn "$DSN?application_name=tenant_a" \
+  --pg-schema tenant_a,ext
+
+# read-only follower for tenant_a (same search_path)
+gortex daemon start --follow --backend postgres --pg-dsn "$DSN?application_name=tenant_a" \
+  --pg-schema tenant_a,ext
+```
+
+Rules:
+
+- **The extension schema must be on the path.** `vector(N)`, `<=>`,
+  `gin_trgm_ops`, `similarity()` are referenced unqualified. Put the
+  schema that owns `vector` / `pg_trgm` after the tenant schema
+  (`tenant_a,ext`). Extensions are per database, so one `ext` serves every
+  tenant.
+- **Keep `public` off the path once it holds a Gortex store.** The
+  schema-version probe and the `vectors` column probe only look in
+  `current_schema()` (the first entry), so a tenant schema bootstraps its
+  own tables even when a populated schema sits later on the path. Listing
+  `public` after the tenant schema is therefore safe for extensions, but
+  it also makes the tenant's unqualified DDL fall through to tables that
+  already exist there for anything a future migration does not guard — the
+  dedicated `ext` schema avoids the question entirely.
+- Entries are passed to PostgreSQL verbatim, so unquoted names fold to
+  lowercase exactly as in `CREATE SCHEMA`; quote a mixed-case schema
+  yourself (`--pg-schema '"Tenant_A",ext'`).
+- The migration advisory lock is database-wide; it only serializes the
+  first boot of concurrent tenants. The writer lock is already keyed by
+  `current_schema()`, so one writer per tenant schema is enforced.
+- Alternatively use one database per tenant on the same instance: nothing
+  in Gortex assumes a database name, but extensions must then be created
+  in every database.
 
 ## Running behind pgbouncer
 

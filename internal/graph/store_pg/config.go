@@ -3,7 +3,9 @@ package store_pg
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,10 +42,13 @@ type Config struct {
 	DSN string
 
 	// PoolMaxConns is the maximum number of connections in the pool.
-	// 0 means use DefaultPoolMaxConns.
+	// Precedence: this field when > 0; otherwise a pool_max_conns
+	// parameter in the DSN; otherwise DefaultPoolMaxConns.
 	PoolMaxConns int
 
 	// PoolMinConns is the minimum number of connections in the pool.
+	// Precedence: this field when > 0; otherwise a pool_min_conns
+	// parameter in the DSN; otherwise 0.
 	PoolMinConns int
 
 	// PoolMaxConnLifetime is the maximum age of a connection.
@@ -54,9 +59,14 @@ type Config struct {
 	// 0 means use DefaultPoolHealthCheckPeriod.
 	PoolHealthCheckPeriod time.Duration
 
-	// Schema is an optional PostgreSQL schema name to set as the first
-	// entry in search_path for every connection. Used by tests for
-	// per-test schema isolation. Empty means use the database default.
+	// Schema is an optional search_path applied to every connection
+	// (SET search_path TO <Schema>). It is either a single schema name or
+	// a comma-separated list, e.g. "tenant_a,ext" when the pg_trgm/vector
+	// extensions live in a shared schema. Entries are passed to PostgreSQL
+	// verbatim (unquoted names fold to lowercase as usual). This is how
+	// several tenants share one database with one schema each (see
+	// docs/pg-setup.md). Empty means use the database default. Also used
+	// by tests for per-test schema isolation.
 	Schema string
 
 	// StatementTimeout is the per-query timeout applied as the
@@ -89,10 +99,6 @@ func (c *Config) openPool(ctx context.Context) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("store_pg: DSN is required")
 	}
 
-	maxConns := c.PoolMaxConns
-	if maxConns == 0 {
-		maxConns = DefaultPoolMaxConns
-	}
 	maxLifetime := c.PoolMaxConnLifetime
 	if maxLifetime == 0 {
 		maxLifetime = DefaultPoolMaxConnLifetime
@@ -107,8 +113,13 @@ func (c *Config) openPool(ctx context.Context) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("store_pg: parse DSN: %w", err)
 	}
 
-	poolCfg.MaxConns = int32(maxConns)
-	poolCfg.MinConns = int32(c.PoolMinConns)
+	// Pool bounds. Precedence: an explicit Config field wins; otherwise a
+	// pool_max_conns / pool_min_conns already present in the DSN (parsed by
+	// pgxpool into poolCfg) is honored; otherwise the Gortex default
+	// applies. Before this, the DSN values were parsed and then silently
+	// overwritten, so operators had no lever short of the cpuset.
+	poolCfg.MaxConns = int32(resolvePoolBound(c.PoolMaxConns, c.DSN, "pool_max_conns", int(poolCfg.MaxConns), DefaultPoolMaxConns))
+	poolCfg.MinConns = int32(resolvePoolBound(c.PoolMinConns, c.DSN, "pool_min_conns", int(poolCfg.MinConns), 0))
 	poolCfg.MaxConnLifetime = maxLifetime
 	poolCfg.HealthCheckPeriod = healthPeriod
 
@@ -124,9 +135,16 @@ func (c *Config) openPool(ctx context.Context) (*pgxpool.Pool, error) {
 	setTimeoutParam(rp, "statement_timeout", c.StatementTimeout, DefaultStatementTimeout)
 	setTimeoutParam(rp, "lock_timeout", c.LockTimeout, DefaultLockTimeout)
 
-	schemaName := c.Schema
+	// Tag connections so pg_stat_activity can attribute them per process
+	// (and, with one schema per tenant, per tenant when the operator puts
+	// application_name in the DSN). An explicit DSN value is preserved.
+	if _, ok := rp["application_name"]; !ok {
+		rp["application_name"] = defaultApplicationName(c.ReadOnly)
+	}
+
+	schemaName := strings.TrimSpace(c.Schema)
 	if schemaName != "" {
-		setCmd := fmt.Sprintf("SET search_path TO %s", schemaName)
+		setCmd := "SET search_path TO " + searchPathList(schemaName)
 		origAfterConnect := poolCfg.AfterConnect
 		poolCfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 			if origAfterConnect != nil {
@@ -168,4 +186,70 @@ func setTimeoutParam(rp map[string]string, key string, cfgVal, def time.Duration
 		return
 	}
 	rp[key] = fmt.Sprintf("%d", def.Milliseconds())
+}
+
+// resolvePoolBound picks a pool bound. An explicit configured value
+// (cfgVal > 0) always wins; otherwise, when the DSN itself carries the
+// pgxpool parameter named key, the value pgxpool parsed from it
+// (parsedVal) is honored; otherwise def applies.
+func resolvePoolBound(cfgVal int, dsn, key string, parsedVal, def int) int {
+	if cfgVal > 0 {
+		return cfgVal
+	}
+	if dsnHasParam(dsn, key) && parsedVal > 0 {
+		return parsedVal
+	}
+	return def
+}
+
+// dsnHasParam reports whether the DSN explicitly sets the connection
+// parameter key, in either URL form (postgres://…?key=v) or keyword/value
+// form (host=… key=v). pgxpool applies its own defaults for pool
+// parameters that are absent, so presence — not value — is what decides
+// whether the operator asked for something.
+func dsnHasParam(dsn, key string) bool {
+	dsn = strings.TrimSpace(dsn)
+	if strings.Contains(dsn, "://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return false
+		}
+		_, ok := u.Query()[key]
+		return ok
+	}
+	for _, field := range strings.Fields(dsn) {
+		k, _, found := strings.Cut(field, "=")
+		if found && k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultApplicationName is the application_name reported to PostgreSQL
+// when the DSN does not set one: "gortex" for writers, "gortex-follower"
+// for read-only followers.
+func defaultApplicationName(readOnly bool) string {
+	if readOnly {
+		return "gortex-follower"
+	}
+	return "gortex"
+}
+
+// searchPathList renders a Config.Schema value ("a" or "a, b") as the
+// argument of SET search_path: entries are trimmed and joined, otherwise
+// passed through verbatim so PostgreSQL applies its usual identifier
+// rules (unquoted names fold to lowercase; callers who need a mixed-case
+// schema quote it themselves, e.g. `"Tenant_A",ext`).
+func searchPathList(schema string) string {
+	parts := strings.Split(schema, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, ", ")
 }

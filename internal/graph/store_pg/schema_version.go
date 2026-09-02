@@ -138,21 +138,28 @@ type rowQuerier interface {
 }
 
 // readSchemaVersion returns the highest recorded schema version. A
-// missing schema_version table (first boot against a blank database) is
+// missing schema_version table (first boot against a blank schema) is
 // reported as version 0 with no error, so the migration loop bootstraps
-// the schema. Existence is probed with to_regclass, which returns NULL
-// rather than raising undefined_table — critical when this runs inside
-// the migration transaction, where a raised error would abort the whole
-// transaction (25P02). Every other query failure propagates so
-// ensureSchema can fail Open instead of misreading a transient error as
-// "blank database" and re-running DDL.
+// the schema. Existence is probed against pg_class in current_schema()
+// (see currentSchemaRelation), which never raises undefined_table —
+// critical when this runs inside the migration transaction, where a
+// raised error would abort the whole transaction (25P02). Every other
+// query failure propagates so ensureSchema can fail Open instead of
+// misreading a transient error as "blank database" and re-running DDL.
+//
+// The probe is deliberately scoped to current_schema() rather than using
+// to_regclass('schema_version'): to_regclass walks the whole search_path,
+// so with search_path = tenant_a, public and a populated public schema it
+// would find public.schema_version, skip the DDL, and silently make the
+// tenant read and write public's tables.
 func (s *Store) readSchemaVersion(ctx context.Context, q rowQuerier) (int, error) {
-	var reg *string
-	if err := q.QueryRow(ctx, `SELECT to_regclass('schema_version')::text`).Scan(&reg); err != nil {
+	_, exists, err := currentSchemaRelation(ctx, q, "schema_version")
+	if err != nil {
 		return 0, err
 	}
-	if reg == nil {
-		// Table does not exist: blank database, no schema yet.
+	if !exists {
+		// Table does not exist in the current schema: blank schema, no
+		// Gortex tables yet.
 		return 0, nil
 	}
 	var version int
@@ -160,6 +167,34 @@ func (s *Store) readSchemaVersion(ctx context.Context, q rowQuerier) (int, error
 		return 0, err
 	}
 	return version, nil
+}
+
+// currentSchemaRelation resolves an ordinary table by name inside
+// current_schema() only — the first schema of the connection's
+// search_path — and returns its pg_class OID. exists is false (with no
+// error) when the table is absent from that schema, even if a table of
+// the same name exists further down the search_path. Never raises, so it
+// is safe inside a transaction.
+func currentSchemaRelation(ctx context.Context, q rowQuerier, relname string) (oid uint32, exists bool, err error) {
+	var got *uint32
+	err = q.QueryRow(ctx, `
+		SELECT c.oid
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.relname = $1
+		  AND n.nspname = current_schema()
+		  AND c.relkind IN ('r', 'p')
+		LIMIT 1`, relname).Scan(&got)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if got == nil {
+		return 0, false, nil
+	}
+	return *got, true, nil
 }
 
 func writeSchemaVersion(ctx context.Context, tx pgx.Tx, version int) error {

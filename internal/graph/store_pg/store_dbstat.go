@@ -1,12 +1,16 @@
 package store_pg
 
-// DB stats introspection for monitoring and diagnostics.
+// DB stats introspection for monitoring and diagnostics. All queries are
+// scoped to current_schema() so that, with one schema per tenant in a
+// shared database, a store only reports its own tables.
 
 // DBSize returns the estimated database size in bytes, including indexes.
 func (s *Store) DBSize() (int64, error) {
 	var size int64
 	err := s.pool.QueryRow(s.ctx,
-		`SELECT COALESCE(SUM(pg_total_relation_size(relid)), 0) FROM pg_stat_user_tables`).Scan(&size)
+		`SELECT COALESCE(SUM(pg_total_relation_size(relid)), 0)
+		 FROM pg_stat_user_tables
+		 WHERE schemaname = current_schema()`).Scan(&size)
 	return size, err
 }
 
@@ -23,6 +27,7 @@ func (s *Store) DBTableSizes() ([]DBTableSize, error) {
 		        pg_total_relation_size(relid) AS total_bytes,
 		        COALESCE(n_live_tup, 0) AS row_count
 		 FROM pg_stat_user_tables
+		 WHERE schemaname = current_schema()
 		 ORDER BY total_bytes DESC`)
 	if err != nil {
 		return nil, err

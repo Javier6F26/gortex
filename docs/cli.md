@@ -6,7 +6,7 @@ gortex init [path]           Per-repo setup (.mcp.json, hooks, community routing
 gortex init --dry-run-intake Emit a privacy-safe intake manifest and exit before parsing/writes
 gortex init doctor           Zero-op drift report across all detected agents (human or --json)
 gortex mcp [flags]           Start the MCP stdio server (auto-detects daemon; --no-daemon / --proxy; --server adds HTTP API)
-gortex daemon start [flags]  Start the daemon; --http-addr <addr> serves the HTTP/JSON API under /v1/* plus the MCP /mcp transport (--http-auth-token, --cors-origin, --backend, --pg-dsn, --pg-pool-size)
+gortex daemon start [flags]  Start the daemon; --http-addr <addr> serves the HTTP/JSON API under /v1/* plus the MCP /mcp transport (--http-auth-token, --cors-origin, --backend, --pg-dsn, --pg-pool-size, --pg-schema)
 gortex daemon <sub>          start / stop / restart / reload / status / logs / install-service / service-status / uninstall-service / server (multi-server roster)
 gortex eval <sub>            Retrieval + coverage benchmarks — recall / embedders / pack / swebench / stdbench / tokens / baselines / quality / parity (substrate; prefer `gortex bench` for the user-facing surface). `parity` measures per-language cross-file coverage against the committed baseline
 gortex eval-server [flags]   HTTP server used by the swebench harness
@@ -44,6 +44,7 @@ gortex install --no-hooks           # skip user-level hook installation
 # Daemon lifecycle (also spawned by `gortex install --start`):
 gortex daemon start --detach                     # spawn in background
 gortex daemon start --backend postgres --pg-dsn "postgres://user:pass@host:5432/gortex" --pg-pool-size 8   # PostgreSQL backend
+gortex daemon start --backend postgres --pg-dsn "$DSN" --pg-schema tenant_a,ext                              # one schema per tenant (see docs/pg-setup.md)
 gortex daemon status                             # PID, uptime, memory, tracked repos, sessions, server roster, search backend, warmup + enrichment progress
 gortex daemon stop                  # graceful shutdown + final snapshot
 gortex daemon restart               # stop + start
